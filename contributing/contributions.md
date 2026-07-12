@@ -1,7 +1,9 @@
 # Contributing to ModelArk
 
 ModelArk is built in public and pre-1.0 — bug reports, fixes, docs, and curation ideas are all
-welcome. Expect rough edges, and read the honest gaps in the [README](README.md#status) first.
+welcome. Expect rough edges, and read the honest gaps in the [README](../README.md#status) first.
+
+By taking part you agree to the (one-line) [Code of Conduct](code_of_conduct.md).
 
 ## Development setup
 
@@ -27,7 +29,7 @@ CI runs the whole suite on every push and PR.
 
 ## How the project records decisions
 
-Architecture and policy decisions live in [`docs/decision_log.md`](docs/decision_log.md) — an
+Architecture and policy decisions live in [`docs/decision_log.md`](../docs/decision_log.md) — an
 append-only, [ADRLight](https://github.com/Indubitable-Industries/ADRLight)-style ledger. If your
 change makes an architectural or policy call, add an entry following the format at the top of that
 file. **Append only** — never rewrite past entries (status updates excepted). The ledger is also the
@@ -58,4 +60,4 @@ carrying local changes tends to get hard to merge as things shift under you:
 
 Open an issue with what you ran, what you expected, and the relevant log lines
 (`journalctl -u modelark` if you run the supervised service). For anything security-sensitive, see
-[`SECURITY.md`](SECURITY.md).
+[`SECURITY.md`](../SECURITY.md).

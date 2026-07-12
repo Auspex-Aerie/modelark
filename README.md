@@ -39,7 +39,7 @@ savings, and it **streams** — a giant shard compresses and restores in O(chunk
 - **N-copies redundancy** — copy counts enforced from a durable record, not guessed.
 
 …and there's plenty more in the [decision log](docs/decision_log.md). The product is **early**,
-put out deliberately in a build-in-public stance — [contributions welcome](CONTRIBUTING.md).
+put out deliberately in a build-in-public stance — [contributions welcome](contributing/contributions.md).
 
 ## Honest callouts
 
@@ -274,4 +274,4 @@ Pending more real-world usage data:
 - Continued work on the Library view.
 - UI-driven initial drive registration and setup — a guided terminal flow first, eventually a full UI setup and drive registration.
 
-Contributions to any of these are welcome — see [CONTRIBUTING](CONTRIBUTING.md).
+Contributions to any of these are welcome — see [contributing/](contributing/contributions.md).
