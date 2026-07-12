@@ -13,8 +13,8 @@ the giants you can't run locally.
 
 Hugging Face has north of a million repos — really, have you checked lately? Most you'll
 never keep. ModelArk catalogs the metadata broadly (cheap — a few MB), then downloads only
-the curated, full-precision weights worth archiving, tracked by **git-annex** across a fleet
-of external HDDs + a NAS that mostly live offline. The git repo is the *map* of the library;
+the curated, full-precision weights you find are worth archiving, tracked by **git-annex** across a fleet
+of external HDDs + network attached storage (iSCSI). The git repo is the *map* of the library;
 the bytes never touch git.
 
 ## Why else?
@@ -45,9 +45,9 @@ put out deliberately in a build-in-public stance — [contributions welcome](CON
 
 This is pre-1.0 and built in public, so a few sharp edges are worth knowing before you point it at real drives.
 
-**Downloading giants.** Hugging Face's `hf_xet` transport isn't byte-range resumable, so if a shard stalls or the process is killed mid-download, that shard restarts from zero — painful on a 30 GB shard of a 400B model. A watchdog kills genuinely-hung transfers and a sweep clears the orphaned partials, so nothing corrupts and disk never leaks — but you re-spend the bandwidth. Tensor-level checkpointing is on the roadmap; for now, big models just want a stable connection for however long it takes to grab one shard.
+**Downloading giants.** Hugging Face's `hf_xet` transport isn't byte-range resumable, so if a shard stalls or the process is killed mid-download, that shard restarts from zero — painful on a 30 GB shard of a larger model. A watchdog kills genuinely-hung transfers and a sweep clears the orphaned partials, so nothing corrupts and disk never leaks — but you re-spend the bandwidth. Tensor-level checkpointing is on the roadmap; for now, big models just want a stable connection for however long it takes to grab one shard.
 
-**Compression isn't guaranteed per shard.** Every compression is proven by a round-trip canary before the original is dropped, so you can never end up with an unrestorable archive. But if some rare shard format or other unexpected input trips a bug in ZipNN or our handling of it (which has happened, and been patched, already), the shard gets stored *raw* instead. This is the correct and deliberate fallback: the file is intact and verified. However, it just misses the (~⅓) savings — and recompute at model boundaries by the Librarian can start to push you past estimates. We show you both an uncompressed and an "optimally compressed" fill indication, but depending on how optimistically you target your own fleet, this behavior can throw the end of the downloads off the final drive in your Library — and you'll be unable to complete the archive. This is all logged; in the meantime we recommend being as un-optimistic on compression as you can — use the uncompressed value if possible. "Rebase Existing Plan" (fill the gaps left by better-than-assumed compression rates) will come later. Note that rates are only strong on BF16; FP8 does not compress at all.
+**Compression isn't guaranteed per shard.** Every compression is proven by a round-trip canary before the original is dropped, so you can never end up with an unrestorable archive. But if some rare shard format or other unexpected input trips a bug in ZipNN or our handling of it (which has happened, and been patched, already), the shard gets stored *raw* instead. This is the correct and deliberate fallback: the file is intact and verified. However, it misses the (~⅓) savings — and recompute at model boundaries by the Librarian can start to push you past estimates. We show you both an uncompressed and an "optimally compressed" fill indication, but depending on how optimistically you target your own fleet, this behavior can throw the end of the downloads off the final drive in your Library — and you'll be unable to complete the archive. This is all logged; in the meantime we recommend being as un-optimistic on compression as you can — use the fully uncompressed value to budget wherever possible. "Rebase Existing Plan" (fill the gaps left by better-than-assumed compression rates) will come later. Note that rates are only strong on BF16; FP8 does not compress at all.
 
 **Hardware honesty.** SMART read through some USB-to-SATA bridges is synthetic, so take health readings on bridged drives with a grain of salt (during testing here, a genuinely-failing drive passed its synthetic check and then got crushed on the first load). A NAS iSCSI LUN won't auto-reattach after a reboot: that's deliberate — we won't couple boot to a network mount and risk a boot hang — so re-login is manual. And the fill is a single worker that asks for drives in sequence, so expect to hot-swap externals during a large run rather than mounting the whole fleet at once. More automation here is needed, and planned.
 
@@ -239,7 +239,7 @@ views including the live Fill run surface. Restorability is production-verified 
 Tested here on a mix of reliable and junk external drives, plus one iSCSI volume on a RAID5 NAS
 (Synology DiskStation). The iterative bug fixes and breaks along the way are in the decision log and
 commit history; once the system is cleaned up for public release, branch protection and PRs will start
-adding fuller history, alongside dedicated roadmap documents and the like.
+adding a more complete history, alongside dedicated roadmap documents and the like.
 
 For now: use it to archive, and use it carefully. We've built in tools to help you spot where problems
 may have occurred and to give you options to fix them. Bad drives can and will fail after an extended
