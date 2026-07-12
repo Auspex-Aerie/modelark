@@ -236,8 +236,6 @@ architecture-first classification; the librarian placement plan; the full fetch 
 (per-set drive fleet + a capacity failsafe) + on-demand re-verification; and the portal's six
 views including the live Fill run surface. Restorability is production-verified (`DIS-002`).
 
-**In flight:** the first full-scale fill — running, not yet completed end-to-end.
-
 Tested here on a mix of reliable and junk external drives, plus one iSCSI volume on a RAID5 NAS
 (Synology DiskStation). The iterative bug fixes and breaks along the way are in the decision log and
 commit history; once the system is cleaned up for public release, branch protection and PRs will start
