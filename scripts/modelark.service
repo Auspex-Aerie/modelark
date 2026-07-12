@@ -1,0 +1,45 @@
+# ModelArk fill portal — supervised (DEC-023 / INC-006). Makes the fill survive crashes + reboots.
+#
+# Install (operator, privileged — replace <USER> and <INSTALL_DIR> below with your values first):
+#   sudo cp scripts/modelark.service /etc/systemd/system/modelark.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now modelark
+#
+# Watch / post-mortem (journald keeps stdout+stderr persistently — the crash output the terminal lost):
+#   journalctl -u modelark -f            # live
+#   journalctl -u modelark -n 200        # last 200 lines (e.g. an "Aborted (core dumped)")
+#   systemctl status modelark            # state + last exit
+#
+# If it fast-crash-loops and systemd gives up (StartLimit below), clear it after fixing the cause:
+#   sudo systemctl reset-failed modelark && sudo systemctl start modelark
+#
+# Why a system service (not systemd --user): starts at boot without a login session, and can order
+# after a storage mount. Runs as <USER> so it uses the HF token (~/.cache/huggingface), git-annex
+# config, and ~/modelark-library. The guided fill AWAITS an unmounted drive and auto-continues when
+# it mounts (fill.py _await_drive), so mount ordering is best-effort, not required — a slow attach
+# just delays the first shard, it never fails the run.
+
+[Unit]
+Description=ModelArk fill portal (guided archive fill, supervised)
+After=network-online.target
+Wants=network-online.target
+# Optional: also order after your storage mount, e.g. `After=network-online.target mnt-drive\x2d00.mount`
+# Crash-loop guard: 5 restarts within 10 min → stop and wait for a human. A fill crashes every few
+# HOURS at worst (INC-005), so this never trips in normal operation; a FAST loop means a real bug.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=<USER>
+Group=<USER>
+WorkingDirectory=<INSTALL_DIR>
+ExecStart=<INSTALL_DIR>/.venv/bin/modelark serve --no-open --resume
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

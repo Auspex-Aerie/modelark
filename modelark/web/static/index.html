@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ModelArk</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<nav class="topnav">
+  <span class="logo">ModelArk</span>
+  <button class="navbtn" data-view="plans">Plans</button>
+  <button class="navbtn on" data-view="catalog">Catalog</button>
+  <button class="navbtn" data-view="disk">Disk&nbsp;Health</button>
+  <button class="navbtn" data-view="library">Library</button>
+  <button class="navbtn" data-view="fill">Fill</button>
+  <button class="navbtn" data-view="verify">Verify</button>
+  <span class="navspacer"></span>
+  <span class="navnote" id="navnote"></span>
+</nav>
+
+<!-- ===== Plans view (#35 — pick a plan to unlock the app) ===== -->
+<section id="view-plans" class="view" hidden>
+  <div class="page">
+    <h1 class="ph">Plans</h1>
+    <p class="psub">A <b>plan</b> is one fill campaign: a fixed set of registered drives + this catalog's selection + a provisioning mode. Pick a plan to unlock the rest of the app — nothing fills against the wrong drive set by accident.</p>
+    <div id="plansGateMsg" class="disknote" hidden></div>
+    <div id="plansList" class="planslist"></div>
+    <div class="plancreate">
+      <div class="pctitle">Create a plan</div>
+      <div class="pcrow">
+        <input id="newPlanId" placeholder="id — a slug like ark or cold-2026" maxlength="32">
+        <input id="newPlanName" placeholder="name (optional)">
+        <select id="newPlanProv">
+          <option value="uncompressed">uncompressed — over-provision, never runs out (default)</option>
+          <option value="compressed">compressed — bet on ZipNN to fit more</option>
+        </select>
+        <button id="newPlanBtn" class="primary">Create</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ===== Catalog view ===== -->
+<section id="view-catalog" class="view">
+  <aside>
+    <div class="brand"><div class="eb">Build your set</div></div>
+    <div class="budget">
+      <div><span class="big mono" id="selTB">0.00</span>
+        <span class="of">/ <input id="budget" class="budinput mono" value="27"> TB &middot;
+        <span id="selN">0</span> models</span></div>
+      <div class="bar"><div id="barfill"></div></div>
+      <small id="bnote">raw full-precision</small>
+      <div class="finrow"><span id="finnote">nothing finalized yet</span></div>
+    </div>
+    <div class="plangate" id="planGate"></div>
+    <div class="tally" id="tally"></div>
+    <div class="acts">
+      <button id="finish" class="primary">&#x2713; Finish set</button>
+      <button id="export">&#x2B07;</button>
+      <button class="clear" id="clear">Clear</button>
+    </div>
+  </aside>
+  <main>
+    <div class="controls">
+      <div class="searchrow">
+        <input id="search" placeholder="Search repo id or org…  (deepseek, qwen3-32b, -base, gguf)">
+        <span class="shown" id="shown"></span>
+        <span class="shown" id="sizeScreen"></span>
+      </div>
+      <div class="filters" id="catf"></div>
+      <div class="filters" id="varf"></div>
+      <div class="filters" id="bucf"></div>
+      <div class="filters">
+        <span class="flabel">flags</span>
+        <button class="chip toggle on" id="hideQuant">hide quant copies</button>
+        <button class="chip toggle" id="hideGated">hide gated</button>
+        <button class="chip toggle" id="showChecked">only checked</button>
+        <button class="chip toggle" id="showUnchecked">only unchecked</button>
+        <div class="bulk">
+          <button id="selAll">&#x2713; select shown</button>
+          <button id="deselAll">&#x2717; deselect shown</button>
+        </div>
+      </div>
+    </div>
+    <div class="tablewrap">
+      <table><thead><tr>
+        <th class="cb"></th><th data-k="id">Repo</th><th data-k="p" class="num">Params</th>
+        <th data-k="bucket">Bucket</th><th data-k="cat">Category</th><th data-k="v">Variant</th>
+        <th data-k="gb" class="num">Size</th><th data-k="dl" class="num">30d&nbsp;dl</th><th data-k="lic">License</th>
+      </tr></thead><tbody id="tbody"></tbody></table>
+      <div class="empty" id="empty" style="display:none">No models match these filters.</div>
+    </div>
+  </main>
+</section>
+
+<!-- ===== Disk Health view ===== -->
+<section id="view-disk" class="view" hidden>
+  <div class="page">
+    <h1 class="ph">Disk Health</h1>
+    <p class="psub" id="diskNote">SMART status for attached drives — vet your library volumes before they hold archive data.</p>
+    <div id="diskBody" class="diskgrid"></div>
+  </div>
+</section>
+
+<!-- ===== Library view (stub) ===== -->
+<section id="view-library" class="view" hidden>
+  <div class="page">
+    <h1 class="ph">Library</h1>
+    <p class="psub">What's actually archived and on which drive — from the catalog's durable record (works offline).</p>
+    <p class="psub" id="libTotals"></p>
+    <p class="psub"><b>Fleet</b></p>
+    <div id="libFleet" class="diskgrid"></div>
+    <p class="psub"><b>Archived models</b></p>
+    <div id="libBody" class="tablewrap"></div>
+  </div>
+</section>
+
+<!-- ===== Fill view (the librarian's placement plan) ===== -->
+<section id="view-fill" class="view" hidden>
+  <div class="page">
+    <h1 class="ph">Library Fill</h1>
+    <p class="psub">The librarian's placement plan — where each model lands. Must-have copy&nbsp;#1 on the RAID, copy&nbsp;#2 on a replication drive (the dotted link); bulk consolidated onto the big primaries.</p>
+    <div class="fillrun" id="fillRun">
+      <button class="primary" id="fillStart">&#9654; Start fill</button>
+      <button id="fillStop" hidden>&#9632; Stop</button>
+      <span class="fillstatus" id="fillStatus">idle — not running</span>
+    </div>
+    <div class="fillprompt" id="fillPrompt" hidden></div>
+    <div class="planbars" id="planBars"></div>
+    <div class="fillctl">
+      <span class="flabel">stack by</span>
+      <button class="chip toggle on" id="stackType">type</button>
+      <button class="chip toggle" id="stackCat">category</button>
+      <span class="fillnote" id="fillNote"></span>
+    </div>
+    <div class="fillmain">
+      <div class="fillcol-graph">
+        <div id="fillGraph" class="fillgraph"></div>
+        <div id="fillAdvisories"></div>
+      </div>
+      <div class="fillcol-run">
+        <div id="fillTelemetry"></div>
+        <div id="fillQueue"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- DEF-023: a fill that fell over announces itself on open, until acknowledged -->
+<div class="oopsie-overlay" id="oopsieModal" hidden>
+  <div class="oopsie-card">
+    <div class="oopsie-head" id="oopsieHead"></div>
+    <div class="oopsie-msg" id="oopsieMsg"></div>
+    <div class="oopsie-failed" id="oopsieFailed"></div>
+    <div class="oopsie-when" id="oopsieWhen"></div>
+    <div class="oopsie-acts">
+      <button id="oopsieView">Go to Fill</button>
+      <button id="oopsieAck" class="primary">Acknowledge</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Verify view (DEF-021) ===== -->
+<section id="view-verify" class="view" hidden>
+  <div class="page">
+    <h1 class="ph">Verify</h1>
+    <p class="psub">Re-verify archived copies. <b>Suspects</b> — models whose archiving overlapped a disruption (a compressor raw-fallback, an interrupted copy, or a crash / read-only-flip window) — are surfaced automatically. Record consistency (all files archived, stored hashes match the catalog) is checked offline; the decompress-canary runs when the drive is mounted.</p>
+    <div class="vfacts">
+      <button id="vfReverifyAll" class="primary">Re-verify all suspects</button>
+      <span class="vfnote" id="vfNote"></span>
+    </div>
+    <div id="vfSuspects"></div>
+    <p class="psub" style="margin-top:24px"><b>Manual re-verify</b> — any archived repo</p>
+    <div class="vfmanual">
+      <input id="vfRepo" placeholder="repo id, e.g. deepseek-ai/DeepSeek-R1-Distill-Qwen-32B">
+      <button id="vfRun">Re-verify</button>
+    </div>
+    <div id="vfResults"></div>
+  </div>
+</section>
+
+<div class="toast" id="toast"></div>
+<script src="/static/app.js"></script>
+<script src="/static/plans.js"></script>
+<script src="/static/catalog.js"></script>
+<script src="/static/disk.js"></script>
+<script src="/static/library.js"></script>
+<script src="/static/fill.js"></script>
+<script src="/static/verify.js"></script>
+</body>
+</html>

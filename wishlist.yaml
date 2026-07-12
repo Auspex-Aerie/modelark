@@ -1,0 +1,147 @@
+# wishlist.yaml — declarative curation rules.
+# Everything discovered is catalog-only until a rule promotes it to download.
+# Archive policy: grab full-precision (largest) weights; quantize on demand later.
+# Scope: LANGUAGE models only for now (DEC-001 / DEF-002 in docs/decision_log.md).
+
+defaults:
+  download: false
+  prefer_precision: full          # archive the canonical full-precision source
+  also_grab_runnable_quant: false # optionally pull one Q4_K_M that fits 24GB VRAM
+
+# Compression gate (DEC-022). Weights are stored ZipNN-compressed. Whole-file compress is
+# fastest but needs ~4x the shard in RAM (measured: ~3.67x + baseline). A shard whose est.
+# peak exceeds the budget below is handled out-of-RAM instead of OOM-ing the run.
+# See strata/streamznn.py (StreamZNN, MIT) + strata/modelark/compress.py.
+compression:
+  max_compress_ram_gb: 4.0     # whole-file peak ~= 4x shard; shards over this budget don't use whole-file
+  stream_compress: true        # over budget -> StreamZNN (float-aware, O(chunk)). false -> zstd-stream if installed, else store raw
+  threads: 1                   # ZipNN internal compression threads. Was 4, but its native threaded path
+                               # double-freed intermittently (INC-005) → 1 = single-threaded, no race.
+                               # Revisit >1 only once ZipNN's threaded compressor is proven safe.
+
+# Download rate cap. The fill stops (resumable) once this many GB of ORIGINAL bytes have been archived
+# in a ROLLING 24h window. 0 = unlimited. Code default is 4000 (4 TB/day) if this section is absent.
+download:
+  max_24h_gb: 0                # 0 = uncapped (2026-07-10: unblocked; verified the window is rolling)
+
+# Logging (DEC-023 / #26). The portal + fill worker log here AND to stdout (→ journald under systemd).
+# A rotating file means an alive-but-hung process's log is still current — journald was empty during
+# the 2026-07-09 download hang because block-buffered print()s never flushed.
+logging:
+  level: INFO                  # DEBUG | INFO | WARNING | ERROR
+  file: logs/modelark.log      # relative to repo root; rotating. Set to null for console-only.
+  max_mb: 20                   # rotate at this size
+  backups: 5                   # keep this many rotated files (modelark.log.1 … .5)
+  console: true                # also log to stdout (journald captures it)
+
+# Scope filter (DEC-002): a repo's architecture-derived `category` (not HF's
+# unreliable pipeline_tag) must be in this set. Domain is text-only for now.
+scope:
+  domain: text
+  include_categories:
+    - generative-llm    # decoder LLMs (base / instruct / reasoning)
+    - encoder           # BERT / masked-LM family
+    - seq2seq           # T5 / BART / FLAN encoder-decoder
+    - translation       # NMT (Marian / NLLB / M2M)
+    - embedding         # text embeddings / retrieval
+    - reranker          # cross-encoder rerankers
+    - classifier        # text / token / zero-shot classification
+    - qa                # extractive / table QA
+    - compression       # prompt/context compressors (gist, AutoCompressor, ICAE, xRAG, LLoCO) — DEC-012
+    # --- audio-speech + world models (DEC-010) ---
+    - asr               # speech-to-text (Whisper, Canary, Parakeet)
+    - tts               # text-to-speech (Bark, Kokoro, XTTS, Parler)
+    - speech-lm         # audio-understanding / speech LLMs (Qwen2-Audio, Moshi)
+    - audio-gen         # music / sound generation (MusicGen, Stable Audio)
+    - world-model       # world foundation models (Cosmos, Genie)
+    - image-gen         # text-to-image diffusion (FLUX, SD, ...) — DEC-011
+  deferred_domains:        # DEF-002 — video + VLM still reserved (DEC-010/011 took audio+world+image-gen)
+    - vision
+    - multimodal
+    - video-gen
+
+always_include:
+  orgs:
+    # --- Chinese frontier labs ---
+    - deepseek-ai
+    - Qwen
+    - moonshotai
+    - zai-org
+    - MiniMaxAI
+    - tencent
+    - stepfun-ai
+    - OpenGVLab
+    - XiaomiMiMo
+    - baidu
+    - 01-ai
+    - openbmb           # was OpenBMB — HF handles are case-sensitive
+    - internlm          # InternLM text LLMs (OpenGVLab is the vision/VLM arm)
+    # --- Western & other ---
+    - meta-llama
+    - mistralai
+    - google
+    - microsoft
+    - nvidia
+    - allenai
+    - ibm-granite
+    - tiiuae
+    # --- Diverse labs (Arcee line) ---
+    - arcee-ai
+    - CohereLabs
+    - NousResearch
+    - ai21labs
+    - LiquidAI
+    - LGAI-EXAONE
+    - SakanaAI
+    - bigcode
+    - HuggingFaceTB
+    # --- Encoder / embeddings (lang types) ---
+    - answerdotai
+    - google-bert
+    - FacebookAI
+    - BAAI
+    - sentence-transformers
+    - intfloat
+    - nomic-ai
+    - jinaai
+    - mixedbread-ai
+    - Snowflake
+    - Alibaba-NLP
+    # --- audio / speech / music (DEC-010) ---
+    - openai            # Whisper (ASR)
+    - facebook          # MMS / Seamless / MusicGen / wav2vec2
+    - suno              # Bark (TTS)
+    - hexgrad           # Kokoro (TTS)
+    - coqui             # XTTS (TTS)
+    - fishaudio         # Fish-Speech (TTS)
+    - parler-tts        # Parler-TTS
+    - kyutai            # Moshi / STT / TTS
+    - sesame            # CSM (TTS)
+    - SWivid            # F5-TTS
+    # --- image generation (DEC-011) ---
+    - black-forest-labs # FLUX
+    - stabilityai       # Stable Diffusion
+    - playgroundai      # Playground
+  repos: []            # explicit pins, any size
+
+trusted_quantizers:    # these orgs' GGUF/quant repos are trusted to download
+  - bartowski
+  - mradermacher
+  - unsloth
+
+exclude:
+  pickle_only: true                       # security: skip code-execution-only repos
+  below_likes: 50                         # drop the long-tail noise
+  patterns:
+    - "*roleplay*"
+    - "*-merge-*"
+    - "*frankenmerge*"
+
+# Scorer ranks the "maybe" pile; score >= threshold promotes to download.
+score_weights:
+  is_base_model: 5      # foundations first — you can finetune/quant down from them
+  popularity_log: 1.0   # log(downloads + likes)
+  trusted_quantizer: 3
+  format_safe: 1        # safetensors/gguf over pickle
+  recency: 1
+threshold: 6.0
