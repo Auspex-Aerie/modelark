@@ -1,4 +1,4 @@
-// Library view: what's archived, on which drive — from the DuckDB mirror (DEF-006).
+// Library view: what's archived, on which drive — from the SQLite mirror (DEF-006).
 window.loadLibrary = async function () {
   const {api} = window.MA;
   const sz = b => b == null ? "—"

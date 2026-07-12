@@ -5,7 +5,7 @@ and *where* (symlinks + git-annex location log; bytes never touch git). Each
 registered drive is a **clone of the map** that physically holds content, wired
 as a fleet remote so `git annex whereis / numcopies / fsck / move` work across
 the whole fleet, and so a shelved drive is self-describing when re-plugged. The
-NAS joins later as a `directory` special remote. The DuckDB `drives` table is the
+NAS joins later as a `directory` special remote. The SQLite `drives` table is the
 queryable offline mirror of this.
 
 `drive register` qualifies a drive (SMART baseline → health verdict), optionally
@@ -49,7 +49,7 @@ def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess:
 
 def _sudo(*args: str) -> list[str]:
     """Elevate a single privileged command. The register process itself stays the
-    invoking user — so the git-annex map/clone and the DuckDB catalog stay
+    invoking user — so the git-annex map/clone and the SQLite catalog stay
     user-owned (no root-owned objects, no git 'dubious ownership' refusals) — and
     only the hardware operations (SMART read, mkfs, mount) run as root."""
     return ["sudo", *args] if not osplat.is_root() else list(args)
