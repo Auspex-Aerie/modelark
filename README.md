@@ -41,6 +41,18 @@ savings, and it **streams** — a giant shard compresses and restores in O(chunk
 …and there's plenty more in the [decision log](docs/decision_log.md). The product is **early**,
 put out deliberately in a build-in-public stance — [contributions welcome](CONTRIBUTING.md).
 
+## Honest callouts
+
+This is pre-1.0 and built in public, so a few sharp edges are worth knowing before you point it at real drives.
+
+**Downloading giants.** Hugging Face's `hf_xet` transport isn't byte-range resumable, so if a shard stalls or the process is killed mid-download, that shard restarts from zero — painful on a 30 GB shard of a 400B model. A watchdog kills genuinely-hung transfers and a sweep clears the orphaned partials, so nothing corrupts and disk never leaks — but you re-spend the bandwidth. Tensor-level checkpointing is on the roadmap; for now, big models just want a stable connection for however long it takes to grab one shard.
+
+**Compression isn't guaranteed per shard.** Every compression is proven by a round-trip canary before the original is dropped, so you can never end up with an unrestorable archive. But if some rare shard format or other unexpected input trips a bug in ZipNN or our handling of it (which has happened, and been patched, already), the shard gets stored *raw* instead. This is the correct and deliberate fallback: the file is intact and verified. However, it just misses the (~⅓) savings — and recompute at model boundaries by the Librarian can start to push you past estimates. We show you both an uncompressed and an "optimally compressed" fill indication, but depending on how optimistically you target your own fleet, this behavior can throw the end of the downloads off the final drive in your Library — and you'll be unable to complete the archive. This is all logged; in the meantime we recommend being as un-optimistic on compression as you can — use the uncompressed value if possible. "Rebase Existing Plan" (fill the gaps left by better-than-assumed compression rates) will come later. Note that rates are only strong on BF16; FP8 does not compress at all.
+
+**Hardware honesty.** SMART read through some USB-to-SATA bridges is synthetic, so take health readings on bridged drives with a grain of salt (during testing here, a genuinely-failing drive passed its synthetic check and then got crushed on the first load). A NAS iSCSI LUN won't auto-reattach after a reboot: that's deliberate — we won't couple boot to a network mount and risk a boot hang — so re-login is manual. And the fill is a single worker that asks for drives in sequence, so expect to hot-swap externals during a large run rather than mounting the whole fleet at once. More automation here is needed, and planned.
+
+**Smaller things.** `duckdb` is still a hard dependency even though the catalog is SQLite now — only the one-time migration uses it, so a fresh install pulls it for nothing. It'll be removed in the next version: it remains for migration capability but is immediately deprecated. The `zstd` fallback is implemented but dormant until you install `zstandard` — if it's not present we won't use it, but we won't complain very loudly either, so make sure it's installed. Tier-B (functional, generate-a-token) verification is minimal — Tier-A structural checking is the workhorse. And in the shipped catalog export, `downloads_all` is empty, so ranking leans on `downloads_30d` and `likes`. More advanced catalog and metadata work is also required, known, and planned.
+
 ## Architecture
 
 ```
@@ -224,13 +236,40 @@ views including the live Fill run surface. Restorability is production-verified 
 
 **In flight:** the first full-scale fill — running, not yet completed end-to-end.
 
-**Missing / roadmap (honest gaps):**
-- **Must-have has no UI surface** — you can only mark a model must-have via `modelark protect`
-  on the CLI; the cart should let you toggle it (planned, #21).
-- **Scheduled Library Audit** — the Verify tab does on-demand re-verification + auto-surfaces
-  disruption suspects; a *scheduled* fleet-wide sample audit isn't automated yet (#23).
-- **Download Status view** — `fetch_events` are recorded (and surfaced in Verify), but there's no
-  dedicated history view yet (#18).
-- **iSCSI boot persistence** — a NAS LUN doesn't auto-reattach after a reboot yet (manual re-login).
-- **zstd fallback** — implemented but dormant/untested until `zstandard` is installed.
-- **Run-page polish** — ambient progress animation is planned, not built.
+Tested here on a mix of reliable and junk external drives, plus one iSCSI volume on a RAID5 NAS
+(Synology DiskStation). The iterative bug fixes and breaks along the way are in the decision log and
+commit history; once the system is cleaned up for public release, branch protection and PRs will start
+adding fuller history, alongside dedicated roadmap documents and the like.
+
+For now: use it to archive, and use it carefully. We've built in tools to help you spot where problems
+may have occurred and to give you options to fix them. Bad drives can and will fail after an extended
+load (many hours of downloading weights), and there are likely a few gotchas in here we haven't run into
+ourselves during testing.
+
+The project will also move quickly at this alpha stage. We'll make sure everything migrates cleanly and
+back up the existing DB before changes — but bear that in mind before making major local changes, since
+merges may get harder. Instead, I'd suggest (and welcome!) offering changes as fork PRs — I'll review and
+apply them quickly.
+
+## Planned Roadmap
+
+The [decision log](docs/decision_log.md) has the full picture; the headline deferrals:
+
+- **Curation & safety** — a must-have toggle in the cart (CLI-only today), first-class gated/license-accept model handling, and deeper pickle hygiene (opcode scanning, quarantine, safetensors conversion).
+- **Placement** — letting one model's shards span drives when it won't fit whole, compression-*aware* predictive packing (today it's a capacity failsafe), and growing or rebalancing a plan's fleet mid-run.
+- **Fill & transport** — tensor-level download checkpointing so a giant shard resumes instead of restarting, plus in-flight queue edits (append / re-download / re-verify) during a run.
+- **Verification & visibility** — a scheduled fleet-wide audit (on-demand re-verification already exists) and a download-status view over recorded `fetch_events`.
+- **Ops & packaging** — scripting host setup (the `smartctl` sudoers rule + systemd unit are manual) and spinning StreamZNN out into its own MIT repo.
+
+## Unscheduled Roadmap
+
+Pending more real-world usage data:
+
+- Automated response to SMART changes / USB quirks — a helper that walks you through it.
+- General onboarding and setup automation.
+- Rebase / replan / move.
+- Enhanced Verify — richer manual and automatic detection, and more features.
+- Continued work on the Library view.
+- UI-driven initial drive registration and setup — a guided terminal flow first, eventually a full UI setup and drive registration.
+
+Contributions to any of these are welcome — see [CONTRIBUTING](CONTRIBUTING.md).
