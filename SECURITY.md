@@ -8,7 +8,7 @@ but isn't actually restorable) — please report it privately rather than openin
 
 - **Preferred:** open a private security advisory on GitHub (repo → **Security** → **Advisories** →
   *Report a vulnerability*).
-- **Or** contact the maintainers at: `[INSERT CONTACT]`.
+- **Or** contact the maintainers at: `dev@auspexlabs.sh`.
 
 Please include repro steps and the affected version/commit. We'll acknowledge and work a fix. There
 is no bounty program.
