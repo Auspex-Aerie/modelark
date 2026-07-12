@@ -42,6 +42,9 @@ research and the running candidate landscape.
 
 ## Catalog state — complete walk (2026-06-28, 400/org cap)
 
+> Historical snapshot (the initial walk). The catalog has since grown to ~4.1k models — run
+> `modelark discover` for live numbers.
+
 41/41 orgs · **3,470 models cataloged** · **222 TB** of weights mapped (nothing downloaded) ·
 1,745 excluded (logged in `catalog/exclusions/`).
 Categories: generative-llm 2619 · embedding 360 · seq2seq 170 · encoder 155 · classifier 77 ·

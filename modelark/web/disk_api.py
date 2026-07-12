@@ -100,7 +100,7 @@ def _drive(d: dict) -> dict:
     j, needs_priv = _smart(dev)
     if j is None:
         if not osplat.is_root():
-            base.update(status="unknown", note="needs root — run `sudo modelark serve` to read SMART")
+            base.update(status="unknown", note="SMART needs root — grant smartctl passwordless sudo (README > Setup); don't run the portal as root")
         elif d.get("TRAN") == "usb":
             usb = _usb_id(d["NAME"])
             base.update(status="unknown",

@@ -19,4 +19,4 @@ echo
 echo "✓ Setup complete."
 echo "  Optional (gated repos / higher rate limits):  .venv/bin/hf auth login"
 echo "  Launch the portal:                            .venv/bin/modelark serve"
-echo "  Disk Health needs SMART:                      sudo .venv/bin/modelark serve"
+echo "  Disk Health (SMART):  grant smartctl passwordless sudo (see README > Setup) — do NOT run the portal as root"

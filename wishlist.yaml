@@ -11,7 +11,7 @@ defaults:
 # Compression gate (DEC-022). Weights are stored ZipNN-compressed. Whole-file compress is
 # fastest but needs ~4x the shard in RAM (measured: ~3.67x + baseline). A shard whose est.
 # peak exceeds the budget below is handled out-of-RAM instead of OOM-ing the run.
-# See strata/streamznn.py (StreamZNN, MIT) + strata/modelark/compress.py.
+# See modelark/streamznn.py (StreamZNN, MIT) + modelark/compress.py.
 compression:
   max_compress_ram_gb: 4.0     # whole-file peak ~= 4x shard; shards over this budget don't use whole-file
   stream_compress: true        # over budget -> StreamZNN (float-aware, O(chunk)). false -> zstd-stream if installed, else store raw

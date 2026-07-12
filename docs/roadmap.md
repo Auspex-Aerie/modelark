@@ -2,14 +2,13 @@
 
 Canonical build order and parked work. **Design rationale** lives in the append-only ledger
 (`docs/decision_log.md`); **this file is the plan** (what's next, in what order, done-when) and the
-**backlog** (what's parked and why). Session handoffs (`claudedocs/HANDOFF.md`) are ephemeral and
-point here.
+**backlog** (what's parked and why).
 
 > Task numbers (`#NN`) are stable cross-reference labels; a live task board may assign its own IDs.
 
 ## The Plan epic (#33–#38) — ✅ DONE (2026-07-11)
 
-**Shipped** on branch `feature/plan-epic`, all verified (unit tests + Playwright): #33 Plan entity +
+**Shipped** and verified (unit tests + Playwright): #33 Plan entity +
 copy-aware totals (**DEC-030**); #34 registration→plan_drives; #37 per-model capacity failsafe +
 provisioning-aware fill + DEF-022 fail-soft replica (**DEC-031**); #35 Plans tab + gate / #36 two
 capacity bars / #38 graduated catalog gate / DEF-023 loud oopsies (**DEC-032**); DEF-021 Verifier

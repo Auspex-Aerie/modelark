@@ -1,5 +1,5 @@
--- Strata catalog schema (SQLite, WAL mode). Shared core, used by strata.modelark and
--- any future strata.* product. git-annex owns *where bytes physically live*;
+-- ModelArk catalog schema (SQLite, WAL mode). The shared core (modelark.core), reusable by
+-- future modelark modules. git-annex owns *where bytes physically live*;
 -- the `replicas` table mirrors `git annex whereis` for offline-queryable location.
 -- WAL journaling → concurrent readers + one writer across processes (DEC-024, replacing DuckDB's
 -- single-writer lock). SQLite is dynamically typed; the declared types below are affinity hints.
@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS fetch_events (
 
 -- A first-class Plan (#33, DEF-016) — one fill campaign's identity: a FIXED set of registered
 -- drives (plan_drives) + the global selection/archived it fills + a provisioning mode. The three
--- LIVE numbers (uncompressed/compressed/capacity, strata.modelark.plan.totals) fuel the level-1
+-- LIVE numbers (uncompressed/compressed/capacity, modelark.plan.totals) fuel the level-1
 -- capacity failsafe. One plan for now (`ark`); selection/archived stay GLOBAL — a future plan_id
 -- column on them is the multi-plan future (a DEF). Exactly one row has is_active (the current
 -- backend/portal context); the #35 UI gate additionally forces an explicit operator pick per session.

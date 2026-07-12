@@ -19,7 +19,7 @@ window.loadDisk = async function () {
     return;
   }
   note.innerHTML = d.needs_privilege
-    ? '<span class="disknote">SMART needs root — start the portal with <b>sudo modelark serve</b>, or grant passwordless sudo for smartctl, to read drive health.</span>'
+    ? '<span class="disknote">SMART needs root — grant passwordless sudo for <b>smartctl</b> (see README Setup) to read drive health; do not run the portal as root.</span>'
     : "SMART status for attached drives — vet your library volumes before they hold archive data.";
 
   if (!d.drives.length) { body.innerHTML = '<div class="stub">No physical disks detected.</div>'; return; }

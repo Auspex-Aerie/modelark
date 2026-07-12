@@ -45,8 +45,14 @@ project's narrative; skim it to understand *why* things are the way they are.
 
 ## Pull requests
 
-Work on a feature branch and open a PR. Keep changes focused, and include a test when you fix a bug
-or add behavior. Explain *why*, not just *what* — the reasoning is what the ledger captures.
+At this alpha stage the project moves quickly, so the smoothest way to contribute is a **fork PR** —
+carrying local changes tends to get hard to merge as things shift under you:
+
+1. **Fork** the repo and branch on your fork.
+2. **Contribute** — keep changes focused; include a test when you fix a bug or add behavior, and
+   explain *why*, not just *what* (the reasoning is what the ledger captures).
+3. **Push** your branch and open a PR back here. CI runs the suite on every PR; I review and apply
+   them quickly.
 
 ## Reporting bugs
 
