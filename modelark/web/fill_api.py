@@ -109,7 +109,7 @@ def _rx_bytes() -> int | None:
 
 def start(body: dict) -> dict:
     """Launch the guided fill. Optional body {"max_24h_gb": <float>} overrides the config cap
-    (wishlist.yaml `download.max_24h_gb`; 0 = unlimited, default 4 TB/day)."""
+    (wishlist.yaml `download.max_24h_gb`; 0 = unlimited, default 1 TB/day)."""
     max_24h_gb = float(body["max_24h_gb"]) if "max_24h_gb" in body else wishlist.download()["max_24h_gb"]
 
     def work(should_stop, emit):

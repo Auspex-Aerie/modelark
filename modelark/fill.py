@@ -148,7 +148,7 @@ def _primary_order(ctx, plan: dict, blocked: set) -> list[tuple[str, str]]:
     return sorted(pending, key=rank)
 
 
-def execute(ctx, *, plan_id: str | None = None, max_24h_gb: float = 2000,
+def execute(ctx, *, plan_id: str | None = None, max_24h_gb: float = 1000,
             repo_scope: list[str] | None = None, guided: bool = False, poll_secs: float = 3.0) -> dict:
     """Run the active Plan's finalized selection through both tiers behind the DEC-019 gates,
     RE-PLANNING the primary tier from live reality before each drive-batch and enforcing the #37

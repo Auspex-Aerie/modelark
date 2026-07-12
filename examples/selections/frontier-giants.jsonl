@@ -1,20 +1,4 @@
-{"repo_id": "NousResearch/k2-merged-3.5T-bf16", "model_name": "k2-merged-3.5T-bf16", "params_b": 3468.149}
-{"repo_id": "deepseek-ai/DeepSeek-V4-Pro-Base", "model_name": "DeepSeek-V4-Pro-Base", "params_b": 1600.79}
-{"repo_id": "moonshotai/Kimi-K2-Thinking", "model_name": "Kimi-K2-Thinking", "params_b": 1058.118}
-{"repo_id": "moonshotai/Kimi-K2-Base", "model_name": "Kimi-K2-Base", "params_b": 1026.471}
-{"repo_id": "moonshotai/Kimi-K2-Instruct", "model_name": "Kimi-K2-Instruct", "params_b": 1026.471}
-{"repo_id": "moonshotai/Kimi-K2-Instruct-0905", "model_name": "Kimi-K2-Instruct-0905", "params_b": 1026.471}
-{"repo_id": "XiaomiMiMo/MiMo-V2.5-Pro", "model_name": "MiMo-V2.5-Pro", "params_b": 1023.245}
-{"repo_id": "XiaomiMiMo/MiMo-V2.5-Pro-Base", "model_name": "MiMo-V2.5-Pro-Base", "params_b": 1023.245}
-{"repo_id": "nvidia/DeepSeek-V4-Pro-NVFP4", "model_name": "DeepSeek-V4-Pro-NVFP4", "params_b": 909.964}
-{"repo_id": "deepseek-ai/DeepSeek-V4-Pro-DSpark", "model_name": "DeepSeek-V4-Pro-DSpark", "params_b": 889.485}
-{"repo_id": "deepseek-ai/DeepSeek-V4-Pro", "model_name": "DeepSeek-V4-Pro", "params_b": 861.608}
-{"repo_id": "zai-org/GLM-5-FP8", "model_name": "GLM-5-FP8", "params_b": 753.91}
-{"repo_id": "zai-org/GLM-5.1-FP8", "model_name": "GLM-5.1-FP8", "params_b": 753.91}
-{"repo_id": "zai-org/GLM-5", "model_name": "GLM-5", "params_b": 753.864}
-{"repo_id": "zai-org/GLM-5.1", "model_name": "GLM-5.1", "params_b": 753.864}
-{"repo_id": "zai-org/GLM-5.2-FP8", "model_name": "GLM-5.2-FP8", "params_b": 753.376}
-{"repo_id": "zai-org/GLM-5.2", "model_name": "GLM-5.2", "params_b": 753.33}
-{"repo_id": "deepseek-ai/DeepSeek-Math-V2", "model_name": "DeepSeek-Math-V2", "params_b": 685.397}
-{"repo_id": "deepseek-ai/DeepSeek-V3.2", "model_name": "DeepSeek-V3.2", "params_b": 685.397}
-{"repo_id": "deepseek-ai/DeepSeek-V3.2-Exp", "model_name": "DeepSeek-V3.2-Exp", "params_b": 685.397}
+{"repo_id": "NousResearch/k2-merged-3.5T-bf16", "model_name": "k2-merged-3.5T-bf16", "params_b": 3468.149, "category": "generative-llm"}
+{"repo_id": "deepseek-ai/DeepSeek-V4-Pro-Base", "model_name": "DeepSeek-V4-Pro-Base", "params_b": 1600.79, "category": "generative-llm"}
+{"repo_id": "moonshotai/Kimi-K2-Thinking", "model_name": "Kimi-K2-Thinking", "params_b": 1058.118, "category": "generative-llm"}
+{"repo_id": "XiaomiMiMo/MiMo-V2.5-Pro", "model_name": "MiMo-V2.5-Pro", "params_b": 1023.245, "category": "generative-llm"}

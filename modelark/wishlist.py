@@ -35,9 +35,9 @@ def compression() -> dict:
 
 
 # Download rate cap. The fill self-throttles once `max_24h_gb` of ORIGINAL bytes have been archived
-# within a ROLLING 24h window (fetch._bytes_last_24h); 0 = unlimited. Default 4 TB/day if wishlist.yaml
-# has no `download:` section.
-_DOWNLOAD_DEFAULTS = {"max_24h_gb": 4000.0}
+# within a ROLLING 24h window (fetch._bytes_last_24h); 0 = unlimited. Default 1 TB/day if wishlist.yaml
+# has no `download:` section — deliberately conservative; the user opts UP, not down.
+_DOWNLOAD_DEFAULTS = {"max_24h_gb": 1000.0}
 
 
 def download() -> dict:

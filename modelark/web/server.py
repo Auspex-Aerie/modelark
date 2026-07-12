@@ -105,6 +105,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(selection_api.clear())
             elif u.path == "/api/selection/finalize":
                 self._json(selection_api.finalize())
+            elif u.path == "/api/selection/oversize":
+                self._json(selection_api.oversize(body))
             elif u.path == "/api/fill/start":
                 self._json(fill_api.start(body))
             elif u.path == "/api/fill/stop":

@@ -6,7 +6,11 @@ fetch pipeline reads (rows with finalized_at NOT NULL).
 """
 from __future__ import annotations
 
+from modelark import wishlist
+from modelark.core import telemetry
 from modelark.web import data
+
+log = telemetry.get_logger("modelark.selection")
 
 
 def summary() -> dict:
@@ -21,6 +25,7 @@ def summary() -> dict:
     fin = data.q("SELECT count(*) FROM selection WHERE finalized_at IS NOT NULL")[0][0]
     return {
         "n": tot[0], "bytes": tot[1], "finalized": fin, "budget": data.DEFAULT_BUDGET_TB,
+        "cap_24h_gb": wishlist.download()["max_24h_gb"],
         "by_cat": [{"cat": c, "n": n, "bytes": b, "recent": recent.get(c)} for c, n, b in by],
     }
 
@@ -53,6 +58,15 @@ def finalize() -> dict:
     """Commit the current cart: stamp the whole un-finalized set as the wishlist."""
     data.q("UPDATE selection SET finalized_at = CURRENT_TIMESTAMP WHERE finalized_at IS NULL")
     return summary()
+
+
+def oversize(body: dict) -> dict:
+    """Log that a build set exceeds the 24h download cap — a considerate-use nudge, not a block. The
+    Catalog page POSTs this once when the selection first crosses the cap (it also shows a dismissable
+    banner), leaving a durable record that the tool discouraged over-grabbing."""
+    log.warning("build set exceeds 24h download cap",
+                selected_gb=round(float(body["selected_gb"])), cap_gb=round(float(body["cap_gb"])))
+    return {"ok": True}
 
 
 def export_ids() -> list[str]:

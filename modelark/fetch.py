@@ -488,7 +488,7 @@ def _bytes_last_24h(con) -> int:
                        "WHERE verified_at > datetime('now', '-1 day')").fetchone()[0]
 
 
-def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_24h_gb=2000,
+def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_24h_gb=1000,
         ctx: RunCtx | None = None, fits: Callable[[str], bool] | None = None) -> None:
     """`fits(repo_id) -> bool` (optional, #37): a per-model boundary check the caller (fill.execute)
     supplies — 'does this repo still fit the target drive's LIVE free in the plan's provisioning

@@ -20,9 +20,10 @@ compression:
                                # Revisit >1 only once ZipNN's threaded compressor is proven safe.
 
 # Download rate cap. The fill stops (resumable) once this many GB of ORIGINAL bytes have been archived
-# in a ROLLING 24h window. 0 = unlimited. Code default is 4000 (4 TB/day) if this section is absent.
+# in a ROLLING 24h window. Default 1000 (1 TB/day) — deliberately conservative. Raise it yourself if you
+# mean to; 0 = uncapped. Please be considerate: this is an archive/DR tool, not a way to mirror all of HF.
 download:
-  max_24h_gb: 0                # 0 = uncapped (2026-07-10: unblocked; verified the window is rolling)
+  max_24h_gb: 1000             # 1 TB/day default; set higher (or 0 = uncapped) only if you must
 
 # Logging (DEC-023 / #26). The portal + fill worker log here AND to stdout (→ journald under systemd).
 # A rotating file means an alive-but-hung process's log is still current — journald was empty during

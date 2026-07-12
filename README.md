@@ -53,6 +53,8 @@ This is pre-1.0 and built in public, so a few sharp edges are worth knowing befo
 
 **Smaller things.** `duckdb` is still a hard dependency even though the catalog is SQLite now — only the one-time migration uses it, so a fresh install pulls it for nothing. It'll be removed in the next version: it remains for migration capability but is immediately deprecated. The `zstd` fallback is implemented but dormant until you install `zstandard` — if it's not present we won't use it, but we won't complain very loudly either, so make sure it's installed. Tier-B (functional, generate-a-token) verification is minimal — Tier-A structural checking is the workhorse. And in the shipped catalog export, `downloads_all` is empty, so ranking leans on `downloads_30d` and `likes`. More advanced catalog and metadata work is also required, known, and planned.
 
+**Be considerate.** ModelArk ships with a **1 TB/day** download cap (`download.max_24h_gb`; raise it — or set `0` to uncap — only if you must). This is an **archive/DR library-management** system, *not* a way to mirror large amounts of Hugging Face: point it at giant swaths of the Hub and you'll be rate-limited by them. The portal also warns you when a build set exceeds the daily cap. Please archive what you'll actually keep.
+
 ## Architecture
 
 ```

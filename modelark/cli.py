@@ -413,9 +413,9 @@ def main(argv=None):
     ft.add_argument("--limit", type=int, help="only fetch the first N models")
     ft.add_argument("--repo", action="append", help="explicit repo(s) instead of the finalized set")
     ft.add_argument("--dry-run", action="store_true", help="show the plan without downloading")
-    ft.add_argument("--max-24h", dest="max_24h_gb", type=float, default=2000,
+    ft.add_argument("--max-24h", dest="max_24h_gb", type=float, default=1000,
                     help="stop at the next repo boundary if >N GB were downloaded in the last 24h "
-                         "(default 2000 = 2 TB; 0 disables)")
+                         "(default 1000 = 1 TB; 0 disables)")
     ft.set_defaults(func=cmd_fetch)
 
     lib = sub.add_parser("library", help="the central git-annex map repo")
@@ -432,8 +432,8 @@ def main(argv=None):
     lp.add_argument("--repo", action="append", help="plan specific repo(s) instead of the finalized set")
     lp.add_argument("--apply", action="store_true", help="execute the plan (fetch per drive)")
     lp.add_argument("--json", action="store_true", help="emit the plan as JSON (portal Fill tab / scripting)")
-    lp.add_argument("--max-24h", dest="max_24h_gb", type=float, default=2000,
-                    help="24h download cap in GB across the fleet (default 2000 = 2 TB; 0 disables)")
+    lp.add_argument("--max-24h", dest="max_24h_gb", type=float, default=1000,
+                    help="24h download cap in GB across the fleet (default 1000 = 1 TB; 0 disables)")
     lp.set_defaults(func=cmd_library_plan)
 
     dr = sub.add_parser("drive", help="register & list archive drives")

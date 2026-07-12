@@ -7,6 +7,7 @@
   let BUD = +(localStorage.getItem("modelark_budget") || 27);
   let lastSel = {n: 0, bytes: 0, finalized: 0, by_cat: []};
   let gatePrevent = false;                     // #38: cart's compressed footprint would exceed plan capacity
+  let capLogged = false, capDismissed = false; // 24h-cap considerate-use nudge (session flags)
   const catChips = {};
 
   const chip = (t, cls) => { const b = document.createElement("button");
@@ -64,6 +65,21 @@
     $("bnote").textContent = tb > BUD ? ("over by " + (tb - BUD).toFixed(1) + " TB")
       : ((BUD - tb).toFixed(1) + " TB left · ZipNN ~30% off bf16 on disk");
     $("finnote").innerHTML = lastSel.finalized ? `<b>${lastSel.finalized}</b> finalized (ready for fetch)` : "nothing finalized yet";
+    // 24h-cap considerate-use nudge (dismissable; threshold tracks config — raising the cap clears it)
+    const capGB = lastSel.cap_24h_gb || 0, selGB = lastSel.bytes / 1e9, cw = $("capWarn");
+    if (cw) {
+      const over = capGB > 0 && selGB > capGB;
+      if (!over) { capDismissed = false; cw.hidden = true; }
+      else if (capDismissed) { cw.hidden = true; }
+      else {
+        $("capWarnMsg").textContent =
+          `Your set (${selGB.toFixed(0)} GB) exceeds the 24-hour download cap (${capGB.toFixed(0)} GB). `
+          + "This can be dismissed, but please be considerate — ModelArk is an archive/DR library manager, "
+          + "not a way to mirror large amounts of Hugging Face; you'll be rate-limited by them.";
+        cw.hidden = false;
+        if (!capLogged) { capLogged = true; post("/api/selection/oversize", {selected_gb: selGB, cap_gb: capGB}).catch(() => {}); }
+      }
+    }
   }
 
   function renderTally(s) {
@@ -139,6 +155,7 @@
   $("finish").onclick = async () => { const s = await post("/api/selection/finalize", {});
     renderTally(s); toast(s.finalized + " models finalized → wishlist"); };
   $("export").onclick = () => { location = "/api/export"; toast("selection downloaded"); };
+  $("capWarnDismiss").onclick = () => { capDismissed = true; $("capWarn").hidden = true; };
 
   // controls
   let dt; $("search").addEventListener("input", e => { S.q = e.target.value; clearTimeout(dt); dt = setTimeout(load, 180); });

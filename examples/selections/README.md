@@ -6,11 +6,11 @@ curate. Use one as a jumping-off point, then refine in the portal's **Catalog** 
 
 | File | Angle | How it's built |
 |------|-------|----------------|
-| `flagship-llms.jsonl`   | The essentials         | top generative LLMs by all-time downloads |
-| `fits-24gb.jsonl`       | Runs locally           | generative LLMs ≤ 14B params, by downloads (fit a 24 GB GPU) |
-| `frontier-giants.jsonl` | Archive the unrunnable | generative LLMs ≥ 100B params, largest first |
+| `fits-24gb.jsonl`       | Runs locally           | ~10 LLMs ≤ 14B, one per org, by 30-day downloads (fit a 24 GB GPU) |
+| `flagship-llms.jsonl`   | The notable ones       | ~10 LLMs by community likes, one per org (size-mixed, ~3B→large) |
+| `frontier-giants.jsonl` | Archive the unrunnable | a *handful* of the biggest — a taste of the use case, not a grab-list |
 
-Each line is `{"repo_id", "model_name", "params_b"}`.
+Each line is `{"repo_id", "model_name", "params_b", "category"}`.
 
 ## Using a set
 
@@ -24,5 +24,6 @@ xargs -a <(python -c "import json;[print(json.loads(l)['repo_id']) for l in open
 
 Mark anything you want a redundant second copy of with `modelark protect --repo <id>`.
 
-> These sets were generated from a catalog snapshot and are **illustrative** — regenerate against a
-> fresh `modelark discover --walk` for current models and numbers.
+> These sets are **illustrative** and deliberately small — regenerate against a fresh
+> `modelark discover --walk` for current numbers. Keep your own sets modest: the default 1 TB/day cap
+> will pace you, and ModelArk is an archive/DR tool, not a way to mirror large swaths of Hugging Face.
