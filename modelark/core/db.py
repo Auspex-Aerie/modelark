@@ -10,6 +10,7 @@ support `con.execute(sql, params).fetchone()/.fetchall()`, `?` placeholders, and
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime
@@ -71,6 +72,15 @@ def _statements(sql: str) -> Iterable[str]:
             yield chunk
 
 
+def _apply_schema(con: sqlite3.Connection, tables_only: bool = False) -> None:
+    """Apply the packaged schema. The first startup pass creates only tables so legacy data can be
+    rebuilt before unique indexes and views are installed; the final pass installs everything."""
+    for stmt in _statements(SCHEMA_PATH.read_text()):
+        if tables_only and not stmt.lstrip().upper().startswith("CREATE TABLE"):
+            continue
+        con.execute(stmt)
+
+
 def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Connection:
     """Open the catalog in WAL mode, applying the schema on first (writable) use. `isolation_level=None`
     → autocommit per statement (matches DuckDB); `check_same_thread=False` because the portal shares
@@ -96,11 +106,23 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
     con.execute("PRAGMA busy_timeout=15000")         # a concurrent WRITER briefly holds the lock → wait, don't error
     con.execute("PRAGMA synchronous=NORMAL")         # WAL-safe durability without an fsync per commit
     if read_only:
+        con.execute("PRAGMA foreign_keys=ON")         # every connection must opt in; SQLite defaults this OFF
         con.execute("PRAGMA query_only=ON")          # this connection reads live data but cannot write
         return con
-    for stmt in _statements(SCHEMA_PATH.read_text()):
-        con.execute(stmt)
-    _migrate(con)
+    try:
+        # A legacy table rebuild must run with FK enforcement off; validation still happens through
+        # PRAGMA foreign_key_check before its transaction commits. Every normal write below runs ON.
+        con.execute("PRAGMA foreign_keys=OFF")
+        _apply_schema(con, tables_only=True)
+        _migrate(con)
+        _apply_schema(con)
+        con.execute("PRAGMA foreign_keys=ON")
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(f"Catalog foreign-key check failed after startup: {violations[:8]}")
+    except Exception:
+        con.close()
+        raise
     return con
 
 
@@ -112,6 +134,102 @@ _MIGRATIONS = (
     "ALTER TABLE models ADD COLUMN numcopies INTEGER DEFAULT 1",
     "ALTER TABLE archived ADD COLUMN stored_relpath VARCHAR",
 )
+
+_INTEGRITY_TABLES = (
+    "models", "files", "drives", "replicas", "verifications", "selection",
+    "archived", "fetch_events", "plans", "plan_drives",
+)
+_VIEW_NAMES = ("v_ui", "v_model_summary", "v_storage_by_drive")
+_SCHEMA_VERSION = 1
+
+
+def _canonical_table_sql(table: str, replacement: str) -> str:
+    """Return one canonical CREATE TABLE statement under a temporary table name."""
+    prefix = re.compile(
+        rf"^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+{re.escape(table)}\b",
+        re.IGNORECASE,
+    )
+    for stmt in _statements(SCHEMA_PATH.read_text()):
+        clean = stmt.strip()
+        if prefix.match(clean):
+            return prefix.sub(f"CREATE TABLE {replacement}", clean, count=1)
+    raise RuntimeError(f"Packaged schema has no CREATE TABLE statement for {table}")
+
+
+def _backup_before_integrity_migration(con: sqlite3.Connection) -> Path:
+    """Create one consistent, non-overwriting recovery copy before the destructive table swap."""
+    backup_path = DB_PATH.with_name(f"{DB_PATH.name}.pre-integrity-v{_SCHEMA_VERSION}.bak")
+    if backup_path.exists():
+        return backup_path
+    backup = sqlite3.connect(str(backup_path), isolation_level=None)
+    try:
+        con.backup(backup)                              # includes committed WAL state consistently
+    finally:
+        backup.close()
+    return backup_path
+
+
+def _rebuild_integrity_tables(con: sqlite3.Connection) -> None:
+    """Upgrade a pre-constraint catalog without dropping or repairing user data silently.
+
+    SQLite cannot add CHECK or FOREIGN KEY clauses with ALTER TABLE. Build every canonical table
+    beside the legacy set, copy rows (so CHECK/NOT NULL constraints run), swap them transactionally,
+    then run SQLite's cross-table checker before commit. Any invalid legacy row rolls everything back
+    and leaves a diagnostic instead of a partly-upgraded catalog.
+    """
+    if con.execute("PRAGMA foreign_key_list(archived)").fetchall():
+        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        return
+    if con.execute("PRAGMA foreign_keys").fetchone()[0]:
+        raise RuntimeError("Integrity migration requires foreign_keys=OFF before its transaction")
+
+    _backup_before_integrity_migration(con)
+    current = "catalog"
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        for view in _VIEW_NAMES:
+            con.execute(f'DROP VIEW IF EXISTS "{view}"')
+        for table in _INTEGRITY_TABLES:
+            current = table
+            new = f"{table}__integrity_new"
+            con.execute(f'DROP TABLE IF EXISTS "{new}"')
+            con.execute(_canonical_table_sql(table, new))
+            old_cols = {r[1] for r in con.execute(f'PRAGMA table_info("{table}")').fetchall()}
+            new_cols = [r[1] for r in con.execute(f'PRAGMA table_info("{new}")').fetchall()]
+            cols = [c for c in new_cols if c in old_cols]
+            quoted = ", ".join(f'"{c}"' for c in cols)
+            con.execute(f'INSERT INTO "{new}" ({quoted}) SELECT {quoted} FROM "{table}"')
+
+        # Drop children before parents for clarity even though enforcement is deliberately off on
+        # this connection. DDL is transactional in SQLite, including the table renames below.
+        for table in reversed(_INTEGRITY_TABLES):
+            con.execute(f'DROP TABLE "{table}"')
+        for table in _INTEGRITY_TABLES:
+            con.execute(f'ALTER TABLE "{table}__integrity_new" RENAME TO "{table}"')
+
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            detail = "; ".join(
+                f"{table} rowid={rowid} references missing {parent} (fk#{fk_id})"
+                for table, rowid, parent, fk_id in violations[:12]
+            )
+            more = f"; plus {len(violations) - 12} more" if len(violations) > 12 else ""
+            raise RuntimeError(f"Legacy catalog contains orphaned rows: {detail}{more}")
+        # Enforce the cross-row invariant during the same transaction so duplicate active plans also
+        # roll the rebuild back instead of leaving a half-upgraded database.
+        con.execute(
+            "CREATE UNIQUE INDEX idx_plans_one_active ON plans(is_active) WHERE is_active = 1"
+        )
+        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        con.execute("COMMIT")
+    except Exception as exc:
+        con.execute("ROLLBACK")
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(
+            f"Cannot add catalog integrity constraints: legacy table {current!r} contains "
+            f"invalid data ({exc}). Correct or export that row before retrying."
+        ) from exc
 
 
 def _migrate(con) -> None:
@@ -137,6 +255,7 @@ def _migrate(con) -> None:
     # `verified`. No physical verifier writes this model status, so every such legacy
     # row is safely and idempotently narrowed to the evidence it actually holds.
     con.execute("UPDATE models SET status='inspected' WHERE status='verified'")
+    _rebuild_integrity_tables(con)
 
 
 def upsert(con, table: str, row: dict, pk: list[str], touch: list[str] | None = None) -> None:
@@ -155,16 +274,29 @@ def upsert(con, table: str, row: dict, pk: list[str], touch: list[str] | None = 
 
 
 def replace_files(con, repo_id: str, rows: list[dict]) -> None:
-    """Replace the file rows for a repo in a single transaction."""
+    """Refresh file rows for a repo in one transaction.
+
+    Rediscovery may remove an upstream filename after ModelArk archived it. Such a row is durable
+    archive provenance and must survive the refresh; unreferenced stale rows are removed normally.
+    """
     con.execute("BEGIN")
     try:
-        con.execute("DELETE FROM files WHERE repo_id = ?", [repo_id])
         for r in rows:
-            cols = list(r)
-            con.execute(
-                f"INSERT INTO files ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})",
-                [r[c] for c in cols],
-            )
+            upsert(con, "files", r, pk=["repo_id", "rfilename"])
+        names = [r["rfilename"] for r in rows]
+        keep = ""
+        params: list[object] = [repo_id]
+        if names:
+            keep = f"AND rfilename NOT IN ({', '.join(['?'] * len(names))})"
+            params.extend(names)
+        con.execute(
+            "DELETE FROM files AS f WHERE repo_id=? " + keep + " "
+            "AND NOT EXISTS (SELECT 1 FROM archived a "
+            "                WHERE a.repo_id=f.repo_id AND a.rfilename=f.rfilename) "
+            "AND NOT EXISTS (SELECT 1 FROM replicas r "
+            "                WHERE r.repo_id=f.repo_id AND r.rfilename=f.rfilename)",
+            params,
+        )
         con.execute("COMMIT")
     except Exception:
         con.execute("ROLLBACK")

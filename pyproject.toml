@@ -1,22 +1,45 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "modelark"
 version = "0.1.0"
 description = "Catalog, fetch, and verify open model weights across an offline drive library."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Auspex-Aerie", email = "dev@auspexlabs.sh" },
+]
 requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Archiving",
+]
 dependencies = [
     "huggingface_hub>=0.29",
-    "hf_transfer",
-    "duckdb>=1.4",
     "pyyaml",
     "httpx",
     "zipnn==0.5.4",   # pinned: pre-1.0, compressed-at-rest archive codec (DEC-003)
 ]
 
 [project.optional-dependencies]
+migration = [
+    "duckdb>=1.4",
+]
+zstd = [
+    "zstandard>=0.23",
+]
 dev = [
     "build>=1.2",
     "playwright>=1.52",
@@ -24,6 +47,12 @@ dev = [
     "ruff>=0.11",
     "wheel>=0.45",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Auspex-Aerie/modelark"
+Repository = "https://github.com/Auspex-Aerie/modelark"
+Issues = "https://github.com/Auspex-Aerie/modelark/issues"
+Security = "https://github.com/Auspex-Aerie/modelark/security/policy"
 
 [project.scripts]
 modelark = "modelark.cli:main"

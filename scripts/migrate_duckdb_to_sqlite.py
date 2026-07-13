@@ -18,8 +18,6 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
-import duckdb
-
 from modelark.core import db
 
 TABLES = ["models", "files", "drives", "replicas", "verifications",
@@ -41,6 +39,13 @@ def _cell(col: str, val: object) -> object:
 
 
 def migrate(src_path: Path, dst_path: Path) -> dict:
+    try:
+        import duckdb
+    except ImportError as exc:
+        raise RuntimeError(
+            "DuckDB migration support is optional; install it with "
+            "`pip install 'modelark[migration]'`."
+        ) from exc
     src = duckdb.connect(str(src_path))                     # read-write on the COPY → replays any .wal
     db.CATALOG_DIR = dst_path.parent
     db.DB_PATH = dst_path
@@ -59,11 +64,22 @@ def migrate(src_path: Path, dst_path: Path) -> dict:
         ph = ", ".join(["?"] * len(use))
         dst.execute("BEGIN")
         for r in rows:
-            dst.execute(f"INSERT INTO {t} ({', '.join(use)}) VALUES ({ph})",
-                        [_cell(use[i], r[i]) for i in range(len(use))])
+            values = [_cell(use[i], r[i]) for i in range(len(use))]
+            # Pre-DEC-039 Tier A used this model status for remote-header evidence. The constrained
+            # SQLite schema intentionally has no `verified` model state; preserve the row while
+            # narrowing the claim exactly as the in-place SQLite migration does.
+            if t == "models" and "status" in use:
+                status = use.index("status")
+                if values[status] == "verified":
+                    values[status] = "inspected"
+            dst.execute(f"INSERT INTO {t} ({', '.join(use)}) VALUES ({ph})", values)
         dst.execute("COMMIT")
         got = dst.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
         report[t] = {"src": len(rows), "dst": got, "dropped_cols": dropped}
+    # The destination schema is bootstrapped before source rows exist. Run row-level backfills once
+    # more after import (notably nested archived stored_relpath recovery); constraint migration is
+    # already complete and this call is idempotent.
+    db._migrate(dst)
     src.close()
     dst.close()
     return report

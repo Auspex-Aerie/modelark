@@ -52,6 +52,7 @@ jobs:
           pip install --no-deps /tmp/modelark-wheel/modelark-*.whl
           cd /tmp
           python -c "import tempfile; from pathlib import Path; from modelark import wishlist; from modelark.core import db; from modelark.web import server; d=tempfile.mkdtemp(); db.configure(d); c=db.connect(_bootstrapping=True); c.close(); assert wishlist.download()['max_24h_gb']==1000; assert (server.STATIC/'index.html').is_file(); assert db.DB_PATH.is_file() and Path(d) in db.DB_PATH.parents"
+          python -c "from importlib.metadata import metadata, requires; m=metadata('modelark'); r=requires('modelark') or []; assert m['License-Expression']=='Apache-2.0'; assert m['Project-URL']; assert not any(x.lower().startswith(('duckdb','hf-transfer')) and 'extra ==' not in x for x in r)"
 
   # Browser E2E — boots the portal on a seeded catalog and drives it headless with Playwright.
   # Separate job so the core suite stays zero-dep and fast; this one pays for a browser install.
