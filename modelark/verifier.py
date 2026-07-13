@@ -15,11 +15,34 @@ re-check for exactly the shards a disruption (restart / crash / RO flip / raw-fa
 """
 from __future__ import annotations
 
+import re
+from pathlib import Path, PurePosixPath
+
 from modelark import compress, fetch, register
 
 _DISRUPTION_OUTCOMES = ("awaiting-drive", "compress-fallback", "error")
 _WINDOW_MIN = 15                    # an archive within ±this many minutes of a disruption is a suspect
 _FLOAT_SQL = ("bf16", "bfloat16", "fp16", "f16", "float16", "fp32", "f32", "float32")
+_ANNEX_SHA256 = re.compile(r"^SHA256E?-s\d+--([0-9a-f]{64})(?:\.|$)")
+
+
+def _stored_relpath(rfilename: str, stored_name: str | None, stored_relpath: str | None) -> PurePosixPath:
+    """Canonical path below <archive>/<repo>; infer it for a pre-migration record when needed."""
+    if stored_relpath:
+        value = stored_relpath
+    elif stored_name:
+        value = str(PurePosixPath(rfilename).parent / stored_name)
+    else:
+        raise ValueError("unsafe stored path: both stored_relpath and stored_name are empty")
+    rel = PurePosixPath(value)
+    if not rel.parts or value != rel.as_posix() or rel.is_absolute() or ".." in rel.parts:
+        raise ValueError(f"unsafe stored path {value!r}")
+    return rel
+
+
+def _annex_hash(key: str | None) -> str | None:
+    m = _ANNEX_SHA256.match(key or "")
+    return m.group(1) if m else None
 
 
 def suspects(con) -> list[dict]:
@@ -74,54 +97,91 @@ def suspects(con) -> list[dict]:
 
 
 def reverify(con, repo_id: str, deep: bool = True) -> dict:
-    """Re-verify one archived model. RECORD consistency is offline-safe; the decompress-canary runs only
-    for stored blobs whose drive is mounted (skipped, not failed, when a drive is shelved)."""
+    """Re-verify one archived model. RECORD consistency is offline-safe; physical status remains
+    unknown for stored blobs whose drive is shelved, and missing bytes on a mounted drive fail."""
     planned_names = {f["rfilename"] for f in fetch.plan(con, repo_id)}
     catalog_sha = dict(con.execute("SELECT rfilename, sha256 FROM files WHERE repo_id=?", [repo_id]).fetchall())
     by_name: dict[str, list[dict]] = {}
-    for rf, sn, dl, osha, comp in con.execute(
-            "SELECT rfilename, stored_name, drive_label, orig_sha256, compressed "
+    for rf, sn, sr, dl, osha, comp, key in con.execute(
+            "SELECT rfilename, stored_name, stored_relpath, drive_label, orig_sha256, compressed, annex_key "
             "FROM archived WHERE repo_id=?", [repo_id]).fetchall():
-        by_name.setdefault(rf, []).append({"stored_name": sn, "drive": dl, "orig": osha, "compressed": bool(comp)})
+        by_name.setdefault(rf, []).append({"stored_name": sn, "stored_relpath": sr, "drive": dl,
+                                           "orig": osha, "compressed": bool(comp), "annex_key": key})
 
     if not by_name:
-        return {"repo": repo_id, "archived": False, "ok": False, "detail": "not archived — nothing to re-verify"}
+        return {"repo": repo_id, "archived": False, "status": "not-archived", "ok": False,
+                "detail": "not archived — nothing to re-verify"}
 
     missing = sorted(planned_names - set(by_name))                    # planned but never archived
-    sha_mismatch = [rf for rf, cs in by_name.items()                 # stored HF-hash disagrees with the catalog
-                    if catalog_sha.get(rf) and cs[0]["orig"] and catalog_sha[rf] != cs[0]["orig"]]
+    sha_mismatch = [rf for rf, cs in by_name.items()                 # any stored HF-hash disagrees with catalog
+                    if catalog_sha.get(rf) and any(c["orig"] and catalog_sha[rf] != c["orig"] for c in cs)]
     record_ok = not missing and not sha_mismatch
 
-    deep_checks, deep_ran = [], False
+    required = max(1, int((con.execute("SELECT coalesce(numcopies,1) FROM models WHERE repo_id=?",
+                                       [repo_id]).fetchone() or [1])[0]))
+    deep_checks, deep_ran, offline = [], False, set()
     if deep:
         for rf, copies in by_name.items():
             for c in copies:
                 path = register.archive_path(con, c["drive"])         # None → drive shelved → skip (not fail)
                 if path is None:
-                    continue
-                stored = path / repo_id / c["stored_name"]
-                if not stored.exists():
+                    offline.add(c["drive"])
                     continue
                 deep_ran = True
                 try:
-                    ok = (compress.canary_ok(stored, c["orig"]) if c["compressed"]
-                          else compress.sha256_file(stored) == c["orig"])
-                    deep_checks.append({"file": rf, "drive": c["drive"], "ok": bool(ok)})
+                    rel = _stored_relpath(rf, c["stored_name"], c["stored_relpath"])
+                except ValueError as e:
+                    deep_checks.append({"file": rf, "drive": c["drive"], "ok": False, "err": str(e)[:120]})
+                    continue
+                stored = path / repo_id / Path(*rel.parts)
+                if not stored.exists():
+                    deep_checks.append({"file": rf, "drive": c["drive"], "ok": False,
+                                        "err": "recorded blob is missing on mounted drive"})
+                    continue
+                try:
+                    expected = c["orig"] if c["compressed"] else (c["orig"] or _annex_hash(c["annex_key"]))
+                    if expected is None:
+                        deep_checks.append({"file": rf, "drive": c["drive"], "ok": None,
+                                            "err": "no canonical or annex sha256 available"})
+                    else:
+                        ok = (compress.canary_ok(stored, expected) if c["compressed"]
+                              else compress.sha256_file(stored) == expected)
+                        deep_checks.append({"file": rf, "drive": c["drive"], "ok": bool(ok)})
                 except Exception as e:                                # a decompress error IS a failed check
                     deep_checks.append({"file": rf, "drive": c["drive"], "ok": False, "err": str(e)[:80]})
-                break                                                 # one healthy copy per file is enough
-    deep_ok = all(d["ok"] for d in deep_checks) if deep_checks else None
+    checked_fail = any(d["ok"] is False for d in deep_checks)
+    unverifiable = any(d["ok"] is None for d in deep_checks)
+    insufficient = []
+    if deep:
+        for rf in planned_names:
+            healthy = sum(d["ok"] is True for d in deep_checks if d["file"] == rf)
+            unknown_checked = sum(d["ok"] is None for d in deep_checks if d["file"] == rf)
+            possible = healthy + unknown_checked + sum(c["drive"] in offline for c in by_name.get(rf, []))
+            if possible < required:
+                insufficient.append(rf)
+    if not record_ok or checked_fail or insufficient:
+        status = "failed"
+    elif not deep or unverifiable or offline or any(
+            sum(d["ok"] is True for d in deep_checks if d["file"] == rf) < required for rf in planned_names):
+        status = "unknown"
+    else:
+        status = "verified"
+    deep_ok = status == "verified" if deep else None
 
     parts = [f"{len(by_name)} file(s) archived"]
     if missing:
         parts.append(f"{len(missing)} planned file(s) MISSING")
     if sha_mismatch:
         parts.append(f"{len(sha_mismatch)} sha256 MISMATCH")
-    parts.append("canary " + ("PASS" if deep_ok else "FAIL" if deep_ok is False else "skipped (drive not mounted)"))
+    if insufficient:
+        parts.append(f"{len(insufficient)} file(s) below required {required} checked/possible copies")
+    parts.append("physical " + ("PASS" if status == "verified" else "FAIL" if status == "failed" else "UNKNOWN"))
     return {"repo": repo_id, "archived": True, "record_ok": record_ok,
             "missing": missing, "sha_mismatch": sha_mismatch,
-            "n_files": len(by_name), "deep_ran": deep_ran, "deep_ok": deep_ok,
-            "deep_checks": deep_checks[:24], "ok": record_ok and deep_ok is not False,
+            "n_files": len(by_name), "required_copies": required, "status": status,
+            "offline_drives": sorted(offline), "insufficient": sorted(insufficient),
+            "deep_ran": deep_ran, "deep_ok": deep_ok,
+            "deep_checks": deep_checks[:24], "ok": status == "verified",
             "detail": " · ".join(parts)}
 
 

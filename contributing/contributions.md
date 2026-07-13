@@ -8,9 +8,12 @@ By taking part you agree to the (one-line) [Code of Conduct](code_of_conduct.md)
 ## Development setup
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -e .          # installs modelark + deps (huggingface_hub, duckdb, httpx, zipnn)
+python3 -m venv .venv-dev
+.venv-dev/bin/pip install -e ".[dev]"
 ```
+
+The `dev` extra installs the test/build tools and Playwright Python package. A runtime-only
+editable install remains `.venv/bin/pip install -e .`.
 
 System packages for the full pipeline: `git-annex` (byte storage), `smartmontools` (Disk Health),
 and optionally `open-iscsi` (NAS LUN). See the README's **Setup** section.
@@ -20,21 +23,26 @@ and optionally `open-iscsi` (NAS LUN). See the README's **Setup** section.
 Each test file is a self-contained harness (no pytest needed) — run one, or all:
 
 ```bash
-.venv/bin/python tests/test_plan.py
-for t in tests/test_*.py; do .venv/bin/python "$t"; done
+.venv-dev/bin/python tests/test_plan.py
+for t in tests/test_*.py; do
+  [ "$t" = tests/test_e2e_portal.py ] && continue
+  .venv-dev/bin/python "$t"
+done
 ```
 
 A file prints `all passed` on success and raises (non-zero exit) on the first failing assertion.
 CI runs the core suite on every push and PR; the browser E2E is a separate job (below).
+Run the correctness-oriented static checks with `.venv-dev/bin/ruff check modelark tests`.
 
 ### End-to-end tests
 
 The portal has a headless Playwright smoke test (`tests/test_e2e_portal.py`): it seeds a throwaway
-catalog, boots the portal, and drives a real browser (select a plan → catalog → the over-cap banner).
-It needs a browser, so it lives in its own dev venv:
+catalog in a temporary data directory, boots the portal, and drives a real browser (select a plan →
+catalog → the over-cap banner). It never moves, replaces, or opens your normal catalog. Install the
+browser once in the development environment:
 
 ```bash
-python3 -m venv .venv-dev && .venv-dev/bin/pip install -e . playwright && .venv-dev/bin/playwright install chromium
+.venv-dev/bin/playwright install chromium
 .venv-dev/bin/python tests/test_e2e_portal.py
 ```
 

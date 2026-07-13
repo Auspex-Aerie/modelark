@@ -26,7 +26,6 @@ from pathlib import Path
 from modelark.core import db
 from modelark.core import platform as osplat
 
-LIBRARY_CONFIG = db.CATALOG_DIR / "library.json"
 DEFAULT_LIBRARY = Path.home() / "modelark-library"
 ARCHIVE_SUBDIR = "modelark"          # content lives under <mount>/modelark
 
@@ -67,14 +66,15 @@ def _is_annex(repo: Path) -> bool:
 # ---- the central "map" repo -------------------------------------------------
 
 def library_root() -> Path:
-    if LIBRARY_CONFIG.exists():
-        return Path(json.loads(LIBRARY_CONFIG.read_text())["library_root"]).expanduser()
+    config = db.CATALOG_DIR / "library.json"
+    if config.exists():
+        return Path(json.loads(config.read_text())["library_root"]).expanduser()
     return DEFAULT_LIBRARY
 
 
 def _save_library_root(path: Path) -> None:
     db.CATALOG_DIR.mkdir(parents=True, exist_ok=True)
-    LIBRARY_CONFIG.write_text(json.dumps({"library_root": str(path)}, indent=2) + "\n")
+    (db.CATALOG_DIR / "library.json").write_text(json.dumps({"library_root": str(path)}, indent=2) + "\n")
 
 
 def ensure_library(path: Path | None = None) -> Path:

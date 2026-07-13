@@ -64,6 +64,16 @@ def test_replace_files_is_atomic_replace(tmp_path):
     con.close()
 
 
+def test_legacy_archive_basename_migrates_to_nested_relpath(tmp_path):
+    con = _fresh(tmp_path)
+    con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,drive_label) "
+                "VALUES('org/m','nested/model.safetensors','model.safetensors.znn','drive-01')")
+    db._migrate(con)
+    got = con.execute("SELECT stored_relpath FROM archived").fetchone()[0]
+    assert got == "nested/model.safetensors.znn", got
+    con.close()
+
+
 if __name__ == "__main__":
     import tempfile
     from pathlib import Path

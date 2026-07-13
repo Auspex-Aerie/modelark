@@ -16,6 +16,15 @@ dependencies = [
     "zipnn==0.5.4",   # pinned: pre-1.0, compressed-at-rest archive codec (DEC-003)
 ]
 
+[project.optional-dependencies]
+dev = [
+    "build>=1.2",
+    "playwright>=1.52",
+    "pytest>=8.3",
+    "ruff>=0.11",
+    "wheel>=0.45",
+]
+
 [project.scripts]
 modelark = "modelark.cli:main"
 
@@ -25,4 +34,11 @@ include = ["modelark*"]
 namespaces = true
 
 [tool.setuptools.package-data]
+"modelark" = ["default_wishlist.yaml"]
 "modelark.core" = ["*.sql"]
+"modelark.web" = ["static/*"]
+
+[tool.ruff.lint]
+# Start with correctness-oriented Pyflakes checks. The existing style backlog can be adopted
+# separately without hiding undefined names or unused imports in new work.
+select = ["F"]

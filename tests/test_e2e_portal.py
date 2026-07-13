@@ -1,21 +1,20 @@
-"""E2E smoke test: the portal boots on a throwaway seeded catalog and the 24h-cap plumbing is live.
+"""E2E smoke test: the portal boots on an isolated temporary catalog and drives the real UI.
 
-Standalone harness (no pytest). Needs .venv-dev (playwright installs come in V2):
-    python3 -m venv .venv-dev && .venv-dev/bin/pip install -e . playwright && .venv-dev/bin/playwright install chromium
+Standalone harness (no pytest). Needs the development extra and a browser:
+    python3 -m venv .venv-dev && .venv-dev/bin/pip install -e '.[dev]'
+    .venv-dev/bin/playwright install chromium
     .venv-dev/bin/python tests/test_e2e_portal.py
 
-V1 (this file): back up any real catalog, seed a tiny one (a few small models + one 1.5 TB giant),
-start `modelark serve` headless on a test port, and assert over HTTP that the cap is 1 TB and the
-giant is in the catalog. V2 adds the Playwright browser flow (select plan -> tick giant -> banner).
-Cleans up + restores the real catalog in `finally`.
+The test injects a temporary data/state directory into both this process and the portal subprocess.
+It never reads, moves, replaces, or deletes the user's default catalog (including its WAL/SHM files).
 """
 from __future__ import annotations
 
 import json
-import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -104,38 +103,36 @@ def _browser_flow() -> None:
 
 
 def main() -> None:
-    backup = None
-    if db.DB_PATH.exists():                                  # never clobber a real catalog
-        backup = db.DB_PATH.with_name("catalog.sqlite.e2e-bak")
-        shutil.move(str(db.DB_PATH), str(backup))
-    proc = None
-    try:
-        con = db.connect(_bootstrapping=True)               # creates catalog.sqlite + applies schema.sql
+    with tempfile.TemporaryDirectory(prefix="modelark-e2e-") as td:
+        root = Path(td)
+        data_dir, state_dir = root / "data", root / "state"
+        db.configure(data_dir, state_dir)
+        con = db.connect(_bootstrapping=True)
         _seed(con)
         con.close()
-        print("  seeded 4 models (1 giant)")
+        assert db.DB_PATH.parent == data_dir and db.DB_PATH.is_file()
+        print("  seeded 4 models (1 giant) in an isolated catalog")
 
         serve = Path(sys.executable).with_name("modelark")  # .venv-dev/bin/modelark
-        proc = subprocess.Popen([str(serve), "serve", "--no-open", "--port", str(PORT)],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        assert _wait_port(PORT), f"portal did not come up on :{PORT}"
-        time.sleep(2)                                       # patience: ui_cache build + ark bootstrap
-        print(f"  portal up on {BASE}")
+        proc = subprocess.Popen(
+            [str(serve), "--data-dir", str(data_dir), "--state-dir", str(state_dir),
+             "serve", "--no-open", "--port", str(PORT)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            assert _wait_port(PORT), f"portal did not come up on :{PORT}"
+            time.sleep(2)                                   # patience: ui_cache build + ark bootstrap
+            print(f"  portal up on {BASE}")
 
-        sel = _get("/api/selection")
-        assert sel["cap_24h_gb"] == 1000, f"cap should be 1000 GB, got {sel['cap_24h_gb']}"
-        ids = [m["id"] for m in _get("/api/models")["rows"]]
-        assert "demo/giant-llm" in ids, f"giant model missing from catalog: {ids}"
-        print(f"  api ok: cap={sel['cap_24h_gb']} GB · {len(ids)} models incl. the giant")
-        _browser_flow()
-        print("all passed")
-    finally:
-        if proc:
+            sel = _get("/api/selection")
+            assert sel["cap_24h_gb"] == 1000, f"cap should be 1000 GB, got {sel['cap_24h_gb']}"
+            ids = [m["id"] for m in _get("/api/models")["rows"]]
+            assert "demo/giant-llm" in ids, f"giant model missing from catalog: {ids}"
+            print(f"  api ok: cap={sel['cap_24h_gb']} GB · {len(ids)} models incl. the giant")
+            _browser_flow()
+            print("all passed")
+        finally:
             proc.terminate()
             proc.wait(timeout=10)
-        db.DB_PATH.unlink(missing_ok=True)
-        if backup:
-            shutil.move(str(backup), str(db.DB_PATH))
 
 
 if __name__ == "__main__":
