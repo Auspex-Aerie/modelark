@@ -126,6 +126,8 @@ def test_restore_real_git_annex_roundtrip(tmp_path):
     key = _run("git", "-C", str(source), "annex", "lookupkey", relative).stdout.strip()
     _run("git", "-C", str(source), "commit", "-qam", "archive fixture")
     _run("git", "clone", "-q", str(source), str(archive))
+    _run("git", "-C", str(archive), "config", "user.name", "ModelArk Test")
+    _run("git", "-C", str(archive), "config", "user.email", "test@modelark.invalid")
     _run("git", "-C", str(archive), "annex", "init", "restore-test", "-q")
     assert not (archive / relative).exists(), "clone should begin with dropped annex content"
     _archived(con, repo, name, name, "drive-00", digest, False, key)
