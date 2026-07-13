@@ -110,9 +110,12 @@ def _materialize(source: Path, destination: Path, row: dict, expected: str) -> N
     temporary = Path(temporary_name)
     try:
         if row["compressed"]:
-            compress.decompress_file(
-                source, temporary, dtype=compress.zipnn_dtype(row["quant"])
-            )
+            try:
+                compress.decompress_file(
+                    source, temporary, dtype=compress.zipnn_dtype(row["quant"])
+                )
+            except Exception as exc:
+                raise RestoreError(f"decompression failed: {exc}") from exc
         else:
             shutil.copyfile(source, temporary)
         with temporary.open("rb") as restored:

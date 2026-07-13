@@ -57,6 +57,18 @@ def test_index_injects_token_and_security_headers():
     assert headers["Cache-Control"] == "no-store"
 
 
+def test_csrf_injection_accepts_head_attributes_and_fails_closed():
+    page = server._inject_csrf_meta('<html><head lang="en"><title>x</title></head></html>',
+                                    'token-with-"quotes"')
+    assert '<head lang="en">\n<meta name="modelark-csrf-token"' in page
+    assert 'content="token-with-&quot;quotes&quot;"' in page
+    try:
+        server._inject_csrf_meta("<html><body>missing head</body></html>", "token")
+        raise AssertionError("a missing head tag should fail closed")
+    except RuntimeError as exc:
+        assert "missing an opening head tag" in str(exc)
+
+
 def test_host_header_rejects_dns_rebinding():
     with _portal() as httpd:
         status, _, body = _request(httpd, "GET", "/", headers={"Host": "attacker.example"})

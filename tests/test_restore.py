@@ -158,6 +158,38 @@ def test_restore_falls_back_from_corrupt_copy_to_verified_replica(tmp_path):
     assert "sha256 mismatch" in result["warnings"][0]["detail"], result
 
 
+def test_restore_falls_back_after_compressed_codec_exception(tmp_path):
+    con = _mem()
+    repo, name, data = "org/model", "model.safetensors", b"\x00\x01" * 32_768
+    digest = _file(con, repo, name, data, "safetensors", "bf16")
+    bad, good = tmp_path / "bad", tmp_path / "good"
+    stored_name = name + ".znn"
+    bad_stored = bad / "org" / "model" / stored_name
+    bad_stored.parent.mkdir(parents=True)
+    bad_stored.write_bytes(b"corrupt compressed bytes")
+    source = tmp_path / "source.safetensors"
+    source.write_bytes(data)
+    good_stored = good / "org" / "model" / stored_name
+    compress.compress_file(source, good_stored, codec=compress.CODEC_STREAM, threads=1)
+    _archived(con, repo, name, stored_name, "drive-00", digest, True)
+    _archived(con, repo, name, stored_name, "drive-01", digest, True)
+
+    mounts = {"drive-00": bad, "drive-01": good}
+    decompress = compress.decompress_file
+
+    def fail_bad_copy(source_path, destination, dtype="bfloat16"):
+        if Path(source_path) == bad_stored:
+            raise ValueError("invalid codec fixture")
+        return decompress(source_path, destination, dtype=dtype)
+
+    with mock.patch.object(restore.register, "archive_path", side_effect=lambda c, d: mounts[d]), \
+         mock.patch.object(restore.compress, "decompress_file", side_effect=fail_bad_copy):
+        result = restore.restore_repo(con, repo, tmp_path / "out")
+    assert (tmp_path / "out" / "org" / "model" / name).read_bytes() == data
+    assert result["files"][0]["drive"] == "drive-01", result
+    assert "decompression failed: invalid codec fixture" in result["warnings"][0]["detail"]
+
+
 def test_restore_failure_reports_offline_missing_and_publishes_nothing(tmp_path):
     con = _mem()
     repo, name, data = "org/model", "model.safetensors", b"weights"

@@ -1,10 +1,12 @@
 """Thin HTTP layer: route /api/* to the api modules, serve /static/* from disk."""
 from __future__ import annotations
 
+import html
 import hmac
 import ipaddress
 import json
 import mimetypes
+import re
 import secrets
 import signal
 import webbrowser
@@ -67,6 +69,24 @@ def _authority(value: str | None, default_port: int = 80) -> tuple[str, int] | N
     return hostname.lower(), port
 
 
+def _inject_csrf_meta(page: str, token: str) -> str:
+    """Inject the CSRF capability after the opening head tag, or fail closed."""
+    meta = (
+        '<meta name="modelark-csrf-token" '
+        f'content="{html.escape(token, quote=True)}">'
+    )
+    rendered, substitutions = re.subn(
+        r"(<head\b[^>]*>)",
+        lambda match: match.group(1) + "\n" + meta,
+        page,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    if substitutions != 1:
+        raise RuntimeError("portal index is missing an opening head tag")
+    return rendered
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ModelArk"
     sys_version = ""
@@ -127,9 +147,7 @@ class Handler(BaseHTTPRequestHandler):
     def _index(self):
         """Render the per-process CSRF capability into a same-origin-only document."""
         page = (STATIC / "index.html").read_text()
-        token = self.server.csrf_token
-        meta = f'<meta name="modelark-csrf-token" content="{token}">'
-        page = page.replace("<head>", "<head>\n" + meta, 1)
+        page = _inject_csrf_meta(page, self.server.csrf_token)
         self._send(page, "text/html; charset=utf-8", headers={"Cache-Control": "no-store"})
 
     def _static(self, name):
