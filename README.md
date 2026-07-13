@@ -51,7 +51,13 @@ This is pre-1.0 and built in public, so a few sharp edges are worth knowing befo
 
 **Hardware honesty.** SMART read through some USB-to-SATA bridges is synthetic, so take health readings on bridged drives with a grain of salt (during testing here, a genuinely-failing drive passed its synthetic check and then got crushed on the first load). A NAS iSCSI LUN won't auto-reattach after a reboot: that's deliberate — we won't couple boot to a network mount and risk a boot hang — so re-login is manual. And the fill is a single worker that asks for drives in sequence, so expect to hot-swap externals during a large run rather than mounting the whole fleet at once. More automation here is needed, and planned.
 
-**Smaller things.** `duckdb` is still a hard dependency even though the catalog is SQLite now — only the one-time migration uses it, so a fresh install pulls it for nothing. It'll be removed in the next version: it remains for migration capability but is immediately deprecated. The `zstd` fallback is implemented but dormant until you install `zstandard` — if it's not present we won't use it, but we won't complain very loudly either, so make sure it's installed. Tier B (functional, generate-a-token) is not implemented. Tier A proves the complete declared safetensors layout, but only fixed-header sanity for GGUF; neither format check reads or hashes tensor data. In the shipped catalog export, `downloads_all` is empty, so `downloads_30d` is the available popularity field. More advanced catalog and metadata work is also required, known, and planned.
+**Smaller things.** The `zstd` fallback is optional; install the `zstd` extra if you disable
+StreamZNN and want that fallback instead of raw storage. DuckDB support is isolated to the optional
+`migration` extra for one-time legacy-catalog conversion. Tier B (functional,
+generate-a-token) is not implemented. Tier A proves the complete declared safetensors layout, but
+only fixed-header sanity for GGUF; neither format check reads or hashes tensor data. In the shipped
+catalog export, `downloads_all` is empty, so `downloads_30d` is the available popularity field. More
+advanced catalog and metadata work is also required, known, and planned.
 
 **Be considerate.** ModelArk ships with a **1 TB/day** download cap (`download.max_24h_gb`; raise it — or set `0` to uncap — only if you must). This is an **archive/DR library-management** system, *not* a way to mirror large amounts of Hugging Face: point it at giant swaths of the Hub and you'll be rate-limited by them. The portal also warns you when a build set exceeds the daily cap. Please archive what you'll actually keep.
 
@@ -178,8 +184,15 @@ no cart UI for it yet — see gaps below).
 python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
-`zipnn` is a hard dependency (compression + the canary). `zstandard` is *optional* — only the
-stream-off zstd fallback needs it; without it that fallback stores raw.
+`zipnn` is a hard dependency (compression + the canary). Optional capabilities are explicit extras:
+
+```bash
+.venv/bin/pip install -e ".[zstd]"       # stream-off zstd fallback
+.venv/bin/pip install -e ".[migration]"  # one-time DuckDB → SQLite conversion
+```
+
+Without the `zstd` extra, the stream-off fallback stores raw. Normal installs do not pull DuckDB,
+Torch, CUDA, or a workstation-specific dependency freeze.
 
 For development, use a separate environment with the declared tooling extra:
 ```bash
@@ -312,3 +325,11 @@ Pending more real-world usage data:
 - UI-driven initial drive registration and setup — a guided terminal flow first, eventually a full UI setup and drive registration.
 
 Contributions to any of these are welcome — see [contributing/](contributing/contributions.md).
+
+## Licensing
+
+ModelArk is licensed under [Apache-2.0](LICENSE). The standalone
+[`modelark/streamznn.py`](modelark/streamznn.py) module retains its embedded MIT license. The
+sanitized catalog export has additional provenance and third-party-rights notes in
+[`catalog/export/README.md`](catalog/export/README.md); no model weights are distributed in this
+repository.

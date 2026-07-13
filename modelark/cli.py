@@ -400,7 +400,8 @@ def main(argv=None):
 
     pr = sub.add_parser("protect", help="mark model(s) must-have (numcopies=2) → a replica-tier 2nd copy")
     pr.add_argument("--repo", action="append", required=True, help="repo id (repeatable)")
-    pr.add_argument("--numcopies", type=int, default=2, help="copies to require (default 2; 1 = unprotect)")
+    pr.add_argument("--numcopies", type=int, choices=[1, 2], default=2,
+                    help="copies to require (default 2; 1 = unprotect)")
     pr.set_defaults(func=cmd_protect)
 
     pl = sub.add_parser("plan", help="the first-class Plan (#33): drive set + live capacity numbers")
