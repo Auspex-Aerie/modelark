@@ -115,6 +115,12 @@ def test_nested_relpath_verifies_and_copy_count_is_enforced():
 def test_stored_relative_path_rejects_escape():
     root = Path("archive/org/model")
     assert fetch._stored_relative_path(root / "nested" / "x", root) == "nested/x"
+    for stored_name, stored_relpath in ((None, None), (".", None), (None, ".")):
+        try:
+            verifier._stored_relpath("model.safetensors", stored_name, stored_relpath)
+            raise AssertionError("empty/directory archive path must fail")
+        except ValueError as e:
+            assert "unsafe stored path" in str(e)
     try:
         fetch._stored_relative_path(Path("archive/elsewhere/x"), root)
         raise AssertionError("path outside model root must fail")

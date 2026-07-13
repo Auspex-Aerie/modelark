@@ -28,9 +28,14 @@ _ANNEX_SHA256 = re.compile(r"^SHA256E?-s\d+--([0-9a-f]{64})(?:\.|$)")
 
 def _stored_relpath(rfilename: str, stored_name: str | None, stored_relpath: str | None) -> PurePosixPath:
     """Canonical path below <archive>/<repo>; infer it for a pre-migration record when needed."""
-    value = stored_relpath or str(PurePosixPath(rfilename).parent / (stored_name or ""))
+    if stored_relpath:
+        value = stored_relpath
+    elif stored_name:
+        value = str(PurePosixPath(rfilename).parent / stored_name)
+    else:
+        raise ValueError("unsafe stored path: both stored_relpath and stored_name are empty")
     rel = PurePosixPath(value)
-    if not value or rel.is_absolute() or ".." in rel.parts:
+    if not rel.parts or value != rel.as_posix() or rel.is_absolute() or ".." in rel.parts:
         raise ValueError(f"unsafe stored path {value!r}")
     return rel
 

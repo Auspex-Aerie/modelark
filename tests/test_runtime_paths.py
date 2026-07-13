@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import tempfile
+from functools import wraps
 from pathlib import Path
 from unittest import mock
 
@@ -11,6 +12,21 @@ from modelark import wishlist
 from modelark.core import db
 
 
+def _isolated_runtime(fn):
+    """Restore module-level path/config overrides even when a test assertion fails."""
+    @wraps(fn)
+    def wrapped(tmp_path):
+        old_data, old_state = db.CATALOG_DIR, db.STATE_DIR
+        old_config = wishlist._CONFIG_OVERRIDE
+        try:
+            return fn(tmp_path)
+        finally:
+            db.configure(old_data, old_state)
+            wishlist.configure(old_config)
+    return wrapped
+
+
+@_isolated_runtime
 def test_configure_isolates_data_state_and_logs(tmp_path):
     data, state = tmp_path / "data", tmp_path / "state"
     db.configure(data, state)
@@ -23,6 +39,7 @@ def test_configure_isolates_data_state_and_logs(tmp_path):
     assert db.DB_PATH.is_file()
 
 
+@_isolated_runtime
 def test_explicit_config_wins(tmp_path):
     config = tmp_path / "custom.yaml"
     config.write_text("download:\n  max_24h_gb: 7\n")
@@ -31,6 +48,7 @@ def test_explicit_config_wins(tmp_path):
     wishlist.configure(None)
 
 
+@_isolated_runtime
 def test_packaged_default_works_without_source_checkout(tmp_path):
     wishlist.configure(None)
     with mock.patch.object(db, "REPO_ROOT", tmp_path), \
@@ -41,12 +59,18 @@ def test_packaged_default_works_without_source_checkout(tmp_path):
         assert wishlist.compression()["threads"] == 1
 
 
+@_isolated_runtime
 def test_packaged_default_matches_source_policy(tmp_path):
-    packaged = wishlist.config_source()
     source = db.REPO_ROOT / "wishlist.yaml"
-    assert yaml.safe_load(packaged.read_text()) == yaml.safe_load(source.read_text())
+    source_policy = yaml.safe_load(source.read_text())
+    with mock.patch.object(db, "REPO_ROOT", tmp_path), \
+            mock.patch.object(wishlist, "_user_config_path", return_value=tmp_path / "missing.yaml"):
+        packaged = wishlist.config_source()
+        assert packaged.name == "default_wishlist.yaml"
+        assert yaml.safe_load(packaged.read_text()) == source_policy
 
 
+@_isolated_runtime
 def test_legacy_repo_catalog_is_never_silently_replaced(tmp_path):
     legacy_root, new_data = tmp_path / "checkout", tmp_path / "xdg"
     legacy = legacy_root / "catalog" / "catalog.sqlite"
