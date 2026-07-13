@@ -18,8 +18,6 @@ from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError, HfHu
 from modelark.core import db
 from modelark import formats, ggufmeta
 
-EXCLUSIONS_DIR = db.CATALOG_DIR / "exclusions"
-
 # Modalities we now collect (DEC-010: text + audio-speech + world models). Vision,
 # multimodal, image-gen, video-gen stay deferred (DEF-002).
 _COLLECTED_DOMAINS = {"text", "audio", "world", "image-gen"}
@@ -183,10 +181,11 @@ def discover_top(n: int, task: str = "text-generation", con=None) -> dict[str, s
 
 def _write_exclusions(records: list[dict], path=None) -> Path:
     """Persist every skipped repo (with reason) so nothing is dropped silently."""
-    EXCLUSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    exclusions_dir = db.CATALOG_DIR / "exclusions"
+    exclusions_dir.mkdir(parents=True, exist_ok=True)
     if path is None:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        path = EXCLUSIONS_DIR / f"discover-{ts}.jsonl"
+        path = exclusions_dir / f"discover-{ts}.jsonl"
     else:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)

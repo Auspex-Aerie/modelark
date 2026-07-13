@@ -1,17 +1,51 @@
 """Load and expose the declarative curation rules in wishlist.yaml."""
 from __future__ import annotations
 
+import os
+import sys
+from importlib import resources
 from pathlib import Path
 
 import yaml
 
 from modelark.core import db
 
-WISHLIST_PATH = db.REPO_ROOT / "wishlist.yaml"
+_CONFIG_OVERRIDE: Path | None = None
+
+
+def configure(path: str | Path | None = None) -> None:
+    """Select an explicit wishlist file. Omitted: user config, source checkout, then packaged default."""
+    global _CONFIG_OVERRIDE
+    _CONFIG_OVERRIDE = Path(path).expanduser().resolve() if path is not None else None
+
+
+def _user_config_path() -> Path:
+    if sys.platform == "win32":
+        root = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
+    elif sys.platform == "darwin":
+        root = Path.home() / "Library" / "Application Support"
+    else:
+        root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+    return root / "modelark" / "wishlist.yaml"
+
+
+def config_source():
+    """Return the selected config as a Path or importlib Traversable."""
+    if _CONFIG_OVERRIDE is not None:
+        if not _CONFIG_OVERRIDE.is_file():
+            raise FileNotFoundError(f"ModelArk config does not exist: {_CONFIG_OVERRIDE}")
+        return _CONFIG_OVERRIDE
+    user = _user_config_path()
+    if user.is_file():
+        return user
+    source = db.REPO_ROOT / "wishlist.yaml"
+    if source.is_file():                                  # editable/source checkout compatibility
+        return source
+    return resources.files("modelark").joinpath("default_wishlist.yaml")
 
 
 def load() -> dict:
-    return yaml.safe_load(WISHLIST_PATH.read_text())
+    return yaml.safe_load(config_source().read_text(encoding="utf-8"))
 
 
 def orgs() -> list[str]:
@@ -47,8 +81,8 @@ def download() -> dict:
     return cfg
 
 
-# Logging (DEC-023 / #26). Defaults are safe if wishlist.yaml has no `logging:` section. `file` is
-# resolved relative to the repo root; set it null to disable the file sink (console only).
+# Logging (DEC-023 / #26). Relative paths live under the writable state directory; set `file` null
+# to disable the file sink (console only).
 _LOGGING_DEFAULTS = {"level": "INFO", "file": "logs/modelark.log", "max_mb": 20, "backups": 5, "console": True}
 
 
@@ -59,7 +93,7 @@ def logging_config() -> dict:
     file = cfg["file"]
     if file:
         p = Path(file)
-        file = str(p if p.is_absolute() else db.REPO_ROOT / p)
+        file = str(p if p.is_absolute() else db.STATE_DIR / p)
     return {"level": str(cfg["level"]), "file_path": file or None,
             "max_bytes": int(float(cfg["max_mb"]) * 1_000_000), "backups": int(cfg["backups"]),
             "to_console": bool(cfg["console"])}

@@ -1,13 +1,13 @@
 # ModelArk
 
 > 🚧 **Building in public.** An in-progress project, developed openly (with Claude). It works
-> end-to-end and restorability is production-verified — but it isn't 1.0. The honest
+> end-to-end and its write-time restore canary is production-verified — but it isn't 1.0. The honest
 > [Status](#status) + gaps are at the bottom; feedback and contributions are welcome.
 
 An ark for open model weights: catalog every open model worth
 knowing about, archive the ones worth keeping across an offline drive library —
-**compressed and integrity-proven** — and verify each is intact and loadable, even
-the giants you can't run locally.
+**compressed and integrity-proven at write time** — and re-check the physical archive copies,
+even for giants you cannot load locally.
 
 ## Why
 
@@ -51,21 +51,22 @@ This is pre-1.0 and built in public, so a few sharp edges are worth knowing befo
 
 **Hardware honesty.** SMART read through some USB-to-SATA bridges is synthetic, so take health readings on bridged drives with a grain of salt (during testing here, a genuinely-failing drive passed its synthetic check and then got crushed on the first load). A NAS iSCSI LUN won't auto-reattach after a reboot: that's deliberate — we won't couple boot to a network mount and risk a boot hang — so re-login is manual. And the fill is a single worker that asks for drives in sequence, so expect to hot-swap externals during a large run rather than mounting the whole fleet at once. More automation here is needed, and planned.
 
-**Smaller things.** `duckdb` is still a hard dependency even though the catalog is SQLite now — only the one-time migration uses it, so a fresh install pulls it for nothing. It'll be removed in the next version: it remains for migration capability but is immediately deprecated. The `zstd` fallback is implemented but dormant until you install `zstandard` — if it's not present we won't use it, but we won't complain very loudly either, so make sure it's installed. Tier-B (functional, generate-a-token) verification is minimal — Tier-A structural checking is the workhorse. And in the shipped catalog export, `downloads_all` is empty, so ranking leans on `downloads_30d` and `likes`. More advanced catalog and metadata work is also required, known, and planned.
+**Smaller things.** `duckdb` is still a hard dependency even though the catalog is SQLite now — only the one-time migration uses it, so a fresh install pulls it for nothing. It'll be removed in the next version: it remains for migration capability but is immediately deprecated. The `zstd` fallback is implemented but dormant until you install `zstandard` — if it's not present we won't use it, but we won't complain very loudly either, so make sure it's installed. Tier B (functional, generate-a-token) is not implemented; Tier A is currently a basic header/metadata check rather than a complete tensor-layout proof. And in the shipped catalog export, `downloads_all` is empty, so ranking leans on `downloads_30d` and `likes`. More advanced catalog and metadata work is also required, known, and planned.
 
 **Be considerate.** ModelArk ships with a **1 TB/day** download cap (`download.max_24h_gb`; raise it — or set `0` to uncap — only if you must). This is an **archive/DR library-management** system, *not* a way to mirror large amounts of Hugging Face: point it at giant swaths of the Hub and you'll be rate-limited by them. The portal also warns you when a build set exceeds the daily cap. Please archive what you'll actually keep.
 
 ## Architecture
 
 ```
-GitHub: Auspex-Aerie/modelark          ← code + catalog export + git-annex index
-   the map: what exists, where it lives, is it intact — small, versioned, backed up
+GitHub: Auspex-Aerie/modelark              ← code + sanitized catalog export
+Local modelark-library git-annex repo      ← the private byte/location map
 Tiered drive fleet (git-annex remotes)      ← the actual TBs of weights
    NAS RAID (iSCSI, copy #1) · big USB primaries (bulk) · a small replica drive (copy #2)
 ```
 
-- **Catalog** — SQLite (`catalog/catalog.sqlite`, rebuildable). Source of truth for
-  *what exists* and *what we want*. Diffable JSONL under `catalog/export/` is versioned.
+- **Catalog** — SQLite (by default `$XDG_DATA_HOME/modelark/catalog.sqlite`, rebuildable).
+  Source of truth for *what exists* and *what we want*. Diffable, sanitized JSONL exports can be
+  versioned separately from private drive and annex metadata.
 - **git-annex** — authority for *where bytes physically live*; tracks drives even
   unplugged, enforces N-copies redundancy, `fsck`s integrity.
 - **modelark.core** — reusable catalog/db primitives.
@@ -82,7 +83,8 @@ Tiered drive fleet (git-annex remotes)      ← the actual TBs of weights
 3. **Plan** — the librarian bin-packs the set across the tiered fleet (must-have copy #1 on
    the RAID, bulk consolidated onto the big primaries, must-have copy #2 on a replica drive).
 4. **Fill** — per shard: HF download → sha256 vs HF's canonical hash → compress → **canary**
-   → drop the original → git-annex add → record. Throttled by an optional rolling 24 h cap (uncapped by default), resumable at
+   → drop the original → git-annex add → record. Throttled by a rolling 24 h cap (1 TB/day by default;
+   `0` disables it), resumable at
    the file level (a crash re-processes only the interrupted shard, no re-download).
 5. **Replicate** — must-have copy #2 is a *local* clone→clone transfer from copy #1 (no second
    HF download).
@@ -135,10 +137,12 @@ Restore/canary route by the stored file's magic, so every codec (and legacy `.zn
 
 ## Configuration — `wishlist.yaml`
 
-Curation (what to collect) plus operational knobs:
+Curation (what to collect) plus operational knobs. ModelArk loads an explicit `--config` first,
+then `$XDG_CONFIG_HOME/modelark/wishlist.yaml`, then a checkout-root `wishlist.yaml` for editable
+installs, and finally the packaged default:
 
 ```yaml
-scope:            # architecture-derived categories in scope (language models for now)
+scope:            # architecture-derived categories enabled for this archive policy
 always_include:   # orgs to always walk
 exclude:          # repos/patterns to skip
 score_weights:    # ranking inputs
@@ -158,10 +162,24 @@ no cart UI for it yet — see gaps below).
 **Python (3.10+):**
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e .            # or: .venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -e .
 ```
 `zipnn` is a hard dependency (compression + the canary). `zstandard` is *optional* — only the
 stream-off zstd fallback needs it; without it that fallback stores raw.
+
+For development, use a separate environment with the declared tooling extra:
+```bash
+python3 -m venv .venv-dev
+.venv-dev/bin/pip install -e ".[dev]"
+.venv-dev/bin/playwright install chromium
+```
+
+Writable state is never placed in the installed package. The catalog defaults to
+`$XDG_DATA_HOME/modelark` (normally `~/.local/share/modelark`) and logs/state to
+`$XDG_STATE_HOME/modelark` (normally `~/.local/state/modelark`). Use global options
+`--data-dir`, `--state-dir`, and `--config` to override them. An existing checkout-local
+`catalog/catalog.sqlite` is not moved automatically: start with
+`modelark --data-dir ./catalog ...` until you deliberately migrate it.
 
 **System packages (apt):**
 ```bash
@@ -191,15 +209,16 @@ drop-in + the systemd unit is `DEF-025`.)*
 
 ```bash
 modelark discover --walk                     # catalog the wishlist orgs
-modelark verify --all                        # Tier A structural check (no download)
+modelark verify --all                        # Tier A header/metadata check (no full download)
 modelark protect --repo org/model            # mark must-have (numcopies=2 → a 2nd copy)
 modelark serve                               # portal → :8077 (curate, then Fill)
 modelark library plan                        # review the placement plan
-modelark library plan --apply                # run the fill from the CLI (portal must be stopped)
+modelark library plan --apply                # run the fill from the CLI (stop the portal worker first)
 modelark export                              # dump JSONL for git
 ```
 The fill runs either from the **Fill tab's Start button** (worker inside the running portal) or
-from `library plan --apply` (CLI — needs the portal stopped, since it holds the DB write lock).
+from `library plan --apply`. SQLite/WAL allows concurrent readers, but do not run two independent
+fill controllers against the same plan; stop the portal worker before starting the CLI fill.
 Disk Health needs SMART access — grant passwordless sudo for `smartctl` (see **Setup**); don't run
 the portal as root.
 
@@ -207,11 +226,13 @@ the portal as root.
 
 | Tier | Proves | Cost |
 |------|--------|------|
-| **A — Structural** | valid, complete, known-architecture checkpoint | range-reads headers only — **works on a 700B without downloading it** |
-| **B — Functional** | actually generates coherent tokens | needs the model to fit (~≤32B Q4 on 24 GB) |
+| **A — Header check** | recognized safetensors/GGUF header and basic metadata; not full tensor-layout or byte-integrity proof | range-reads headers only — **works on a 700B without downloading it** |
+| **B — Functional** | planned, not implemented | would require loading a model and exercising inference |
 
-Integrity = sha256 vs HF's canonical hash + git-annex `fsck`. Security gate = format-safety
-(prefer safetensors/GGUF; flag pickles) + HF scan.
+Archive integrity comes from the write-time sha256/canary and from re-verifying mounted physical
+copies. Tier A is discovery-time structural evidence, not a security scan. Pickle artifacts are
+classified but are not currently rejected by an enforced security gate, and HF scan integration is
+not implemented.
 
 ## Safety invariants (the gates)
 
@@ -229,7 +250,7 @@ Every architecture/policy decision, deferral, and incident is in
 
 ## Status
 
-**Working + proven end-to-end:** catalog (~4.1k models) + Tier A verification +
+**Working + proven end-to-end:** catalog (~4.1k models) + Tier A header checks +
 architecture-first classification; the librarian placement plan; the full fetch pipeline
 (download → verify → ZipNN + canary → git-annex → record); StreamZNN streaming (no OOM on
 10 GB shards); the codec gate; must-have 2-copy replication; crash-resume; first-class Plans
@@ -238,8 +259,8 @@ views including the live Fill run surface. Restorability is production-verified 
 
 Tested here on a mix of reliable and junk external drives, plus one iSCSI volume on a RAID5 NAS
 (Synology DiskStation). The iterative bug fixes and breaks along the way are in the decision log and
-commit history; once the system is cleaned up for public release, branch protection and PRs will start
-adding a more complete history, alongside dedicated roadmap documents and the like.
+commit history. Branch protection and PR checks are active; the public history begins with the
+sanitized repository snapshot and will grow from there.
 
 For now: use it to archive, and use it carefully. We've built in tools to help you spot where problems
 may have occurred and to give you options to fix them. Bad drives can and will fail after an extended
@@ -259,6 +280,9 @@ The [decision log](docs/decision_log.md) has the full picture; the headline defe
 - **Placement** — letting one model's shards span drives when it won't fit whole, compression-*aware* predictive packing (today it's a capacity failsafe), and growing or rebalancing a plan's fleet mid-run.
 - **Fill & transport** — tensor-level download checkpointing so a giant shard resumes instead of restarting, plus in-flight queue edits (append / re-download / re-verify) during a run.
 - **Verification & visibility** — a scheduled fleet-wide audit (on-demand re-verification already exists) and a download-status view over recorded `fetch_events`.
+- **Recovery** — a first-class restore command that retrieves annex content, reconstructs the original
+  Hugging Face layout, decompresses atomically, and verifies final hashes. The codec restore primitive
+  and write-time canary exist today; the operator-facing workflow does not yet.
 - **Ops & packaging** — scripting host setup (the `smartctl` sudoers rule + systemd unit are manual) and spinning StreamZNN out into its own MIT repo.
 
 ## Unscheduled Roadmap

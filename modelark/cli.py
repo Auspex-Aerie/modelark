@@ -8,7 +8,6 @@ from pathlib import Path
 from modelark.core import db
 from modelark import discover, verify, wishlist
 
-EXPORT_DIR = db.REPO_ROOT / "catalog" / "export"
 EXPORT_TABLES = ["models", "files", "verifications", "drives", "replicas"]
 
 
@@ -106,11 +105,12 @@ def cmd_query(args):
 def cmd_export(args):
     """Dump the catalog to JSONL — the diffable, git-committed source of truth. SQLite has no
     DuckDB `COPY … (FORMAT json)`, so we stream rows and json-encode each (one object per line)."""
-    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    export_dir = db.CATALOG_DIR / "export"
+    export_dir.mkdir(parents=True, exist_ok=True)
     con = db.connect(read_only=True)
     try:
         for t in EXPORT_TABLES:
-            out = EXPORT_DIR / f"{t}.jsonl"
+            out = export_dir / f"{t}.jsonl"
             cur = con.execute(f"SELECT * FROM {t} ORDER BY 1")
             cols = [d[0] for d in cur.description]
             n = 0
@@ -118,7 +118,7 @@ def cmd_export(args):
                 for row in cur:
                     fh.write(json.dumps(dict(zip(cols, row)), default=str) + "\n")
                     n += 1
-            print(f"  exported {n:>6} rows -> {out.relative_to(db.REPO_ROOT)}")
+            print(f"  exported {n:>6} rows -> {out}")
     finally:
         con.close()
 
@@ -341,6 +341,12 @@ def cmd_drive_list(args):
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="modelark", description="Catalog & verify open model weights.")
+    p.add_argument("--data-dir", type=Path,
+                   help="writable catalog/runtime-data directory (default: platform user-data dir)")
+    p.add_argument("--state-dir", type=Path,
+                   help="writable logs/state directory (default: platform user-state dir)")
+    p.add_argument("--config", type=Path,
+                   help="wishlist/config YAML (default: user config, source checkout, packaged default)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     d = sub.add_parser("discover", help="record HF model metadata in the catalog")
@@ -457,6 +463,10 @@ def main(argv=None):
     dl.set_defaults(func=cmd_drive_list)
 
     args = p.parse_args(argv)
+    if args.data_dir is not None or args.state_dir is not None:
+        db.configure(args.data_dir, args.state_dir)
+    if args.config is not None:
+        wishlist.configure(args.config)
     args.func(args)
 
 

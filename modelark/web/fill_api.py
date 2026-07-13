@@ -14,8 +14,6 @@ import os
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
-
 from modelark.core import db, telemetry
 from modelark import fetch, fill, register, wishlist
 from modelark.web import data, fill_worker

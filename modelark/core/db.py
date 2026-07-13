@@ -9,16 +9,54 @@ support `con.execute(sql, params).fetchone()/.fetchall()`, `?` placeholders, and
 """
 from __future__ import annotations
 
+import os
 import sqlite3
+import sys
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 PKG_ROOT = Path(__file__).resolve().parent           # modelark/core
-REPO_ROOT = PKG_ROOT.parent.parent                   # repository root
-CATALOG_DIR = REPO_ROOT / "catalog"
+REPO_ROOT = PKG_ROOT.parent.parent                   # source root for legacy/editable-install detection only
+
+
+def _xdg_data_home() -> Path:
+    """Platform-appropriate writable application-data root, without a third-party dependency."""
+    if sys.platform == "win32":
+        return Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support"
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+
+
+def _xdg_state_home() -> Path:
+    if sys.platform == "win32":
+        return _xdg_data_home()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Logs"
+    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+
+
+CATALOG_DIR = _xdg_data_home() / "modelark"
 DB_PATH = CATALOG_DIR / "catalog.sqlite"
+STATE_DIR = _xdg_state_home() / "modelark"
 SCHEMA_PATH = PKG_ROOT / "schema.sql"
+
+
+def configure(data_dir: str | Path | None = None, state_dir: str | Path | None = None) -> None:
+    """Override writable runtime locations before opening the catalog.
+
+    The CLI exposes this as ``--data-dir``/``--state-dir``; tests use it to guarantee isolation.
+    Package resources remain read-only and are resolved separately through importlib.resources.
+    """
+    global CATALOG_DIR, DB_PATH, STATE_DIR
+    if data_dir is not None:
+        CATALOG_DIR = Path(data_dir).expanduser().resolve()
+        DB_PATH = CATALOG_DIR / "catalog.sqlite"
+    if state_dir is not None:
+        STATE_DIR = Path(state_dir).expanduser().resolve()
+    elif data_dir is not None:
+        STATE_DIR = CATALOG_DIR / "state"
 
 # Store Python datetimes as ISO text (Python 3.12 deprecated the implicit datetime adapter).
 sqlite3.register_adapter(datetime, lambda d: d.isoformat(sep=" ", timespec="seconds"))
@@ -39,6 +77,13 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
     one connection across its threads under `data._lock`. WAL means readers never block on the writer.
     `_bootstrapping=True` is for the DuckDB→SQLite migrator only — it creates the new catalog.sqlite,
     so it must skip the not-yet-migrated guard below."""
+    legacy_sqlite = REPO_ROOT / "catalog" / "catalog.sqlite"
+    if not _bootstrapping and DB_PATH != legacy_sqlite and not DB_PATH.exists() and legacy_sqlite.exists():
+        raise RuntimeError(
+            f"Legacy repo-local catalog found at {legacy_sqlite}. ModelArk will not move or replace it "
+            f"automatically. Re-run with --data-dir {legacy_sqlite.parent} (or copy it deliberately "
+            f"to {CATALOG_DIR}) after stopping every ModelArk process."
+        )
     CATALOG_DIR.mkdir(parents=True, exist_ok=True)
     legacy = CATALOG_DIR / "catalog.duckdb"          # guard: never silently start on an EMPTY sqlite when the
     if not _bootstrapping and not DB_PATH.exists() and legacy.exists():   # DuckDB catalog is still the source of truth
@@ -65,6 +110,7 @@ _MIGRATIONS = (
     "ALTER TABLE drives ADD COLUMN role VARCHAR DEFAULT 'primary'",
     "ALTER TABLE drives ADD COLUMN raid_backed BOOLEAN DEFAULT false",
     "ALTER TABLE models ADD COLUMN numcopies INTEGER DEFAULT 1",
+    "ALTER TABLE archived ADD COLUMN stored_relpath VARCHAR",
 )
 
 
@@ -72,8 +118,21 @@ def _migrate(con) -> None:
     for stmt in _MIGRATIONS:
         try:
             con.execute(stmt)                        # a duplicate-column ADD raises; ignore (already migrated)
-        except sqlite3.OperationalError:
-            pass
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e).lower():
+                raise
+    # Old rows recorded only a basename. Hugging Face preserves rfilename's parent directories on
+    # disk, so parent(rfilename)/stored_name recovers the actual relative path without touching bytes.
+    for repo_id, rfilename, stored_name, drive_label in con.execute(
+            "SELECT repo_id,rfilename,stored_name,drive_label FROM archived "
+            "WHERE stored_relpath IS NULL AND stored_name IS NOT NULL").fetchall():
+        rel = PurePosixPath(rfilename).parent / stored_name
+        if rel.is_absolute() or ".." in rel.parts:
+            raise RuntimeError(
+                f"Unsafe legacy archive path for {repo_id}/{rfilename} on {drive_label}: {rel}")
+        con.execute("UPDATE archived SET stored_relpath=? "
+                    "WHERE repo_id=? AND rfilename=? AND drive_label=?",
+                    [rel.as_posix(), repo_id, rfilename, drive_label])
 
 
 def upsert(con, table: str, row: dict, pk: list[str], touch: list[str] | None = None) -> None:

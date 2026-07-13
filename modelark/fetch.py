@@ -30,7 +30,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
 from modelark.core import db
@@ -176,6 +175,17 @@ def _dest_writable(dest: Path) -> bool:
         except OSError:
             pass
         return False
+
+
+def _stored_relative_path(stored: Path, model_dir: Path) -> str:
+    """Lexical POSIX path below a model root; never allow an archive record to escape that root."""
+    try:
+        rel = stored.relative_to(model_dir)
+    except ValueError as e:
+        raise RuntimeError(f"stored file escaped its model directory: {stored}") from e
+    if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+        raise RuntimeError(f"unsafe stored relative path: {rel}")
+    return rel.as_posix()
 
 
 class _HttpResp:
@@ -443,8 +453,10 @@ def fetch_model(ctx: RunCtx, repo_id: str, dest: Path, drive_label: str, annex: 
         else:
             key = None
         stored_sz = stored.stat().st_size
+        stored_relpath = _stored_relative_path(stored, model_dir)
         ctx.write(lambda c: db.upsert(c, "archived", {
             "repo_id": repo_id, "rfilename": f["rfilename"], "stored_name": stored.name,
+            "stored_relpath": stored_relpath,
             "drive_label": drive_label, "orig_sha256": f["sha256"], "znn_sha256": znn_sha,
             "orig_bytes": f["size"], "stored_bytes": stored_sz,
             "compressed": compressed, "annex_key": key,
@@ -587,13 +599,15 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                     ctx.on_progress({"phase": "rate_limited", "say": f"  [429] {rid} — HF rate limit; stopping."})
                     break
                 print(f"  [error   ] {rid}: {str(e)[:100]}")
-                ctx.write(lambda c: _event(c, rid, "error", detail=str(e)[:200]))
+                detail = str(e)[:200]
+                ctx.write(lambda c: _event(c, rid, "error", detail=detail))
             except RepositoryNotFoundError as e:
                 print(f"  [error   ] {rid}: {str(e)[:100]}")
                 ctx.write(lambda c: _event(c, rid, "error", detail="repo not found"))
             except Exception as e:                       # INC-004: isolate ANY other repo failure (stalled
                 print(f"  [error   ] {rid}: {type(e).__name__}: {str(e)[:100]}")   # download exhausted retries,
-                ctx.write(lambda c: _event(c, rid, "error", detail=f"{type(e).__name__}: {str(e)[:180]}"))
+                detail = f"{type(e).__name__}: {str(e)[:180]}"
+                ctx.write(lambda c: _event(c, rid, "error", detail=detail))
                 if not _dest_writable(dest):             # the DRIVE went unwritable mid-batch (USB drop), not just this
                     ctx.write(lambda c: _event(c, rid, "awaiting-drive",           # DEF-021: a disruption boundary
                               detail=f"{drive_label} went unwritable mid-fill"))
@@ -700,9 +714,9 @@ def run_replica(replica_assign: dict, source: str | None, ctx: RunCtx | None = N
             print("    ok")
             subprocess.run(["git", "-C", str(lib), "annex", "sync"], capture_output=True, text=True)
             ctx.write(lambda c: c.execute(   # mirror source's archived rows onto this replica label
-                "INSERT INTO archived (repo_id, rfilename, stored_name, drive_label, orig_sha256, "
+                "INSERT INTO archived (repo_id, rfilename, stored_name, stored_relpath, drive_label, orig_sha256, "
                 "znn_sha256, orig_bytes, stored_bytes, compressed, annex_key, verified_at) "
-                "SELECT repo_id, rfilename, stored_name, ?, orig_sha256, znn_sha256, orig_bytes, "
+                "SELECT repo_id, rfilename, stored_name, stored_relpath, ?, orig_sha256, znn_sha256, orig_bytes, "
                 "stored_bytes, compressed, annex_key, CURRENT_TIMESTAMP FROM archived WHERE drive_label=? AND "
                 f"repo_id IN ({','.join(['?']*len(repos))}) "
                 "ON CONFLICT (repo_id, rfilename, drive_label) DO NOTHING",

@@ -107,7 +107,8 @@ CREATE TABLE IF NOT EXISTS selection (
 CREATE TABLE IF NOT EXISTS archived (
     repo_id      VARCHAR,
     rfilename    VARCHAR,          -- original path within the HF repo
-    stored_name  VARCHAR,          -- name on disk (".znn" when compressed)
+    stored_name  VARCHAR,          -- legacy basename (kept for migration/backward compatibility)
+    stored_relpath VARCHAR,        -- POSIX path below <archive>/<repo_id>, including nested HF dirs
     drive_label  VARCHAR,
     orig_sha256  VARCHAR,          -- HF canonical (= decompressed) hash
     znn_sha256   VARCHAR,          -- compressed-blob hash (NULL when stored raw)

@@ -6,6 +6,7 @@ import mimetypes
 import signal
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib import resources
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -15,7 +16,7 @@ from modelark import plan, wishlist
 from modelark.web import (catalog_api, data, disk_api, fill_api, fill_worker,
                                  library_api, plan_api, selection_api, verify_api)
 
-STATIC = Path(__file__).resolve().parent / "static"
+STATIC = Path(str(resources.files("modelark.web").joinpath("static")))
 
 
 class Handler(BaseHTTPRequestHandler):

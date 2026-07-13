@@ -13,10 +13,12 @@
     </div>`;
 
   function verdictRow(r) {
-    const cls = !r.archived ? "mut" : r.ok ? "ok" : "bad";
-    const badge = !r.archived ? "not archived" : r.ok ? "ok" : "FAIL";
+    const status = r.status || (r.ok ? "verified" : "failed");
+    const cls = !r.archived || status === "unknown" ? "mut" : status === "verified" ? "ok" : "bad";
+    const badge = !r.archived ? "not archived" : status === "verified" ? "verified"
+      : status === "unknown" ? "not fully checked" : "FAIL";
     const checks = (r.deep_checks && r.deep_checks.length)
-      ? '<div class="vfchecks">' + r.deep_checks.map(c => `${c.ok ? "✓" : "✗"} ${c.file}${c.err ? " (" + c.err + ")" : ""}`).join("<br>") + "</div>" : "";
+      ? '<div class="vfchecks">' + r.deep_checks.map(c => `${c.ok === true ? "✓" : c.ok === false ? "✗" : "?"} ${c.file}${c.err ? " (" + c.err + ")" : ""}`).join("<br>") + "</div>" : "";
     return `<div class="vfres ${cls}"><div class="vfresh"><span class="vfrepo">${r.repo}</span>
       <span class="vfbadge ${cls}">${badge}</span></div><div class="vfresd">${r.detail || ""}</div>${checks}</div>`;
   }

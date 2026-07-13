@@ -27,7 +27,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install -e ".[dev]"
 
       - name: Run test suite (excluding E2E)
         run: |
@@ -37,6 +37,21 @@ jobs:
             echo "== $t =="
             python "$t"
           done
+
+      - name: Static correctness checks
+        run: ruff check modelark tests
+
+      - name: Build distribution wheel
+        if: matrix.python-version == '3.12'
+        run: python -m pip wheel . --no-deps --wheel-dir /tmp/modelark-wheel
+
+      - name: Smoke-test the installed wheel and packaged resources
+        if: matrix.python-version == '3.12'
+        run: |
+          pip uninstall -y modelark
+          pip install --no-deps /tmp/modelark-wheel/modelark-*.whl
+          cd /tmp
+          python -c "import tempfile; from pathlib import Path; from modelark import wishlist; from modelark.core import db; from modelark.web import server; d=tempfile.mkdtemp(); db.configure(d); c=db.connect(_bootstrapping=True); c.close(); assert wishlist.download()['max_24h_gb']==1000; assert (server.STATIC/'index.html').is_file(); assert db.DB_PATH.is_file() and Path(d) in db.DB_PATH.parents"
 
   # Browser E2E — boots the portal on a seeded catalog and drives it headless with Playwright.
   # Separate job so the core suite stays zero-dep and fast; this one pays for a browser install.
@@ -55,7 +70,7 @@ jobs:
       - name: Install (+ Playwright Chromium)
         run: |
           python -m pip install --upgrade pip
-          pip install -e . playwright
+          pip install -e ".[dev]"
           playwright install --with-deps chromium
 
       - name: Portal E2E (headless)

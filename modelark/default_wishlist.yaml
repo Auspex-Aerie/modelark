@@ -1,0 +1,123 @@
+# Packaged default configuration. A user config at the platform config directory
+# (or `modelark --config PATH`) overrides this file.
+defaults:
+  download: false
+  prefer_precision: full
+  also_grab_runnable_quant: false
+
+compression:
+  max_compress_ram_gb: 4.0
+  stream_compress: true
+  threads: 1
+
+download:
+  max_24h_gb: 1000
+
+logging:
+  level: INFO
+  file: logs/modelark.log
+  max_mb: 20
+  backups: 5
+  console: true
+
+scope:
+  domain: text
+  include_categories:
+    - generative-llm
+    - encoder
+    - seq2seq
+    - translation
+    - embedding
+    - reranker
+    - classifier
+    - qa
+    - compression
+    - asr
+    - tts
+    - speech-lm
+    - audio-gen
+    - world-model
+    - image-gen
+  deferred_domains:
+    - vision
+    - multimodal
+    - video-gen
+
+always_include:
+  orgs:
+    - deepseek-ai
+    - Qwen
+    - moonshotai
+    - zai-org
+    - MiniMaxAI
+    - tencent
+    - stepfun-ai
+    - OpenGVLab
+    - XiaomiMiMo
+    - baidu
+    - 01-ai
+    - openbmb
+    - internlm
+    - meta-llama
+    - mistralai
+    - google
+    - microsoft
+    - nvidia
+    - allenai
+    - ibm-granite
+    - tiiuae
+    - arcee-ai
+    - CohereLabs
+    - NousResearch
+    - ai21labs
+    - LiquidAI
+    - LGAI-EXAONE
+    - SakanaAI
+    - bigcode
+    - HuggingFaceTB
+    - answerdotai
+    - google-bert
+    - FacebookAI
+    - BAAI
+    - sentence-transformers
+    - intfloat
+    - nomic-ai
+    - jinaai
+    - mixedbread-ai
+    - Snowflake
+    - Alibaba-NLP
+    - openai
+    - facebook
+    - suno
+    - hexgrad
+    - coqui
+    - fishaudio
+    - parler-tts
+    - kyutai
+    - sesame
+    - SWivid
+    - black-forest-labs
+    - stabilityai
+    - playgroundai
+  repos: []
+
+trusted_quantizers:
+  - bartowski
+  - mradermacher
+  - unsloth
+
+exclude:
+  pickle_only: true
+  below_likes: 50
+  patterns:
+    - "*roleplay*"
+    - "*-merge-*"
+    - "*frankenmerge*"
+
+score_weights:
+  is_base_model: 5
+  popularity_log: 1.0
+  trusted_quantizer: 3
+  format_safe: 1
+  recency: 1
+threshold: 6.0

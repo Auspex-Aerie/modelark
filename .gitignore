@@ -43,6 +43,9 @@ logs/
 .playwright-mcp/
 catalog/last_fill.json
 
+# Local working handoffs can contain deployment-specific details; never publish them.
+claudedocs/
+
 # public repo: ship only the model catalog; a user's own hardware/fill exports stay local
 catalog/export/drives.jsonl
 catalog/export/files.jsonl
