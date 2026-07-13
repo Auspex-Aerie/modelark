@@ -89,6 +89,7 @@ td.cb{width:34px;text-align:center}input[type=checkbox]{width:15px;height:15px;a
 .t-quant{color:var(--quant)}.t-finetune{color:var(--finetune)}
 .lock{color:var(--warn)}.empty{padding:40px;text-align:center;color:var(--mut)}
 .capwarn{display:flex;align-items:flex-start;gap:10px;margin:0 0 12px;padding:9px 13px;font-size:.8rem;line-height:1.4;background:rgba(216,161,58,.13);border:1px solid var(--warn);border-radius:8px;color:var(--warn)}
+.capwarn[hidden]{display:none}
 .capwarn-x{margin-left:auto;flex:none;background:none;border:none;color:inherit;font-size:1.15rem;line-height:1;cursor:pointer;opacity:.75}
 .capwarn-x:hover{opacity:1}
 

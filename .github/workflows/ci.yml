@@ -6,6 +6,7 @@ on:
   pull_request:
 
 jobs:
+  # Core suite — pure Python, fast, no browser. Excludes the E2E (its own job below).
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -28,10 +29,34 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
-      - name: Run test suite
+      - name: Run test suite (excluding E2E)
         run: |
           set -e
           for t in tests/test_*.py; do
+            [ "$t" = "tests/test_e2e_portal.py" ] && { echo "== $t -> e2e job =="; continue; }
             echo "== $t =="
             python "$t"
           done
+
+  # Browser E2E — boots the portal on a seeded catalog and drives it headless with Playwright.
+  # Separate job so the core suite stays zero-dep and fast; this one pays for a browser install.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: System deps (git-annex)
+        run: sudo apt-get update && sudo apt-get install -y git-annex
+
+      - name: Install (+ Playwright Chromium)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . playwright
+          playwright install --with-deps chromium
+
+      - name: Portal E2E (headless)
+        run: python tests/test_e2e_portal.py

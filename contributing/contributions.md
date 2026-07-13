@@ -25,7 +25,21 @@ for t in tests/test_*.py; do .venv/bin/python "$t"; done
 ```
 
 A file prints `all passed` on success and raises (non-zero exit) on the first failing assertion.
-CI runs the whole suite on every push and PR.
+CI runs the core suite on every push and PR; the browser E2E is a separate job (below).
+
+### End-to-end tests
+
+The portal has a headless Playwright smoke test (`tests/test_e2e_portal.py`): it seeds a throwaway
+catalog, boots the portal, and drives a real browser (select a plan → catalog → the over-cap banner).
+It needs a browser, so it lives in its own dev venv:
+
+```bash
+python3 -m venv .venv-dev && .venv-dev/bin/pip install -e . playwright && .venv-dev/bin/playwright install chromium
+.venv-dev/bin/python tests/test_e2e_portal.py
+```
+
+CI runs it as a separate job. **If you touch the portal UI, add an E2E assertion like it** — this test
+already caught a real banner bug the unit tests missed.
 
 ## How the project records decisions
 
