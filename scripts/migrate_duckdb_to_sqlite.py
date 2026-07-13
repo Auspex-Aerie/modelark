@@ -46,43 +46,72 @@ def migrate(src_path: Path, dst_path: Path) -> dict:
             "DuckDB migration support is optional; install it with "
             "`pip install 'modelark[migration]'`."
         ) from exc
-    src = duckdb.connect(str(src_path))                     # read-write on the COPY → replays any .wal
-    db.CATALOG_DIR = dst_path.parent
-    db.DB_PATH = dst_path
-    dst_path.unlink(missing_ok=True)
-    Path(str(dst_path) + "-wal").unlink(missing_ok=True)
-    Path(str(dst_path) + "-shm").unlink(missing_ok=True)
-    dst = db.connect(_bootstrapping=True)                   # bootstraps the SQLite schema (skips the not-migrated guard)
-    sqlite_cols = {t: {r[1] for r in dst.execute(f"PRAGMA table_info({t})").fetchall()} for t in TABLES}
+    src = dst = None
+    destination_started = completed = False
+    sidecars = (dst_path, Path(str(dst_path) + "-wal"), Path(str(dst_path) + "-shm"))
+    try:
+        src = duckdb.connect(str(src_path))                 # read-write on the COPY → replays any .wal
+        db.CATALOG_DIR = dst_path.parent
+        db.DB_PATH = dst_path
+        for path in sidecars:
+            path.unlink(missing_ok=True)
+        destination_started = True
+        dst = db.connect(_bootstrapping=True)               # creates the constrained SQLite schema
+        sqlite_cols = {
+            t: {r[1] for r in dst.execute(f"PRAGMA table_info({t})").fetchall()}
+            for t in TABLES
+        }
 
-    report = {}
-    for t in TABLES:
-        src_cols = [c[0] for c in src.execute(f"SELECT * FROM {t} LIMIT 0").description]
-        use = [c for c in src_cols if c in sqlite_cols[t]]  # only columns present in BOTH schemas
-        dropped = [c for c in src_cols if c not in sqlite_cols[t]]
-        rows = src.execute(f"SELECT {', '.join(use)} FROM {t}").fetchall()
-        ph = ", ".join(["?"] * len(use))
-        dst.execute("BEGIN")
-        for r in rows:
-            values = [_cell(use[i], r[i]) for i in range(len(use))]
-            # Pre-DEC-039 Tier A used this model status for remote-header evidence. The constrained
-            # SQLite schema intentionally has no `verified` model state; preserve the row while
-            # narrowing the claim exactly as the in-place SQLite migration does.
-            if t == "models" and "status" in use:
-                status = use.index("status")
-                if values[status] == "verified":
-                    values[status] = "inspected"
-            dst.execute(f"INSERT INTO {t} ({', '.join(use)}) VALUES ({ph})", values)
-        dst.execute("COMMIT")
-        got = dst.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
-        report[t] = {"src": len(rows), "dst": got, "dropped_cols": dropped}
-    # The destination schema is bootstrapped before source rows exist. Run row-level backfills once
-    # more after import (notably nested archived stored_relpath recovery); constraint migration is
-    # already complete and this call is idempotent.
-    db._migrate(dst)
-    src.close()
-    dst.close()
-    return report
+        report = {}
+        for t in TABLES:
+            src_cols = [c[0] for c in src.execute(f"SELECT * FROM {t} LIMIT 0").description]
+            use = [c for c in src_cols if c in sqlite_cols[t]]  # columns present in BOTH schemas
+            dropped = [c for c in src_cols if c not in sqlite_cols[t]]
+            rows = src.execute(f"SELECT {', '.join(use)} FROM {t}").fetchall()
+            ph = ", ".join(["?"] * len(use))
+            row_no, row_key = 0, "before first row"
+            try:
+                dst.execute("BEGIN")
+                for row_no, row in enumerate(rows, 1):
+                    values = [_cell(use[i], row[i]) for i in range(len(use))]
+                    row_key = f"{use[0]}={values[0]!r}" if use else "no shared columns"
+                    # Pre-DEC-039 Tier A mislabeled remote-header evidence as `verified`.
+                    if t == "models" and "status" in use:
+                        status = use.index("status")
+                        if values[status] == "verified":
+                            values[status] = "inspected"
+                    dst.execute(f"INSERT INTO {t} ({', '.join(use)}) VALUES ({ph})", values)
+                dst.execute("COMMIT")
+            except Exception as exc:
+                if dst.in_transaction:
+                    dst.execute("ROLLBACK")
+                raise RuntimeError(
+                    f"DuckDB migration failed in table {t!r} at source row {row_no} "
+                    f"({row_key[:160]}): {exc}. The partial SQLite destination was removed; "
+                    "the DuckDB source is unchanged."
+                ) from exc
+            got = dst.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+            report[t] = {"src": len(rows), "dst": got, "dropped_cols": dropped}
+        # The destination schema is bootstrapped before source rows exist. Run row-level backfills
+        # once more after import (notably nested archived stored_relpath recovery).
+        db._migrate(dst)
+        completed = True
+        return report
+    finally:
+        if dst is not None:
+            try:
+                if dst.in_transaction:
+                    dst.execute("ROLLBACK")
+            finally:
+                dst.close()
+        if src is not None:
+            src.close()
+        if destination_started and not completed:
+            for path in sidecars:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass  # preserve the original migration diagnostic
 
 
 def main(argv: list[str]) -> int:

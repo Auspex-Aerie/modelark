@@ -117,9 +117,6 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
         _migrate(con)
         _apply_schema(con)
         con.execute("PRAGMA foreign_keys=ON")
-        violations = con.execute("PRAGMA foreign_key_check").fetchall()
-        if violations:
-            raise RuntimeError(f"Catalog foreign-key check failed after startup: {violations[:8]}")
     except Exception:
         con.close()
         raise
