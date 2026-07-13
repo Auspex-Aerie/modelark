@@ -51,7 +51,7 @@ This is pre-1.0 and built in public, so a few sharp edges are worth knowing befo
 
 **Hardware honesty.** SMART read through some USB-to-SATA bridges is synthetic, so take health readings on bridged drives with a grain of salt (during testing here, a genuinely-failing drive passed its synthetic check and then got crushed on the first load). A NAS iSCSI LUN won't auto-reattach after a reboot: that's deliberate — we won't couple boot to a network mount and risk a boot hang — so re-login is manual. And the fill is a single worker that asks for drives in sequence, so expect to hot-swap externals during a large run rather than mounting the whole fleet at once. More automation here is needed, and planned.
 
-**Smaller things.** `duckdb` is still a hard dependency even though the catalog is SQLite now — only the one-time migration uses it, so a fresh install pulls it for nothing. It'll be removed in the next version: it remains for migration capability but is immediately deprecated. The `zstd` fallback is implemented but dormant until you install `zstandard` — if it's not present we won't use it, but we won't complain very loudly either, so make sure it's installed. Tier B (functional, generate-a-token) is not implemented; Tier A is currently a basic header/metadata check rather than a complete tensor-layout proof. And in the shipped catalog export, `downloads_all` is empty, so ranking leans on `downloads_30d` and `likes`. More advanced catalog and metadata work is also required, known, and planned.
+**Smaller things.** `duckdb` is still a hard dependency even though the catalog is SQLite now — only the one-time migration uses it, so a fresh install pulls it for nothing. It'll be removed in the next version: it remains for migration capability but is immediately deprecated. The `zstd` fallback is implemented but dormant until you install `zstandard` — if it's not present we won't use it, but we won't complain very loudly either, so make sure it's installed. Tier B (functional, generate-a-token) is not implemented. Tier A proves the complete declared safetensors layout, but only fixed-header sanity for GGUF; neither format check reads or hashes tensor data. In the shipped catalog export, `downloads_all` is empty, so `downloads_30d` is the available popularity field. More advanced catalog and metadata work is also required, known, and planned.
 
 **Be considerate.** ModelArk ships with a **1 TB/day** download cap (`download.max_24h_gb`; raise it — or set `0` to uncap — only if you must). This is an **archive/DR library-management** system, *not* a way to mirror large amounts of Hugging Face: point it at giant swaths of the Hub and you'll be rate-limited by them. The portal also warns you when a build set exceeds the daily cap. Please archive what you'll actually keep.
 
@@ -155,11 +155,12 @@ then `$XDG_CONFIG_HOME/modelark/wishlist.yaml`, then a checkout-root `wishlist.y
 installs, and finally the packaged default:
 
 ```yaml
-scope:            # architecture-derived categories enabled for this archive policy
-always_include:   # orgs to always walk
-exclude:          # repos/patterns to skip
-score_weights:    # ranking inputs
-threshold: 6.0    # keep score cutoff
+scope:               # architecture-derived categories included by `discover --walk`
+  include_categories: [generative-llm, encoder, seq2seq]
+always_include:      # orgs walked by `discover --walk`
+  orgs: [deepseek-ai, Qwen]
+exclude:
+  pickle_only: true  # block pickle-only acquisition; false stores inert raw bytes
 
 compression:            # DEC-022 codec gate
   max_compress_ram_gb: 4.0   # whole-file peak ≈ 4× shard; over this, don't use whole-file
@@ -222,7 +223,7 @@ drop-in + the systemd unit is `DEF-025`.)*
 
 ```bash
 modelark discover --walk                     # catalog the wishlist orgs
-modelark verify --all                        # Tier A header/metadata check (no full download)
+modelark verify --all                        # Tier A remote-header evidence (no full download)
 modelark protect --repo org/model            # mark must-have (numcopies=2 → a 2nd copy)
 modelark serve                               # portal → :8077 (curate, then Fill)
 modelark library plan                        # review the placement plan
@@ -240,13 +241,14 @@ the portal as root.
 
 | Tier | Proves | Cost |
 |------|--------|------|
-| **A — Header check** | recognized safetensors/GGUF header and basic metadata; not full tensor-layout or byte-integrity proof | range-reads headers only — **works on a 700B without downloading it** |
+| **A — Remote-header evidence** | safetensors: valid dtype/shape byte lengths, exact non-overlapping data layout, and complete shard-index mapping; GGUF: fixed-header sanity and a standard split filename sequence only | range-reads headers only — **works on a 700B without downloading it** |
 | **B — Functional** | planned, not implemented | would require loading a model and exercising inference |
 
 Archive integrity comes from the write-time sha256/canary and from re-verifying mounted physical
-copies. Tier A is discovery-time structural evidence, not a security scan. Pickle artifacts are
-classified but are not currently rejected by an enforced security gate, and HF scan integration is
-not implemented.
+copies. Tier A does not read tensor data, prove architecture/loadability, or perform a security scan.
+Pickle-only acquisition is blocked by default at archive planning; an explicit
+`exclude.pickle_only: false` stores those files as inert raw bytes, which ModelArk never imports or
+executes. Opcode scanning and Hugging Face scan integration are not implemented.
 
 ## Safety invariants (the gates)
 
@@ -264,7 +266,7 @@ Every architecture/policy decision, deferral, and incident is in
 
 ## Status
 
-**Working + proven end-to-end:** catalog (~4.1k models) + Tier A header checks +
+**Working + proven end-to-end:** catalog (~4.1k models) + Tier A remote-header evidence +
 architecture-first classification; the librarian placement plan; the full fetch pipeline
 (download → verify → ZipNN + canary → git-annex → record); StreamZNN streaming (no OOM on
 10 GB shards); the codec gate; must-have 2-copy replication; verified atomic restore; crash-resume; first-class Plans

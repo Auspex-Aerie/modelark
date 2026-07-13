@@ -1,4 +1,4 @@
-"""Load and expose the declarative curation rules in wishlist.yaml."""
+"""Load discovery scope, archive policy, and operational settings from wishlist.yaml."""
 from __future__ import annotations
 
 import os
@@ -54,6 +54,11 @@ def orgs() -> list[str]:
 
 def scope_categories() -> list[str]:
     return load()["scope"]["include_categories"]
+
+
+def exclude_pickle_only() -> bool:
+    """Whether archive planning must refuse repositories whose only usable weights are pickle."""
+    return bool((load().get("exclude") or {}).get("pickle_only", True))
 
 
 # DEC-022 compression gate. Defaults are conservative so an older wishlist.yaml (no `compression:`

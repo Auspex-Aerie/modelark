@@ -1,12 +1,7 @@
-# wishlist.yaml — declarative curation rules.
-# Everything discovered is catalog-only until a rule promotes it to download.
-# Archive policy: grab full-precision (largest) weights; quantize on demand later.
-# Scope: LANGUAGE models only for now (DEC-001 / DEF-002 in docs/decision_log.md).
-
-defaults:
-  download: false
-  prefer_precision: full          # archive the canonical full-precision source
-  also_grab_runnable_quant: false # optionally pull one Q4_K_M that fits 24GB VRAM
+# wishlist.yaml — discovery scope, archive safety policy, and operational settings.
+# Everything discovered is catalog-only until an operator selects and finalizes it in the portal.
+# Weight preference: safetensors, else GGUF, else explicitly opted-in inert pickle;
+# companion config/tokenizer/index files ride along.
 
 # Compression gate (DEC-022). Weights are stored ZipNN-compressed. Whole-file compress is
 # fastest but needs ~4x the shard in RAM (measured: ~3.67x + baseline). A shard whose est.
@@ -36,9 +31,8 @@ logging:
   console: true                # also log to stdout (journald captures it)
 
 # Scope filter (DEC-002): a repo's architecture-derived `category` (not HF's
-# unreliable pipeline_tag) must be in this set. Domain is text-only for now.
+# unreliable pipeline_tag) must be in this set.
 scope:
-  domain: text
   include_categories:
     - generative-llm    # decoder LLMs (base / instruct / reasoning)
     - encoder           # BERT / masked-LM family
@@ -56,11 +50,6 @@ scope:
     - audio-gen         # music / sound generation (MusicGen, Stable Audio)
     - world-model       # world foundation models (Cosmos, Genie)
     - image-gen         # text-to-image diffusion (FLUX, SD, ...) — DEC-011
-  deferred_domains:        # DEF-002 — video + VLM still reserved (DEC-010/011 took audio+world+image-gen)
-    - vision
-    - multimodal
-    - video-gen
-
 always_include:
   orgs:
     # --- Chinese frontier labs ---
@@ -123,26 +112,7 @@ always_include:
     - black-forest-labs # FLUX
     - stabilityai       # Stable Diffusion
     - playgroundai      # Playground
-  repos: []            # explicit pins, any size
-
-trusted_quantizers:    # these orgs' GGUF/quant repos are trusted to download
-  - bartowski
-  - mradermacher
-  - unsloth
-
 exclude:
-  pickle_only: true                       # security: skip code-execution-only repos
-  below_likes: 50                         # drop the long-tail noise
-  patterns:
-    - "*roleplay*"
-    - "*-merge-*"
-    - "*frankenmerge*"
-
-# Scorer ranks the "maybe" pile; score >= threshold promotes to download.
-score_weights:
-  is_base_model: 5      # foundations first — you can finetune/quant down from them
-  popularity_log: 1.0   # log(downloads + likes)
-  trusted_quantizer: 3
-  format_safe: 1        # safetensors/gguf over pickle
-  recency: 1
-threshold: 6.0
+  # Enforced by archive planning. true refuses pickle-only repos; false archives their
+  # pickle weights as inert raw bytes (ModelArk never imports or executes them).
+  pickle_only: true

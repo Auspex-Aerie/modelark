@@ -155,10 +155,17 @@ def restore_repo(con, repo_id: str, output_root: str | Path) -> dict:
     overwritten. On failure no final model directory is published.
     """
     repo_rel = _safe_relative(repo_id, description="repository id")
-    planned = [item["rfilename"] for item in fetch.plan(con, repo_id)]
     copies = _rows(con, repo_id)
     if not copies:
         raise RestoreError(f"{repo_id}: no archived files recorded")
+    # Acquisition policy cannot strand bytes already accepted into the archive. Pickle
+    # remains inert here: restore copies/decompresses and hashes it, but never imports it.
+    # A legacy/foreign archive may contain formats the current acquisition planner does
+    # not support; in that case its durable archive records are the recovery manifest.
+    try:
+        planned = [item["rfilename"] for item in fetch.plan(con, repo_id, allow_pickle=True)]
+    except fetch.ArchivePolicyError:
+        planned = sorted(copies)
     if not planned:
         raise RestoreError(f"{repo_id}: catalog has no restorable planned files")
     missing = sorted(set(planned) - set(copies))

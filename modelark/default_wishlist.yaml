@@ -1,9 +1,5 @@
 # Packaged default configuration. A user config at the platform config directory
 # (or `modelark --config PATH`) overrides this file.
-defaults:
-  download: false
-  prefer_precision: full
-  also_grab_runnable_quant: false
 
 compression:
   max_compress_ram_gb: 4.0
@@ -21,7 +17,6 @@ logging:
   console: true
 
 scope:
-  domain: text
   include_categories:
     - generative-llm
     - encoder
@@ -38,11 +33,6 @@ scope:
     - audio-gen
     - world-model
     - image-gen
-  deferred_domains:
-    - vision
-    - multimodal
-    - video-gen
-
 always_include:
   orgs:
     - deepseek-ai
@@ -99,25 +89,6 @@ always_include:
     - black-forest-labs
     - stabilityai
     - playgroundai
-  repos: []
-
-trusted_quantizers:
-  - bartowski
-  - mradermacher
-  - unsloth
-
 exclude:
+  # Enforced by archive planning; false opts into storing pickle weights as inert raw bytes.
   pickle_only: true
-  below_likes: 50
-  patterns:
-    - "*roleplay*"
-    - "*-merge-*"
-    - "*frankenmerge*"
-
-score_weights:
-  is_base_model: 5
-  popularity_log: 1.0
-  trusted_quantizer: 3
-  format_safe: 1
-  recency: 1
-threshold: 6.0

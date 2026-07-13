@@ -372,7 +372,7 @@ def main(argv=None):
     d.add_argument("--top", type=int, help="discover top-N by downloads")
     d.add_argument("--task", default="text-generation", help="pipeline tag for --top")
     d.add_argument("--walk", action="store_true",
-                   help="walk every wishlist org, scope-filtered by language pipeline tags")
+                   help="walk every configured org, filtered by architecture-derived categories")
     d.add_argument("--org", action="append",
                    help="walk specific org(s), scope-filtered (repeatable)")
     d.add_argument("--limit-per-org", type=int, default=40,

@@ -72,6 +72,10 @@ class _StopRequested(Exception):
     """Raised inside the download loop when a stop is requested mid-shard, so run() can stop cleanly."""
 
 
+class ArchivePolicyError(RuntimeError):
+    """The catalog entry cannot produce an archive plan under the configured safety policy."""
+
+
 def _noop(ev: dict) -> None:            # default progress sink (CLI relies on the print()s below)
     pass
 
@@ -107,19 +111,48 @@ def finalized(con) -> list[str]:
         "SELECT repo_id FROM selection WHERE finalized_at IS NOT NULL ORDER BY repo_id").fetchall()]
 
 
-def plan(con, repo_id: str) -> list[dict]:
-    """Files to archive for a repo: full-precision weights + essential companions."""
+def plan(con, repo_id: str, *, allow_pickle: bool | None = None) -> list[dict]:
+    """Files to archive for a repo: preferred weights + essential companions.
+
+    ``allow_pickle=None`` applies the configured acquisition policy. Restore passes
+    ``True`` because a later policy change must never make already-archived inert bytes
+    unrecoverable.
+    """
     rows = con.execute(
         "SELECT rfilename, size_bytes, sha256, format, quant FROM files WHERE repo_id = ?",
         [repo_id]).fetchall()
     files = [dict(zip(["rfilename", "size", "sha256", "fmt", "quant"], r)) for r in rows]
-    has_st = any(f["fmt"] == "safetensors" for f in files)
+    st = [f for f in files if f["fmt"] == "safetensors"]
+    gguf = [f for f in files if f["fmt"] == "gguf"]
+    pickle = [f for f in files if f["fmt"] == "pytorch"]
+    if st:
+        selected_weights = st
+    elif gguf:
+        selected_weights = gguf
+    elif pickle:
+        if allow_pickle is None:
+            allow_pickle = not wishlist.exclude_pickle_only()
+        if not allow_pickle:
+            raise ArchivePolicyError(
+                f"{repo_id}: pickle-only weights are blocked by exclude.pickle_only=true; "
+                "select a safetensors/GGUF repository or explicitly opt in to inert pickle storage"
+            )
+        selected_weights = pickle
+    else:
+        formats = sorted({f["fmt"] for f in files if f["fmt"] != "aux"})
+        detail = f" (found: {', '.join(formats)})" if formats else ""
+        raise ArchivePolicyError(
+            f"{repo_id}: no supported archive weights; expected safetensors, GGUF, or opted-in pickle"
+            + detail
+        )
+
+    selected_names = {f["rfilename"] for f in selected_weights}
     out = []
     for f in files:
-        if f["fmt"] == "safetensors":
+        if f["rfilename"] in selected_names and f["fmt"] == "safetensors":
             f["mode"] = "compress" if f["quant"] in _FLOAT else "raw"   # gptq/awq → store raw
             out.append(f)
-        elif f["fmt"] == "gguf" and not has_st:        # gguf only if no safetensors source
+        elif f["rfilename"] in selected_names:            # GGUF / explicitly opted-in pickle
             f["mode"] = "raw"
             out.append(f)
         elif f["fmt"] == "aux":                         # config/tokenizer/index/etc.
@@ -531,8 +564,12 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
             grand = 0
             print(f"DRY RUN — {len(ids)} model(s) → {dest or f'<drive {drive_label}>'} (drive {drive_label}):")
             for rid in ids:
-                with ctx.lock:
-                    files = plan(con, rid)
+                try:
+                    with ctx.lock:
+                        files = plan(con, rid)
+                except ArchivePolicyError as exc:
+                    print(f"  {rid:48} BLOCKED · {exc}")
+                    continue
                 comp = sum(f["size"] or 0 for f in files if f["mode"] == "compress")
                 raw = sum(f["size"] or 0 for f in files if f["mode"] == "raw")
                 grand += comp + raw
@@ -586,6 +623,10 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                 ctx.write(lambda c: _event(c, rid, "archived", bytes=r["bytes"], detail=tag))
             except _StopRequested:
                 break                                    # clean stop requested mid-shard (INC-004)
+            except ArchivePolicyError as e:
+                print(f"  [policy  ] {rid}: {e}")
+                detail = str(e)[:200]
+                ctx.write(lambda c: _event(c, rid, "policy", detail=detail))
             except GatedRepoError:
                 print(f"  [gated   ] {rid}  — needs `hf auth login` + accepted license")
                 ctx.write(lambda c: _event(c, rid, "auth", detail="gated / needs accepted license"))

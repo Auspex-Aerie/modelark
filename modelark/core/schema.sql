@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS models (
     total_size_bytes   BIGINT,
     hf_last_modified   TIMESTAMP,
     hf_created_at      TIMESTAMP,
-    status             VARCHAR DEFAULT 'discovered',  -- discovered|wishlist|fetching|archived|verified|skip
+    status             VARCHAR DEFAULT 'discovered',  -- discovered|inspected|wishlist|fetching|archived|skip
     numcopies          INTEGER DEFAULT 1,     -- 1 | 2 (must-have: 2nd copy on the replica tier) — DEC-014
     score              DOUBLE,
     notes              VARCHAR,
@@ -82,15 +82,15 @@ CREATE TABLE IF NOT EXISTS replicas (
 CREATE TABLE IF NOT EXISTS verifications (
     repo_id          VARCHAR PRIMARY KEY,
     checksum_ok      BOOLEAN,   -- all local files sha256 == HF canonical (NULL if not downloaded)
-    structural_ok    BOOLEAN,   -- Tier A: headers parse, shapes/dtypes consistent
-    shards_complete  BOOLEAN,   -- index references all present; no missing shards
+    structural_ok    BOOLEAN,   -- Tier A: strict safetensors layout or GGUF fixed-header sanity
+    shards_complete  BOOLEAN,   -- exact index mapping / standard split sequence; NULL if unknown
     format_safety    VARCHAR,   -- safe | pickle-present | mixed | unknown
-    pickle_scan      VARCHAR,   -- clean | flagged | n/a
-    hf_scan_status   VARCHAR,   -- from HF API (NULL if unreported)
+    pickle_scan      VARCHAR,   -- unscanned | n/a (scanner not implemented)
+    hf_scan_status   VARCHAR,   -- reserved for HF API integration; currently NULL
     signature        VARCHAR,   -- none | sigstore | gpg
     signer           VARCHAR,
-    load_tier_max    VARCHAR,   -- 'A' or 'B' (highest tier passed)
-    functional_ok    BOOLEAN,   -- Tier B result; NULL if too big / not run
+    load_tier_max    VARCHAR,   -- 'A' = format-specific remote-header evidence; 'B' unused/planned
+    functional_ok    BOOLEAN,   -- Tier B result; currently always NULL (not implemented)
     detail           VARCHAR,   -- human-readable findings
     verified_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     tool_versions    VARCHAR
@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS archived (
 CREATE TABLE IF NOT EXISTS fetch_events (
     repo_id      VARCHAR,
     event_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    outcome      VARCHAR,        -- archived | auth | rate_limited | waiting | error | throttled
+    outcome      VARCHAR,        -- archived | policy | auth | rate_limited | waiting | error | throttled
     bytes        BIGINT,         -- downloaded bytes (archived outcome)
     wait_seconds DOUBLE,         -- backoff waited / server Retry-After (rate_limited/waiting)
     detail       VARCHAR
