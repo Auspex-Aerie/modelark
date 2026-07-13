@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from unittest import mock
 
 from modelark.core import db
 
@@ -44,6 +45,28 @@ def test_schema_and_views(tmp_path):
     assert con.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert con.execute("PRAGMA foreign_key_list(archived)").fetchall()
     con.close()
+
+
+def test_normal_connect_does_not_scan_every_foreign_key_row(tmp_path):
+    statements = []
+    real_connect = sqlite3.connect
+
+    class TracedConnection:
+        def __init__(self, con):
+            self._con = con
+
+        def execute(self, sql, *args):
+            statements.append(sql.strip().lower())
+            return self._con.execute(sql, *args)
+
+        def __getattr__(self, name):
+            return getattr(self._con, name)
+
+    with mock.patch.object(db.sqlite3, "connect", side_effect=lambda *a, **kw:
+                           TracedConnection(real_connect(*a, **kw))):
+        con = _fresh(tmp_path)
+        con.close()
+    assert "pragma foreign_key_check" not in statements, statements
 
 
 def test_upsert_touch_and_v_ui(tmp_path):
