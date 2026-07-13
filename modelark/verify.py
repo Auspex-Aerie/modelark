@@ -23,6 +23,7 @@ from modelark.formats import DTYPE_BITS, KNOWN_ST_DTYPES
 
 _client = httpx.Client(follow_redirects=True, timeout=30.0)
 WEIGHT_FORMATS = {"safetensors", "gguf", "pytorch", "onnx", "mlx"}
+_CONTENT_RANGE = re.compile(r"bytes\s+(\d+)-(\d+)/(?:\d+|\*)", re.IGNORECASE)
 
 
 class AuthRequired(RuntimeError):
@@ -55,6 +56,15 @@ def _range(url: str, start: int, length: int) -> bytes:
         if r.status_code in (401, 403):
             raise AuthRequired(f"gated/private ({r.status_code})")
         if r.status_code == 206:
+            content_range = r.headers.get("Content-Range", "")
+            match = _CONTENT_RANGE.fullmatch(content_range.strip())
+            expected_end = start + length - 1
+            if (match is None or int(match.group(1)) != start
+                    or int(match.group(2)) != expected_end):
+                raise RuntimeError(
+                    f"unexpected Content-Range {content_range!r}; "
+                    f"expected bytes {start}-{expected_end}"
+                )
             return r.read()[:length]
         if r.status_code == 200:  # server ignored Range; stop early, don't pull it all
             buf = bytearray()
@@ -164,11 +174,17 @@ _SPLIT_WEIGHT = re.compile(
 
 def _split_sequence_complete(filenames: set[str]) -> bool | None:
     """Prove standard split filenames are complete; return None for an ambiguous multi-file set."""
+    if not filenames:
+        return False
+    matches = [_SPLIT_WEIGHT.fullmatch(filename) for filename in filenames]
+    if any(match is None for match in matches):
+        # One ordinary weight file is complete; mixed/non-standard multi-file layouts
+        # carry no machine-readable completeness claim.
+        return True if len(filenames) == 1 else None
+
     groups: dict[tuple[str, str, int], set[int]] = {}
-    for filename in filenames:
-        match = _SPLIT_WEIGHT.match(filename)
-        if match is None:
-            return True if len(filenames) == 1 else None
+    for match in matches:
+        assert match is not None  # narrowed by the ambiguity check above
         total = int(match.group("total"))
         if total < 1:
             return False

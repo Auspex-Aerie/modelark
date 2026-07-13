@@ -86,13 +86,44 @@ def test_range_fallback_honors_offset_when_server_ignores_range():
         assert verify._range("https://example.invalid/file", 3, 4) == b"3456"
 
 
+def test_range_partial_response_must_confirm_the_exact_requested_interval():
+    class Response:
+        status_code = 206
+
+        def __init__(self, content_range):
+            self.headers = {"Content-Range": content_range}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return b"3456"
+
+    with mock.patch.object(verify._client, "stream", return_value=Response("bytes 3-6/10")):
+        assert verify._range("https://example.invalid/file", 3, 4) == b"3456"
+    for content_range in ("bytes 0-3/10", "", "garbage"):
+        with mock.patch.object(verify._client, "stream", return_value=Response(content_range)):
+            try:
+                verify._range("https://example.invalid/file", 3, 4)
+                raise AssertionError("a mismatched Content-Range must fail closed")
+            except RuntimeError as exc:
+                assert "unexpected Content-Range" in str(exc), exc
+
+
 def test_standard_split_sequences_are_proven_or_rejected():
+    assert verify._split_sequence_complete(set()) is False
     assert verify._split_sequence_complete({"model.safetensors"}) is True
     assert verify._split_sequence_complete({"model-00001-of-00002.safetensors"}) is False
     assert verify._split_sequence_complete({
         "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"
     }) is True
     assert verify._split_sequence_complete({"a.safetensors", "b.safetensors"}) is None
+    assert verify._split_sequence_complete({
+        "model-00001-of-00001.safetensors", "adapter.safetensors"
+    }) is None
 
 
 def test_safetensors_index_must_match_tensor_locations():
