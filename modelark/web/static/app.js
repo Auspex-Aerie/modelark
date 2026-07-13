@@ -1,8 +1,19 @@
 // Shared helpers + view navigation.
+const escapeHTML = value => String(value == null ? "" : value).replace(/[&<>"']/g, ch => ({
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+})[ch]);
+
 window.MA = {
   api: (p, o) => fetch(p, o).then(r => r.json()),
-  post: (p, body) => fetch(p, {method: "POST", headers: {"Content-Type": "application/json"},
-                              body: JSON.stringify(body)}).then(r => r.json()),
+  post: (p, body) => {
+    const token = document.querySelector('meta[name="modelark-csrf-token"]')?.content;
+    const headers = {"Content-Type": "application/json"};
+    if (token) headers["X-ModelArk-CSRF"] = token;
+    return fetch(p, {method: "POST", headers, body: JSON.stringify(body)}).then(r => r.json());
+  },
+  // Any API/operator value interpolated into an HTML template must pass through this helper.
+  // Prefer textContent for plain text; esc() exists for the structured views below.
+  esc: escapeHTML,
   gb: b => b >= 1e12 ? (b / 1e12).toFixed(2) + "TB" : (b / 1e9).toFixed(0) + "GB",
   dl: n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : n,
   toast(m) {

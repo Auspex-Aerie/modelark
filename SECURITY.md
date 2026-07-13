@@ -2,11 +2,16 @@
 
 ModelArk is pre-1.0 and built in public.
 
-Keep in mind that at this stage ModelArk is **entirely locally hosted** — the portal binds to
-localhost, and downloads are strictly between you and Hugging Face. Adversarial behavior against the
-system, from the machine it runs on, isn't a likely scenario. That said, a vulnerability that lets
-something **arbitrary and genuinely damaging** happen from a security standpoint is welcome to be
-reported, and **we will address it**.
+At this stage ModelArk is **entirely locally hosted** — the portal binds only to loopback, and
+downloads are strictly between you and Hugging Face. Localhost is still a security boundary: a
+hostile webpage may try to send requests to a service on the visitor's machine, and catalog or
+operator text must not become executable HTML.
+
+The portal therefore validates the loopback Host and port on every request. Mutations require an
+exact same-origin `Origin`, `application/json`, a bounded body, and a per-process CSRF capability.
+Structured views escape remote/operator data, responses carry a restrictive CSP, and the server
+refuses non-loopback binds because remote authentication is not implemented. Bypasses of any of
+these controls are security issues and **we will address them**.
 
 The confusing category — where we expect a lot of reports filed as "security" that are really severe
 **bugs** — looks like:
@@ -14,6 +19,8 @@ The confusing category — where we expect a lot of reports filed as "security" 
 - **Silent data loss** or a **false integrity pass** via some unusual interaction with the local
   portal (an archive that reports "verified" but isn't actually restorable, because of a trick played
   against the local webserver).
+- **Cross-origin mutation or script execution** through Host/Origin/CSRF validation gaps, unsafe
+  rendering, or a CSP bypass.
 
 A bug like that is serious and we treat it as such — but on its own it is **not adversarial**. It
 becomes a *security* issue only if you can show a real attack path: e.g. a download or input that

@@ -2,7 +2,7 @@
 // sets it active server-side and reloads, so the whole app re-reads against the chosen drive set. The
 // gate (app.js) forces this view until a plan is picked; `ark` (the whole fleet) is always available.
 (function () {
-  const { api, post, gb, toast } = window.MA;
+  const { api, post, gb, toast, esc } = window.MA;
   const $ = id => document.getElementById(id);
 
   function planCard(p, totals) {
@@ -13,12 +13,12 @@
     const other = p.provisioning === "uncompressed" ? "compressed" : "uncompressed";
     const drives = (p.drives && p.drives.length) ? " (" + p.drives.join(", ") + ")" : " (none)";
     return `<div class="plancard${p.is_active ? " active" : ""}">
-      <div class="pcheadrow"><div><span class="pcname">${p.name || p.plan_id}</span> <span class="pcid">${p.plan_id}</span></div>
+      <div class="pcheadrow"><div><span class="pcname">${esc(p.name || p.plan_id)}</span> <span class="pcid">${esc(p.plan_id)}</span></div>
         ${p.is_active ? '<span class="pcactive">active</span>' : ""}</div>
-      <div class="pcmeta">${p.provisioning} · ${p.n_drives} drive${p.n_drives === 1 ? "" : "s"}${drives}</div>
+      <div class="pcmeta">${esc(p.provisioning)} · ${esc(p.n_drives)} drive${p.n_drives === 1 ? "" : "s"}${esc(drives)}</div>
       ${nums}
-      <div class="pcacts"><button class="pcuse" data-id="${p.plan_id}">${p.is_active ? "Use this plan →" : "Select + use →"}</button>
-        <button class="pcprov" data-id="${p.plan_id}" data-mode="${other}">switch to ${other}</button></div>
+      <div class="pcacts"><button class="pcuse" data-id="${esc(p.plan_id)}">${p.is_active ? "Use this plan →" : "Select + use →"}</button>
+        <button class="pcprov" data-id="${esc(p.plan_id)}" data-mode="${other}">switch to ${other}</button></div>
     </div>`;
   }
 
@@ -36,8 +36,8 @@
     if (!host) return;
     host.innerHTML = '<div class="pcmut" style="padding:14px">loading…</div>';
     let ov;
-    try { ov = await api("/api/plan"); } catch (e) { host.innerHTML = "error: " + e; return; }
-    if (!ov || ov.error) { host.innerHTML = "error: " + ((ov && ov.error) || "no data"); return; }
+    try { ov = await api("/api/plan"); } catch (e) { host.textContent = "error: " + e; return; }
+    if (!ov || ov.error) { host.textContent = "error: " + ((ov && ov.error) || "no data"); return; }
     const gate = $("plansGateMsg");
     if (gate) {
       const chosen = sessionStorage.getItem("modelark_plan_chosen");

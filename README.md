@@ -75,7 +75,7 @@ Tiered drive fleet (git-annex remotes)      ← the actual TBs of weights
 
 ## The pipeline
 
-`discover → curate → plan → fill → verify → replicate`, all resumable:
+`discover → curate → plan → fill → verify → replicate → restore`, with resumable archive work:
 
 1. **Discover** metadata for the wishlist orgs (architecture-first classification, not HF's
    unreliable pipeline tags).
@@ -88,6 +88,8 @@ Tiered drive fleet (git-annex remotes)      ← the actual TBs of weights
    the file level (a crash re-processes only the interrupted shard, no re-download).
 5. **Replicate** — must-have copy #2 is a *local* clone→clone transfer from copy #1 (no second
    HF download).
+6. **Restore** — retrieve a readable annex copy, reconstruct the original Hugging Face paths,
+   decompress into a hidden staging tree, verify every canonical sha256, then publish atomically.
 
 ## Compression & integrity
 
@@ -116,9 +118,20 @@ path isn't used unless it's warranted:
 
 Restore/canary route by the stored file's magic, so every codec (and legacy `.znn`) restores.
 
+`modelark restore --repo org/model --dest ./recovered` is the first-class recovery path. It tries
+recorded copies in order, asks git-annex to retrieve dropped content, falls back to another replica
+when a copy is offline or corrupt, and creates `./recovered/org/model` only after every planned file
+passes its canonical hash. It refuses to overwrite an existing model tree.
+
 ## The portal
 
 `modelark serve` → http://127.0.0.1:8077
+
+The operator portal is loopback-only. Every request validates the loopback Host and port; mutations
+also require exact same-origin requests, JSON bodies below 64 KiB, and a per-process CSRF capability.
+Remote/operator text rendered into structured views is centrally HTML-escaped, and responses carry
+a restrictive Content Security Policy. There is intentionally no non-loopback mode until
+authentication exists.
 
 - **Plans** — create or recall an archive set (its own drive fleet, budget, and provisioning mode);
   you pick an active plan per session before the other tabs unlock.
@@ -214,6 +227,7 @@ modelark protect --repo org/model            # mark must-have (numcopies=2 → a
 modelark serve                               # portal → :8077 (curate, then Fill)
 modelark library plan                        # review the placement plan
 modelark library plan --apply                # run the fill from the CLI (stop the portal worker first)
+modelark restore --repo org/model --dest ./recovered  # verified restore to ./recovered/org/model
 modelark export                              # dump JSONL for git
 ```
 The fill runs either from the **Fill tab's Start button** (worker inside the running portal) or
@@ -253,7 +267,7 @@ Every architecture/policy decision, deferral, and incident is in
 **Working + proven end-to-end:** catalog (~4.1k models) + Tier A header checks +
 architecture-first classification; the librarian placement plan; the full fetch pipeline
 (download → verify → ZipNN + canary → git-annex → record); StreamZNN streaming (no OOM on
-10 GB shards); the codec gate; must-have 2-copy replication; crash-resume; first-class Plans
+10 GB shards); the codec gate; must-have 2-copy replication; verified atomic restore; crash-resume; first-class Plans
 (per-set drive fleet + a capacity failsafe) + on-demand re-verification; and the portal's six
 views including the live Fill run surface. Restorability is production-verified (`DIS-002`).
 
@@ -280,9 +294,8 @@ The [decision log](docs/decision_log.md) has the full picture; the headline defe
 - **Placement** — letting one model's shards span drives when it won't fit whole, compression-*aware* predictive packing (today it's a capacity failsafe), and growing or rebalancing a plan's fleet mid-run.
 - **Fill & transport** — tensor-level download checkpointing so a giant shard resumes instead of restarting, plus in-flight queue edits (append / re-download / re-verify) during a run.
 - **Verification & visibility** — a scheduled fleet-wide audit (on-demand re-verification already exists) and a download-status view over recorded `fetch_events`.
-- **Recovery** — a first-class restore command that retrieves annex content, reconstructs the original
-  Hugging Face layout, decompresses atomically, and verifies final hashes. The codec restore primitive
-  and write-time canary exist today; the operator-facing workflow does not yet.
+- **Recovery enhancements** — richer progress for multi-model restores, explicit conflict policies,
+  and restore manifests. The safe repeatable-`--repo` verified workflow exists today.
 - **Ops & packaging** — scripting host setup (the `smartctl` sudoers rule + systemd unit are manual) and spinning StreamZNN out into its own MIT repo.
 
 ## Unscheduled Roadmap

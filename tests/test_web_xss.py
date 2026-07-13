@@ -1,0 +1,97 @@
+"""Frontend HTML-escaping and CSRF-header regression tests (standalone + pytest)."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+STATIC = ROOT / "modelark" / "web" / "static"
+
+
+def test_shared_encoder_and_post_contract() -> None:
+    """Exercise the actual app.js helpers in Node with a minimal browser facade."""
+    script = f"""
+const fs = require("fs");
+const vm = require("vm");
+let request;
+const document = {{
+  readyState: "loading",
+  querySelectorAll: () => [],
+  querySelector: selector => selector === 'meta[name="modelark-csrf-token"]'
+    ? {{content: "csrf-<&token"}} : null,
+  getElementById: () => null,
+  addEventListener: () => {{}},
+}};
+const context = {{
+  window: {{}}, document, sessionStorage: {{getItem: () => null, setItem: () => {{}}}},
+  clearTimeout: () => {{}}, setTimeout: () => 0,
+  fetch: async (path, options) => {{ request = {{path, options}}; return {{json: async () => ({{ok: true}})}}; }},
+}};
+vm.runInNewContext(fs.readFileSync({json.dumps(str(STATIC / 'app.js'))}, "utf8"), context);
+const payload = `<img src=x onerror="globalThis.pwned=1"> & 'quoted'`;
+if (context.window.MA.esc(payload) !== "&lt;img src=x onerror=&quot;globalThis.pwned=1&quot;&gt; &amp; &#39;quoted&#39;")
+  throw new Error("escapeHTML did not encode an executable payload");
+context.window.MA.post("/api/mutate", {{value: payload}}).then(() => {{
+  if (request.options.headers["Content-Type"] !== "application/json") throw new Error("missing JSON content type");
+  if (request.options.headers["X-ModelArk-CSRF"] !== "csrf-<&token") throw new Error("missing CSRF token");
+  if (JSON.parse(request.options.body).value !== payload) throw new Error("POST body changed");
+}}).catch(error => {{ console.error(error); process.exitCode = 1; }});
+"""
+    subprocess.run(["node", "-e", script], check=True, cwd=ROOT)
+
+
+def test_api_text_fields_use_the_shared_encoder() -> None:
+    """Keep the previously exploitable and highest-risk API fields behind MA.esc()."""
+    expected = {
+        "plans.js": (
+            "${esc(p.name || p.plan_id)}",
+            'data-id="${esc(p.plan_id)}"',
+        ),
+        "catalog.js": (
+            "${esc(m.id)}",
+            "${esc(m.lic)}",
+            "${esc(g.recent.split('/').pop())}",
+        ),
+        "disk.js": (
+            "${esc(x.serial)}",
+            "${esc(x.quirk_cmd)}",
+        ),
+        "library.js": (
+            "${esc(m.repo_id)}",
+            "${esc((m.drives || []).join(\", \"))}",
+        ),
+        "fill.js": (
+            "${esc(a.msg)}",
+            "${esc(s.repo || \"—\")}",
+            "${esc(s.awaiting_drive)}",
+            "${esc(t.plan_id)}",
+        ),
+        "verify.js": (
+            "${esc(s.repo)}",
+            "${esc(c.file)}",
+            "${esc(r.detail || \"\")}",
+        ),
+    }
+    for filename, needles in expected.items():
+        source = (STATIC / filename).read_text()
+        assert "esc" in source, filename
+        for needle in needles:
+            assert needle in source, f"{filename} lost escaping around {needle}"
+
+
+def test_no_direct_script_insertion_apis() -> None:
+    for path in STATIC.glob("*.js"):
+        source = path.read_text()
+        assert "document.write" not in source, path.name
+        assert ".outerHTML" not in source, path.name
+        assert "insertAdjacentHTML" not in source, path.name
+
+
+if __name__ == "__main__":
+    test_shared_encoder_and_post_contract()
+    test_api_text_fields_use_the_shared_encoder()
+    test_no_direct_script_insertion_apis()
+    print("web XSS tests passed")

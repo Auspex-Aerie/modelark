@@ -1,6 +1,6 @@
 // Disk Health view: render SMART status per attached drive.
 window.loadDisk = async function () {
-  const {api} = window.MA;
+  const {api, esc} = window.MA;
   const body = document.getElementById("diskBody");
   const note = document.getElementById("diskNote");
   body.innerHTML = '<div class="stub">Reading SMART…</div>';
@@ -14,8 +14,8 @@ window.loadDisk = async function () {
     return;
   }
   if (d.platform_unsupported) {
-    note.innerHTML = '<span class="disknote">' + (d.os || "This OS") + ' drives aren\'t health-checked in-system.</span>';
-    body.innerHTML = '<div class="stub">' + (d.message || "Run your platform's preferred health tracking against the drive first before use.") + '</div>';
+    note.innerHTML = '<span class="disknote">' + esc(d.os || "This OS") + ' drives aren\'t health-checked in-system.</span>';
+    body.innerHTML = '<div class="stub">' + esc(d.message || "Run your platform's preferred health tracking against the drive first before use.") + '</div>';
     return;
   }
   note.innerHTML = d.needs_privilege
@@ -25,7 +25,7 @@ window.loadDisk = async function () {
   if (!d.drives.length) { body.innerHTML = '<div class="stub">No physical disks detected.</div>'; return; }
 
   const cell = (k, v, cls) => v == null || v === "" ? "" :
-    `<div class="k">${k}</div><div class="v ${cls || ''}">${v}</div>`;
+    `<div class="k">${esc(k)}</div><div class="v ${esc(cls || '')}">${esc(v)}</div>`;
   body.innerHTML = d.drives.map(x => {
     const st = x.status || "unknown";
     const realloc = cell("Reallocated", x.reallocated, x.reallocated >= 100 ? "bad" : x.reallocated > 0 ? "warn" : "");
@@ -40,12 +40,12 @@ window.loadDisk = async function () {
     const unsafe = cell("Unsafe shutdowns", x.unsafe_shutdowns);
     const smart = x.smart_passed == null ? "" :
       cell("SMART overall", x.smart_passed ? "PASSED" : "FAILED", x.smart_passed ? "" : "bad");
-    const drv = x.dtype ? ` · <span title="smartctl driver">-d ${x.dtype}</span>` : "";
-    return `<div class="drive ${st}">
-      <span class="pill ${st}">${st}</span>
-      <h3>${x.dev}</h3>
-      <div class="sub">${x.model} · ${x.size || '?'} · ${x.bus || '?'}${x.spinning ? ' · spinning' : ' · ssd'}${drv}<br>SN ${x.serial}</div>
-      ${x.note ? `<div class="sub" style="color:var(--warn)">${x.note}</div>${x.quirk_cmd ? `<code class="fixcmd" title="click to select">${x.quirk_cmd}</code>` : ''}` : `
+    const drv = x.dtype ? ` · <span title="smartctl driver">-d ${esc(x.dtype)}</span>` : "";
+    return `<div class="drive ${esc(st)}">
+      <span class="pill ${esc(st)}">${esc(st)}</span>
+      <h3>${esc(x.dev)}</h3>
+      <div class="sub">${esc(x.model)} · ${esc(x.size || '?')} · ${esc(x.bus || '?')}${x.spinning ? ' · spinning' : ' · ssd'}${drv}<br>SN ${esc(x.serial)}</div>
+      ${x.note ? `<div class="sub" style="color:var(--warn)">${esc(x.note)}</div>${x.quirk_cmd ? `<code class="fixcmd" title="click to select">${esc(x.quirk_cmd)}</code>` : ''}` : `
       <div class="attrs">
         ${smart}
         ${cell("Power-on hours", x.power_on_hours)}
