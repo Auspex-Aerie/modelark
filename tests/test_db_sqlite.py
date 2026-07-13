@@ -74,6 +74,14 @@ def test_legacy_archive_basename_migrates_to_nested_relpath(tmp_path):
     con.close()
 
 
+def test_legacy_tier_a_verified_status_is_narrowed_to_inspected(tmp_path):
+    con = _fresh(tmp_path)
+    con.execute("INSERT INTO models(repo_id,status) VALUES('org/m','verified')")
+    db._migrate(con)
+    assert con.execute("SELECT status FROM models WHERE repo_id='org/m'").fetchone()[0] == "inspected"
+    con.close()
+
+
 if __name__ == "__main__":
     import tempfile
     from pathlib import Path

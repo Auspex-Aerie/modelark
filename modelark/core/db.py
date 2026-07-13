@@ -133,6 +133,10 @@ def _migrate(con) -> None:
         con.execute("UPDATE archived SET stored_relpath=? "
                     "WHERE repo_id=? AND rfilename=? AND drive_label=?",
                     [rel.as_posix(), repo_id, rfilename, drive_label])
+    # Before DEC-039, discovery-time Tier A header checks mislabeled models as
+    # `verified`. No physical verifier writes this model status, so every such legacy
+    # row is safely and idempotently narrowed to the evidence it actually holds.
+    con.execute("UPDATE models SET status='inspected' WHERE status='verified'")
 
 
 def upsert(con, table: str, row: dict, pk: list[str], touch: list[str] | None = None) -> None:

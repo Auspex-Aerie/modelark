@@ -99,7 +99,6 @@ def suspects(con) -> list[dict]:
 def reverify(con, repo_id: str, deep: bool = True) -> dict:
     """Re-verify one archived model. RECORD consistency is offline-safe; physical status remains
     unknown for stored blobs whose drive is shelved, and missing bytes on a mounted drive fail."""
-    planned_names = {f["rfilename"] for f in fetch.plan(con, repo_id)}
     catalog_sha = dict(con.execute("SELECT rfilename, sha256 FROM files WHERE repo_id=?", [repo_id]).fetchall())
     by_name: dict[str, list[dict]] = {}
     for rf, sn, sr, dl, osha, comp, key in con.execute(
@@ -111,6 +110,15 @@ def reverify(con, repo_id: str, deep: bool = True) -> dict:
     if not by_name:
         return {"repo": repo_id, "archived": False, "status": "not-archived", "ok": False,
                 "detail": "not archived — nothing to re-verify"}
+
+    # Verify bytes already accepted into the archive regardless of today's acquisition
+    # policy. For legacy/foreign unsupported formats, the durable records are the manifest.
+    try:
+        planned_names = {
+            f["rfilename"] for f in fetch.plan(con, repo_id, allow_pickle=True)
+        }
+    except fetch.ArchivePolicyError:
+        planned_names = set(by_name)
 
     missing = sorted(planned_names - set(by_name))                    # planned but never archived
     sha_mismatch = [rf for rf, cs in by_name.items()                 # any stored HF-hash disagrees with catalog

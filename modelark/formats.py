@@ -380,8 +380,9 @@ def parse_variant(repo_id, tags=()):
 
     Discriminator is the *absence* of an instruct/chat suffix plus structured
     signals (base_model tags), NOT the presence of the word 'base' (see BOT-001).
-    `quant` = a derived precision copy → the scorer dedups it to the full-precision
-    source. `finetune` = derived but not instruct-suffixed (merges, domain tunes).
+    `quant` = a derived precision copy, kept distinct from a full-precision source
+    during operator curation. `finetune` = derived but not instruct-suffixed
+    (merges, domain tunes).
     """
     s = repo_id.lower()
     tagset = {t.lower() for t in (tags or [])}

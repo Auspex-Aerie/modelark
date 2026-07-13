@@ -26,7 +26,7 @@ LAZY import inside register_drive, so there is no module-level cycle.
 from __future__ import annotations
 
 from modelark.core import db
-from modelark import librarian, register
+from modelark import librarian, register, wishlist
 
 DEFAULT_PLAN = "ark"
 _FIELDS = ["plan_id", "name", "annex_root", "provisioning", "status", "is_active", "created_at", "notes"]
@@ -153,20 +153,31 @@ def capacity(con, plan_id) -> int:
 
 def _footprint_by_repo(con, repo_ids: list[str]) -> dict[str, tuple[int, int, int]]:
     """Per repo: (raw, compressible, noncompressible) planned bytes, mirroring fetch.plan's file
-    selection (safetensors + aux + gguf-when-no-safetensors) and its float-quant compressibility test —
-    in ONE pass, no per-repo query. `raw` = compressible + noncompressible."""
+    selection (safetensors, else GGUF, else policy-allowed inert pickle, plus aux) and its
+    float-quant compressibility test — in ONE pass, no per-repo query. `raw` = compressible +
+    noncompressible."""
     if not repo_ids:
         return {}
     ph = ",".join(["?"] * len(repo_ids))
+    allow_pickle = not wishlist.exclude_pickle_only()
+    pickle_clause = " OR (f.format='pytorch' AND h.st=0 AND h.gguf=0)" if allow_pickle else ""
+    aux_eligible = "(h.st=1 OR h.gguf=1 OR h.pickle=1)" if allow_pickle else "(h.st=1 OR h.gguf=1)"
+    file_filter = (
+        f"((f.format='aux' AND {aux_eligible}) OR f.format='safetensors' "
+        f"OR (f.format='gguf' AND h.st=0){pickle_clause})"
+    )
     rows = con.execute(
-        "WITH hasst AS (SELECT repo_id, max(CASE WHEN format='safetensors' THEN 1 ELSE 0 END) s "
-        "               FROM files GROUP BY repo_id), "
+        "WITH hasfmt AS (SELECT repo_id, "
+        " max(CASE WHEN format='safetensors' THEN 1 ELSE 0 END) st, "
+        " max(CASE WHEN format='gguf' THEN 1 ELSE 0 END) gguf, "
+        " max(CASE WHEN format='pytorch' THEN 1 ELSE 0 END) pickle "
+        " FROM files GROUP BY repo_id), "
         "planned AS (SELECT f.repo_id, f.size_bytes, "
         "   CASE WHEN f.format='safetensors' AND (f.quant IS NULL OR lower(f.quant) IN "
         "        ('bf16','bfloat16','fp16','f16','float16','fp32','f32','float32')) "
         "        THEN 1 ELSE 0 END AS comp "
-        "   FROM files f JOIN hasst h USING(repo_id) "
-        "   WHERE (f.format IN ('safetensors','aux') OR (f.format='gguf' AND h.s=0)) "
+        "   FROM files f JOIN hasfmt h USING(repo_id) "
+        f"   WHERE {file_filter} "
         f"     AND f.repo_id IN ({ph})) "
         "SELECT repo_id, coalesce(sum(size_bytes),0), "
         "       coalesce(sum(CASE WHEN comp=1 THEN size_bytes ELSE 0 END),0), "

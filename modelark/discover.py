@@ -1,8 +1,8 @@
 """Discover models on the Hugging Face Hub and record metadata in the catalog.
 
-Metadata is cheap, so we catalog broadly; bytes are downloaded later only for
-repos the wishlist scorer promotes. Scope is decided by our own `category`
-(architecture-first), not HF's unreliable `pipeline_tag` — see DEC-002.
+Metadata is cheap, so we catalog broadly; bytes are downloaded later only after
+an operator selects and finalizes repositories. Walk scope is decided by our own
+`category` (architecture-first), not HF's unreliable `pipeline_tag` — see DEC-002.
 """
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError, HfHu
 from modelark.core import db
 from modelark import formats, ggufmeta
 
-# Modalities we now collect (DEC-010: text + audio-speech + world models). Vision,
-# multimodal, image-gen, video-gen stay deferred (DEF-002).
+# Modalities we now collect (DEC-010/011: text + audio-speech + world + image-gen).
+# Vision, multimodal, and video generation stay deferred (DEF-002).
 _COLLECTED_DOMAINS = {"text", "audio", "world", "image-gen"}
 
 
