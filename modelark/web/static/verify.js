@@ -1,15 +1,15 @@
 // Verify view (DEF-021): auto-surfaced disruption suspects + on-demand re-verify of archived copies.
 // Record consistency is checked offline; the decompress-canary runs server-side when a drive is mounted.
 (function () {
-  const { api, post, toast } = window.MA;
+  const { api, post, toast, esc } = window.MA;
   const $ = id => document.getElementById(id);
   let suspects = [];
 
   const suspectRow = s => `<div class="vfsus">
-      <div class="vfsusmain"><span class="vfrepo">${s.repo}</span>
-        <span class="vfreasons">${s.reasons.join(" · ")}</span></div>
-      <div class="vfsusmeta"><span>${(s.drives || []).join(", ")}${s.verified_at ? " · " + s.verified_at : ""}</span>
-        <button class="vfone" data-repo="${s.repo}">re-verify</button></div>
+      <div class="vfsusmain"><span class="vfrepo">${esc(s.repo)}</span>
+        <span class="vfreasons">${esc(s.reasons.join(" · "))}</span></div>
+      <div class="vfsusmeta"><span>${esc((s.drives || []).join(", "))}${s.verified_at ? " · " + esc(s.verified_at) : ""}</span>
+        <button class="vfone" data-repo="${esc(s.repo)}">re-verify</button></div>
     </div>`;
 
   function verdictRow(r) {
@@ -18,9 +18,9 @@
     const badge = !r.archived ? "not archived" : status === "verified" ? "verified"
       : status === "unknown" ? "not fully checked" : "FAIL";
     const checks = (r.deep_checks && r.deep_checks.length)
-      ? '<div class="vfchecks">' + r.deep_checks.map(c => `${c.ok === true ? "✓" : c.ok === false ? "✗" : "?"} ${c.file}${c.err ? " (" + c.err + ")" : ""}`).join("<br>") + "</div>" : "";
-    return `<div class="vfres ${cls}"><div class="vfresh"><span class="vfrepo">${r.repo}</span>
-      <span class="vfbadge ${cls}">${badge}</span></div><div class="vfresd">${r.detail || ""}</div>${checks}</div>`;
+      ? '<div class="vfchecks">' + r.deep_checks.map(c => `${c.ok === true ? "✓" : c.ok === false ? "✗" : "?"} ${esc(c.file)}${c.err ? " (" + esc(c.err) + ")" : ""}`).join("<br>") + "</div>" : "";
+    return `<div class="vfres ${cls}"><div class="vfresh"><span class="vfrepo">${esc(r.repo)}</span>
+      <span class="vfbadge ${cls}">${badge}</span></div><div class="vfresd">${esc(r.detail || "")}</div>${checks}</div>`;
   }
 
   async function runVerify(repos) {
@@ -28,7 +28,7 @@
     $("vfResults").innerHTML = '<div class="pcmut" style="padding:12px">verifying ' + repos.length + ' model(s)…</div>';
     let r;
     try { r = await post("/api/verify/run", { repos }); } catch (e) { r = { error: String(e) }; }
-    if (!r || !r.ok) { $("vfResults").innerHTML = '<div class="pcmut" style="padding:12px">error: ' + ((r && r.error) || "failed") + "</div>"; return; }
+    if (!r || !r.ok) { $("vfResults").innerHTML = '<div class="pcmut" style="padding:12px">error: ' + esc((r && r.error) || "failed") + "</div>"; return; }
     $("vfResults").innerHTML = '<p class="psub" style="margin:18px 0 8px"><b>Results</b></p>' + r.results.map(verdictRow).join("");
   }
 
@@ -37,7 +37,7 @@
     if (!host) return;
     host.innerHTML = '<div class="pcmut" style="padding:12px">scanning for suspects…</div>';
     let d;
-    try { d = await api("/api/verify/suspects"); } catch (e) { host.innerHTML = "error: " + e; return; }
+    try { d = await api("/api/verify/suspects"); } catch (e) { host.textContent = "error: " + e; return; }
     suspects = (d && d.suspects) || [];
     $("vfNote").textContent = suspects.length
       ? suspects.length + " suspect(s) found — archiving overlapped a disruption"

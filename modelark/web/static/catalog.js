@@ -1,6 +1,6 @@
 // Catalog view: filter/search/sort, build the cart, finalize the wishlist.
 (function () {
-  const {api, post, gb, dl, toast} = window.MA;
+  const {api, post, gb, dl, toast, esc} = window.MA;
   const $ = id => document.getElementById(id);
   const S = {q: "", cat: new Set(), v: new Set(), bucket: new Set(),
              hide_quant: 1, hide_gated: 0, sel: "", sort: "dl", dir: "desc"};
@@ -44,12 +44,12 @@
   async function load() {
     const d = await api("/api/models?" + qstr());
     $("tbody").innerHTML = d.rows.map(m => `
-      <tr class="${m.sel ? 'sel' : ''}" data-id="${m.id}">
+      <tr class="${m.sel ? 'sel' : ''}" data-id="${esc(m.id)}">
       <td class="cb"><input type="checkbox" ${m.sel ? 'checked' : ''}></td>
-      <td class="idcell">${m.id}${m.g ? ' <span class="lock" title="gated">&#128274;</span>' : ''}</td>
-      <td class="num">${m.p != null ? m.p + 'B' : '—'}</td><td>${m.bucket}</td><td>${m.cat}</td>
-      <td><span class="tag t-${m.v}">${m.v}</span></td><td class="num">${gb(m.bytes)}</td>
-      <td class="num">${dl(m.dl)}</td><td>${m.lic}</td></tr>`).join("");
+      <td class="idcell">${esc(m.id)}${m.g ? ' <span class="lock" title="gated">&#128274;</span>' : ''}</td>
+      <td class="num">${esc(m.p != null ? m.p + 'B' : '—')}</td><td>${esc(m.bucket)}</td><td>${esc(m.cat)}</td>
+      <td><span class="tag t-${esc(m.v)}">${esc(m.v)}</span></td><td class="num">${esc(gb(m.bytes))}</td>
+      <td class="num">${esc(dl(m.dl))}</td><td>${esc(m.lic)}</td></tr>`).join("");
     $("empty").style.display = d.rows.length ? "none" : "block";
     $("shown").textContent = d.matched + " of " + d.total + (d.capped ? " (showing " + d.rows.length + ")" : "") + " shown";
     $("sizeScreen").textContent = "· " + gb(d.filtered_bytes || 0) + " on screen";
@@ -64,7 +64,7 @@
     bar.style.background = tb > BUD ? "var(--crit)" : tb > BUD * 0.85 ? "var(--warn)" : "var(--ok)";
     $("bnote").textContent = tb > BUD ? ("over by " + (tb - BUD).toFixed(1) + " TB")
       : ((BUD - tb).toFixed(1) + " TB left · ZipNN ~30% off bf16 on disk");
-    $("finnote").innerHTML = lastSel.finalized ? `<b>${lastSel.finalized}</b> finalized (ready for fetch)` : "nothing finalized yet";
+    $("finnote").innerHTML = lastSel.finalized ? `<b>${esc(lastSel.finalized)}</b> finalized (ready for fetch)` : "nothing finalized yet";
     // 24h-cap considerate-use nudge (dismissable; threshold tracks config — raising the cap clears it)
     const capGB = lastSel.cap_24h_gb || 0, selGB = lastSel.bytes / 1e9, cw = $("capWarn");
     if (cw) {
@@ -85,8 +85,8 @@
   function renderTally(s) {
     lastSel = s; renderBudget();
     $("tally").innerHTML = '<h2>your set · by category</h2>' + (s.by_cat.length ? s.by_cat.map(g => `
-      <div class="crow" data-cat="${g.cat}"><div class="cc">${g.cat}</div><div class="cn">${g.n} · ${gb(g.bytes)}</div>
-      ${g.recent ? `<div class="rec">+ ${g.recent.split('/').pop()}</div>` : ''}</div>`).join("")
+      <div class="crow" data-cat="${esc(g.cat)}"><div class="cc">${esc(g.cat)}</div><div class="cn">${esc(g.n)} · ${esc(gb(g.bytes))}</div>
+      ${g.recent ? `<div class="rec">+ ${esc(g.recent.split('/').pop())}</div>` : ''}</div>`).join("")
       : '<div class="rec" style="padding:10px">Tick rows to build your set. Hit Finish to commit it as the wishlist.</div>');
     $("tally").querySelectorAll(".crow").forEach(el => el.onclick = () => {
       const cat = el.dataset.cat;                       // clicking a tally category filters the table to it
@@ -123,7 +123,7 @@
     else
       note = `<span class="pgnote">Compressed ${gb(g.compressed)} · uncompressed ${gb(g.uncompressed)} of ${gb(cap)} capacity.</span>`;
     el.innerHTML =
-      `<div class="pgh"><span class="pgtitle">Plan capacity · ${g.plan_id}</span><span class="pgbadge ${g.tier}">${badge}</span></div>` +
+      `<div class="pgh"><span class="pgtitle">Plan capacity · ${esc(g.plan_id)}</span><span class="pgbadge ${esc(g.tier)}">${esc(badge)}</span></div>` +
       `<div class="pgbar"><div style="width:${compPct.toFixed(1)}%;background:${barColor}"></div></div>` + note;
   }
 
@@ -175,7 +175,8 @@
     if (S.sort === k) S.dir = S.dir === "asc" ? "desc" : "asc";
     else { S.sort = k; S.dir = (["id", "cat", "v", "lic", "bucket"].includes(k)) ? "asc" : "desc"; }
     document.querySelectorAll("thead th .ar").forEach(a => a.remove());
-    th.insertAdjacentHTML("beforeend", ' <span class="ar">' + (S.dir === "asc" ? "▲" : "▼") + '</span>');
+    const arrow = document.createElement("span");
+    arrow.className = "ar"; arrow.textContent = " " + (S.dir === "asc" ? "▲" : "▼"); th.appendChild(arrow);
     load();
   });
 

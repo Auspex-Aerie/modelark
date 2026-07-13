@@ -2,6 +2,7 @@
 // a type/category toggle, and dotted copy#1→copy#2 links. Consumes /api/library/plan
 // (the same librarian.plan_view the CLI's `library plan --json` emits).
 (function () {
+  const {esc} = window.MA;
   const CAT = {
     "generative-llm": "#2c5f8f", "embedding": "#0f766e", "encoder": "#0e7490",
     "reranker": "#7c3aed", "qa": "#b45309", "classifier": "#a16207", "compression": "#be123c",
@@ -137,15 +138,15 @@
       ? `<div class="seg segarch" style="width:${(100 * archived / usable).toFixed(2)}%" title="already archived: ${MA.gb(archived)}"></div>`
       : "";
     const segs = Object.entries(groups).sort((a, b) => b[1] - a[1]).map(([k, b]) =>
-      `<div class="seg" style="width:${(100 * b / usable).toFixed(2)}%;background:${color(k)}" title="${keyLabel(k)} (planned): ${MA.gb(b)}"></div>`).join("");
+      `<div class="seg" style="width:${(100 * b / usable).toFixed(2)}%;background:${color(k)}" title="${esc(keyLabel(k))} (planned): ${esc(MA.gb(b))}"></div>`).join("");
     const badge = { raid: "RAID", primary: "PRIMARY", replica: "REPLICA" }[d.tier] || d.tier;
     const total = archived + (d.planned_bytes || 0);
     const totalPct = usable ? Math.min(100, Math.round(100 * total / usable)) : 0;
-    return `<div class="drivecard${(d.n_models || archived) ? "" : " empty"}" id="dc-${d.label}">
-      <div class="dchead"><span class="dclabel">${d.label}</span><span class="dcbadge ${d.tier}">${badge}</span></div>
+    return `<div class="drivecard${(d.n_models || archived) ? "" : " empty"}" id="dc-${esc(d.label)}">
+      <div class="dchead"><span class="dclabel">${esc(d.label)}</span><span class="dcbadge ${esc(d.tier)}">${esc(badge)}</span></div>
       <div class="dcbar"><div class="dcbarfill">${archSeg}${segs}</div></div>
       <div class="dcfoot"><span>${totalPct}% · ${MA.gb(total)}/${MA.gb(usable)}</span><span>${d.n_models} planned</span></div>
-      <div class="dcdone" id="done-${d.label}"${archived ? "" : " hidden"}>${archived ? doneRowHTML(archived, usable) : ""}</div>
+      <div class="dcdone" id="done-${esc(d.label)}"${archived ? "" : " hidden"}>${archived ? doneRowHTML(archived, usable) : ""}</div>
     </div>`;
   }
 
@@ -153,7 +154,7 @@
     const keys = new Set();
     data.drives.forEach(d => d.models.forEach(m => keys.add(keyOf(m))));
     return `<div class="filllegend">` + [...keys].sort().map(k =>
-      `<span class="lgi"><span class="lgsw" style="background:${color(k)}"></span>${keyLabel(k)}</span>`).join("") + `</div>`;
+      `<span class="lgi"><span class="lgsw" style="background:${color(k)}"></span>${esc(keyLabel(k))}</span>`).join("") + `</div>`;
   }
 
   // Route each copy#1→copy#2 link down the left gutter (orthogonal), so it never crosses the
@@ -206,7 +207,7 @@
     graph.innerHTML = html + legend(data);
     requestAnimationFrame(() => drawLinks(data));
     document.getElementById("fillAdvisories").innerHTML =
-      (data.advisories || []).map(a => `<div class="fadv ${a.level}">${a.msg}</div>`).join("");
+      (data.advisories || []).map(a => `<div class="fadv ${esc(a.level)}">${esc(a.msg)}</div>`).join("");
     const t = data.totals || {};
     document.getElementById("fillNote").textContent =
       `${t.n_planned} to place · ${t.n_must} must-have · ${t.n_bulk} bulk` + (t.n_done ? ` · ${t.n_done} done` : "");
@@ -275,8 +276,8 @@
     if (!s || s.status === "idle" || (s.status !== "running" && !s.session_bytes)) {
       const t = (last && last.totals) || {};
       el.innerHTML = `<div class="telpanel idle"><div class="telhead" style="margin-bottom:9px">Run</div>` +
-        (s && s.status in TERMINAL ? statusLine(s) : "Not running. Press <b>Start fill</b> to begin.") +
-        (t.n_planned != null ? `<div style="margin-top:11px;font:500 13px ui-monospace,monospace">${t.n_planned} to place · ${t.n_must} must-have · ${t.n_bulk} bulk</div>` : "") +
+        (s && s.status in TERMINAL ? esc(statusLine(s)) : "Not running. Press <b>Start fill</b> to begin.") +
+        (t.n_planned != null ? `<div style="margin-top:11px;font:500 13px ui-monospace,monospace">${esc(t.n_planned)} to place · ${esc(t.n_must)} must-have · ${esc(t.n_bulk)} bulk</div>` : "") +
         `</div>`;
       return;
     }
@@ -293,11 +294,11 @@
     const phase = (s.file_phase || "").toLowerCase();
 
     let html = `<div class="telpanel">`;
-    html += `<div class="telcap"><span class="telhead">Now fetching</span>${s.drive ? `<span class="telpill" style="background:#2c5f8f">${s.drive}</span>` : ""}</div>`;
-    html += `<div class="telcur">${s.repo || "—"}</div>`;
-    if (s.file) html += `<div><span class="telphase" style="background:${PHASE_COLOR[phase] || "#7a8496"}">${phase || "…"}</span><span class="telfile">${shortFile(s.file)}</span></div>`;
-    if (s.n_repos) html += `<div class="telrow"><div class="tellabel"><span>model</span><span>${s.repo_index || 0} / ${s.n_repos}</span></div><div class="telbar"><div class="telbarfill" style="width:${repoPct.toFixed(1)}%"></div></div></div>`;
-    if (s.shard_no) html += `<div class="telrow"><div class="tellabel"><span>shard</span><span>${s.shard_no} / ${s.n_shards}</span></div><div class="telbar"><div class="telbarfill file" style="width:${shardPct.toFixed(1)}%"></div></div></div>`;
+    html += `<div class="telcap"><span class="telhead">Now fetching</span>${s.drive ? `<span class="telpill" style="background:#2c5f8f">${esc(s.drive)}</span>` : ""}</div>`;
+    html += `<div class="telcur">${esc(s.repo || "—")}</div>`;
+    if (s.file) html += `<div><span class="telphase" style="background:${PHASE_COLOR[phase] || "#7a8496"}">${esc(phase || "…")}</span><span class="telfile">${esc(shortFile(s.file))}</span></div>`;
+    if (s.n_repos) html += `<div class="telrow"><div class="tellabel"><span>model</span><span>${esc(s.repo_index || 0)} / ${esc(s.n_repos)}</span></div><div class="telbar"><div class="telbarfill" style="width:${repoPct.toFixed(1)}%"></div></div></div>`;
+    if (s.shard_no) html += `<div class="telrow"><div class="tellabel"><span>shard</span><span>${esc(s.shard_no)} / ${esc(s.n_shards)}</span></div><div class="telbar"><div class="telbarfill file" style="width:${shardPct.toFixed(1)}%"></div></div></div>`;
     html += `<div class="telstats">`
       + `<div class="telstat"><span class="k">download · live</span><span class="v accent">${dlrate}</span></div>`
       + `<div class="telstat"><span class="k">avg · effective</span><span class="v">${rate}</span></div>`
@@ -344,12 +345,12 @@
       if (it.drive !== prevDrive) {
         prevDrive = it.drive;
         const st = dstat[it.drive];
-        div = `<div class="telqdrive"><span>${it.drive}</span><span class="qsub">${st.n} · ${MA.gb(st.b)}</span></div>`;
+        div = `<div class="telqdrive"><span>${esc(it.drive)}</span><span class="qsub">${esc(st.n)} · ${esc(MA.gb(st.b))}</span></div>`;
       }
       const cls = { done: "done", partial: "partial", current: "cur" }[it.state] || "";
       const rem = it.state === "partial"
         ? `<span class="qrem">${it.remaining} cop${it.remaining === 1 ? "y" : "ies"} left</span>` : "";
-      return div + `<div class="telq ${cls}"><span class="telqdot" style="background:${CAT[it.category] || hashColor(it.category || "?")}"></span><span class="qname">${it.repo}</span>${rem}<span class="qsz">${MA.gb(it.size)}</span></div>`;
+      return div + `<div class="telq ${cls}"><span class="telqdot" style="background:${CAT[it.category] || hashColor(it.category || "?")}"></span><span class="qname">${esc(it.repo)}</span>${rem}<span class="qsz">${esc(MA.gb(it.size))}</span></div>`;
     }).join("");
     const left = items.reduce((a, it) => a + it.remaining * it.size, 0);   // Σ (copies still owed) × size
     const head = `${doneN} / ${items.length} done · ${MA.gb(left)} left`;
@@ -399,7 +400,7 @@
     if (!el) return;
     if (s && s.status === "running" && s.awaiting_drive) {
       el.hidden = false;
-      el.innerHTML = `⏳ Insert drive <b>${s.awaiting_drive}</b> — the fill continues automatically once it mounts. ` +
+      el.innerHTML = `⏳ Insert drive <b>${esc(s.awaiting_drive)}</b> — the fill continues automatically once it mounts. ` +
         `<button id="fillConfirm">I inserted it</button>`;
       const b = document.getElementById("fillConfirm");
       if (b) b.onclick = () => MA.post("/api/fill/confirm-drive", { label: s.awaiting_drive })
@@ -462,8 +463,8 @@
     };
     const dividend = Math.max(0, t.uncompressed - t.compressed);
     el.innerHTML =
-      `<div class="pbhead"><span class="pbtitle">Plan '${t.plan_id}' · ${t.provisioning} provisioning</span>` +
-      `<span class="pbcap">${t.n_selection} finalized · capacity ${MA.gb(cap)} · ${t.n_drives} drive${t.n_drives === 1 ? "" : "s"}</span></div>` +
+      `<div class="pbhead"><span class="pbtitle">Plan '${esc(t.plan_id)}' · ${esc(t.provisioning)} provisioning</span>` +
+      `<span class="pbcap">${esc(t.n_selection)} finalized · capacity ${esc(MA.gb(cap))} · ${esc(t.n_drives)} drive${t.n_drives === 1 ? "" : "s"}</span></div>` +
       bar("Uncompressed footprint (boundary currency)", t.uncompressed, "unc") +
       bar("Compressed estimate (on disk)", t.compressed, "comp") +
       `<div class="pbnote">compression dividend ≈ ${MA.gb(dividend)} — the drive space compression is expected to reclaim` +
@@ -480,9 +481,9 @@
     graph.innerHTML = '<div class="fillloading">planning…</div>';
     document.getElementById("fillAdvisories").innerHTML = "";
     MA.api("/api/library/plan").then(d => {
-      if (!d || d.error) { graph.innerHTML = '<div class="fillloading">error: ' + ((d && d.error) || "no data") + '</div>'; return; }
+      if (!d || d.error) { graph.innerHTML = '<div class="fillloading">error: ' + esc((d && d.error) || "no data") + '</div>'; return; }
       render(d);
-    }).catch(e => { graph.innerHTML = '<div class="fillloading">error: ' + ((e && e.message) || e) + '</div>'; });
+    }).catch(e => { graph.innerHTML = '<div class="fillloading">error: ' + esc((e && e.message) || e) + '</div>'; });
     // one-row-per-model queue: pull the heavy structure once, then the cheap live per-model state
     MA.api("/api/library/queue").then(d => {
       if (d && !d.error) { queueModels = d.models; queueDrives = d.drives; }

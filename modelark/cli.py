@@ -164,6 +164,24 @@ def cmd_fetch(args):
               repos=args.repo, dry_run=args.dry_run, max_24h_gb=args.max_24h_gb)
 
 
+def cmd_restore(args):
+    from modelark import restore
+    con = db.connect(read_only=True)
+    try:
+        for repo_id in args.repo:
+            try:
+                result = restore.restore_repo(con, repo_id, args.dest)
+            except restore.RestoreError as exc:
+                raise SystemExit(f"restore failed: {exc}") from exc
+            retrieved = result["annex_retrievals"]
+            suffix = f"; {retrieved} retrieved through git-annex" if retrieved else ""
+            print(f"restored {repo_id}: {result['n_files']} verified file(s) -> {result['path']}{suffix}")
+            for warning in result["warnings"]:
+                print(f"  warning: {warning['file']}: {warning['detail']}")
+    finally:
+        con.close()
+
+
 def cmd_library_init(args):
     from modelark import register
     path = register.ensure_library(Path(args.path).expanduser() if args.path else None)
@@ -423,6 +441,12 @@ def main(argv=None):
                     help="stop at the next repo boundary if >N GB were downloaded in the last 24h "
                          "(default 1000 = 1 TB; 0 disables)")
     ft.set_defaults(func=cmd_fetch)
+
+    rs = sub.add_parser("restore", help="restore an archived model to its original Hugging Face layout")
+    rs.add_argument("--repo", action="append", required=True, help="archived repo id (repeatable)")
+    rs.add_argument("--dest", type=Path, required=True,
+                    help="output root; each model is restored below <dest>/<org>/<model>")
+    rs.set_defaults(func=cmd_restore)
 
     lib = sub.add_parser("library", help="the central git-annex map repo")
     libsub = lib.add_subparsers(dest="library_cmd", required=True)
