@@ -27,7 +27,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,migration]"
+          pip install -e ".[dev]"
 
       - name: Run test suite (excluding E2E)
         run: |
