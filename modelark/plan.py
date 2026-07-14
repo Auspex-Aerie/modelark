@@ -26,7 +26,7 @@ LAZY import inside register_drive, so there is no module-level cycle.
 from __future__ import annotations
 
 from modelark.core import db
-from modelark import librarian, register, wishlist
+from modelark import archive_manifest, librarian, register, wishlist
 
 DEFAULT_PLAN = "ark"
 _FIELDS = ["plan_id", "name", "annex_root", "provisioning", "status", "is_active", "created_at", "notes"]
@@ -152,38 +152,19 @@ def capacity(con, plan_id) -> int:
 
 
 def _footprint_by_repo(con, repo_ids: list[str]) -> dict[str, tuple[int, int, int]]:
-    """Per repo: (raw, compressible, noncompressible) planned bytes, mirroring fetch.plan's file
-    selection (safetensors, else GGUF, else policy-allowed inert pickle, plus aux) and its
-    float-quant compressibility test — in ONE pass, no per-repo query. `raw` = compressible +
-    noncompressible."""
-    if not repo_ids:
-        return {}
-    ph = ",".join(["?"] * len(repo_ids))
-    allow_pickle = not wishlist.exclude_pickle_only()
-    pickle_clause = " OR (f.format='pytorch' AND h.st=0 AND h.gguf=0)" if allow_pickle else ""
-    aux_eligible = "(h.st=1 OR h.gguf=1 OR h.pickle=1)" if allow_pickle else "(h.st=1 OR h.gguf=1)"
-    file_filter = (
-        f"((f.format='aux' AND {aux_eligible}) OR f.format='safetensors' "
-        f"OR (f.format='gguf' AND h.st=0){pickle_clause})"
-    )
-    rows = con.execute(
-        "WITH hasfmt AS (SELECT repo_id, "
-        " max(CASE WHEN format='safetensors' THEN 1 ELSE 0 END) st, "
-        " max(CASE WHEN format='gguf' THEN 1 ELSE 0 END) gguf, "
-        " max(CASE WHEN format='pytorch' THEN 1 ELSE 0 END) pickle "
-        " FROM files GROUP BY repo_id), "
-        "planned AS (SELECT f.repo_id, f.size_bytes, "
-        "   CASE WHEN f.format='safetensors' AND (f.quant IS NULL OR lower(f.quant) IN "
-        "        ('bf16','bfloat16','fp16','f16','float16','fp32','f32','float32')) "
-        "        THEN 1 ELSE 0 END AS comp "
-        "   FROM files f JOIN hasfmt h USING(repo_id) "
-        f"   WHERE {file_filter} "
-        f"     AND f.repo_id IN ({ph})) "
-        "SELECT repo_id, coalesce(sum(size_bytes),0), "
-        "       coalesce(sum(CASE WHEN comp=1 THEN size_bytes ELSE 0 END),0), "
-        "       coalesce(sum(CASE WHEN comp=0 THEN size_bytes ELSE 0 END),0) "
-        "FROM planned GROUP BY repo_id", repo_ids).fetchall()
-    return {r[0]: (r[1], r[2], r[3]) for r in rows}
+    """Per repo: (raw, compressible, noncompressible) from the canonical bulk manifest.
+
+    Ineligible repositories remain absent, preserving the catalog-gate behavior while the
+    shadow reconciler reports their typed manifest-policy diagnostics.
+    """
+    policy = archive_manifest.ArchivePolicy(allow_pickle=not wishlist.exclude_pickle_only())
+    batch = archive_manifest.inspect_manifests_for_repos(con, repo_ids, policy)
+    out = {}
+    for repo_id, manifest in batch.manifests.items():
+        compressible = sum(item.size_bytes for item in manifest if item.storage_action == "compress")
+        noncompressible = sum(item.size_bytes for item in manifest if item.storage_action == "raw")
+        out[repo_id] = (compressible + noncompressible, compressible, noncompressible)
+    return out
 
 
 # Graduated catalog gate (#38): tiers on the COMPRESSED footprint vs capacity (compressed is what

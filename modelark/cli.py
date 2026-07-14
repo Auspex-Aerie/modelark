@@ -197,7 +197,22 @@ def cmd_library_nas_add(args):
 
 
 def cmd_library_plan(args):
-    from modelark import librarian, fetch, fill, plan
+    from modelark import librarian, fetch, fill, plan, reconcile
+    if getattr(args, "explain", False):
+        if args.apply:
+            raise SystemExit("--explain is read-only and cannot be combined with --apply")
+        con = db.connect(read_only=True)
+        try:
+            prow = plan.active(con)
+            if prow is None:
+                raise SystemExit("no active plan; select a plan before requesting a shadow explanation")
+            print(json.dumps(reconcile.shadow_report(
+                con, prow["plan_id"], repo_ids=args.repo,
+                provisioning=prow["provisioning"],
+            ), default=str, sort_keys=True))
+        finally:
+            con.close()
+        return
     con = db.connect()          # RW like fetch: portal must be stopped; replays any dirty WAL
     try:                        # one connection for the whole command (plan → apply → post-check)
         prow = plan.active(con) or plan.bootstrap(con)   # #33: scope planning to the active Plan
@@ -464,6 +479,8 @@ def main(argv=None):
     lp.add_argument("--repo", action="append", help="plan specific repo(s) instead of the finalized set")
     lp.add_argument("--apply", action="store_true", help="execute the plan (fetch per drive)")
     lp.add_argument("--json", action="store_true", help="emit the plan as JSON (portal Fill tab / scripting)")
+    lp.add_argument("--explain", action="store_true",
+                    help="read-only DEC-045 shadow graph + legacy comparison JSON; never used by --apply")
     lp.add_argument("--max-24h", dest="max_24h_gb", type=float, default=1000,
                     help="24h download cap in GB across the fleet (default 1000 = 1 TB; 0 disables)")
     lp.set_defaults(func=cmd_library_plan)

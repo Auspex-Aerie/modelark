@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 from pathlib import Path, PurePosixPath
 
-from modelark import compress, fetch, register
+from modelark import archive_manifest, compress, register
 
 _DISRUPTION_OUTCOMES = ("awaiting-drive", "compress-fallback", "error")
 _WINDOW_MIN = 15                    # an archive within ±this many minutes of a disruption is a suspect
@@ -69,17 +69,26 @@ def suspects(con) -> list[dict]:
     ).fetchall():
         add(repo, drive, "float weights stored raw (compress fallback / over-budget)", va)
 
-    # 2. partial copy: a drive holds FEWER than the repo's planned files (interrupted mid-copy)
-    for repo, drive in con.execute(
-        "WITH hasst AS (SELECT repo_id, max(CASE WHEN format='safetensors' THEN 1 ELSE 0 END) s "
-        "               FROM files GROUP BY repo_id), "
-        "planned AS (SELECT f.repo_id, count(*) n FROM files f JOIN hasst h USING(repo_id) "
-        "            WHERE f.format IN ('safetensors','aux') OR (f.format='gguf' AND h.s=0) GROUP BY f.repo_id), "
-        "perdrive AS (SELECT repo_id, drive_label, count(*) n FROM archived GROUP BY repo_id, drive_label) "
-        "SELECT pd.repo_id, pd.drive_label FROM perdrive pd JOIN planned pl "
-        "  ON pd.repo_id=pl.repo_id WHERE pd.n < pl.n"
-    ).fetchall():
-        add(repo, drive, "partial copy (interrupted)")
+    # 2. partial copy: compare exact canonical filename sets. Counts are unsafe because an extra
+    # archived filename can otherwise hide a missing required one, and old SQL omitted pickle.
+    archived_rows = con.execute(
+        "SELECT repo_id,drive_label,rfilename FROM archived ORDER BY repo_id,drive_label,rfilename"
+    ).fetchall()
+    repos = sorted({row[0] for row in archived_rows})
+    manifest_batch = archive_manifest.inspect_manifests_for_repos(
+        con, repos, archive_manifest.recovery_policy()
+    )
+    present: dict[tuple[str, str], set[str]] = {}
+    archived_names: dict[str, set[str]] = {}
+    for repo, drive, rfilename in archived_rows:
+        present.setdefault((repo, drive), set()).add(rfilename)
+        archived_names.setdefault(repo, set()).add(rfilename)
+    for (repo, drive), names in present.items():
+        manifest = manifest_batch.manifests.get(repo)
+        required = ({item.rfilename for item in manifest} if manifest is not None
+                    else archived_names.get(repo, set()))
+        if not required <= names:
+            add(repo, drive, "partial copy (interrupted)")
 
     # 3. disruption-window: an archive that landed within ±window of the repo's own disruption event
     q = ",".join(f"'{o}'" for o in _DISRUPTION_OUTCOMES)
@@ -115,9 +124,12 @@ def reverify(con, repo_id: str, deep: bool = True) -> dict:
     # policy. For legacy/foreign unsupported formats, the durable records are the manifest.
     try:
         planned_names = {
-            f["rfilename"] for f in fetch.plan(con, repo_id, allow_pickle=True)
+            item.rfilename
+            for item in archive_manifest.manifest_for_repo(
+                con, repo_id, archive_manifest.recovery_policy()
+            )
         }
-    except fetch.ArchivePolicyError:
+    except archive_manifest.ArchivePolicyError:
         planned_names = set(by_name)
 
     missing = sorted(planned_names - set(by_name))                    # planned but never archived
