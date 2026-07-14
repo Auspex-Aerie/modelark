@@ -34,10 +34,7 @@ from typing import Any, Callable
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
 from modelark.core import db
-from modelark import compress, register, wishlist
-
-# quant labels safe to ZipNN-compress (true float weights; not already-quantized)
-_FLOAT = {None, "bf16", "bfloat16", "fp16", "f16", "float16", "fp32", "f32", "float32"}
+from modelark import archive_manifest, compress, register, wishlist
 
 # Download-stall resilience (INC-004 + the DEC-023 stage-2 watchdog). The built-in read timeout did
 # NOT catch a multi-hour hang (hf blocked/retried internally and never returned control; on 2026-07-09
@@ -74,8 +71,7 @@ class _StopRequested(Exception):
     """Raised inside the download loop when a stop is requested mid-shard, so run() can stop cleanly."""
 
 
-class ArchivePolicyError(RuntimeError):
-    """The catalog entry cannot produce an archive plan under the configured safety policy."""
+ArchivePolicyError = archive_manifest.ArchivePolicyError
 
 
 def _noop(ev: dict) -> None:            # default progress sink (CLI relies on the print()s below)
@@ -114,54 +110,14 @@ def finalized(con) -> list[str]:
 
 
 def plan(con, repo_id: str, *, allow_pickle: bool | None = None) -> list[dict]:
-    """Files to archive for a repo: preferred weights + essential companions.
+    """Compatibility adapter over the canonical archive manifest.
 
     ``allow_pickle=None`` applies the configured acquisition policy. Restore passes
     ``True`` because a later policy change must never make already-archived inert bytes
     unrecoverable.
     """
-    rows = con.execute(
-        "SELECT rfilename, size_bytes, sha256, format, quant FROM files WHERE repo_id = ?",
-        [repo_id]).fetchall()
-    files = [dict(zip(["rfilename", "size", "sha256", "fmt", "quant"], r)) for r in rows]
-    st = [f for f in files if f["fmt"] == "safetensors"]
-    gguf = [f for f in files if f["fmt"] == "gguf"]
-    pickle = [f for f in files if f["fmt"] == "pytorch"]
-    if st:
-        selected_weights = st
-    elif gguf:
-        selected_weights = gguf
-    elif pickle:
-        if allow_pickle is None:
-            allow_pickle = not wishlist.exclude_pickle_only()
-        if not allow_pickle:
-            raise ArchivePolicyError(
-                f"{repo_id}: pickle-only weights are blocked by exclude.pickle_only=true; "
-                "select a safetensors/GGUF repository or explicitly opt in to inert pickle storage"
-            )
-        selected_weights = pickle
-    else:
-        formats = sorted({f["fmt"] for f in files if f["fmt"] != "aux"})
-        detail = f" (found: {', '.join(formats)})" if formats else ""
-        raise ArchivePolicyError(
-            f"{repo_id}: no supported archive weights; expected safetensors, GGUF, or opted-in pickle"
-            + detail
-        )
-
-    selected_names = {f["rfilename"] for f in selected_weights}
-    out = []
-    for f in files:
-        if f["rfilename"] in selected_names and f["fmt"] == "safetensors":
-            f["mode"] = "compress" if f["quant"] in _FLOAT else "raw"   # gptq/awq → store raw
-            out.append(f)
-        elif f["rfilename"] in selected_names:            # GGUF / explicitly opted-in pickle
-            f["mode"] = "raw"
-            out.append(f)
-        elif f["fmt"] == "aux":                         # config/tokenizer/index/etc.
-            f["mode"] = "raw"
-            out.append(f)
-        # skip pytorch/onnx/mlx/other and gguf-when-safetensors-exists
-    return out
+    policy = archive_manifest.acquisition_policy(allow_pickle=allow_pickle)
+    return [item.as_fetch_record() for item in archive_manifest.manifest_for_repo(con, repo_id, policy)]
 
 
 def _is_annex(dest: Path) -> bool:

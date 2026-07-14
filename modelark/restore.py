@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from modelark import compress, fetch, register
+from modelark import archive_manifest, compress, register
 
 _ANNEX_SHA256 = re.compile(r"^SHA256E?-s\d+--([0-9a-f]{64})(?:\.|$)")
 
@@ -163,8 +163,13 @@ def restore_repo(con, repo_id: str, output_root: str | Path) -> dict:
     # A legacy/foreign archive may contain formats the current acquisition planner does
     # not support; in that case its durable archive records are the recovery manifest.
     try:
-        planned = [item["rfilename"] for item in fetch.plan(con, repo_id, allow_pickle=True)]
-    except fetch.ArchivePolicyError:
+        planned = [
+            item.rfilename
+            for item in archive_manifest.manifest_for_repo(
+                con, repo_id, archive_manifest.recovery_policy()
+            )
+        ]
+    except archive_manifest.ArchivePolicyError:
         planned = sorted(copies)
     if not planned:
         raise RestoreError(f"{repo_id}: catalog has no restorable planned files")
