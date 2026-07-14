@@ -416,9 +416,14 @@ def test_sweep_incomplete(tmp_path):
 
 
 if __name__ == "__main__":
+    import inspect
     import tempfile
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
-            fn(Path(tempfile.mkdtemp()))
+            with tempfile.TemporaryDirectory() as td:
+                if inspect.signature(fn).parameters:
+                    fn(Path(td))
+                else:
+                    fn()
             print(f"ok  {name}")
     print("all passed")
