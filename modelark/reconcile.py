@@ -330,8 +330,7 @@ def _copy_facts(
 def _drive_rank(kind: RequirementKind, drive: DriveFact) -> tuple:
     if kind == RequirementKind.PROTECTED_REPLICA:
         return (drive.capacity_bytes, drive.drive_label)
-    if kind == RequirementKind.PROTECTED_HOME:
-        return (0 if drive.raid_backed else 1, -drive.capacity_bytes, drive.drive_label)
+    # PRIMARY and PROTECTED_HOME both prefer RAID-backed drives, then largest capacity.
     return (0 if drive.raid_backed else 1, -drive.capacity_bytes, drive.drive_label)
 
 
@@ -584,8 +583,10 @@ def shadow_report(
             plan_id=plan_id, provisioning=provisioning,
         )
         reservations = _legacy_reservations(con, placement)
-    except archive_manifest.ArchivePolicyError as exc:
-        legacy_error = str(exc)
+    except Exception as exc:
+        # This is a comparison seam: legacy planner/adapter drift must not discard the
+        # independently derived graph that the operator invoked --explain to inspect.
+        legacy_error = f"{type(exc).__name__}: {exc}"
     normalized = normalize_legacy_reservations(reservations, result)
     payload = result.to_dict()
     payload["shadow"] = {
