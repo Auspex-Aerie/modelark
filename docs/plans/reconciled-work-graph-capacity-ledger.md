@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Phase 1 implemented in shadow mode — local validation complete; implementation review and copied-catalog replay pending** |
+| Status | **Phase 2 implemented in shadow mode — local validation complete; implementation review and empirical gates pending** |
 | Scope | Fill planning, copy reconciliation, capacity accounting, execution, terminal failures, and operator surfaces |
 | Impact | Large blast radius across every fill safety path; phased shadow rollout is mandatory |
 | Trigger | A live legacy fill falsely reported a capacity stop after double-counting protected first copies already stored on the RAID home |
@@ -1061,8 +1061,8 @@ deterministic target stickiness is insufficient.
 
 ### Phase 1 — canonical manifest and reconciler, shadow-only
 
-Implementation status (2026-07-14): complete on `feat/reconciled-work-graph-phase1`, pending
-implementation review. The legacy fill executor still owns every placement and write decision. The new
+Implementation status (2026-07-14): merged as PR #10. The legacy fill executor still owns every
+placement and write decision. The new
 graph is reachable only through the read-only `modelark library plan --explain` diagnostic and tests;
 `--explain --apply` is rejected before a catalog connection is opened.
 
@@ -1108,6 +1108,11 @@ executor.
 
 ### Phase 2 — capacity ledger and typed feasibility
 
+Implementation status (2026-07-14): complete locally on `feat/reconciled-work-graph-phase2`, pending
+implementation review. `tiered_v1`, candidate-specific budgets, typed failures, file preflight, and
+codec caps are visible through read-only CLI/API shadow diagnostics only. No fill gate or executor
+consumes them.
+
 1. Implement the deterministic behavior-preserving placement policy from Section 6.4.
 2. Implement internal canonical capacity modes behind an old-value adapter; do not migrate schema yet.
 3. Unify headroom.
@@ -1128,6 +1133,26 @@ Review evidence:
 - replica drive total equals durable sum plus maximum task workspace, never the workspace sum;
 - incident-shaped graph feasible in guaranteed mode;
 - deliberate shortfall fixtures produce exact, typed numbers.
+
+Local evidence recorded before implementation review:
+
+- the incident fixture creates nine missing home tasks, removes 116 phantom reservations, places all
+  125 replica requirements, and is feasible in guaranteed mode;
+- deterministic synthetic placement agrees with normalized legacy targets while deliberate target
+  mutation remains a visible comparison failure;
+- the 100,000 archived-row fixture exercises 10,000 actual intent/drive candidates and completes the
+  full pytest call in 1.31 seconds on this workstation, with an internal two-second placement bound;
+- replica durable bytes aggregate by sum while conservative target workspace aggregates by maximum;
+- guaranteed/compression-aware boundaries, snapshot/live evidence, root-cause diagnostic deduplication,
+  and exact file-preflight boundaries have direct tests;
+- StreamZNN, whole ZipNN, and zstd reject output expansion before the write that would cross their
+  declared caps, and incompressible output returns to the existing raw-fallback path; and
+- `docs/capacity-evidence.md` records a disposable git-annex directory-remote trace showing one
+  target temporary object atomically renamed into place. The conservative workspace term remains
+  active pending review.
+
+Still required before Phase 3: implementation review, an operator-approved real-bf16 StreamZNN
+high-water run, and the copied/sanitized legacy-catalog replay plus release-host latency/lock evidence.
 
 ### Phase 3 — executor conversion
 

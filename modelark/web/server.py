@@ -191,6 +191,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(plan_api.totals())
             elif u.path == "/api/plan/cart":
                 self._json(plan_api.cart())
+            elif u.path == "/api/plan/explain":
+                self._json(plan_api.shadow_explain())
             elif u.path == "/api/verify/suspects":
                 self._json(verify_api.suspects())
             elif u.path == "/api/fill/status":

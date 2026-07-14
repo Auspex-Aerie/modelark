@@ -17,7 +17,12 @@ NEVER = (lambda: False)
 
 
 def _shard(dirpath: Path, name: str, n: int = 2_000_000) -> tuple[Path, str]:
-    data = os.urandom(n)                                   # even length → valid bf16 byte stream
+    # bf16-like: noisy mantissa byte plus a compressible exponent byte. Fully random bytes are
+    # intentionally routed to raw by the DEC-045 no-expansion cap.
+    data = bytearray(n)
+    data[0::2] = os.urandom(n // 2)
+    data[1::2] = b"\x3f" * (n // 2)
+    data = bytes(data)
     p = dirpath / name
     p.write_bytes(data)
     return p, hashlib.sha256(data).hexdigest()
@@ -44,6 +49,55 @@ def test_canary_fail_is_reported(tmp_path):
     res = fetch._compress_isolated(local, "bfloat16", compress.CODEC_WHOLE, 1, "0" * 64, NEVER)
     assert res["status"] == "canary", res
     assert not (tmp_path / "m.safetensors.znn").exists()          # child removed the uncertified .znn
+
+
+def test_incompressible_output_cap_falls_back_before_publish(tmp_path):
+    local = tmp_path / "dense.safetensors"
+    local.write_bytes(os.urandom(2_000_000))
+    sha = hashlib.sha256(local.read_bytes()).hexdigest()
+    res = fetch._compress_isolated(
+        local, "bfloat16", compress.CODEC_WHOLE, 1, sha, NEVER
+    )
+    assert res["status"] == "over-cap", res
+    assert local.exists(), "raw source must survive output-cap fallback"
+    assert not (tmp_path / "dense.safetensors.znn").exists()
+
+
+def test_whole_cap_is_checked_before_first_write(tmp_path):
+    src = tmp_path / "whole.bin"
+    dst = tmp_path / "whole.znn"
+    src.write_bytes(b"1234")
+    fake_zipnn = mock.Mock()
+    fake_zipnn.compress.return_value = b"12345"
+    with mock.patch("modelark.compress._zipnn", return_value=fake_zipnn), \
+         mock.patch("modelark.compress._atomic_write_bytes") as write:
+        try:
+            compress.compress_file(src, dst, codec=compress.CODEC_WHOLE)
+            raise AssertionError("expanded whole output must hit the cap")
+        except compress.OutputCapExceeded:
+            pass
+    write.assert_not_called()
+    assert not dst.exists()
+
+
+def test_zstd_cap_is_checked_before_next_write(tmp_path):
+    src = tmp_path / "zstd.bin"
+    dst = tmp_path / "zstd.znn"
+    src.write_bytes(b"1234")
+    compressor = mock.Mock()
+    compressor.compress.return_value = b"x" * 100
+    factory = mock.Mock()
+    factory.compressobj.return_value = compressor
+    zstd = mock.Mock()
+    zstd.ZstdCompressor.return_value = factory
+    with mock.patch("modelark.compress._zstd", return_value=zstd):
+        try:
+            compress._compress_zstd(src, dst, threads=1, output_cap=4)
+            raise AssertionError("expanded zstd output must hit the cap")
+        except compress.OutputCapExceeded:
+            pass
+    assert not dst.exists()
+    assert not list(tmp_path.glob("zstd.znn.*.tmp"))
 
 
 def test_crash_falls_back(tmp_path):

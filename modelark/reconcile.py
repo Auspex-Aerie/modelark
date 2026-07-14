@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Sequence
@@ -330,8 +331,7 @@ def _copy_facts(
 def _drive_rank(kind: RequirementKind, drive: DriveFact) -> tuple:
     if kind == RequirementKind.PROTECTED_REPLICA:
         return (drive.capacity_bytes, drive.drive_label)
-    if kind == RequirementKind.PROTECTED_HOME:
-        return (0 if drive.raid_backed else 1, -drive.capacity_bytes, drive.drive_label)
+    # PRIMARY and PROTECTED_HOME both prefer RAID-backed drives, then largest capacity.
     return (0 if drive.raid_backed else 1, -drive.capacity_bytes, drive.drive_label)
 
 
@@ -584,10 +584,41 @@ def shadow_report(
             plan_id=plan_id, provisioning=provisioning,
         )
         reservations = _legacy_reservations(con, placement)
-    except archive_manifest.ArchivePolicyError as exc:
-        legacy_error = str(exc)
+    except Exception as exc:
+        # This is a comparison seam: legacy planner/adapter drift must not discard the
+        # independently derived graph that the operator invoked --explain to inspect.
+        legacy_error = f"{type(exc).__name__}: {exc}"
     normalized = normalize_legacy_reservations(reservations, result)
     payload = result.to_dict()
+    from modelark import capacity  # local import: capacity types depend on Phase-1 graph types
+    capacity_result = capacity.plan_capacity(con, result, provisioning=provisioning)
+    payload["capacity"] = capacity_result.to_dict()
+    legacy_counts = Counter(item.requirement_id for item in normalized)
+    legacy_duplicates = sorted(key for key, count in legacy_counts.items() if count > 1)
+    legacy_targets = {item.requirement_id: item.target_drive for item in normalized}
+    new_targets = {item.requirement_id: item.target_drive for item in capacity_result.tasks}
+    shared = sorted(legacy_targets.keys() & new_targets.keys())
+    target_mismatches = [
+        {
+            "requirement_id": requirement_id,
+            "legacy": legacy_targets[requirement_id],
+            "tiered_v1": new_targets[requirement_id],
+        }
+        for requirement_id in shared
+        if legacy_targets[requirement_id] != new_targets[requirement_id]
+    ]
+    payload["placement_comparison"] = {
+        "target_equivalent": (
+            not legacy_duplicates
+            and not target_mismatches
+            and legacy_targets.keys() == new_targets.keys()
+        ),
+        "legacy_duplicate_requirements": legacy_duplicates,
+        "legacy_only": sorted(legacy_targets.keys() - new_targets.keys()),
+        "tiered_v1_only": sorted(new_targets.keys() - legacy_targets.keys()),
+        "target_mismatches": target_mismatches,
+        "normalization": "satisfied requirements removed only; targets are never rewritten",
+    }
     payload["shadow"] = {
         "legacy_error": legacy_error,
         "legacy_reservations": len(reservations),

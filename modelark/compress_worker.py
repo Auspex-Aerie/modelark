@@ -11,6 +11,7 @@ Protocol — one-shot, no persistent state:
 On a clean run this writes a JSON result to the `result` path and exits 0:
     {"ok": true,  "znn_path": ..., "znn_sha256": ..., "stored_bytes": ...}   canary passed
     {"ok": false}                                                            canary FAILED (.znn removed)
+    {"ok": false, "over_cap": true, "detail": ...}                          safe raw fallback
 A native crash exits via a signal WITHOUT writing the result; the parent reads the negative return
 code and treats it as a crash. The result travels by file, never by stdout — the compressor
 libraries may write to stdout and would corrupt a stdout-based channel.
@@ -34,7 +35,11 @@ def run(request: dict) -> dict:
     threads = int(request["threads"])
     expected_sha256 = request["expected_sha256"]
 
-    znn = compress.compress_file(src, dst, dtype=dtype, codec=codec, threads=threads)
+    try:
+        znn = compress.compress_file(src, dst, dtype=dtype, codec=codec, threads=threads)
+    except compress.OutputCapExceeded as exc:
+        dst.unlink(missing_ok=True)
+        return {"ok": False, "over_cap": True, "detail": str(exc)}
     if compress.canary_ok(znn, expected_sha256, dtype):
         return {"ok": True, "znn_path": str(znn),
                 "znn_sha256": compress.sha256_file(znn), "stored_bytes": znn.stat().st_size}

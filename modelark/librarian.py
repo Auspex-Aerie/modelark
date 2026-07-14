@@ -16,30 +16,16 @@ from __future__ import annotations
 
 import shutil
 
+from modelark import capacity as capacity_model
 from modelark import fetch, register  # noqa: F401
 
-_ZIPNN_FLOAT_RATIO = 0.67          # bf16 ZipNN on-disk estimate; the CONSERVATIVE FLOOR + fresh-catalog default
-_SIZE_MARGIN = 1.08                # +8% headroom so a mislabeled fp8 (HYP-001) can't under-provision
-_RATIO_MIN_SAMPLE = 50_000_000_000 # need ≥50 GB of float weights archived before trusting the observed ratio
-
-# Reserved headroom per drive — marginal tranches, so the effective % shrinks as a drive grows.
-_HEADROOM_TRANCHES = [
-    (1e12,         0.05),    # first 1 TB     -> 5%
-    (4e12,         0.02),    # 1–4 TB         -> 2%
-    (16e12,        0.0125),  # 4–16 TB        -> 1.25%
-    (float("inf"), 0.009),   # above 16 TB    -> 0.9%
-]
+_ZIPNN_FLOAT_RATIO = capacity_model.DEFAULT_FLOAT_RATIO
+_SIZE_MARGIN = capacity_model.EXPECTED_MARGIN
+_RATIO_MIN_SAMPLE = capacity_model.RATIO_MIN_SAMPLE
 
 
 def headroom_bytes(capacity: int) -> int:
-    reserved, lo = 0.0, 0.0
-    for hi, rate in _HEADROOM_TRANCHES:
-        band = min(capacity, hi) - lo
-        if band <= 0:
-            break
-        reserved += band * rate
-        lo = hi
-    return int(reserved)
+    return capacity_model.headroom_bytes(capacity)
 
 
 def observed_float_ratio(con) -> float | None:
@@ -47,19 +33,13 @@ def observed_float_ratio(con) -> float | None:
     compression AND the raw-fallbacks (INC-005 crash/hang shards stored uncompressed). None until
     _RATIO_MIN_SAMPLE bytes of evidence. This is the fix for the plan creeping onto more drives each
     restart: the estimate must track reality (raw-fallbacks push actual > a fixed 0.67), not guess."""
-    stored, orig = con.execute(
-        "SELECT coalesce(sum(a.stored_bytes), 0), coalesce(sum(a.orig_bytes), 0) "
-        "FROM archived a JOIN files f ON a.repo_id = f.repo_id AND a.rfilename = f.rfilename "
-        "WHERE f.format = 'safetensors' AND a.orig_bytes > 0 AND "
-        "(f.quant IS NULL OR lower(f.quant) IN "
-        "('bf16','bfloat16','fp16','f16','float16','fp32','f32','float32'))").fetchone()
-    return stored / orig if orig >= _RATIO_MIN_SAMPLE else None
+    return capacity_model.observed_float_ratio(con)
 
 
 def plan_float_ratio(con) -> float:
     """The float ratio est_stored_bytes should use: our observed average once there's enough evidence,
     but NEVER more optimistic than the _ZIPNN_FLOAT_RATIO baseline (a conservative floor)."""
-    return max(observed_float_ratio(con) or _ZIPNN_FLOAT_RATIO, _ZIPNN_FLOAT_RATIO)
+    return capacity_model.plan_float_ratio(con)
 
 
 def est_stored_bytes(con, repo_id: str, float_ratio: float | None = None,

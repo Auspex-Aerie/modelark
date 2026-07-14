@@ -74,6 +74,7 @@ def test_incident_shape_creates_only_nine_home_fetches_and_shadow_removes_116_ph
     assert report["shadow"]["satisfied_legacy_reservations_removed"] == 116
     assert report["shadow"]["new_intents"] == 134
     assert report["shadow"]["executor"].startswith("legacy")
+    assert report["placement_comparison"]["target_equivalent"] is True
 
 
 def test_exact_sets_prevent_extra_file_from_masking_missing_required_file():
@@ -228,6 +229,17 @@ def test_cli_explain_refuses_apply_without_opening_database():
         except SystemExit as exc:
             assert "read-only" in str(exc)
     connect.assert_not_called()
+
+
+def test_shadow_report_preserves_new_graph_when_legacy_adapter_breaks():
+    con = _mem()
+    _drive(con, "primary")
+    _repo(con, "org/model")
+    with mock.patch("modelark.librarian.plan_placements", return_value={}):
+        report = reconcile.shadow_report(con, "ark")
+    assert report["intents"][0]["repo"] == "org/model"
+    assert report["shadow"]["legacy_error"].startswith("KeyError:")
+    assert report["shadow"]["legacy_reservations"] == 0
 
 
 def test_reconciliation_100k_archived_rows_stays_bounded():

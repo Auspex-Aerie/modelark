@@ -79,6 +79,10 @@ class StreamZnnError(Exception):
     """Raised on a malformed / truncated / corrupt StreamZNN container. Never swallowed."""
 
 
+class OutputCapExceeded(StreamZnnError):
+    """Compression would exceed the caller's guaranteed on-disk output ceiling."""
+
+
 def _read_exact(fh: BinaryIO, n: int) -> bytes:
     """Read exactly `n` bytes from `fh` or raise StreamZnnError. A short read means a
     truncated/corrupt container — it is never returned as a silently-short slice."""
@@ -100,6 +104,7 @@ def compress_file(
     dtype: str = "bfloat16",
     chunk_bytes: int = DEFAULT_CHUNK,
     threads: int = 0,
+    max_output_bytes: int | None = None,
 ) -> Path:
     """Compress `src` → `dst` as a StreamZNN container, written atomically.
 
@@ -121,7 +126,12 @@ def compress_file(
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(tmp_fd, "wb") as fo, open(src_path, "rb") as fi:
+            if max_output_bytes is not None and len(MAGIC) > max_output_bytes:
+                raise OutputCapExceeded(
+                    f"StreamZNN magic exceeds {max_output_bytes}-byte output cap"
+                )
             fo.write(MAGIC)
+            written = len(MAGIC)
             while True:
                 chunk = fi.read(chunk_bytes)
                 if not chunk:
@@ -133,8 +143,20 @@ def compress_file(
                 blob: bytes = bytes(ZipNN(input_format="byte", bytearray_dtype=dtype, threads=threads).compress(chunk))
                 if len(blob) > _MAX_BLOB:
                     raise StreamZnnError(f"compressed slice {len(blob)} exceeds {_MAX_BLOB}-byte frame ceiling")
+                # Check expansion while the blob is still in memory. A post-write check could
+                # transiently cross the ledger's raw-plus-framing guarantee by one whole chunk.
+                if max_output_bytes is not None and len(blob) > len(chunk):
+                    raise OutputCapExceeded(
+                        f"compressed slice {len(blob)} exceeds raw slice {len(chunk)}"
+                    )
+                next_size = _LEN.size + len(blob)
+                if max_output_bytes is not None and written + next_size > max_output_bytes:
+                    raise OutputCapExceeded(
+                        f"StreamZNN output would exceed {max_output_bytes}-byte cap"
+                    )
                 fo.write(_LEN.pack(len(blob)))
                 fo.write(blob)
+                written += next_size
             fo.flush()
             os.fsync(fo.fileno())
         os.replace(tmp_path, dst_path)          # atomic publish; a crash before this leaves only the tmp
