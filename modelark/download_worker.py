@@ -4,7 +4,8 @@
 2026-07-09 Falcon-H1 hang, where `socket.setdefaulttimeout` did NOT fire, likely hf_xet native I/O).
 A blocking call inside a thread can't be interrupted; inside a CHILD process it can be SIGKILL'd. So
 the fetch pipeline downloads HERE, and the parent (`fetch._download_shard` via `_run_monitored`) kills
-this child when the on-disk `.incomplete` stops growing, then retries — hf resumes the partial.
+this child when the on-disk `.incomplete` stops growing, then retries. Classic HTTP may resume the
+partial; hf_xet currently reconstructs that interrupted file from zero (INC-010).
 
 Protocol: argv[1] = JSON {repo_id, rfilename, local_dir, result}. Writes a JSON result and exits 0:
     {"ok": true,  "path": "<downloaded file>"}

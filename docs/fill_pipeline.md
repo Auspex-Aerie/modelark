@@ -48,12 +48,12 @@ and defers offline ones; GATE-C PAUSES (not errors) when copy#1 is safe and only
 ┌─ REPLICA TIER · copy#2 of must-haves (a LOCAL copy, no HF re-download) ────────────────┐
 │   await replica drive(s)                                                               │
 │   run_replica:   git annex copy   FROM drive-00 (NAS)   TO   drive-04                  │
-│                  └─ ⚠ NO source/target probe → a dead NAS = every copy fails, churns   │ ◄ DEF-022 gap
+│                  └─ source + target write-probed; offline copies defer the tier softly │ ◄ DEC-031
 └────────────────────────────────────────────────────────────────────────────────────────┘
    │
    ▼
-  GATE-C  does every must-have hold its N copies? ──no──► ERROR (hard stop)   ◄ INC-009 blew up here
-          └─ yes ─► DONE                                  ⚠ fires even when copy#1 is all safe (DEF-022)
+  GATE-C  does every must-have hold its N copies? ──no──► copy#1 safe? PAUSE : ERROR
+          └─ yes ─► DONE
 ```
 
 ## Drive topology & the copy#2 single point of failure
@@ -71,8 +71,8 @@ and defers offline ones; GATE-C PAUSES (not errors) when copy#1 is safe and only
          │                                                     │
          └──────────── SOURCE of EVERY copy#2 ─────────────────┘
 
-  ⚠ SPOF: copy#2 READS from the NAS. NAS offline (INC-009) → no copy#2 is possible,
-    even with drive-04 + drive-01 healthy → run_replica churns → GATE-C hard-errors.
+  Copy#2 currently reads from the designated source. If it is offline, DEC-031 records a deferred
+  target and pauses cleanly; it does not churn or misreport a completed replica set.
 ```
 
 ## Failsafes — what stops the fill, and how it recovers
