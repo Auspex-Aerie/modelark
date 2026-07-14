@@ -220,6 +220,7 @@ def _stop_terminal() -> dict:
 
 def _file_guard(ctx, plan_id: str, provisioning: str, task: capacity.AssignedTask):
     budgets = {item.rfilename: item for item in task.budget.file_budgets}
+    mode = capacity.mode_from_legacy(provisioning)
 
     def before_file(repo_id, item):
         with ctx.lock:
@@ -231,19 +232,27 @@ def _file_guard(ctx, plan_id: str, provisioning: str, task: capacity.AssignedTas
             path = register.archive_path(ctx.con, task.target_drive)
         if path is None:
             with ctx.lock:
-                drive = next(entry for entry in capacity.inspect_drives(ctx.con, plan_id)
-                             if entry.drive_label == task.target_drive)
+                drive = next((
+                    entry for entry in capacity.inspect_drives(ctx.con, plan_id)
+                    if entry.drive_label == task.target_drive
+                ), None)
         else:
             try:
                 free = shutil.disk_usage(path).free
             except OSError:
                 free = 0
             with ctx.lock:
-                drive = next(entry for entry in capacity.inspect_drives(
-                    ctx.con, plan_id, live_free_by_drive={task.target_drive: free}
-                ) if entry.drive_label == task.target_drive)
+                drive = next((
+                    entry for entry in capacity.inspect_drives(
+                        ctx.con, plan_id, live_free_by_drive={task.target_drive: free}
+                    ) if entry.drive_label == task.target_drive
+                ), None)
+        if drive is None:
+            raise fetch.CapacityPreflightError(
+                capacity.target_drive_changed_failure(task, mode)
+            )
         failure = capacity.preflight_file(
-            drive, budgets[item.rfilename], capacity.mode_from_legacy(provisioning),
+            drive, budgets[item.rfilename], mode,
             requirement_id=task.requirement_id,
             task_id=task.task_id,
         )

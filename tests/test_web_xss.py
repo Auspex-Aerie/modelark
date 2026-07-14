@@ -96,7 +96,8 @@ def test_fill_poll_uses_shared_terminal_classifier_and_modal() -> None:
     assert '"plan-capacity-stop": "🟠 capacity changed"' in app
     assert "window.MA.showFillTerminal = show" in app
     assert "MA.isFillTerminal(s.status)" in fill
-    assert fill.count("announceTerminal(s)") >= 3, "load, poll, and refresh must announce terminals"
+    call_sites = [line.strip() for line in fill.splitlines() if line.strip() == "announceTerminal(s);"]
+    assert len(call_sites) == 2, "both poll and refresh/load must announce terminals"
 
 
 if __name__ == "__main__":

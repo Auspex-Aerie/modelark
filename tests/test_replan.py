@@ -197,6 +197,30 @@ def test_reconcile_uses_and_closes_dedicated_read_connection():
     assert read_con.closed
 
 
+def test_file_guard_types_a_target_removed_after_reconciliation(tmp_path):
+    con, _, _, _ = _executor_harness()
+    ctx = fetch.RunCtx(con=con)
+    snapshot = fill._reconcile(ctx, "ark", "uncompressed", None)
+    task = next(item for item in snapshot.ledger.tasks if item.kind == reconcile.TaskKind.FETCH)
+    manifest_item = next(
+        item for item in snapshot.graph.manifests[task.repo_id]
+        if item.rfilename in task.budget.missing_files
+    )
+    guard = fill._file_guard(ctx, "ark", "uncompressed", task)
+
+    for archive_path in (None, tmp_path):
+        with mock.patch.object(fill.register, "archive_path", return_value=archive_path), \
+             mock.patch.object(fill.capacity, "inspect_drives", return_value=()):
+            try:
+                guard(task.repo_id, manifest_item)
+                raise AssertionError("a stale target must be a typed re-plan boundary")
+            except fetch.CapacityPreflightError as exc:
+                failure = exc.failure
+        assert failure.code == capacity.FailureCode.TARGET_DRIVE_CHANGED
+        assert failure.requirement_id == task.requirement_id
+        assert failure.actions == ("reconcile_plan", "restore_target_drive_to_plan")
+
+
 def test_reconciled_executor_bounds_failed_task_retries():
     con, calls, fake_run, fake_replica = _executor_harness(failed={"b"})
     with mock.patch.object(fill.fetch, "run", side_effect=fake_run), \
