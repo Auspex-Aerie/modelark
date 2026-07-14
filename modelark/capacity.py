@@ -46,6 +46,7 @@ class FreeEvidence(str, Enum):
 class FailureCode(str, Enum):
     CAPACITY_DURABLE_SHORT = "CAPACITY_DURABLE_SHORT"
     CAPACITY_WORKSPACE_SHORT = "CAPACITY_WORKSPACE_SHORT"
+    TARGET_DRIVE_CHANGED = "TARGET_DRIVE_CHANGED"
     TARGET_TIER_MISSING = "TARGET_TIER_MISSING"
     GRAPH_INVARIANT = "GRAPH_INVARIANT"
 
@@ -493,6 +494,31 @@ def preflight_file(
         shortfall_bytes=required - drive.usable_now,
         evidence=drive.free_evidence,
         actions=("free_target_space", "add_eligible_drive", "replan"),
+    )
+
+
+def target_drive_changed_failure(
+    task: AssignedTask,
+    mode: CapacityMode,
+) -> CapacityFailure:
+    """Typed stale-snapshot evidence when a task target leaves its Plan before execution."""
+    durable = task.budget.durable_for(mode)
+    workspace = task.budget.workspace_for(mode)
+    required = durable + workspace
+    return CapacityFailure(
+        code=FailureCode.TARGET_DRIVE_CHANGED,
+        capacity_mode=mode,
+        requirement_id=task.requirement_id,
+        task_ids=(task.task_id,),
+        target_tier=("replica" if task.kind == TaskKind.REPLICATE else "primary"),
+        eligible_drives=(task.target_drive,),
+        required_bytes=required,
+        available_bytes=0,
+        safety_floor_bytes=0,
+        workspace_bytes=workspace,
+        shortfall_bytes=required,
+        evidence=None,
+        actions=("reconcile_plan", "restore_target_drive_to_plan"),
     )
 
 
