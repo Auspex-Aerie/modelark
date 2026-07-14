@@ -26,17 +26,10 @@ LAZY import inside register_drive, so there is no module-level cycle.
 from __future__ import annotations
 
 from modelark.core import db
-from modelark import archive_manifest, librarian, register, wishlist
+from modelark import archive_manifest, capacity as capacity_model, librarian, register, wishlist
 
 DEFAULT_PLAN = "ark"
 _FIELDS = ["plan_id", "name", "annex_root", "provisioning", "status", "is_active", "created_at", "notes"]
-
-# DEC-029: treat a RAID-backed LUN's usable capacity conservatively — reserve at least this fraction
-# even where the size-tranched headroom (librarian) would reserve less. The LUN is ALSO provisioned at
-# ~85% of its Synology volume (the ops half of DEC-029, done at LUN-creation time); this is the belt to
-# that suspenders, so the capacity model never reports a near-full LUN as roomy (INC-009, twice-bitten).
-_RAID_MIN_HEADROOM_FRAC = 0.03
-
 
 # ---- CRUD -------------------------------------------------------------------
 
@@ -130,10 +123,7 @@ def bootstrap(con, plan_id=DEFAULT_PLAN) -> dict:
 def _headroom(cap: int, raid_backed: bool) -> int:
     """Reserved headroom for a drive of `cap` bytes — the librarian's size-tranched reserve, with a
     DEC-029 conservative floor for a RAID-backed LUN so a big LUN still keeps real breathing room."""
-    h = librarian.headroom_bytes(cap)
-    if raid_backed:
-        h = max(h, int(cap * _RAID_MIN_HEADROOM_FRAC))
-    return h
+    return capacity_model.safety_floor(cap, raid_backed)
 
 
 def capacity(con, plan_id) -> int:

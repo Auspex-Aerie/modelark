@@ -44,6 +44,24 @@ def cart() -> dict:
         return plan.cart_totals(con, active["plan_id"])
 
 
+def shadow_explain() -> dict:
+    """Read-only Phase-2 graph/ledger evidence without holding the portal's shared lock."""
+    from modelark import plan, reconcile
+    from modelark.core import db
+    con = db.connect(read_only=True)
+    try:
+        active = plan.active(con)
+        if active is None:
+            return {"ok": False, "error": "no active plan"}
+        return reconcile.shadow_report(
+            con,
+            active["plan_id"],
+            provisioning=active["provisioning"],
+        )
+    finally:
+        con.close()
+
+
 def select(body: dict) -> dict:
     from modelark import plan
     with data._lock:

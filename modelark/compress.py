@@ -17,6 +17,7 @@ pre-StreamZNN `.znn`. Streaming (StreamZNN + zstd) is O(chunk); whole/legacy loa
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import tempfile
 from pathlib import Path
@@ -47,6 +48,10 @@ _DTYPE_MAP: Final[dict[str, str]] = {
     "fp16": "float16", "f16": "float16", "float16": "float16",
     "fp32": "float32", "f32": "float32", "float32": "float32",
 }
+
+
+class OutputCapExceeded(RuntimeError):
+    """A codec would cross the guaranteed raw-plus-framing output ceiling."""
 
 
 def zipnn_dtype(quant: str | None) -> str:
@@ -84,6 +89,30 @@ def plan_codec(shard_bytes: int, cfg: dict) -> str:
     return CODEC_RAW                                    # stream off, no zstd → store raw
 
 
+def zstd_output_cap(raw_size: int) -> int:
+    """ZSTD_compressBound's documented single-frame upper bound."""
+    low_size_overhead = ((128 * 1024 - raw_size) >> 11) if raw_size < 128 * 1024 else 0
+    return raw_size + (raw_size >> 8) + low_size_overhead
+
+
+def codec_output_cap(
+    raw_size: int,
+    codec: str,
+    *,
+    stream_chunk_bytes: int = streamznn.DEFAULT_CHUNK,
+) -> int:
+    if codec == CODEC_RAW:
+        return 0
+    if codec == CODEC_STREAM:
+        chunks = math.ceil(raw_size / stream_chunk_bytes) if raw_size else 0
+        return raw_size + len(streamznn.MAGIC) + 4 * chunks
+    if codec == CODEC_ZSTD:
+        return zstd_output_cap(raw_size)
+    if codec == CODEC_WHOLE:
+        return raw_size
+    raise ValueError(f"unsupported codec {codec!r}")
+
+
 def _zipnn(dtype: str = "bfloat16", threads: int = 0) -> ZipNN:
     return ZipNN(input_format="byte", bytearray_dtype=dtype, threads=threads)
 
@@ -103,14 +132,27 @@ def _atomic_write_bytes(dst: Path, data: bytes) -> None:
         raise
 
 
-def _compress_whole(src: Path, dst: Path, dtype: str, threads: int) -> Path:
+def _compress_whole(src: Path, dst: Path, dtype: str, threads: int, output_cap: int) -> Path:
     """In-memory ZipNN of the whole shard (O(shard) RAM) → a self-describing ZipNN blob."""
     blob = bytes(_zipnn(dtype, threads).compress(src.read_bytes()))   # ZipNN mutates its input; read is single-use
+    if len(blob) > output_cap:
+        raise OutputCapExceeded(
+            f"whole ZipNN output {len(blob)} exceeds {output_cap}-byte cap"
+        )
     _atomic_write_bytes(dst, blob)
     return dst
 
 
-def _compress_zstd(src: Path, dst: Path, threads: int) -> Path:
+def _write_capped(fo, data: bytes, written: int, output_cap: int) -> int:
+    if written + len(data) > output_cap:
+        raise OutputCapExceeded(
+            f"zstd output would exceed {output_cap}-byte cap before next write"
+        )
+    fo.write(data)
+    return written + len(data)
+
+
+def _compress_zstd(src: Path, dst: Path, threads: int, output_cap: int) -> Path:
     """Streaming plain zstd (O(chunk) RAM) — the stream-off fallback, only when `zstandard` exists."""
     zstd = _zstd()
     if zstd is None:
@@ -119,7 +161,11 @@ def _compress_zstd(src: Path, dst: Path, threads: int) -> Path:
     fd, tmp = tempfile.mkstemp(dir=str(dst.parent), prefix=dst.name + ".", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fo, open(src, "rb") as fi:
-            zstd.ZstdCompressor(level=3, threads=threads).copy_stream(fi, fo)
+            compressor = zstd.ZstdCompressor(level=3, threads=threads).compressobj()
+            written = 0
+            for chunk in iter(lambda: fi.read(1 << 20), b""):
+                written = _write_capped(fo, compressor.compress(chunk), written, output_cap)
+            _write_capped(fo, compressor.flush(), written, output_cap)
             fo.flush()
             os.fsync(fo.fileno())
         os.replace(tmp, dst)
@@ -135,12 +181,19 @@ def compress_file(src: StrPath, dst: StrPath | None = None, dtype: str = "bfloat
     caller (nothing to compress), so it is not a valid codec here."""
     src_path = Path(src)
     dst_path = Path(dst) if dst is not None else src_path.with_name(src_path.name + ZNN_SUFFIX)
+    output_cap = codec_output_cap(src_path.stat().st_size, codec)
     if codec == CODEC_WHOLE:
-        return _compress_whole(src_path, dst_path, dtype, threads)
+        return _compress_whole(src_path, dst_path, dtype, threads, output_cap)
     if codec == CODEC_STREAM:
-        return streamznn.compress_file(src_path, dst_path, dtype=dtype, threads=threads)
+        try:
+            return streamznn.compress_file(
+                src_path, dst_path, dtype=dtype, threads=threads,
+                max_output_bytes=output_cap,
+            )
+        except streamznn.OutputCapExceeded as exc:
+            raise OutputCapExceeded(str(exc)) from exc
     if codec == CODEC_ZSTD:
-        return _compress_zstd(src_path, dst_path, threads)
+        return _compress_zstd(src_path, dst_path, threads, output_cap)
     raise ValueError(f"compress_file: not a compressing codec: {codec!r}")
 
 

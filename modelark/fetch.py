@@ -232,6 +232,7 @@ def _compress_isolated(local: Path, dtype: str, codec: str, threads: int,
         "canary"  — round-trip did NOT match the canonical sha256 (keep the original, drop nothing)
         "crash"   — child died from a signal (e.g. SIGABRT double-free) → caller stores the shard RAW
         "stalled" — child made no progress for the (size-scaled) stall window, killed → caller stores RAW
+        "over-cap"— compressed output would exceed the guaranteed disk ceiling → caller stores RAW
         "error"   — child exited non-zero without a signal (unexpected; surface it)
     Raises _StopRequested if a stop is requested mid-compress (the child is killed first)."""
     dst = local.with_name(local.name + compress.ZNN_SUFFIX)
@@ -254,7 +255,8 @@ def _compress_isolated(local: Path, dtype: str, codec: str, threads: int,
     try:
         if mon["outcome"] == "exited" and mon["rc"] == 0:
             result = json.loads(Path(res_path).read_text())
-            result["status"] = "ok" if result["ok"] else "canary"
+            result["status"] = ("ok" if result["ok"] else
+                                ("over-cap" if result.get("over_cap") else "canary"))
             return result
         for tmp in dst.parent.glob(dst.name + ".*.tmp"):  # sweep the half-written temp the dead/killed child left
             tmp.unlink(missing_ok=True)
@@ -409,13 +411,17 @@ def fetch_model(ctx: RunCtx, repo_id: str, dest: Path, drive_label: str, annex: 
                 ctx.on_progress({**base, "file_phase": "compress", "codec": codec})
                 dtype = compress.zipnn_dtype(f["quant"])
                 res = _compress_isolated(local, dtype, codec, compress_cfg["threads"], f["sha256"], ctx.should_stop)
-                if res["status"] in ("crash", "stalled"):
+                if res["status"] in ("crash", "stalled", "over-cap"):
                     # INC-005: the compressor died natively (ZipNN double-free) or hung on this shard. The
                     # child absorbed it — store the shard RAW so the fill routes around it instead of
                     # core-dumping the portal or looping. (A stop mid-compress raises _StopRequested.)
                     stored, znn_sha, compressed = local, None, False
-                    why = (f"CRASHED (signal {res['signal']})" if res["status"] == "crash"
-                           else f"HUNG ({_COMPRESS_STALL_SECS}s no progress)")
+                    if res["status"] == "crash":
+                        why = f"CRASHED (signal {res['signal']})"
+                    elif res["status"] == "stalled":
+                        why = f"HUNG ({_COMPRESS_STALL_SECS}s no progress)"
+                    else:
+                        why = f"OUTPUT CAP ({res.get('detail', 'compressed data expanded')})"
                     print(f"    [raw-fallback] {f['rfilename']} ({gb:.2f} GB) — compressor {why}, "
                           f"stored uncompressed :: {res['stderr']}")
                     ctx.on_progress({**base, "file_phase": "compress-crashed", "codec": "raw-fallback"})

@@ -74,6 +74,7 @@ def test_incident_shape_creates_only_nine_home_fetches_and_shadow_removes_116_ph
     assert report["shadow"]["satisfied_legacy_reservations_removed"] == 116
     assert report["shadow"]["new_intents"] == 134
     assert report["shadow"]["executor"].startswith("legacy")
+    assert report["placement_comparison"]["target_equivalent"] is True
 
 
 def test_exact_sets_prevent_extra_file_from_masking_missing_required_file():

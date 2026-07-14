@@ -11,6 +11,7 @@ import hashlib
 import os
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from zipnn import ZipNN
 
@@ -217,6 +218,26 @@ def test_source_file_untouched() -> None:
         src.write_bytes(data)
         streamznn.compress_file(src, znn, chunk_bytes=64 * 1024)
         assert _sha(src.read_bytes()) == before, "compress_file must not mutate the source file"
+
+
+def test_stream_output_cap_rejects_expansion_before_frame_write() -> None:
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        src, dst = tmp / "i", tmp / "i.znn"
+        src.write_bytes(b"1234")
+        compressor = mock.Mock()
+        compressor.compress.return_value = b"12345"
+        with mock.patch("modelark.streamznn.ZipNN", return_value=compressor):
+            try:
+                streamznn.compress_file(
+                    src, dst, chunk_bytes=4,
+                    max_output_bytes=4 + len(streamznn.MAGIC) + 4,
+                )
+                raise AssertionError("expanded stream chunk must hit the cap")
+            except streamznn.OutputCapExceeded:
+                pass
+        assert not dst.exists()
+        assert not list(tmp.glob("i.znn.*.tmp"))
 
 
 def test_plan_codec_gate() -> None:
