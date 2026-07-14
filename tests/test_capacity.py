@@ -186,10 +186,10 @@ def test_compression_aware_mode_can_fit_where_guaranteed_durable_cannot():
     )
     graph = reconcile.reconcile_plan(con, "ark")
     guaranteed = capacity.plan_capacity(
-        con, graph, provisioning="uncompressed", compression_cfg=_cfg()
+        con, graph, capacity_mode="guaranteed", compression_cfg=_cfg()
     )
     aware = capacity.plan_capacity(
-        con, graph, provisioning="compressed", compression_cfg=_cfg()
+        con, graph, capacity_mode="compression_aware", compression_cfg=_cfg()
     )
     assert not guaranteed.feasible
     assert guaranteed.failures[0].code == capacity.FailureCode.CAPACITY_WORKSPACE_SHORT
@@ -354,3 +354,13 @@ def test_phase2_candidate_cross_product_stays_bounded():
         assert len(result.tasks) == 1000 and result.feasible
     finally:
         con.close()
+
+
+def test_canonical_and_deprecated_capacity_arguments_cannot_disagree():
+    try:
+        capacity.plan_capacity(
+            None, None, capacity_mode="guaranteed", provisioning="compressed"
+        )
+        raise AssertionError("conflicting compatibility arguments must be refused")
+    except ValueError as exc:
+        assert "disagree" in str(exc)

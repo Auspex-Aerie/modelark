@@ -35,6 +35,32 @@ def _legacy_without_constraints(tmp_path):
     return sqlite3.connect(str(db.DB_PATH), isolation_level=None)
 
 
+def _legacy_v1_plans(tmp_path, *, constrained=True):
+    """Create the prior plans.provisioning schema at user_version=1."""
+    con = _fresh(tmp_path)
+    con.execute("PRAGMA foreign_keys=OFF")
+    con.execute("DROP INDEX IF EXISTS idx_plans_one_active")
+    check = "CHECK (provisioning IN ('uncompressed','compressed'))" if constrained else ""
+    con.execute(f"""
+        CREATE TABLE plans__v1 (
+            plan_id VARCHAR PRIMARY KEY NOT NULL,
+            name VARCHAR,
+            annex_root VARCHAR,
+            provisioning VARCHAR NOT NULL DEFAULT 'uncompressed' {check},
+            status VARCHAR NOT NULL DEFAULT 'active',
+            is_active BOOLEAN NOT NULL DEFAULT false,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            notes VARCHAR
+        )
+    """)
+    con.execute("DROP TABLE plans")
+    con.execute("ALTER TABLE plans__v1 RENAME TO plans")
+    con.execute("CREATE UNIQUE INDEX idx_plans_one_active ON plans(is_active) WHERE is_active=1")
+    con.execute("PRAGMA user_version=1")
+    con.close()
+    return sqlite3.connect(str(db.DB_PATH), isolation_level=None)
+
+
 def test_schema_and_views(tmp_path):
     con = _fresh(tmp_path)
     tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
@@ -44,6 +70,9 @@ def test_schema_and_views(tmp_path):
     assert {"v_ui", "v_model_summary", "v_storage_by_drive"} <= views, views
     assert con.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     assert con.execute("PRAGMA foreign_key_list(archived)").fetchall()
+    plan_columns = {row[1] for row in con.execute("PRAGMA table_info(plans)").fetchall()}
+    assert "capacity_mode" in plan_columns and "provisioning" not in plan_columns
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 2
     con.close()
 
 
@@ -62,9 +91,11 @@ def test_normal_connect_does_not_scan_every_foreign_key_row(tmp_path):
         def __getattr__(self, name):
             return getattr(self._con, name)
 
+    initial = _fresh(tmp_path)
+    initial.close()
     with mock.patch.object(db.sqlite3, "connect", side_effect=lambda *a, **kw:
                            TracedConnection(real_connect(*a, **kw))):
-        con = _fresh(tmp_path)
+        con = db.connect()
         con.close()
     assert "pragma foreign_key_check" not in statements, statements
 
@@ -173,11 +204,16 @@ def test_legacy_catalog_rebuild_preserves_rows_and_applies_migrations(tmp_path):
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION
     assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     con.close()
-    backup = db.DB_PATH.with_name(f"{db.DB_PATH.name}.pre-integrity-v{db._SCHEMA_VERSION}.bak")
+    backup = db.DB_PATH.with_name(f"{db.DB_PATH.name}.pre-integrity-v1.bak")
     old = sqlite3.connect(str(backup))
-    assert old.execute("SELECT status FROM models").fetchone()[0] == "inspected"
+    assert old.execute("SELECT status FROM models").fetchone()[0] == "verified"
     assert old.execute("PRAGMA foreign_key_list(archived)").fetchall() == []
     old.close()
+    v2_backup = sqlite3.connect(str(db.DB_PATH.with_name(
+        f"{db.DB_PATH.name}.pre-capacity-v2.bak"
+    )))
+    assert v2_backup.execute("SELECT status FROM models").fetchone()[0] == "inspected"
+    v2_backup.close()
 
 
 def test_legacy_orphans_abort_and_roll_back_integrity_rebuild(tmp_path):
@@ -193,8 +229,101 @@ def test_legacy_orphans_abort_and_roll_back_integrity_rebuild(tmp_path):
     assert raw.execute("PRAGMA foreign_key_list(archived)").fetchall() == []
     assert raw.execute("SELECT repo_id FROM selection").fetchone()[0] == "missing/model"
     raw.close()
-    assert db.DB_PATH.with_name(
-        f"{db.DB_PATH.name}.pre-integrity-v{db._SCHEMA_VERSION}.bak").is_file()
+    assert db.DB_PATH.with_name(f"{db.DB_PATH.name}.pre-integrity-v1.bak").is_file()
+
+
+def test_v1_capacity_modes_map_transactionally_and_idempotently(tmp_path):
+    legacy = _legacy_v1_plans(tmp_path)
+    legacy.execute(
+        "INSERT INTO plans(plan_id,name,provisioning,is_active) VALUES('safe','Safe','uncompressed',1)"
+    )
+    legacy.execute(
+        "INSERT INTO plans(plan_id,name,provisioning,is_active) VALUES('aware','Aware','compressed',0)"
+    )
+    legacy.execute("INSERT INTO drives(drive_label) VALUES('drive-01')")
+    legacy.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('safe','drive-01')")
+    legacy.close()
+
+    con = db.connect()
+    assert con.execute(
+        "SELECT plan_id,capacity_mode FROM plans ORDER BY plan_id"
+    ).fetchall() == [("aware", "compression_aware"), ("safe", "guaranteed")]
+    columns = {row[1] for row in con.execute("PRAGMA table_info(plans)").fetchall()}
+    assert "capacity_mode" in columns and "provisioning" not in columns
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert con.execute("SELECT plan_id,drive_label FROM plan_drives").fetchone() == (
+        "safe", "drive-01"
+    )
+    con.close()
+
+    backup = db.DB_PATH.with_name(f"{db.DB_PATH.name}.pre-capacity-v2.bak")
+    assert backup.is_file()
+    before = backup.stat().st_mtime_ns
+    con = db.connect()
+    assert con.execute("SELECT count(*) FROM plans").fetchone()[0] == 2
+    con.close()
+    assert backup.stat().st_mtime_ns == before, "the recovery backup must never be overwritten"
+
+
+def test_v2_capacity_mode_migration_rolls_back_invalid_legacy_value(tmp_path):
+    legacy = _legacy_v1_plans(tmp_path, constrained=False)
+    legacy.execute(
+        "INSERT INTO plans(plan_id,name,provisioning,is_active) VALUES('bad','Bad','lz4',1)"
+    )
+    legacy.close()
+    try:
+        db.connect()
+        raise AssertionError("invalid legacy capacity values must abort schema v2")
+    except RuntimeError as exc:
+        assert "schema v2 capacity modes" in str(exc) or "capacity" in str(exc), exc
+    raw = sqlite3.connect(str(db.DB_PATH))
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == 1
+    columns = {row[1] for row in raw.execute("PRAGMA table_info(plans)").fetchall()}
+    assert "provisioning" in columns and "capacity_mode" not in columns
+    assert raw.execute("SELECT provisioning FROM plans").fetchone()[0] == "lz4"
+    raw.close()
+    assert db.DB_PATH.with_name(f"{db.DB_PATH.name}.pre-capacity-v2.bak").is_file()
+
+
+def test_newer_catalog_is_rejected_without_stamping_down(tmp_path):
+    con = _fresh(tmp_path)
+    con.execute("PRAGMA user_version=3")
+    con.close()
+    before = db.DB_PATH.read_bytes()
+    sidecars_before = {
+        path.name for path in db.DB_PATH.parent.iterdir()
+        if path.name.startswith(db.DB_PATH.name)
+    }
+    try:
+        db.connect()
+        raise AssertionError("an older program must reject a newer catalog")
+    except RuntimeError as exc:
+        assert "newer than this ModelArk build" in str(exc), exc
+    raw = sqlite3.connect(str(db.DB_PATH))
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == 3
+    raw.close()
+    assert db.DB_PATH.read_bytes() == before
+    assert {
+        path.name for path in db.DB_PATH.parent.iterdir()
+        if path.name.startswith(db.DB_PATH.name)
+    } == sidecars_before
+
+
+def test_read_only_open_refuses_an_unmigrated_v1_catalog(tmp_path):
+    legacy = _legacy_v1_plans(tmp_path)
+    legacy.close()
+    try:
+        db.connect(read_only=True)
+        raise AssertionError("read-only diagnostics must not attempt a schema migration")
+    except RuntimeError as exc:
+        assert "requires a writable migration" in str(exc), exc
+    raw = sqlite3.connect(str(db.DB_PATH))
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == 1
+    assert "provisioning" in {
+        row[1] for row in raw.execute("PRAGMA table_info(plans)").fetchall()
+    }
+    raw.close()
 
 
 def test_foreign_keys_domains_and_single_active_plan_are_enforced(tmp_path):

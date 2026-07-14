@@ -17,7 +17,7 @@ The external audit's numbered blockers are fixed. These are the remaining releas
 | **RC-2** | Resolve roadmap task #30 (“resume re-fetch durability”) | ✅ Reconciled: durable per-(repo,file,drive) completion is covered by DEC-019 and regression tests; interrupted `hf_xet` file restart is the known INC-010 residual, explicitly deferred as DEF-026 | Canonical checkout only |
 | **RC-3** | ✅ Final public documentation/governance pass | README/setup/scope claims match code; conventional contribution/conduct entrypoints and issue/PR templates exist; deferred work is named honestly | Canonical checkout only |
 | **RC-4** | ✅ Build the legacy-checkout migration/cutover tool + runbook | Dry-run-first inspection, non-overwriting database backup/manifest, copied-data migration, git-remote plan, validation, and rollback paths are tested without accessing the running checkout | Tooling and fixtures only; **do not touch the live legacy checkout** |
-| **RC-5** | Deployable release candidate — in progress | Minimal user-service deploy is dry-run/idempotence tested; fresh normal/dev installs, wheel/sdist, full standalone + browser suites, dependency/secret/history checks, CI, and review are green | Canonical checkout only; no live archive |
+| **RC-5** | Deployable release candidate — in progress | Minimal user-service deploy is dry-run/idempotence tested; reconciled capacity Phases 1–3 are merged; schema-v2 capacity terminology, fresh normal/dev installs, wheel/sdist, full standalone + browser suites, dependency/secret/history checks, CI, and review are green | Canonical checkout only; no live archive |
 | **RC-6** | Cut over the operator's legacy working copy | After its fill is explicitly stopped: verify no writers, back up live state, run the approved migration, re-origin to `Auspex-Aerie/modelark`, pull `main`, validate archive/restore/service behavior, and prove rollback | **Operator-attended only; never run autonomously** (DEC-042) |
 
 Post-release deferrals remain deferrals: the Torch-free StreamZNN package split (`DEF-014`), the
@@ -32,6 +32,11 @@ provisioning-aware fill + DEF-022 fail-soft replica (**DEC-031**); #35 Plans tab
 capacity bars / #38 graduated catalog gate / DEF-023 loud oopsies (**DEC-032**); DEF-021 Verifier
 (**DEC-033**); DEC-029 conservative RAID headroom folded into the capacity math. All three deferred
 DEFs (021/022/023) resolved. Next: the guided storage startover (§7 of the handoff) + a fresh fill.
+
+The historical specification below retains the original `provisioning` terminology. Current code
+uses capacity modes: `guaranteed` (formerly `uncompressed`) and `compression_aware` (formerly
+`compressed`). DEC-045 replaces the legacy count-based planner with the reconciled work graph and
+exact per-drive ledger; Phases 1–3 merged in PRs #10–#12, with the Phase 3 review follow-up in #13.
 
 <details><summary>Original build-order spec (kept for reference)</summary>
 

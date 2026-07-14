@@ -1192,6 +1192,11 @@ not depend on either the naming migration or the legacy working-copy cutover.
 
 ### Phase 4 — separately shippable capacity-mode rename
 
+**Implementation status (2026-07-14): in review.** The v2 dispatcher/migration, canonical Python,
+CLI, HTTP and browser surfaces, compatibility aliases, cutover guardrails, and migration regressions
+are implemented on the Phase 4 branch. Packaged-wheel, full-suite, Playwright, CI, and Greptile
+evidence remain the release gates.
+
 1. Add the monotonic version dispatcher and schema-v2 `capacity_mode` migration.
 2. Update CLI and API compatibility aliases.
 3. Rename operator labels and update plan forecast/constraint surfaces without changing the Phase 3

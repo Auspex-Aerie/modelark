@@ -94,7 +94,7 @@ def migrate(src_path: Path, dst_path: Path) -> dict:
             report[t] = {"src": len(rows), "dst": got, "dropped_cols": dropped}
         # The destination schema is bootstrapped before source rows exist. Run row-level backfills
         # once more after import (notably nested archived stored_relpath recovery).
-        db._migrate(dst)
+        db._migrate_legacy_columns(dst)
         completed = True
         return report
     finally:

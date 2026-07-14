@@ -8,14 +8,14 @@
   function planCard(p, totals) {
     const t = p.is_active && totals ? totals : null;
     const nums = t
-      ? `<div class="pcnums"><span>unc <b>${gb(t.uncompressed)}</b></span><span>comp <b>${gb(t.compressed)}</b></span><span>cap <b>${gb(t.capacity)}</b></span></div>`
+      ? `<div class="pcnums"><span>raw forecast <b>${gb(t.uncompressed)}</b></span><span>expected stored <b>${gb(t.compressed)}</b></span><span>capacity <b>${gb(t.capacity)}</b></span></div>`
       : `<div class="pcnums pcmut">select to see live capacity numbers</div>`;
-    const other = p.provisioning === "uncompressed" ? "compressed" : "uncompressed";
+    const other = p.capacity_mode === "guaranteed" ? "compression_aware" : "guaranteed";
     const drives = (p.drives && p.drives.length) ? " (" + p.drives.join(", ") + ")" : " (none)";
     return `<div class="plancard${p.is_active ? " active" : ""}">
       <div class="pcheadrow"><div><span class="pcname">${esc(p.name || p.plan_id)}</span> <span class="pcid">${esc(p.plan_id)}</span></div>
         ${p.is_active ? '<span class="pcactive">active</span>' : ""}</div>
-      <div class="pcmeta">${esc(p.provisioning)} · ${esc(p.n_drives)} drive${p.n_drives === 1 ? "" : "s"}${esc(drives)}</div>
+      <div class="pcmeta">${esc(p.capacity_mode)} capacity · ${esc(p.n_drives)} drive${p.n_drives === 1 ? "" : "s"}${esc(drives)}</div>
       ${nums}
       <div class="pcacts"><button class="pcuse" data-id="${esc(p.plan_id)}">${p.is_active ? "Use this plan →" : "Select + use →"}</button>
         <button class="pcprov" data-id="${esc(p.plan_id)}" data-mode="${other}">switch to ${other}</button></div>
@@ -47,8 +47,10 @@
     host.innerHTML = ov.plans.map(p => planCard(p, ov.totals)).join("");
     host.querySelectorAll(".pcuse").forEach(b => b.onclick = () => selectAndReload(b.dataset.id));
     host.querySelectorAll(".pcprov").forEach(b => b.onclick = async () => {
-      const r = await post("/api/plan/provisioning", { plan_id: b.dataset.id, mode: b.dataset.mode });
-      if (r && r.ok) { toast("provisioning → " + r.provisioning); window.loadPlans(); }
+      const r = await post("/api/plan/capacity-mode", {
+        plan_id: b.dataset.id, capacity_mode: b.dataset.mode,
+      });
+      if (r && r.ok) { toast("capacity mode → " + r.capacity_mode); window.loadPlans(); }
       else toast((r && r.error) || "failed");
     });
   };
@@ -60,7 +62,7 @@
       const id = ($("newPlanId").value || "").trim().toLowerCase();
       if (!id) { toast("enter a plan id"); return; }
       const r = await post("/api/plan/create",
-        { plan_id: id, name: $("newPlanName").value, provisioning: $("newPlanProv").value });
+        { plan_id: id, name: $("newPlanName").value, capacity_mode: $("newPlanProv").value });
       if (r && r.ok) { toast("created plan '" + r.plan_id + "'"); $("newPlanId").value = ""; $("newPlanName").value = ""; window.loadPlans(); }
       else toast((r && r.error) || "could not create the plan");
     };

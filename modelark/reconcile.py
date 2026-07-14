@@ -1,13 +1,14 @@
-"""Shadow-only desired-state reconciliation for archive work (DEC-045 Phase 1).
+"""Desired-state reconciliation for archive work (DEC-045).
 
 The durable catalog remains authoritative.  This module derives exact copy facts,
-requirements, and unassigned work intents without mutating the database or changing the
-legacy fill executor.  Capacity placement materializes concrete tasks in a later phase.
+requirements, and unassigned work intents without mutating the database. Capacity placement
+materializes concrete tasks; the executor discards and re-derives them at drive-batch boundaries.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import warnings
 from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
@@ -570,9 +571,37 @@ def shadow_report(
     con,
     plan_id: str,
     repo_ids: Sequence[str] | None = None,
-    provisioning: str = "uncompressed",
+    capacity_mode: str | None = None,
+    *,
+    provisioning: str | None = None,
 ) -> dict:
-    """Read-only new/legacy diagnostic. The legacy executor does not consume this result."""
+    """Read-only reconciled graph/ledger diagnostic with a legacy-placement comparison."""
+    canonical_alias = {
+        "uncompressed": "guaranteed", "compressed": "compression_aware",
+    }
+    if provisioning is not None:
+        warnings.warn(
+            "shadow_report(provisioning=...) is deprecated; use capacity_mode=...",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if capacity_mode is not None:
+            canonical = canonical_alias.get(capacity_mode, capacity_mode)
+            legacy = canonical_alias.get(provisioning, provisioning)
+            if canonical != legacy:
+                raise ValueError("capacity_mode and deprecated provisioning disagree")
+        capacity_mode = provisioning
+    capacity_mode = capacity_mode or "guaranteed"
+    aliases = {
+        "guaranteed": ("guaranteed", "uncompressed"),
+        "compression_aware": ("compression_aware", "compressed"),
+        "uncompressed": ("guaranteed", "uncompressed"),
+        "compressed": ("compression_aware", "compressed"),
+    }
+    try:
+        canonical_mode, legacy_mode = aliases[capacity_mode]
+    except KeyError as exc:
+        raise ValueError(f"unsupported capacity mode {capacity_mode!r}") from exc
     result = reconcile_plan(con, plan_id, repo_ids)
     legacy_error = None
     reservations: tuple[LegacyReservation, ...] = ()
@@ -581,7 +610,7 @@ def shadow_report(
 
         placement = librarian.plan_placements(
             con, repos=list(repo_ids) if repo_ids is not None else None,
-            plan_id=plan_id, provisioning=provisioning,
+            plan_id=plan_id, capacity_mode=legacy_mode,
         )
         reservations = _legacy_reservations(con, placement)
     except Exception as exc:
@@ -591,7 +620,7 @@ def shadow_report(
     normalized = normalize_legacy_reservations(reservations, result)
     payload = result.to_dict()
     from modelark import capacity  # local import: capacity types depend on Phase-1 graph types
-    capacity_result = capacity.plan_capacity(con, result, provisioning=provisioning)
+    capacity_result = capacity.plan_capacity(con, result, capacity_mode=canonical_mode)
     payload["capacity"] = capacity_result.to_dict()
     legacy_counts = Counter(item.requirement_id for item in normalized)
     legacy_duplicates = sorted(key for key, count in legacy_counts.items() if count > 1)
@@ -634,6 +663,6 @@ def shadow_report(
             for item in normalized
         ],
         "new_intents": len(result.intents),
-        "executor": "legacy (shadow result is not consumed)",
+        "executor": "reconciled (legacy data is comparison-only)",
     }
     return payload

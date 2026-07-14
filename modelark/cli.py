@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from modelark.core import db
@@ -208,7 +209,7 @@ def cmd_library_plan(args):
                 raise SystemExit("no active plan; select a plan before requesting a shadow explanation")
             print(json.dumps(reconcile.shadow_report(
                 con, prow["plan_id"], repo_ids=args.repo,
-                provisioning=prow["provisioning"],
+                capacity_mode=prow["capacity_mode"],
             ), default=str, sort_keys=True))
         finally:
             con.close()
@@ -216,14 +217,21 @@ def cmd_library_plan(args):
     con = db.connect()          # RW like fetch: portal must be stopped; replays any dirty WAL
     try:                        # one connection for the whole command (plan → apply → post-check)
         prow = plan.active(con) or plan.bootstrap(con)   # #33: scope planning to the active Plan
-        pid, prov = prow["plan_id"], prow["provisioning"]
+        pid, capacity_mode = prow["plan_id"], prow["capacity_mode"]
         if getattr(args, "json", False):
-            print(json.dumps(librarian.plan_view(con, repos=args.repo, plan_id=pid, provisioning=prov), default=str))
+            print(json.dumps(librarian.plan_view(
+                con, repos=args.repo, plan_id=pid, capacity_mode=capacity_mode
+            ), default=str))
             return
-        p = librarian.plan_placements(con, repos=args.repo, plan_id=pid, provisioning=prov)
+        p = librarian.plan_placements(
+            con, repos=args.repo, plan_id=pid, capacity_mode=capacity_mode
+        )
         dinfo = {d["label"]: d for d in librarian.drives(con, pid)}
 
-        hdr = f"Placement plan — plan '{pid}' (provisioning={prov}) — {p['n_planned']} model(s)"
+        hdr = (
+            f"Placement plan — plan '{pid}' (capacity mode={capacity_mode}) — "
+            f"{p['n_planned']} model(s)"
+        )
         if p["n_done"]:
             hdr += f" ({p['n_done']} already archived)"
         if p["n_must"]:
@@ -287,37 +295,52 @@ def cmd_plan(args):
             for p in plan.list_plans(con):
                 t = plan.totals(con, p["plan_id"])
                 mark = "*" if p["is_active"] else " "
-                print(f"{mark} {p['plan_id']:12} {(p['name'] or ''):16} prov={p['provisioning']:12} "
+                print(f"{mark} {p['plan_id']:12} {(p['name'] or ''):16} mode={p['capacity_mode']:18} "
                       f"drives={len(p['drives']):>2}  cap={_tb(t['capacity'])}  "
-                      f"unc={_tb(t['uncompressed'])}  comp={_tb(t['compressed'])}")
+                      f"raw={_tb(t['uncompressed'])}  expected={_tb(t['compressed'])}")
         elif sub == "show":
             pid = args.plan or (plan.active(con) or {}).get("plan_id")
             if not pid or plan.get(con, pid) is None:
                 raise SystemExit(f"no such plan: {pid}")
             p, t = plan.get(con, pid), plan.totals(con, pid)
             print(f"Plan {p['plan_id']} ({p['name']}) — {'ACTIVE' if p['is_active'] else 'inactive'}, "
-                  f"provisioning={p['provisioning']}")
+                  f"capacity mode={p['capacity_mode']}")
             print(f"  annex:  {p['annex_root']}")
             print(f"  drives ({len(p['drives'])}): {', '.join(p['drives']) or '(none)'}")
-            print(f"  uncompressed footprint : {_tb(t['uncompressed'])}   "
+            print(f"  raw forecast           : {_tb(t['uncompressed'])}   "
                   f"({t['n_selection']} models, {t['n_must']} must-have · copy-aware)")
-            print(f"  compressed  estimate   : {_tb(t['compressed'])}   (archived-so-far + est for the rest)")
+            print(f"  expected stored forecast: {_tb(t['compressed'])}   "
+                  "(archived-so-far + estimate for the rest)")
             print(f"  fleet capacity         : {_tb(t['capacity'])}   "
-                  f"({t['uncompressed_pct']*100:.0f}% unc / {t['compressed_pct']*100:.0f}% comp)")
+                  f"({t['uncompressed_pct']*100:.0f}% raw / "
+                  f"{t['compressed_pct']*100:.0f}% expected)")
             if t["over_uncompressed"]:
-                print("  🔴 UNCOMPRESSED footprint exceeds capacity — add a drive or trim the set.")
+                print("  🔴 Raw forecast exceeds capacity — add a drive or trim the set.")
             elif t["over_compressed"]:
-                print("  🟡 COMPRESSED estimate exceeds capacity — only fits if compression holds.")
+                print("  🟡 Expected stored forecast exceeds capacity — compression-aware admission fails.")
         elif sub == "create":
-            p = plan.create(con, args.id, name=args.name, provisioning=args.provisioning)
-            print(f"created plan {p['plan_id']} (provisioning={p['provisioning']})")
+            raw_mode = args.capacity_mode or args.provisioning or "guaranteed"
+            if args.provisioning is not None or raw_mode in ("uncompressed", "compressed"):
+                print(
+                    "warning: provisioning/uncompressed/compressed is deprecated; use "
+                    "--capacity-mode guaranteed|compression_aware",
+                    file=sys.stderr,
+                )
+            p = plan.create(con, args.id, name=args.name, capacity_mode=raw_mode)
+            print(f"created plan {p['plan_id']} (capacity mode={p['capacity_mode']})")
         elif sub == "select":
             p = plan.set_active(con, args.id)
             print(f"active plan → {p['plan_id']}")
-        elif sub == "provisioning":
+        elif sub in ("capacity-mode", "provisioning"):
             pid = args.plan or (plan.active(con) or {}).get("plan_id")
-            p = plan.set_provisioning(con, pid, args.mode)
-            print(f"plan {p['plan_id']} provisioning → {p['provisioning']}")
+            if sub == "provisioning" or args.mode in ("uncompressed", "compressed"):
+                print(
+                    "warning: plan provisioning and its legacy values are deprecated; use "
+                    "plan capacity-mode guaranteed|compression_aware",
+                    file=sys.stderr,
+                )
+            p = plan.set_capacity_mode(con, pid, args.mode)
+            print(f"plan {p['plan_id']} capacity mode → {p['capacity_mode']}")
     finally:
         con.close()
 
@@ -424,24 +447,36 @@ def main(argv=None):
                     help="copies to require (default 2; 1 = unprotect)")
     pr.set_defaults(func=cmd_protect)
 
-    pl = sub.add_parser("plan", help="the first-class Plan (#33): drive set + live capacity numbers")
+    pl = sub.add_parser("plan", help="the first-class Plan: drive set + live capacity evidence")
     plsub = pl.add_subparsers(dest="plan_cmd", required=True)
     pls = plsub.add_parser("list", help="list plans (active marked *) with their three live numbers")
     pls.set_defaults(func=cmd_plan)
-    plsh = plsub.add_parser("show", help="show a plan's drives + uncompressed/compressed/capacity")
+    plsh = plsub.add_parser("show", help="show a plan's drives + raw/expected forecasts/capacity")
     plsh.add_argument("--plan", help="plan id (default: the active plan)")
     plsh.set_defaults(func=cmd_plan)
     plc = plsub.add_parser("create", help="create a new plan")
     plc.add_argument("--id", required=True, help="plan slug, e.g. ark")
     plc.add_argument("--name", help="display name")
-    plc.add_argument("--provisioning", choices=["uncompressed", "compressed"], default="uncompressed",
-                     help="uncompressed (over-provision, never runs out — default) | compressed (bet on ZipNN)")
+    mode_choices = ["guaranteed", "compression_aware", "uncompressed", "compressed"]
+    create_modes = plc.add_mutually_exclusive_group()
+    create_modes.add_argument(
+        "--capacity-mode", choices=mode_choices,
+        help="guaranteed (default) | compression_aware; legacy values warn",
+    )
+    create_modes.add_argument(
+        "--provisioning", choices=mode_choices,
+        help="deprecated alias for --capacity-mode",
+    )
     plc.set_defaults(func=cmd_plan)
     plse = plsub.add_parser("select", help="set the active plan")
     plse.add_argument("--id", required=True, help="plan slug to activate")
     plse.set_defaults(func=cmd_plan)
-    plp = plsub.add_parser("provisioning", help="switch a plan's provisioning mode")
-    plp.add_argument("mode", choices=["uncompressed", "compressed"])
+    plm = plsub.add_parser("capacity-mode", help="set guaranteed or compression-aware admission")
+    plm.add_argument("mode", choices=mode_choices)
+    plm.add_argument("--plan", help="plan id (default: the active plan)")
+    plm.set_defaults(func=cmd_plan)
+    plp = plsub.add_parser("provisioning", help="deprecated alias for capacity-mode")
+    plp.add_argument("mode", choices=mode_choices)
     plp.add_argument("--plan", help="plan id (default: the active plan)")
     plp.set_defaults(func=cmd_plan)
 
@@ -484,7 +519,7 @@ def main(argv=None):
     lp.add_argument("--apply", action="store_true", help="execute the plan (fetch per drive)")
     lp.add_argument("--json", action="store_true", help="emit the plan as JSON (portal Fill tab / scripting)")
     lp.add_argument("--explain", action="store_true",
-                    help="read-only DEC-045 shadow graph + legacy comparison JSON; never used by --apply")
+                    help="read-only DEC-045 graph/ledger + legacy comparison JSON")
     lp.add_argument("--max-24h", dest="max_24h_gb", type=float, default=1000,
                     help="24h download cap in GB across the fleet (default 1000 = 1 TB; 0 disables)")
     lp.set_defaults(func=cmd_library_plan)

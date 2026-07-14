@@ -109,6 +109,8 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
         con.execute("PRAGMA busy_timeout=15000")
         con.execute("PRAGMA foreign_keys=ON")
         con.execute("PRAGMA query_only=ON")
+        version = con.execute("PRAGMA user_version").fetchone()[0]
+        _validate_catalog_version(version, read_only=True)
         return con
 
     CATALOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -118,16 +120,19 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
             f"Catalog not migrated yet: {legacy.name} exists but {DB_PATH.name} does not. Run\n"
             f"  .venv/bin/python -m scripts.migrate_duckdb_to_sqlite {legacy} {DB_PATH}\n"
             f"first (DEC-024), then start the portal.")
+    existed = DB_PATH.exists()
     con = sqlite3.connect(str(DB_PATH), isolation_level=None, check_same_thread=False)
-    con.execute("PRAGMA journal_mode=WAL")           # persistent once set; concurrent reader/writer
-    con.execute("PRAGMA busy_timeout=15000")         # a concurrent WRITER briefly holds the lock → wait, don't error
-    con.execute("PRAGMA synchronous=NORMAL")         # WAL-safe durability without an fsync per commit
     try:
+        version = con.execute("PRAGMA user_version").fetchone()[0]
+        _validate_catalog_version(version)
+        con.execute("PRAGMA journal_mode=WAL")       # persistent once set; concurrent reader/writer
+        con.execute("PRAGMA busy_timeout=15000")     # a concurrent WRITER briefly holds the lock → wait, don't error
+        con.execute("PRAGMA synchronous=NORMAL")     # WAL-safe durability without an fsync per commit
         # A legacy table rebuild must run with FK enforcement off; validation still happens through
         # PRAGMA foreign_key_check before its transaction commits. Every normal write below runs ON.
         con.execute("PRAGMA foreign_keys=OFF")
         _apply_schema(con, tables_only=True)
-        _migrate(con)
+        _migrate(con, version, backup_existing=existed)
         _apply_schema(con)
         con.execute("PRAGMA foreign_keys=ON")
     except Exception:
@@ -150,7 +155,21 @@ _INTEGRITY_TABLES = (
     "archived", "fetch_events", "plans", "plan_drives",
 )
 _VIEW_NAMES = ("v_ui", "v_model_summary", "v_storage_by_drive")
-_SCHEMA_VERSION = 1
+_INTEGRITY_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+
+
+def _validate_catalog_version(version: int, *, read_only: bool = False) -> None:
+    if version > _SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Catalog schema v{version} is newer than this ModelArk build (v{_SCHEMA_VERSION}); "
+            "upgrade ModelArk before opening it."
+        )
+    if read_only and version < _SCHEMA_VERSION:
+        raise RuntimeError(
+            f"Catalog schema v{version} requires a writable migration to v{_SCHEMA_VERSION}; "
+            "open it once with the current ModelArk CLI or service before read-only diagnostics."
+        )
 
 
 def _canonical_table_sql(table: str, replacement: str) -> str:
@@ -166,9 +185,9 @@ def _canonical_table_sql(table: str, replacement: str) -> str:
     raise RuntimeError(f"Packaged schema has no CREATE TABLE statement for {table}")
 
 
-def _backup_before_integrity_migration(con: sqlite3.Connection) -> Path:
+def _backup_before_migration(con: sqlite3.Connection, label: str) -> Path:
     """Create one consistent, non-overwriting recovery copy before the destructive table swap."""
-    backup_path = DB_PATH.with_name(f"{DB_PATH.name}.pre-integrity-v{_SCHEMA_VERSION}.bak")
+    backup_path = DB_PATH.with_name(f"{DB_PATH.name}.{label}.bak")
     if backup_path.exists():
         return backup_path
     backup = sqlite3.connect(str(backup_path), isolation_level=None)
@@ -188,12 +207,11 @@ def _rebuild_integrity_tables(con: sqlite3.Connection) -> None:
     and leaves a diagnostic instead of a partly-upgraded catalog.
     """
     if con.execute("PRAGMA foreign_key_list(archived)").fetchall():
-        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        con.execute(f"PRAGMA user_version={_INTEGRITY_SCHEMA_VERSION}")
         return
     if con.execute("PRAGMA foreign_keys").fetchone()[0]:
         raise RuntimeError("Integrity migration requires foreign_keys=OFF before its transaction")
 
-    _backup_before_integrity_migration(con)
     current = "catalog"
     con.execute("BEGIN IMMEDIATE")
     try:
@@ -207,8 +225,16 @@ def _rebuild_integrity_tables(con: sqlite3.Connection) -> None:
             old_cols = {r[1] for r in con.execute(f'PRAGMA table_info("{table}")').fetchall()}
             new_cols = [r[1] for r in con.execute(f'PRAGMA table_info("{new}")').fetchall()]
             cols = [c for c in new_cols if c in old_cols]
+            expressions = [f'"{c}"' for c in cols]
+            if table == "plans" and "capacity_mode" in new_cols and "provisioning" in old_cols:
+                cols.append("capacity_mode")
+                expressions.append(
+                    "CASE provisioning WHEN 'uncompressed' THEN 'guaranteed' "
+                    "WHEN 'compressed' THEN 'compression_aware' ELSE provisioning END"
+                )
             quoted = ", ".join(f'"{c}"' for c in cols)
-            con.execute(f'INSERT INTO "{new}" ({quoted}) SELECT {quoted} FROM "{table}"')
+            selected = ", ".join(expressions)
+            con.execute(f'INSERT INTO "{new}" ({quoted}) SELECT {selected} FROM "{table}"')
 
         # Drop children before parents for clarity even though enforcement is deliberately off on
         # this connection. DDL is transactional in SQLite, including the table renames below.
@@ -230,7 +256,7 @@ def _rebuild_integrity_tables(con: sqlite3.Connection) -> None:
         con.execute(
             "CREATE UNIQUE INDEX idx_plans_one_active ON plans(is_active) WHERE is_active = 1"
         )
-        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        con.execute(f"PRAGMA user_version={_INTEGRITY_SCHEMA_VERSION}")
         con.execute("COMMIT")
     except Exception as exc:
         con.execute("ROLLBACK")
@@ -242,7 +268,70 @@ def _rebuild_integrity_tables(con: sqlite3.Connection) -> None:
         ) from exc
 
 
-def _migrate(con) -> None:
+def _migrate_capacity_mode_v2(con: sqlite3.Connection, *, backup_existing: bool) -> None:
+    """Rename plans.provisioning and map its values without changing admission semantics."""
+    if con.execute("PRAGMA foreign_keys").fetchone()[0]:
+        raise RuntimeError("Capacity-mode migration requires foreign_keys=OFF")
+    if backup_existing:
+        _backup_before_migration(con, "pre-capacity-v2")
+
+    columns = {row[1] for row in con.execute('PRAGMA table_info("plans")').fetchall()}
+    if "capacity_mode" not in columns and "provisioning" not in columns:
+        raise RuntimeError("Cannot migrate plans: neither capacity_mode nor provisioning exists")
+
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        if "capacity_mode" not in columns:
+            con.execute('DROP TABLE IF EXISTS "plans__capacity_v2"')
+            con.execute(_canonical_table_sql("plans", "plans__capacity_v2"))
+            con.execute(
+                'INSERT INTO "plans__capacity_v2" '
+                '(plan_id,name,annex_root,capacity_mode,status,is_active,created_at,notes) '
+                "SELECT plan_id,name,annex_root,CASE provisioning "
+                "WHEN 'uncompressed' THEN 'guaranteed' "
+                "WHEN 'compressed' THEN 'compression_aware' ELSE provisioning END,"
+                "status,is_active,created_at,notes FROM plans"
+            )
+            con.execute('DROP TABLE "plans"')
+            con.execute('ALTER TABLE "plans__capacity_v2" RENAME TO "plans"')
+
+        invalid = con.execute(
+            "SELECT plan_id,capacity_mode FROM plans "
+            "WHERE capacity_mode NOT IN ('guaranteed','compression_aware')"
+        ).fetchall()
+        if invalid:
+            raise RuntimeError(f"Invalid legacy plan capacity values: {invalid[:12]}")
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(f"Capacity-mode migration produced foreign-key violations: {violations[:12]}")
+        con.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_one_active "
+            "ON plans(is_active) WHERE is_active = 1"
+        )
+        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        con.execute("COMMIT")
+    except Exception as exc:
+        con.execute("ROLLBACK")
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(f"Cannot migrate plans to schema v2 capacity modes ({exc})") from exc
+
+
+def _migrate(con, version: int, *, backup_existing: bool) -> None:
+    if version < _INTEGRITY_SCHEMA_VERSION:
+        if backup_existing:
+            _backup_before_migration(con, "pre-integrity-v1")
+        _migrate_legacy_columns(con)
+        _rebuild_integrity_tables(con)
+        version = _INTEGRITY_SCHEMA_VERSION
+    if version < _SCHEMA_VERSION:
+        _migrate_capacity_mode_v2(con, backup_existing=backup_existing)
+        version = _SCHEMA_VERSION
+    if version != _SCHEMA_VERSION:
+        raise RuntimeError(f"Catalog migration stopped at v{version}, expected v{_SCHEMA_VERSION}")
+
+
+def _migrate_legacy_columns(con) -> None:
     for stmt in _MIGRATIONS:
         try:
             con.execute(stmt)                        # a duplicate-column ADD raises; ignore (already migrated)
@@ -265,7 +354,6 @@ def _migrate(con) -> None:
     # `verified`. No physical verifier writes this model status, so every such legacy
     # row is safely and idempotently narrowed to the evidence it actually holds.
     con.execute("UPDATE models SET status='inspected' WHERE status='verified'")
-    _rebuild_integrity_tables(con)
 
 
 def upsert(con, table: str, row: dict, pk: list[str], touch: list[str] | None = None) -> None:

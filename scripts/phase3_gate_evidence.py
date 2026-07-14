@@ -155,24 +155,24 @@ def _active_plan(con: sqlite3.Connection) -> tuple[str, str]:
     active = plan.active(con)
     if active is None:
         raise GateEvidenceError("catalog copy has no active plan")
-    return active["plan_id"], active["provisioning"]
+    return active["plan_id"], active["capacity_mode"]
 
 
-def _run_shadow(con: sqlite3.Connection, plan_id: str, provisioning: str) -> tuple[dict, float]:
+def _run_shadow(con: sqlite3.Connection, plan_id: str, capacity_mode: str) -> tuple[dict, float]:
     started = time.perf_counter()
-    report = reconcile.shadow_report(con, plan_id, provisioning=provisioning)
+    report = reconcile.shadow_report(con, plan_id, capacity_mode=capacity_mode)
     return report, time.perf_counter() - started
 
 
 def _run_executor_path(
     con: sqlite3.Connection,
     plan_id: str,
-    provisioning: str,
+    capacity_mode: str,
 ) -> tuple[reconcile.ReconcileResult, capacity.CapacityPlan, float]:
     """Time only the graph and ledger that the Phase 3 executor will actually consume."""
     started = time.perf_counter()
     graph = reconcile.reconcile_plan(con, plan_id)
-    ledger = capacity.plan_capacity(con, graph, provisioning=provisioning)
+    ledger = capacity.plan_capacity(con, graph, capacity_mode=capacity_mode)
     return graph, ledger, time.perf_counter() - started
 
 
@@ -190,15 +190,15 @@ def measure_catalog_replay(
     source = _open_read_only(catalog)
     try:
         source.execute("PRAGMA query_only=ON")
-        plan_id, provisioning = _active_plan(source)
-        _run_executor_path(source, plan_id, provisioning)  # warm caches; excluded from p95
+        plan_id, capacity_mode = _active_plan(source)
+        _run_executor_path(source, plan_id, capacity_mode)  # warm caches; excluded from p95
         timings = []
         for _ in range(samples):
-            graph, ledger, elapsed = _run_executor_path(source, plan_id, provisioning)
+            graph, ledger, elapsed = _run_executor_path(source, plan_id, capacity_mode)
             timings.append(elapsed)
         # Legacy normalization is a Phase 1/2 review seam, not part of the Phase 3 production loop.
         # Run it once for equivalence evidence, but never charge it to the executor latency budget.
-        report, shadow_elapsed = _run_shadow(source, plan_id, provisioning)
+        report, shadow_elapsed = _run_shadow(source, plan_id, capacity_mode)
 
         # Exercise the same graph while a writer owns a RESERVED lock, but only on an ephemeral
         # consistent backup.  The operator-supplied catalog remains OS-level read-only throughout.
@@ -211,8 +211,8 @@ def measure_catalog_replay(
                 writable.execute("BEGIN IMMEDIATE")
                 reader = _open_read_only(clone)
                 try:
-                    clone_plan_id, clone_provisioning = _active_plan(reader)
-                    _run_executor_path(reader, clone_plan_id, clone_provisioning)
+                    clone_plan_id, clone_capacity_mode = _active_plan(reader)
+                    _run_executor_path(reader, clone_plan_id, clone_capacity_mode)
                 finally:
                     reader.close()
                     writable.execute("ROLLBACK")

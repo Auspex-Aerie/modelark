@@ -7,7 +7,7 @@ import threading
 from contextlib import contextmanager
 from unittest import mock
 
-from modelark.web import selection_api, server
+from modelark.web import plan_api, selection_api, server
 
 
 @contextmanager
@@ -119,6 +119,23 @@ def test_valid_mutation_dispatches():
     assert status == 200 and json.loads(body) == {"ok": True}
     assert headers["Referrer-Policy"] == "no-referrer"
     clear.assert_called_once_with()
+
+
+def test_capacity_mode_route_and_deprecated_alias_dispatch():
+    with _portal() as httpd, \
+         mock.patch.object(plan_api, "set_capacity_mode", return_value={"ok": True}) as canonical, \
+         mock.patch.object(plan_api, "set_provisioning", return_value={"ok": True}) as legacy:
+        body = json.dumps({"plan_id": "ark", "capacity_mode": "guaranteed"})
+        status, _, _ = _request(
+            httpd, "POST", "/api/plan/capacity-mode", body, _mutation_headers(httpd)
+        )
+        legacy_body = json.dumps({"plan_id": "ark", "mode": "uncompressed"})
+        old_status, _, _ = _request(
+            httpd, "POST", "/api/plan/provisioning", legacy_body, _mutation_headers(httpd)
+        )
+    assert status == 200 and old_status == 200
+    canonical.assert_called_once_with({"plan_id": "ark", "capacity_mode": "guaranteed"})
+    legacy.assert_called_once_with({"plan_id": "ark", "mode": "uncompressed"})
 
 
 def test_non_loopback_bind_is_refused_before_startup():

@@ -43,19 +43,20 @@ def plan_float_ratio(con) -> float:
 
 
 def est_stored_bytes(con, repo_id: str, float_ratio: float | None = None,
-                     provisioning: str = "uncompressed") -> int:
-    """Estimated footprint of one copy. Provisioning-aware (DEF-016):
-      • 'uncompressed' (default) → the EXACT raw full-precision footprint (comp + raw, no ratio) — the
+                     capacity_mode: str = "guaranteed") -> int:
+    """Estimated footprint of one copy. Capacity-mode aware (DEC-045):
+      • 'guaranteed' (legacy: 'uncompressed') → the exact raw-bounded footprint — the
         over-provision basis; the fill reserves full space so it can never run out, and compression
         just leaves the reservation with room to spare.
-      • 'compressed'   → the ZipNN estimate (comp × observed-ratio + raw) × margin — the BET; packs
+      • 'compression_aware' (legacy: 'compressed') → the ZipNN estimate plus margin; packs
         each drive to its predicted TRUE capacity, with the per-model failsafe carrying the risk.
     `float_ratio` (from plan_float_ratio, computed ONCE per plan) tracks the fill's real average so
     drives don't over-pack; omitted → computed here (a query per call, fine for one-offs)."""
     files = fetch.plan(con, repo_id)
     comp = sum(f["size"] or 0 for f in files if f["mode"] == "compress")
     raw = sum(f["size"] or 0 for f in files if f["mode"] == "raw")
-    if provisioning == "uncompressed":
+    mode = capacity_model.mode_from_value(capacity_mode)
+    if mode == capacity_model.CapacityMode.GUARANTEED:
         return comp + raw
     ratio = float_ratio if float_ratio is not None else plan_float_ratio(con)
     return int((comp * ratio + raw) * _SIZE_MARGIN)
@@ -148,8 +149,8 @@ def _advise(primary_bulk, raid, replica, p_un, must_items, must_repl, c1_un, c2_
     if freed:
         adv.append({"level": "info", "msg": f"Bulk consolidated — free/unused primary drives: {', '.join(freed)}."})
     if must_items:
-        mb = sum(i["size"] for i in must_items)              # copy#1 footprint (provisioning currency)
-        mb_repl = sum(i["size"] for i in must_repl)          # copy#2 footprint (compressed — the real copy size)
+        mb = sum(i["size"] for i in must_items)              # copy#1 capacity-mode footprint
+        mb_repl = sum(i["size"] for i in must_repl)          # copy#2 expected stored footprint
         if not raid:
             adv.append({"level": "warn", "msg":
                 "NO RAID — must-have copy #1 falls on a single primary disk (no redundant tier). "
@@ -208,12 +209,12 @@ def raw_sizes(con, repos: list[str]) -> dict[str, int]:
 
 
 def plan_placements(con, repos: list[str] | None = None, plan_id: str | None = None,
-                    provisioning: str = "uncompressed") -> dict:
+                    capacity_mode: str = "guaranteed") -> dict:
     """DEC-017 tiered layout, scoped to a Plan (#33). RAID is pulled OUT of the size sort: must-have
     COPY #1 → the RAID (else the largest primary if no RAID); BULK (numcopies=1) → the non-RAID PRIMARY
     drives (consolidated); must-have COPY #2+ → the smallest-sufficient INDEPENDENT REPLICA drive(s)
-    (whole set on one, else span). `plan_id` restricts the fleet to `plan_drives`; `provisioning`
-    picks the packing currency (raw vs compressed est, DEF-016). Resumable per DEC-019; emits advisories."""
+    (whole set on one, else span). `plan_id` restricts the fleet to `plan_drives`; `capacity_mode`
+    chooses guaranteed or compression-aware accounting. Resumable per DEC-019; emits advisories."""
     # DEC-019: a repo leaves the pool only when FULLY placed — its COMPLETE-copy count meets its
     # numcopies. (models.status flips to 'archived' after the FIRST copy, so it is NOT a safe
     # done-signal for a must-have; an interrupted 2nd copy must stay schedulable.)
@@ -223,7 +224,7 @@ def plan_placements(con, repos: list[str] | None = None, plan_id: str | None = N
     pool = [r for r in cands if placed.get(r, 0) < want.get(r, 1)]
     n_done = len(cands) - len(pool)
     float_ratio = plan_float_ratio(con)                  # observed avg (raw-fallbacks included), computed once
-    size = {r: est_stored_bytes(con, r, float_ratio, provisioning) for r in pool}
+    size = {r: est_stored_bytes(con, r, float_ratio, capacity_mode) for r in pool}
     ncopies = {}
     if pool:
         ncopies = dict(con.execute(
@@ -238,11 +239,12 @@ def plan_placements(con, repos: list[str] | None = None, plan_id: str | None = N
     bulk = [(r, size[r]) for r in pool if ncopies.get(r, 1) < 2]
     must_items = [{"repo": r, "size": size[r]} for r in pool if ncopies.get(r, 1) >= 2]
     # A must-have COPY #2 is a `git annex copy` of the already-COMPRESSED copy#1 blob (not a fetch), so
-    # its size is known — never raw-over-provision it. Under 'uncompressed' provisioning, sizing copy#2
+    # its size is known — never raw-over-provision it. Under guaranteed capacity, sizing copy#2
     # at raw would falsely short the small replica tier and GATE-B a fill that actually fits (the copies
     # are compressed on both drives). So the replica tier is ALWAYS sized against the compressed estimate.
-    size_repl = ({r: est_stored_bytes(con, r, float_ratio, "compressed") for r in pool}
-                 if provisioning == "uncompressed" else size)
+    size_repl = ({r: est_stored_bytes(con, r, float_ratio, "compression_aware") for r in pool}
+                 if capacity_model.mode_from_value(capacity_mode)
+                 == capacity_model.CapacityMode.GUARANTEED else size)
     must_repl = [{"repo": r, "size": size_repl[r]} for r in pool if ncopies.get(r, 1) >= 2]
 
     # 1. must-have COPY #1 → the RAID (reserve its space FIRST), else the largest primary (no-RAID fleets)
@@ -285,13 +287,13 @@ def plan_placements(con, repos: list[str] | None = None, plan_id: str | None = N
 
 
 def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
-              provisioning: str = "uncompressed") -> dict:
+              capacity_mode: str = "guaranteed") -> dict:
     """The placement plan as UI-ready JSON — the librarian's results 'published' for the portal
     Fill tab (and `library plan --json`). Per drive: tier/role/raid, capacity + headroom, planned
     models {repo, size, category, copy}, and fill %. Plus copy#1→copy#2 links (the dotted lines),
-    advisories, and totals. Scoped to a Plan's drive set + provisioning currency (#33). The SAME
+    advisories, and totals. Scoped to a Plan's drive set + capacity mode (#33). The SAME
     backend the CLI and the UI both call."""
-    p = plan_placements(con, repos, plan_id, provisioning)
+    p = plan_placements(con, repos, plan_id, capacity_mode)
     dinfo = {d["label"]: d for d in drives(con, plan_id)}
     cats = dict(con.execute("SELECT repo_id, coalesce(category, '?') FROM models").fetchall())
     # A must-have's copy #1 stays in the plan's primary assign even after it's archived (it's still in
@@ -327,7 +329,7 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
                        "n_must": p["n_must"], "n_bulk": p["n_bulk"]}}
 
 
-def queue_view(con, plan_id: str | None = None, provisioning: str = "uncompressed") -> dict:
+def queue_view(con, plan_id: str | None = None, capacity_mode: str = "guaranteed") -> dict:
     """The Fill 'queue' as ONE row per finalized model (not per copy). Returns the WHOLE finalized
     selection — DONE models included — so nothing vanishes when a model finishes. Each row carries
     size (est on-disk), category, numcopies, and the drive its copy#1 and copy#2 are planned for; the
@@ -335,7 +337,7 @@ def queue_view(con, plan_id: str | None = None, provisioning: str = "uncompresse
     (queue_state) and positions each row under the drive of its NEXT unfinished copy — done rows
     settle under their copy#1 home (done-placement 'b'). Heavy (~one plan pass): the Fill tab fetches
     it once on open; the cheap queue_state refreshes state at model boundaries without re-planning."""
-    p = plan_placements(con, None, plan_id, provisioning)
+    p = plan_placements(con, None, plan_id, capacity_mode)
     copy1, copy2 = {}, {}                                       # repo -> planned copy#1 / copy#2 drive
     for label, items in p["primary"]["assign"].items():
         for it in items:
@@ -360,7 +362,7 @@ def queue_view(con, plan_id: str | None = None, provisioning: str = "uncompresse
         n = numcopies.get(repo, 1)
         models.append({
             "repo": repo,
-            "size": est_stored_bytes(con, repo, ratio, "compressed"),   # realistic on-disk footprint for display
+            "size": est_stored_bytes(con, repo, ratio, "compression_aware"),
             "category": cats.get(repo, "?"),
             "numcopies": n,
             "copy1": copy1.get(repo) or arch_home.get(repo),

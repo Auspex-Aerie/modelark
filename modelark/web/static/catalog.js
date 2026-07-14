@@ -115,13 +115,13 @@
     const barColor = g.tier === "ok" ? "var(--ok)" : g.tier === "prevent" ? "var(--crit)" : "var(--warn)";
     let note;
     if (g.tier === "prevent")
-      note = `<span class="pgnote crit"><b>Over capacity.</b> Compressed ${gb(g.compressed)} exceeds the plan's ${gb(cap)} — adding is blocked. Remove models or add a drive to the plan.</span>`;
+      note = `<span class="pgnote crit"><b>Over capacity.</b> Expected stored forecast ${gb(g.compressed)} exceeds the plan's ${gb(cap)} — adding is blocked. Remove models or add a drive to the plan.</span>`;
     else if (g.tier === "warn")
-      note = `<span class="pgnote"><b>Near full.</b> Compressed ${gb(g.compressed)} of ${gb(cap)}${g.over_uncompressed ? ` · uncompressed ${gb(g.uncompressed)} over raw (fits only if compression holds)` : ""}.</span>`;
+      note = `<span class="pgnote"><b>Near full.</b> Expected stored forecast ${gb(g.compressed)} of ${gb(cap)}${g.over_uncompressed ? ` · raw forecast ${gb(g.uncompressed)} exceeds capacity` : ""}.</span>`;
     else if (g.tier === "soft")
-      note = `<span class="pgnote">Compressed ${gb(g.compressed)} of ${gb(cap)} — approaching capacity · uncompressed ${gb(g.uncompressed)}.</span>`;
+      note = `<span class="pgnote">Expected stored forecast ${gb(g.compressed)} of ${gb(cap)} — approaching capacity · raw forecast ${gb(g.uncompressed)}.</span>`;
     else
-      note = `<span class="pgnote">Compressed ${gb(g.compressed)} · uncompressed ${gb(g.uncompressed)} of ${gb(cap)} capacity.</span>`;
+      note = `<span class="pgnote">Expected stored ${gb(g.compressed)} · raw forecast ${gb(g.uncompressed)} of ${gb(cap)} capacity.</span>`;
     el.innerHTML =
       `<div class="pgh"><span class="pgtitle">Plan capacity · ${esc(g.plan_id)}</span><span class="pgbadge ${esc(g.tier)}">${esc(badge)}</span></div>` +
       `<div class="pgbar"><div style="width:${compPct.toFixed(1)}%;background:${barColor}"></div></div>` + note;

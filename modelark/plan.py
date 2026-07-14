@@ -1,7 +1,7 @@
 """First-class Plan entity (#33, DEF-016) — a fill campaign's identity + its capacity model.
 
 A Plan = {identity, the global catalog selection it fills, a FIXED set of registered drives
-(`plan_drives`), its annex, a provisioning mode}. It fuels the level-1 capacity failsafe by exposing
+(`plan_drives`), its annex, a capacity mode}. It fuels the level-1 capacity failsafe by exposing
 three numbers computed LIVE against the catalog every call (never stored snapshots):
 
   • uncompressed = Σ raw (full-precision) footprint of the finalized selection, COPY-AWARE (× numcopies).
@@ -10,9 +10,9 @@ three numbers computed LIVE against the catalog every call (never stored snapsho
                    write, copy-aware. uncompressed − compressed = the compression dividend, in drive terms.
   • capacity     = Σ (drive capacity − headroom) over `plan_drives`. The only capacity that exists.
 
-Provisioning (DEF-016): 'uncompressed' (default) over-provisions against the raw footprint — the fill
-finishes early with drives to spare and never runs out; 'compressed' bets on ZipNN and the per-model
-failsafe (#37, fill.execute) carries the risk. BOTH numbers are always reported (the two bars, #36) so
+Capacity mode (DEC-045): 'guaranteed' (default) reserves against the raw-bounded footprint;
+'compression_aware' uses observed compression plus margin and relies on the live per-file guard.
+BOTH forecasts are always reported (the two bars, #36) so
 an unexpected inflation (orphans / a bug making actual > expected) is visible in either mode.
 
 `selection` + `archived` stay GLOBAL for the single plan `ark`; a future plan_id column on them is the
@@ -25,21 +25,63 @@ LAZY import inside register_drive, so there is no module-level cycle.
 """
 from __future__ import annotations
 
+import warnings
+
 from modelark.core import db
 from modelark import archive_manifest, capacity as capacity_model, librarian, register, wishlist
 
 DEFAULT_PLAN = "ark"
-_FIELDS = ["plan_id", "name", "annex_root", "provisioning", "status", "is_active", "created_at", "notes"]
+CAPACITY_MODES = ("guaranteed", "compression_aware")
+_LEGACY_TO_CANONICAL = {
+    "uncompressed": "guaranteed",
+    "compressed": "compression_aware",
+}
+_CANONICAL_TO_LEGACY = {value: key for key, value in _LEGACY_TO_CANONICAL.items()}
+_FIELDS = ["plan_id", "name", "annex_root", "capacity_mode", "status", "is_active", "created_at", "notes"]
+
+
+def normalize_capacity_mode(value: str, *, warn_legacy: bool = False) -> str:
+    if value in CAPACITY_MODES:
+        return value
+    if value in _LEGACY_TO_CANONICAL:
+        if warn_legacy:
+            warnings.warn(
+                f"capacity mode {value!r} is deprecated; use {_LEGACY_TO_CANONICAL[value]!r}",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return _LEGACY_TO_CANONICAL[value]
+    raise ValueError(
+        f"capacity_mode must be 'guaranteed' or 'compression_aware', got {value!r}"
+    )
+
+
+def legacy_capacity_mode(value: str) -> str:
+    return _CANONICAL_TO_LEGACY[normalize_capacity_mode(value)]
 
 # ---- CRUD -------------------------------------------------------------------
 
-def create(con, plan_id, name=None, annex_root=None, provisioning="uncompressed", notes=None) -> dict:
-    if provisioning not in ("uncompressed", "compressed"):
-        raise ValueError(f"provisioning must be 'uncompressed' or 'compressed', got {provisioning!r}")
+def create(
+    con,
+    plan_id,
+    name=None,
+    annex_root=None,
+    capacity_mode=None,
+    notes=None,
+    *,
+    provisioning=None,
+) -> dict:
+    if provisioning is not None:
+        legacy_mode = normalize_capacity_mode(provisioning, warn_legacy=True)
+        if capacity_mode is not None and normalize_capacity_mode(capacity_mode) != legacy_mode:
+            raise ValueError("capacity_mode and deprecated provisioning disagree")
+        capacity_mode = legacy_mode
+    else:
+        capacity_mode = normalize_capacity_mode(capacity_mode or "guaranteed", warn_legacy=True)
     db.upsert(con, "plans", {
         "plan_id": plan_id, "name": name or plan_id,
         "annex_root": annex_root or str(register.library_root()),
-        "provisioning": provisioning, "status": "active", "notes": notes,
+        "capacity_mode": capacity_mode, "status": "active", "notes": notes,
     }, pk=["plan_id"])
     return get(con, plan_id)
 
@@ -51,6 +93,8 @@ def get(con, plan_id) -> dict | None:
         return None
     d = dict(zip(_FIELDS, row))
     d["is_active"] = bool(d["is_active"])
+    # One-release Python/API compatibility alias. It is not persisted.
+    d["provisioning"] = legacy_capacity_mode(d["capacity_mode"])
     d["drives"] = plan_drive_labels(con, plan_id)
     return d
 
@@ -79,15 +123,23 @@ def set_active(con, plan_id) -> dict:
     return get(con, plan_id)
 
 
-def set_provisioning(con, plan_id, mode) -> dict:
-    """Switch a plan between 'uncompressed' (over-provision, never runs out — default) and 'compressed'
-    (bet on ZipNN; the per-model failsafe carries the risk). Both totals are always reported regardless."""
-    if mode not in ("uncompressed", "compressed"):
-        raise ValueError(f"provisioning must be 'uncompressed' or 'compressed', got {mode!r}")
+def set_capacity_mode(con, plan_id, mode) -> dict:
+    """Set canonical admission accounting without changing how archive bytes are stored."""
+    mode = normalize_capacity_mode(mode, warn_legacy=True)
     if get(con, plan_id) is None:
         raise ValueError(f"no such plan: {plan_id}")
-    con.execute("UPDATE plans SET provisioning=? WHERE plan_id=?", [mode, plan_id])
+    con.execute("UPDATE plans SET capacity_mode=? WHERE plan_id=?", [mode, plan_id])
     return get(con, plan_id)
+
+
+def set_provisioning(con, plan_id, mode) -> dict:
+    """Deprecated one-release alias for :func:`set_capacity_mode`."""
+    warnings.warn(
+        "set_provisioning() is deprecated; use set_capacity_mode()",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return set_capacity_mode(con, plan_id, mode)
 
 
 def add_drive(con, plan_id, drive_label) -> None:
@@ -208,6 +260,7 @@ def _numbers(con, plan_id, repo_ids, count_key) -> dict:
     p = get(con, plan_id)
     return {
         "plan_id": plan_id,
+        "capacity_mode": p["capacity_mode"] if p else "guaranteed",
         "provisioning": p["provisioning"] if p else "uncompressed",
         "uncompressed": unc, "compressed": comp, "capacity": cap,
         count_key: len(repo_ids), "n_must": n_must,

@@ -70,6 +70,13 @@ def _browser_flow() -> None:
         try:
             pg.goto(BASE, wait_until="networkidle")
             time.sleep(2)
+            plan_text = pg.inner_text("#view-plans")
+            assert "guaranteed" in plan_text and "raw forecast" in plan_text
+            assert "expected stored" in plan_text and "provisioning mode" not in plan_text
+            assert pg.locator("#newPlanProv option").evaluate_all(
+                "els => els.map(el => el.value)"
+            ) == ["guaranteed", "compression_aware"]
+            print("  canonical capacity-mode labels rendered")
             # 1. select the `ark` plan (the #35 gate forces this before anything unlocks) -> app reloads
             pg.wait_for_selector(".pcuse[data-id='ark']")
             pg.click(".pcuse[data-id='ark']")
@@ -143,6 +150,9 @@ def main() -> None:
 
             sel = _get("/api/selection")
             assert sel["cap_24h_gb"] == 1000, f"cap should be 1000 GB, got {sel['cap_24h_gb']}"
+            plans = _get("/api/plan")
+            assert plans["plans"][0]["capacity_mode"] == "guaranteed"
+            assert plans["plans"][0]["provisioning"] == "uncompressed"  # one-release alias
             ids = [m["id"] for m in _get("/api/models")["rows"]]
             assert "demo/giant-llm" in ids, f"giant model missing from catalog: {ids}"
             print(f"  api ok: cap={sel['cap_24h_gb']} GB · {len(ids)} models incl. the giant")

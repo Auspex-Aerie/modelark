@@ -63,23 +63,23 @@ def library() -> dict:
 
 
 def _active_plan() -> tuple[str, str]:
-    """(plan_id, provisioning) of the active Plan (#33) — bootstraps `ark` if none yet. Callers already
+    """(plan_id, capacity_mode) of the active Plan — bootstraps `ark` if none yet. Callers already
     hold data._lock; conn()/plan.* don't re-acquire it, so this is safe under the outer lock."""
     from modelark import plan as _plan
     con = data.conn()
     p = _plan.active(con) or _plan.bootstrap(con)
-    return p["plan_id"], p["provisioning"]
+    return p["plan_id"], p["capacity_mode"]
 
 
 def plan() -> dict:
     """The librarian's placement plan as UI JSON (drive tiers, fill %, models-by-category, copy#1→#2
-    links) for the Fill tab, scoped to the active Plan's drive set + provisioning currency (#33).
+    links) for the Fill tab, scoped to the active Plan's drive set + capacity mode (#33).
     `plan_view` is read-only, so it runs on the portal's own connection — same backend as `library
     plan --json`."""
     from modelark import librarian
     with data._lock:
-        pid, prov = _active_plan()
-        return librarian.plan_view(data.conn(), plan_id=pid, provisioning=prov)
+        pid, capacity_mode = _active_plan()
+        return librarian.plan_view(data.conn(), plan_id=pid, capacity_mode=capacity_mode)
 
 
 def queue() -> dict:
@@ -88,8 +88,8 @@ def queue() -> dict:
     on open. See librarian.queue_view."""
     from modelark import librarian
     with data._lock:
-        pid, prov = _active_plan()
-        return librarian.queue_view(data.conn(), plan_id=pid, provisioning=prov)
+        pid, capacity_mode = _active_plan()
+        return librarian.queue_view(data.conn(), plan_id=pid, capacity_mode=capacity_mode)
 
 
 def queue_state() -> dict:

@@ -476,13 +476,13 @@
     };
     const dividend = Math.max(0, t.uncompressed - t.compressed);
     el.innerHTML =
-      `<div class="pbhead"><span class="pbtitle">Plan '${esc(t.plan_id)}' · ${esc(t.provisioning)} provisioning</span>` +
+      `<div class="pbhead"><span class="pbtitle">Plan '${esc(t.plan_id)}' · ${esc(t.capacity_mode)} capacity</span>` +
       `<span class="pbcap">${esc(t.n_selection)} finalized · capacity ${esc(MA.gb(cap))} · ${esc(t.n_drives)} drive${t.n_drives === 1 ? "" : "s"}</span></div>` +
-      bar("Uncompressed footprint (boundary currency)", t.uncompressed, "unc") +
-      bar("Compressed estimate (on disk)", t.compressed, "comp") +
+      bar("Raw forecast (conservative)", t.uncompressed, "unc") +
+      bar("Expected stored forecast", t.compressed, "comp") +
       `<div class="pbnote">compression dividend ≈ ${MA.gb(dividend)} — the drive space compression is expected to reclaim` +
       (t.over_uncompressed
-        ? `</div><div class="fadv warn" style="margin-top:9px">⚠ Uncompressed footprint exceeds capacity — this fits only if compression holds. Add a drive, trim the set, or switch the plan to 'compressed' to bet on ZipNN.</div>`
+        ? `</div><div class="fadv warn" style="margin-top:9px">⚠ Raw forecast exceeds capacity — this plan depends on compression savings. Add a drive, trim the set, or explicitly choose compression_aware capacity.</div>`
         : "</div>");
   }
   function refreshPlanBars() { MA.api("/api/plan/totals").then(renderPlanBars).catch(() => {}); }
