@@ -19,7 +19,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from modelark import compress, plan, reconcile, streamznn
+from modelark import capacity, compress, plan, reconcile, streamznn
 
 
 class GateEvidenceError(RuntimeError):
@@ -164,6 +164,18 @@ def _run_shadow(con: sqlite3.Connection, plan_id: str, provisioning: str) -> tup
     return report, time.perf_counter() - started
 
 
+def _run_executor_path(
+    con: sqlite3.Connection,
+    plan_id: str,
+    provisioning: str,
+) -> tuple[reconcile.ReconcileResult, capacity.CapacityPlan, float]:
+    """Time only the graph and ledger that the Phase 3 executor will actually consume."""
+    started = time.perf_counter()
+    graph = reconcile.reconcile_plan(con, plan_id)
+    ledger = capacity.plan_capacity(con, graph, provisioning=provisioning)
+    return graph, ledger, time.perf_counter() - started
+
+
 def measure_catalog_replay(
     catalog: Path,
     scratch_dir: Path,
@@ -179,11 +191,14 @@ def measure_catalog_replay(
     try:
         source.execute("PRAGMA query_only=ON")
         plan_id, provisioning = _active_plan(source)
-        report, _ = _run_shadow(source, plan_id, provisioning)  # warm caches; excluded from p95
+        _run_executor_path(source, plan_id, provisioning)  # warm caches; excluded from p95
         timings = []
         for _ in range(samples):
-            report, elapsed = _run_shadow(source, plan_id, provisioning)
+            graph, ledger, elapsed = _run_executor_path(source, plan_id, provisioning)
             timings.append(elapsed)
+        # Legacy normalization is a Phase 1/2 review seam, not part of the Phase 3 production loop.
+        # Run it once for equivalence evidence, but never charge it to the executor latency budget.
+        report, shadow_elapsed = _run_shadow(source, plan_id, provisioning)
 
         # Exercise the same graph while a writer owns a RESERVED lock, but only on an ephemeral
         # consistent backup.  The operator-supplied catalog remains OS-level read-only throughout.
@@ -197,15 +212,15 @@ def measure_catalog_replay(
                 reader = _open_read_only(clone)
                 try:
                     clone_plan_id, clone_provisioning = _active_plan(reader)
-                    _run_shadow(reader, clone_plan_id, clone_provisioning)
+                    _run_executor_path(reader, clone_plan_id, clone_provisioning)
                 finally:
                     reader.close()
                     writable.execute("ROLLBACK")
             finally:
                 writable.close()
 
-        diagnostics = Counter(item["severity"] for item in report["diagnostics"])
-        capacity = report["capacity"]
+        graph_payload = graph.to_dict()
+        diagnostics = Counter(item["severity"] for item in graph_payload["diagnostics"])
         p95_ms = 1000 * _percentile_95(timings)
         legacy_error = report["shadow"].get("legacy_error")
         return {
@@ -214,18 +229,19 @@ def measure_catalog_replay(
             "catalog_bytes": catalog.stat().st_size,
             "selected_repositories": len(report["repos"]),
             "archived_rows": source.execute("SELECT count(*) FROM archived").fetchone()[0],
-            "graph_hash": report["graph_hash"],
-            "work_intents": len(report["intents"]),
-            "assigned_tasks": len(capacity["tasks"]),
-            "capacity_feasible": capacity["feasible"],
-            "capacity_failures": len(capacity["failures"]),
+            "graph_hash": graph_payload["graph_hash"],
+            "work_intents": len(graph.intents),
+            "assigned_tasks": len(ledger.tasks),
+            "capacity_feasible": ledger.feasible,
+            "capacity_failures": len(ledger.failures),
             "diagnostics_by_severity": dict(sorted(diagnostics.items())),
             "legacy_comparison_available": legacy_error is None,
             "legacy_error_type": legacy_error.split(":", 1)[0] if legacy_error else None,
             "legacy_target_equivalent": report["placement_comparison"]["target_equivalent"],
             "samples": samples,
-            "p95_milliseconds": round(p95_ms, 3),
-            "maximum_milliseconds": round(1000 * max(timings), 3),
+            "executor_path_p95_milliseconds": round(p95_ms, 3),
+            "executor_path_maximum_milliseconds": round(1000 * max(timings), 3),
+            "shadow_comparison_milliseconds": round(1000 * shadow_elapsed, 3),
             "release_host_budget_milliseconds": 500,
             "concurrent_writer_read_succeeded": True,
             "source_opened_uri_mode_ro": True,

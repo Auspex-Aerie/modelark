@@ -75,6 +75,8 @@ def test_catalog_replay_is_sanitized_bounded_and_leaves_source_unchanged(tmp_pat
     assert result["source_opened_uri_mode_ro"] is True
     assert result["concurrent_writer_read_succeeded"] is True
     assert result["selected_repositories"] == 1
+    assert result["executor_path_p95_milliseconds"] <= 500
+    assert result["shadow_comparison_milliseconds"] >= 0
     assert "org/model" not in json.dumps(result)
     assert catalog.read_bytes() == before
     assert list(scratch.iterdir()) == []

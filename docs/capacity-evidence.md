@@ -89,4 +89,28 @@ only on an automatically removed scratch clone:
 
 The output contains aggregate counts, graph hash, comparison status, and p95/max latency only. It
 does not contain repository ids, filenames, drive labels, or local paths. The release-host gate is
-500 ms p95 over 20 measured runs after one warm-up.
+500 ms p95 over 20 measured graph-plus-ledger runs after one warm-up. The legacy planner comparison
+is executed once and reported separately because it is a review seam, not part of the Phase 3
+production executor path.
+
+The required release-host replay was run on 2026-07-14. The live legacy source was opened with SQLite
+URI `mode=ro` and copied through SQLite's consistent backup API; only the disposable copy received
+current schema migrations. The migrated copy passed `integrity_check` and `foreign_key_check` and
+contained 2,311 archived rows across 444 selected repositories.
+
+```text
+executor graph + ledger samples:      20
+executor p95 milliseconds:       271.724
+executor maximum milliseconds:   329.878
+release-host budget milliseconds:    500
+concurrent-writer clone read:          yes
+capacity byte failures:                  0
+shadow legacy comparison ms:       552.885
+```
+
+The production graph-plus-ledger path passes its latency/locking gate. An initial collector revision
+incorrectly timed the shadow-only legacy planner too and reported about 601 ms; separating that review
+seam produced the figures above. The replay also exposed 54 blocking manifest-policy diagnostics (50
+pickle-only selections under the safe default and four unsupported artifact formats) plus 95 policy-
+drift warnings. Those are not byte-capacity failures, but Phase 3 executor adoption remains gated on
+an explicit operator policy decision for the selected artifacts.

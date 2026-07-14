@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Phases 1–2 merged in shadow mode; Phase 3 empirical entry gates in progress** |
+| Status | **Phases 1–2 merged; Phase 3 empirical gates passed; selected-artifact policy decision pending** |
 | Scope | Fill planning, copy reconciliation, capacity accounting, execution, terminal failures, and operator surfaces |
 | Impact | Large blast radius across every fill safety path; phased shadow rollout is mandatory |
 | Trigger | A live legacy fill falsely reported a capacity stop after double-counting protected first copies already stored on the RAID home |
@@ -1150,12 +1150,17 @@ Local evidence recorded before implementation review:
   target temporary object atomically renamed into place. The conservative workspace term remains
   active pending review.
 
-Still required before Phase 3 executor adoption: the copied/sanitized legacy-catalog replay plus
-release-host latency/lock evidence. The operator-approved real-bf16 StreamZNN high-water gate passed
-on a SHA-verified 29.36 GB restored shard with 19.47 GB measured filesystem high-water against a
-29.36 GB enforced ceiling; sanitized evidence is in `docs/capacity-evidence.md`. The collector is
-`scripts/phase3_gate_evidence.py`; its source inputs are opened read-only and all temporary output is
-constrained to an explicit scratch directory.
+Both empirical gates now pass. The operator-approved real-bf16 StreamZNN run used a SHA-verified
+29.36 GB restored shard and measured 19.47 GB filesystem high-water against a 29.36 GB enforced
+ceiling. The copied-catalog release-host replay measured the production graph-plus-ledger path at
+271.724 ms p95 and 329.878 ms maximum, below the 500 ms budget, while a concurrent writer held the
+disposable clone. Sanitized evidence is in `docs/capacity-evidence.md`.
+
+Executor adoption remains paused on a policy finding from that replay: the committed selection has
+50 pickle-only repositories refused by the safe default and four repositories whose intended
+artifacts are outside the current safetensors/GGUF/opted-in-pickle manifest. Under DEC-045 Gate B,
+those root diagnostics block the whole fill. The operator must explicitly choose acquisition policy
+or artifact support scope; implementation must not silently drop, weaken, or auto-deselect them.
 
 ### Phase 3 — executor conversion
 
