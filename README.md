@@ -164,7 +164,9 @@ installs, and finally the packaged default:
 
 ```yaml
 scope:               # architecture-derived categories included by `discover --walk`
-  include_categories: [generative-llm, encoder, seq2seq]
+  # abbreviated here; the shipped default also includes translation, embeddings,
+  # rerankers, classifiers, QA, audio/speech, world models, and image generation.
+  include_categories: [generative-llm, encoder, seq2seq, image-gen]
 always_include:      # orgs walked by `discover --walk`
   orgs: [deepseek-ai, Qwen]
 exclude:
@@ -179,12 +181,32 @@ compression:            # DEC-022 codec gate
 Must-have status (a replicated 2nd copy) is set with `modelark protect --repo <id>` (there is
 no cart UI for it yet — see gaps below).
 
-## Setup
+## Deploy
+
+The supported supervised path is a normal install in a checkout-local `.venv` plus an unprivileged
+`systemd --user` service. Inspect it before it changes anything:
+
+```bash
+python3 scripts/deploy.py --dry-run
+python3 scripts/deploy.py --enable --start
+.venv/bin/modelark-deploy --source "$PWD" --check
+```
+
+The deployer writes explicit data/state paths, but does not install apt packages, edit sudoers,
+prepare drives, migrate a catalog, or enable fill auto-resume. Add `--resume-fill` only after the
+plan, drives, migrated data, and rollback path have been checked; starting that unit can continue
+large downloads. See the full [deployment and rollback guide](docs/deployment.md).
+
+The current ZipNN dependency makes the first environment large—typically 4–5 GB on Linux because
+upstream pulls Torch and may pull CUDA/NVIDIA packages. ModelArk does not require a GPU. `DEF-014`
+tracks the smaller standalone StreamZNN package.
+
+## Manual setup
 
 **Python (3.10+):**
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -e .
+.venv/bin/pip install .
 ```
 `zipnn` is a hard dependency (compression + the canary). Its current upstream package also declares
 Torch and safetensors even though ModelArk uses only ZipNN's byte mode. On Linux, the default PyPI
@@ -194,8 +216,8 @@ tracks extracting the proven byte-compatible StreamZNN/native path into a smalle
 without making compression optional. Optional capabilities are explicit extras:
 
 ```bash
-.venv/bin/pip install -e ".[zstd]"       # stream-off zstd fallback
-.venv/bin/pip install -e ".[migration]"  # one-time DuckDB → SQLite conversion
+.venv/bin/pip install ".[zstd]"       # stream-off zstd fallback
+.venv/bin/pip install ".[migration]"  # one-time DuckDB → SQLite conversion
 ```
 
 Without the `zstd` extra, the stream-off fallback stores raw. Normal installs do not pull DuckDB or
@@ -213,25 +235,29 @@ Writable state is never placed in the installed package. The catalog defaults to
 `$XDG_DATA_HOME/modelark` (normally `~/.local/share/modelark`) and logs/state to
 `$XDG_STATE_HOME/modelark` (normally `~/.local/state/modelark`). Use global options
 `--data-dir`, `--state-dir`, and `--config` to override them. An existing checkout-local
-`catalog/catalog.sqlite` is not moved automatically: start with
-`modelark --data-dir ./catalog ...` until you deliberately migrate it.
+`catalog/catalog.sqlite` is not moved automatically: the deployer refuses an empty destination while
+checkout-local SQLite or DuckDB data exists. A manual non-editable install cannot infer its source
+checkout, so pass `modelark --data-dir ./catalog ...` until you deliberately migrate it.
 For a legacy working-copy cutover, use the backup-first
 [`scripts/migrate_legacy_runtime.py`](scripts/migrate_legacy_runtime.py) tool and the
 operator-attended [`docs/legacy-cutover.md`](docs/legacy-cutover.md) runbook. Do not migrate a running
 fill or replace its checkout in place. Installed distributions expose the same tool as
 `modelark-migrate`.
 
-**System packages (apt):**
+**System packages (apt; deliberately outside the unprivileged deployer):**
 ```bash
-sudo apt-get install -y git-annex smartmontools open-iscsi   # open-iscsi only if using a NAS LUN
+sudo apt-get install -y git-annex smartmontools
+sudo apt-get install -y open-iscsi   # optional: NAS LUN
+sudo apt-get install -y xfsprogs     # optional: only when formatting XFS drives
 ```
 - **git-annex** — tracks model bytes across the offline fleet.
 - **smartmontools** — `smartctl`, for the Disk Health page.
 - **open-iscsi** — attach a NAS RAID LUN as copy-#1 storage (optional).
+- **xfsprogs** — provides `mkfs.xfs` when XFS formatting is requested (optional).
 
 **Disk Health SMART access — grant `smartctl` passwordless sudo (do NOT run the portal as root):**
-The portal runs as *your* user (the shipped systemd unit sets `User=` to you, not root) so the catalog and the
-git-annex clones on each drive stay user-owned. `smartctl` needs root, so grant it a single
+The portal runs in your `systemd --user` manager so the catalog and git-annex clones on each drive
+stay user-owned. `smartctl` needs root, so grant it a single
 passwordless-sudo rule rather than escalating the whole service:
 ```bash
 echo "$USER ALL=(root) NOPASSWD: /usr/sbin/smartctl" | sudo tee /etc/sudoers.d/modelark-smartctl
@@ -241,7 +267,8 @@ sudo chmod 440 /etc/sudoers.d/modelark-smartctl
 restart. **Don't run the portal as root:** root-owned catalog/annex files trigger git "dubious
 ownership" refusals and it's a needless privilege escalation for a network-listening service. Only the
 hardware ops (SMART read, `mkfs`, `mount`) are elevated, and only via `sudo`. *(Automating this
-drop-in + the systemd unit is `DEF-025`.)*
+privileged drop-in remains the unresolved part of `DEF-025`; the user-service deployment is now
+automated.)*
 
 **Hugging Face auth** (optional — gated repos, higher rate limits): `.venv/bin/hf auth login`.
 
@@ -316,8 +343,10 @@ views including the live Fill run surface. Restorability is production-verified 
 
 Tested here on a mix of reliable and junk external drives, plus one iSCSI volume on a RAID5 NAS
 (Synology DiskStation). The iterative bug fixes and breaks along the way are in the decision log and
-commit history. Branch protection and PR checks are active; the public history begins with the
-sanitized repository snapshot and will grow from there.
+commit history. Branch protection and PR checks are active. The intended public history begins with a
+sanitized repository snapshot and grows from there; the private release history still has a final
+infrastructure-identifier sanitation gate ([`RC-0`](docs/roadmap.md#public-release-closeout--active)),
+so do not change visibility until that scan and rewrite/recreation are complete.
 
 For now: use it to archive, and use it carefully. We've built in tools to help you spot where problems
 may have occurred and to give you options to fix them. Bad drives can and will fail after an extended
@@ -339,7 +368,8 @@ The [decision log](docs/decision_log.md) has the full picture; the headline defe
 - **Verification & visibility** — a scheduled fleet-wide audit (on-demand re-verification already exists) and a download-status view over recorded `fetch_events`.
 - **Recovery enhancements** — richer progress for multi-model restores, explicit conflict policies,
   and restore manifests. The safe repeatable-`--repo` verified workflow exists today.
-- **Ops & packaging** — scripting host setup (the `smartctl` sudoers rule + systemd unit are manual) and spinning StreamZNN out into its own MIT repo.
+- **Ops & packaging** — a safer privileged SMART-access helper (the unprivileged user-service deploy
+  is shipped) and spinning StreamZNN out into its own MIT repo.
 
 ## Unscheduled Roadmap
 

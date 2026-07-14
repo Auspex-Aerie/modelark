@@ -1,22 +1,7 @@
 #!/usr/bin/env bash
-# Bootstrap ModelArk: Python venv + deps + system packages.
+# Backward-compatible entrypoint. The deployer deliberately leaves privileged
+# system-package and sudoers changes to the operator.
 set -euo pipefail
-cd "$(dirname "$0")/.."
-
-echo "→ Python venv + package (editable)"
-python3 -m venv .venv
-.venv/bin/pip install -q --upgrade pip
-.venv/bin/pip install -q -e .
-
-echo "→ System packages (needs sudo): git-annex, smartmontools"
-if command -v apt-get >/dev/null 2>&1; then
-  sudo apt-get install -y git-annex smartmontools
-else
-  echo "  non-apt system — install git-annex + smartmontools with your package manager"
-fi
-
-echo
-echo "✓ Setup complete."
-echo "  Optional (gated repos / higher rate limits):  .venv/bin/hf auth login"
-echo "  Launch the portal:                            .venv/bin/modelark serve"
-echo "  Disk Health (SMART):  grant smartctl passwordless sudo (see README > Setup) — do NOT run the portal as root"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+echo "setup.sh now delegates to the unprivileged deploy surface (scripts/deploy.py)." >&2
+exec python3 "$ROOT/scripts/deploy.py" --source "$ROOT" "$@"

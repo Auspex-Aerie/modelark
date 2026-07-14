@@ -12,11 +12,13 @@ python3 -m venv .venv-dev
 .venv-dev/bin/pip install -e ".[dev]"
 ```
 
-The `dev` extra installs the test/build tools and Playwright Python package. A runtime-only
-editable install remains `.venv/bin/pip install -e .`.
+The `dev` extra installs the test/build tools and Playwright Python package. Normal users get a
+non-editable checkout-local install through `python3 scripts/deploy.py`; editable installs are for
+development only.
 
 System packages for the full pipeline: `git-annex` (byte storage), `smartmontools` (Disk Health),
-and optionally `open-iscsi` (NAS LUN). See the README's **Setup** section.
+and optionally `open-iscsi` (NAS LUN) or `xfsprogs` (XFS formatting). See the README's
+**Deploy** and **Manual setup** sections.
 
 ## Running the tests
 
@@ -32,7 +34,7 @@ done
 
 A file prints `all passed` on success and raises (non-zero exit) on the first failing assertion.
 CI runs the core suite on every push and PR; the browser E2E is a separate job (below).
-Run the correctness-oriented static checks with `.venv-dev/bin/ruff check modelark tests`.
+Run the correctness-oriented static checks with `.venv-dev/bin/ruff check modelark scripts tests`.
 
 ### End-to-end tests
 
@@ -81,5 +83,5 @@ carrying local changes tends to get hard to merge as things shift under you:
 ## Reporting bugs
 
 Open an issue with what you ran, what you expected, and the relevant log lines
-(`journalctl -u modelark` if you run the supervised service). For anything security-sensitive, see
+(`journalctl --user -u modelark.service` if you run the supervised service). For anything security-sensitive, see
 [`SECURITY.md`](../SECURITY.md).

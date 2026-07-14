@@ -1,23 +1,5 @@
-# ModelArk fill portal — supervised (DEC-023 / INC-006). Makes the fill survive crashes + reboots.
-#
-# Install (operator, privileged — replace <USER> and <INSTALL_DIR> below with your values first):
-#   sudo cp scripts/modelark.service /etc/systemd/system/modelark.service
-#   sudo systemctl daemon-reload
-#   sudo systemctl enable --now modelark
-#
-# Watch / post-mortem (journald keeps stdout+stderr persistently — the crash output the terminal lost):
-#   journalctl -u modelark -f            # live
-#   journalctl -u modelark -n 200        # last 200 lines (e.g. an "Aborted (core dumped)")
-#   systemctl status modelark            # state + last exit
-#
-# If it fast-crash-loops and systemd gives up (StartLimit below), clear it after fixing the cause:
-#   sudo systemctl reset-failed modelark && sudo systemctl start modelark
-#
-# Why a system service (not systemd --user): starts at boot without a login session, and can order
-# after a storage mount. Runs as <USER> so it uses the HF token (~/.cache/huggingface), git-annex
-# config, and ~/modelark-library. The guided fill AWAITS an unmounted drive and auto-continues when
-# it mounts (fill.py _await_drive), so mount ordering is best-effort, not required — a slow attach
-# just delays the first shard, it never fails the run.
+# Template rendered by scripts/deploy.py. Install the generated unit as the operator's
+# systemd --user service; do not copy this placeholder file into /etc/systemd/system.
 
 [Unit]
 Description=ModelArk fill portal (guided archive fill, supervised)
@@ -31,10 +13,8 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=<USER>
-Group=<USER>
-WorkingDirectory=<INSTALL_DIR>
-ExecStart=<INSTALL_DIR>/.venv/bin/modelark serve --no-open --resume
+WorkingDirectory=@WORKING_DIRECTORY@
+ExecStart=@EXEC_START@
 Restart=always
 RestartSec=10
 TimeoutStopSec=30
@@ -42,4 +22,4 @@ StandardOutput=journal
 StandardError=journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

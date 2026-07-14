@@ -82,8 +82,17 @@ source in place during the window.
 
 ## Phase 3 — validate the canonical install against the migrated copy
 
-Use a fresh environment built from canonical `main`; do not carry the legacy `.venv` forward. With
-the service still stopped, validate:
+Use canonical `main`; do not carry the legacy `.venv` forward. Review the final-path deploy plan with
+the service still stopped:
+
+```bash
+python3 scripts/deploy.py --data-dir <NEW_DATA_DIR> --state-dir <NEW_STATE_DIR> \
+  --config <CONFIG_PATH> --dry-run
+```
+
+Do not pass `--start` or `--resume-fill` in this phase. Use the already-validated canonical release
+environment for these read-only checks; the final `.venv` is deliberately created only after the
+canonical checkout reaches its final path in Phase 4:
 
 1. CLI import/help and `library plan` against `<NEW_DATA_DIR>`.
 2. Catalog counts and active-plan drive membership against the migration manifest.
@@ -114,11 +123,15 @@ If they are unrelated—as expected for a sanitized public re-origin—the safer
 directory swap:
 
 1. Clone canonical `main` to a new sibling directory.
-2. Build its fresh environment and repeat CLI help before changing paths.
+2. Inspect the clone and its origin, but do not build `.venv` while it still has a temporary path;
+   venv launchers contain absolute paths and are not portable across the directory rename.
 3. Rename the stopped legacy checkout to a timestamped rollback name; do not delete it.
 4. Rename the canonical clone to the desired `ModelDump` working path.
-5. Point the service at the new executable plus explicit migrated data/state/config paths.
-6. Verify `git remote -v`, `git status`, and `gh auth status` show `Auspex-Aerie/modelark` and the
+5. From that final path, run the reviewed deploy command without `--start` or `--resume-fill`. This
+   builds the fresh environment and installs the explicit-path user unit without opening the portal.
+6. Confirm the generated user service points at the new executable plus the explicit migrated
+   data/state/config paths.
+7. Verify `git remote -v`, `git status`, and `gh auth status` show `Auspex-Aerie/modelark` and the
    `auspexlabs` identity before any GitHub write.
 
 This produces the requested canonical working copy without force-resetting an unrelated history or
@@ -130,8 +143,17 @@ operator-approved actions. They are not performed by an unattended agent.
 
 ## Phase 5 — final run and acceptance (operator required)
 
-Start the canonical portal once, still without auto-resume. Re-run the Phase 3 checks through the
-service. Then, with the operator watching logs, enable the intended resume setting and start the fill.
+Start the canonical portal once, still without auto-resume, and run:
+
+```bash
+.venv/bin/modelark-deploy --source "$PWD" \
+  --data-dir <NEW_DATA_DIR> --state-dir <NEW_STATE_DIR> \
+  --config <CONFIG_PATH> --check
+```
+
+Re-run the Phase 3 checks through the service.
+Then, with the operator watching `journalctl --user -u modelark.service -f`, rerun the deployer with
+the same explicit paths plus `--resume-fill --enable --start` and start the fill.
 Confirm it recognizes completed files, current drive capacity, the active plan, and the next expected
 work item before leaving it unattended.
 
