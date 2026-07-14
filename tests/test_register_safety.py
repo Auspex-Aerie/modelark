@@ -131,6 +131,25 @@ def test_failed_wipe_stops_before_mkfs():
     assert not any("mkfs.ext4" in call for call in calls), calls
 
 
+def test_failed_root_reconfirmation_stops_before_wipe():
+    calls = []
+
+    def run(*args, check=True):
+        calls.append(args)
+        if args[0] == "findmnt":
+            return _cp(returncode=1, stderr="transient findmnt failure")
+        return _cp()
+
+    with mock.patch.object(register, "_validate_format_target"), \
+         mock.patch.object(register, "_run", side_effect=run):
+        try:
+            register._mkfs("/dev/sdz", "ext4", "drive-09")
+            raise AssertionError("root-device reconfirmation failure must abort")
+        except RuntimeError as exc:
+            assert "could not re-confirm system root device" in str(exc)
+    assert not any("wipefs" in call or "mkfs.ext4" in call for call in calls), calls
+
+
 def test_format_dry_run_preflights_without_confirmation_or_writes():
     baseline = {"model": "Test Disk", "serial": "SERIAL", "smart_passed": True,
                 "reallocated": 0, "pending": 0, "offline_uncorrectable": 0,

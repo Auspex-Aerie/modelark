@@ -6,8 +6,7 @@ import json
 import sqlite3
 import tempfile
 from pathlib import Path
-
-import duckdb
+from unittest import SkipTest
 
 from modelark.core import db
 
@@ -105,7 +104,23 @@ def test_execution_refuses_confirmation_busy_source_and_existing_destination(tmp
         assert "refusing to overwrite" in str(exc)
 
 
+def test_backup_root_must_not_create_the_destination_as_a_side_effect(tmp_path):
+    source = _source(tmp_path)
+    destination = tmp_path / "new-data"
+    backup_inside_destination = destination / "backups"
+    try:
+        MIGRATION.inspect(source, destination, backup_inside_destination)
+        raise AssertionError("nested backup root must be refused")
+    except RuntimeError as exc:
+        assert "outside the destination data directory" in str(exc)
+    assert not destination.exists()
+
+
 def test_stopped_duckdb_source_uses_the_same_backup_first_pipeline(tmp_path):
+    try:
+        import duckdb
+    except ImportError as exc:
+        raise SkipTest("DuckDB migration extra is not installed") from exc
     source = tmp_path / "legacy-duckdb"
     source.mkdir()
     con = duckdb.connect(str(source / "catalog.duckdb"))
@@ -146,6 +161,9 @@ if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             with tempfile.TemporaryDirectory() as td:
-                fn(Path(td))
-            print(f"ok  {name}")
+                try:
+                    fn(Path(td))
+                    print(f"ok  {name}")
+                except SkipTest as exc:
+                    print(f"skip  {name}: {exc}")
     print("all passed")

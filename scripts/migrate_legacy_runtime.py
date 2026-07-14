@@ -64,6 +64,8 @@ def _paths(source: Path, destination: Path, backup_root: Path) -> tuple[Path, Pa
         raise RuntimeError("source and destination data directories must be separate, non-nested paths")
     if _inside(backup_root, source):
         raise RuntimeError("backup root must be outside the source data directory")
+    if _inside(backup_root, destination):
+        raise RuntimeError("backup root must be outside the destination data directory")
     return source, destination, backup_root
 
 

@@ -294,7 +294,11 @@ def _require_format_confirmation(dev: str, confirmation: str | None) -> None:
 
 def _mkfs(dev: str, fs: str, label: str) -> None:
     _validate_format_target(dev)
-    root_src = _run("findmnt", "-nro", "SOURCE", "/", check=False).stdout.strip()
+    root_result = _run("findmnt", "-nro", "SOURCE", "/", check=False)
+    if root_result.returncode != 0 or not root_result.stdout.strip():
+        raise RuntimeError(
+            f"refusing to format {dev}: could not re-confirm system root device before mkfs")
+    root_src = root_result.stdout.strip()
     if _parent_disk(dev) == _parent_disk(root_src):
         raise RuntimeError(f"refusing to format {dev}: it is the system/root disk.")
     # Mounted/active devices were refused above. Signature removal must succeed;
