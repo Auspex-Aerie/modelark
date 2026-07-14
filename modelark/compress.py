@@ -165,7 +165,7 @@ def _compress_zstd(src: Path, dst: Path, threads: int, output_cap: int) -> Path:
             written = 0
             for chunk in iter(lambda: fi.read(1 << 20), b""):
                 written = _write_capped(fo, compressor.compress(chunk), written, output_cap)
-            _write_capped(fo, compressor.flush(), written, output_cap)
+            written = _write_capped(fo, compressor.flush(), written, output_cap)
             fo.flush()
             os.fsync(fo.fileno())
         os.replace(tmp, dst)

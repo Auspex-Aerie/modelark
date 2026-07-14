@@ -47,6 +47,7 @@ class FailureCode(str, Enum):
     CAPACITY_DURABLE_SHORT = "CAPACITY_DURABLE_SHORT"
     CAPACITY_WORKSPACE_SHORT = "CAPACITY_WORKSPACE_SHORT"
     TARGET_TIER_MISSING = "TARGET_TIER_MISSING"
+    GRAPH_INVARIANT = "GRAPH_INVARIANT"
 
 
 @dataclass(frozen=True)
@@ -538,8 +539,10 @@ def _failure_for_unassigned(
 ) -> CapacityFailure:
     eligible = tuple(item.target_drive for item in candidates) or intent.eligible_drives
     if not candidates:
+        missing_tier = not intent.eligible_drives
         return CapacityFailure(
-            code=FailureCode.TARGET_TIER_MISSING,
+            code=(FailureCode.TARGET_TIER_MISSING if missing_tier
+                  else FailureCode.GRAPH_INVARIANT),
             capacity_mode=placement.mode,
             requirement_id=intent.requirement_id,
             task_ids=(intent.task_id,),
@@ -551,7 +554,8 @@ def _failure_for_unassigned(
             workspace_bytes=0,
             shortfall_bytes=0,
             evidence=None,
-            actions=("add_eligible_drive", "change_plan_policy"),
+            actions=(("add_eligible_drive", "change_plan_policy") if missing_tier
+                     else ("reconcile_plan", "restore_pinned_drive_to_plan")),
             blocked_by_requirement=intent.depends_on_requirement,
         )
     best = max(candidates, key=lambda item: placement.drives[item.target_drive].usable_now)
@@ -656,8 +660,12 @@ def plan_capacity(
     # largest-usable eligible home, preserving the legacy single-home policy.
     for intent in sorted(homes, key=lambda item: item.requirement_id):
         eligible = [drive_by_label[label] for label in intent.eligible_drives if label in drive_by_label]
-        if intent.pinned_target:
+        if intent.pinned_target in drive_by_label:
             target = intent.pinned_target
+        elif intent.pinned_target:
+            # Durable partials may never be silently re-homed. A stale pin is an
+            # unassigned typed failure, never a task omitted from every drive ledger.
+            target = None
         elif eligible:
             target = sorted(
                 eligible,

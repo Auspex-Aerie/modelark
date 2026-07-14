@@ -53,11 +53,20 @@ def shadow_explain() -> dict:
         active = plan.active(con)
         if active is None:
             return {"ok": False, "error": "no active plan"}
-        return reconcile.shadow_report(
-            con,
-            active["plan_id"],
-            provisioning=active["provisioning"],
-        )
+        try:
+            return reconcile.shadow_report(
+                con,
+                active["plan_id"],
+                provisioning=active["provisioning"],
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "SHADOW_CAPACITY_ERROR",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                },
+            }
     finally:
         con.close()
 

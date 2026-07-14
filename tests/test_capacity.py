@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from dataclasses import replace
 from unittest import mock
 
 from modelark import capacity, reconcile
@@ -154,6 +155,27 @@ def test_dependent_replica_failure_is_deduplicated_to_missing_home_tier():
                for item in result.unassigned_intents)
 
 
+def test_stale_home_pin_cannot_create_an_unledgered_feasible_task():
+    con = _mem()
+    _drive(con, "raid", raid=True)
+    _drive(con, "replica", role="replica")
+    _repo(con, "org/model", copies=2)
+    graph = reconcile.reconcile_plan(con, "ark")
+    home = next(item for item in graph.intents
+                if item.requirement_id == "protected_home:org/model")
+    stale_home = replace(home, pinned_target="removed-drive")
+    graph = replace(
+        graph,
+        intents=tuple(stale_home if item is home else item for item in graph.intents),
+    )
+    result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
+    assert not result.feasible
+    assert all(item.target_drive != "removed-drive" for item in result.tasks)
+    failure = next(item for item in result.failures
+                   if item.requirement_id == "protected_home:org/model")
+    assert failure.code == capacity.FailureCode.GRAPH_INVARIANT
+
+
 def test_compression_aware_mode_can_fit_where_guaranteed_durable_cannot():
     con = _mem()
     _drive(con, "primary", capacity_bytes=1_000, free=340)
@@ -243,6 +265,22 @@ def test_portal_shadow_explain_uses_dedicated_read_only_connection():
     connect.assert_called_once_with(read_only=True)
     forbidden_lock.__enter__.assert_not_called()
     assert result["capacity"]["placement_policy"] == "tiered_v1"
+
+
+def test_portal_shadow_explain_returns_typed_phase2_error_and_closes_connection():
+    con = _mem()
+    with mock.patch("modelark.core.db.connect", return_value=con), \
+         mock.patch("modelark.reconcile.shadow_report", side_effect=KeyError("manifest")):
+        result = plan_api.shadow_explain()
+    assert result == {
+        "ok": False,
+        "error": {"code": "SHADOW_CAPACITY_ERROR", "detail": "KeyError: 'manifest'"},
+    }
+    try:
+        con.execute("SELECT 1")
+        raise AssertionError("shadow connection must close after an error")
+    except sqlite3.ProgrammingError:
+        pass
 
 
 def test_shadow_comparison_never_normalizes_away_changed_target():
