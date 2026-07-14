@@ -94,6 +94,23 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
             f"automatically. Re-run with --data-dir {legacy_sqlite.parent} (or copy it deliberately "
             f"to {CATALOG_DIR}) after stopping every ModelArk process."
         )
+    if read_only:
+        # Enforce the diagnostic/portal read contract at SQLite's open boundary.  ``query_only``
+        # rejects SQL writes after a normal connection has already opened the file, while URI
+        # ``mode=ro`` also prevents bootstrap, journal-mode changes, and accidental file creation.
+        # ``as_uri`` percent-encodes spaces and other path characters for SQLite's URI parser.
+        uri = f"{DB_PATH.expanduser().resolve().as_uri()}?mode=ro"
+        con = sqlite3.connect(
+            uri,
+            uri=True,
+            isolation_level=None,
+            check_same_thread=False,
+        )
+        con.execute("PRAGMA busy_timeout=15000")
+        con.execute("PRAGMA foreign_keys=ON")
+        con.execute("PRAGMA query_only=ON")
+        return con
+
     CATALOG_DIR.mkdir(parents=True, exist_ok=True)
     legacy = CATALOG_DIR / "catalog.duckdb"          # guard: never silently start on an EMPTY sqlite when the
     if not _bootstrapping and not DB_PATH.exists() and legacy.exists():   # DuckDB catalog is still the source of truth
@@ -105,10 +122,6 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
     con.execute("PRAGMA journal_mode=WAL")           # persistent once set; concurrent reader/writer
     con.execute("PRAGMA busy_timeout=15000")         # a concurrent WRITER briefly holds the lock → wait, don't error
     con.execute("PRAGMA synchronous=NORMAL")         # WAL-safe durability without an fsync per commit
-    if read_only:
-        con.execute("PRAGMA foreign_keys=ON")         # every connection must opt in; SQLite defaults this OFF
-        con.execute("PRAGMA query_only=ON")          # this connection reads live data but cannot write
-        return con
     try:
         # A legacy table rebuild must run with FK enforcement off; validation still happens through
         # PRAGMA foreign_key_check before its transaction commits. Every normal write below runs ON.

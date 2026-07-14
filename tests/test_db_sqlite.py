@@ -100,6 +100,29 @@ def test_concurrent_read_while_writer_open(tmp_path):
     writer.close()
 
 
+def test_read_only_connect_is_enforced_at_open_and_never_bootstraps(tmp_path):
+    missing = tmp_path / "missing" / "catalog.sqlite"
+    db.CATALOG_DIR = missing.parent
+    db.DB_PATH = missing
+    try:
+        db.connect(read_only=True)
+        raise AssertionError("a read-only connection must not create a missing catalog")
+    except sqlite3.OperationalError as exc:
+        assert "unable to open" in str(exc).lower(), exc
+    assert not missing.parent.exists()
+
+    writer = _fresh(tmp_path / "existing")
+    writer.close()
+    mode = db.DB_PATH.stat().st_mode
+    db.DB_PATH.chmod(0o444)
+    try:
+        reader = db.connect(read_only=True)
+        assert reader.execute("SELECT count(*) FROM models").fetchone() == (0,)
+        reader.close()
+    finally:
+        db.DB_PATH.chmod(mode)
+
+
 def test_replace_files_is_atomic_replace(tmp_path):
     con = _fresh(tmp_path)
     con.execute("INSERT INTO models(repo_id) VALUES('org/m')")

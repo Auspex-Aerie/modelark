@@ -44,3 +44,30 @@ raw_size + len(SZNN_MAGIC) + 4 * ceil(raw_size / chunk_size)
 
 Synthetic bf16-like round-trip and incompressible raw-fallback tests pass. A high-water run against an
 operator-approved representative real bf16 shard remains required before Phase 3 executor activation.
+
+The repository provides a sanitized, self-cleaning collector. It validates that the input is a BF16
+safetensors shard, writes only below the explicit scratch directory, verifies the restored SHA-256,
+and omits the source filename and path from its JSON:
+
+```bash
+.venv-dev/bin/python scripts/phase3_gate_evidence.py streamznn \
+  /path/to/representative/model-00001-of-N.safetensors \
+  --scratch-dir /path/to/disposable/scratch
+```
+
+## Copied-catalog release-host replay
+
+Phase 3 also requires a read-only replay of an operator-approved copied or sanitized catalog. The
+collector opens the supplied catalog with SQLite URI `mode=ro`, performs no bootstrap or journal-mode
+mutation, times the complete graph/ledger/legacy comparison, and exercises concurrent-reader behavior
+only on an automatically removed scratch clone:
+
+```bash
+.venv-dev/bin/python scripts/phase3_gate_evidence.py catalog \
+  /path/to/copied/catalog.sqlite \
+  --scratch-dir /path/to/disposable/scratch
+```
+
+The output contains aggregate counts, graph hash, comparison status, and p95/max latency only. It
+does not contain repository ids, filenames, drive labels, or local paths. The release-host gate is
+500 ms p95 over 20 measured runs after one warm-up.

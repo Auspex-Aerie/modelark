@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Phase 2 implemented in shadow mode — local validation complete; implementation review and empirical gates pending** |
+| Status | **Phases 1–2 merged in shadow mode; Phase 3 empirical entry gates in progress** |
 | Scope | Fill planning, copy reconciliation, capacity accounting, execution, terminal failures, and operator surfaces |
 | Impact | Large blast radius across every fill safety path; phased shadow rollout is mandatory |
 | Trigger | A live legacy fill falsely reported a capacity stop after double-counting protected first copies already stored on the RAID home |
@@ -1108,10 +1108,9 @@ executor.
 
 ### Phase 2 — capacity ledger and typed feasibility
 
-Implementation status (2026-07-14): complete locally on `feat/reconciled-work-graph-phase2`, pending
-implementation review. `tiered_v1`, candidate-specific budgets, typed failures, file preflight, and
-codec caps are visible through read-only CLI/API shadow diagnostics only. No fill gate or executor
-consumes them.
+Implementation status (2026-07-14): merged as PR #11 after CI and Greptile implementation review.
+`tiered_v1`, candidate-specific budgets, typed failures, file preflight, and codec caps are visible
+through read-only CLI/API shadow diagnostics only. No fill gate or executor consumes them.
 
 1. Implement the deterministic behavior-preserving placement policy from Section 6.4.
 2. Implement internal canonical capacity modes behind an old-value adapter; do not migrate schema yet.
@@ -1151,8 +1150,10 @@ Local evidence recorded before implementation review:
   target temporary object atomically renamed into place. The conservative workspace term remains
   active pending review.
 
-Still required before Phase 3: implementation review, an operator-approved real-bf16 StreamZNN
-high-water run, and the copied/sanitized legacy-catalog replay plus release-host latency/lock evidence.
+Still required before Phase 3 executor adoption: an operator-approved real-bf16 StreamZNN high-water
+run, and the copied/sanitized legacy-catalog replay plus release-host latency/lock evidence. The
+sanitized collector is `scripts/phase3_gate_evidence.py`; its source inputs are opened read-only and
+all temporary output is constrained to an explicit scratch directory.
 
 ### Phase 3 — executor conversion
 
