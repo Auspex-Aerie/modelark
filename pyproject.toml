@@ -58,6 +58,7 @@ Security = "https://github.com/Auspex-Aerie/modelark/security/policy"
 [project.scripts]
 modelark = "modelark.cli:main"
 modelark-migrate = "scripts.migrate_legacy_runtime:main"
+modelark-deploy = "scripts.deploy:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -68,6 +69,7 @@ namespaces = true
 "modelark" = ["default_wishlist.yaml"]
 "modelark.core" = ["*.sql"]
 "modelark.web" = ["static/*"]
+"scripts" = ["*.service"]
 
 [tool.ruff.lint]
 # Start with correctness-oriented Pyflakes checks. The existing style backlog can be adopted
