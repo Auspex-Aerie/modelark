@@ -198,8 +198,10 @@ def _check(
         headers={"Host": f"127.0.0.1:{port}"},
     )
     with urllib.request.urlopen(request, timeout=5) as response:
+        if response.status != 200:
+            raise RuntimeError(f"portal health check returned HTTP {response.status}")
         payload = json.load(response)
-    if response.status != 200 or "os" not in payload:
+    if "os" not in payload:
         raise RuntimeError(f"portal health check returned an unexpected response: {payload!r}")
     print(f"deployment healthy: {source} · {executable} · portal os={payload['os']} port={port}")
 
@@ -265,7 +267,7 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(f"deployment check failed: {exc}") from exc
         return
 
-    if not sys.platform.startswith("linux"):
+    if not sys.platform.startswith("linux") and not args.dry_run:
         parser.error("the supervised deploy surface currently supports Linux/systemd only")
     if shutil.which("systemctl") is None and not args.dry_run:
         parser.error("systemctl is required for the supervised deploy surface")

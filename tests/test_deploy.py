@@ -101,7 +101,8 @@ def test_dry_run_creates_nothing(tmp_path, capsys):
     with mock.patch.dict(os.environ, {
             "HOME": str(home),
             "XDG_CONFIG_HOME": str(home / ".config"),
-    }, clear=False), mock.patch.object(Path, "home", return_value=home):
+    }, clear=False), mock.patch.object(Path, "home", return_value=home), \
+            mock.patch.object(sys, "platform", "darwin"):
         deploy.main([
             "--source", str(source), "--venv", str(venv),
             "--data-dir", str(data), "--state-dir", str(state),
@@ -109,6 +110,7 @@ def test_dry_run_creates_nothing(tmp_path, capsys):
         ])
     out = capsys.readouterr().out
     assert "resume:  enabled" in out
+    assert "ModelArk deployment plan" in out
     assert "systemctl --user enable modelark.service" in out
     assert "systemctl --user restart modelark.service" in out
     assert not venv.exists() and not data.exists() and not state.exists() and not home.exists()
