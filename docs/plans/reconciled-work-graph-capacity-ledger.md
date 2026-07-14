@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Phases 1–2 merged; Phase 3 empirical gates passed; selected-artifact policy decision pending** |
+| Status | **Phases 1–2 merged; Phase 3 implementation in review after empirical gates and policy decision** |
 | Scope | Fill planning, copy reconciliation, capacity accounting, execution, terminal failures, and operator surfaces |
 | Impact | Large blast radius across every fill safety path; phased shadow rollout is mandatory |
 | Trigger | A live legacy fill falsely reported a capacity stop after double-counting protected first copies already stored on the RAID home |
@@ -1156,11 +1156,13 @@ ceiling. The copied-catalog release-host replay measured the production graph-pl
 271.724 ms p95 and 329.878 ms maximum, below the 500 ms budget, while a concurrent writer held the
 disposable clone. Sanitized evidence is in `docs/capacity-evidence.md`.
 
-Executor adoption remains paused on a policy finding from that replay: the committed selection has
-50 pickle-only repositories refused by the safe default and four repositories whose intended
-artifacts are outside the current safetensors/GGUF/opted-in-pickle manifest. Under DEC-045 Gate B,
-those root diagnostics block the whole fill. The operator must explicitly choose acquisition policy
-or artifact support scope; implementation must not silently drop, weaken, or auto-deselect them.
+The replay also found 50 pickle-only repositories refused by the safe public default and four
+repositories whose intended artifacts are outside the current safetensors/GGUF/opted-in-pickle
+manifest. The operator retained `exclude.pickle_only: true` for public defaults, retained the explicit
+private opt-in that stores pickle as inert raw bytes without loading it (DEC-040/DEF-011), and parked
+the four unsupported repositories for the current fill. First-class support for their formats remains
+deferred. The executor does not silently skip or auto-deselect any blocker: a committed unsupported
+selection still produces a typed whole-plan Gate B refusal.
 
 ### Phase 3 — executor conversion
 

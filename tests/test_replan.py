@@ -16,11 +16,7 @@ from pathlib import Path
 from unittest import mock
 
 from modelark.core import db
-from modelark import fetch, fill, plan
-
-# A fake active plan (#33) so fill.execute resolves without a plans table in the mock harness.
-_FAKE_PLAN = {"plan_id": "test", "provisioning": "uncompressed", "drives": ["drive-00", "drive-01"]}
-
+from modelark import capacity, fetch, fill, plan, reconcile
 
 # ---- the write-probe --------------------------------------------------------------------------
 
@@ -60,133 +56,165 @@ def test_await_drive_awaits_unwritable(tmp_path):
     assert any(e.get("awaiting_drive") == "drive-01" for e in ev), "should prompt to re-seat, not silently skip"
 
 
-# ---- execute() re-plan loop -----------------------------------------------------------------
+# ---- reconciled execute loop -----------------------------------------------------------------
 
-def _harness(world, await_fn=None):
-    """Fakes for plan_placements / placed_copies / fetch.run / run_replica driven by `world`
-    ({placed: repo->copies, nc: repo->numcopies, drive: repo->copy#1 drive, bad: set-never-places})."""
-    def fake_plan(con, scope=None, plan_id=None, provisioning=None):
-        pool = [r for r, n in world["nc"].items() if world["placed"].get(r, 0) < n]
-        prim = {"drive-00": [], "drive-01": []}
-        for r in pool:
-            if world["placed"].get(r, 0) == 0:                        # needs copy #1
-                prim[world["drive"][r]].append({"repo": r, "size": 1})
-        c2 = [{"repo": r, "size": 1} for r in pool
-              if world["nc"][r] >= 2 and world["placed"].get(r, 0) >= 1]
-        return {"primary": {"assign": prim, "unplaceable": []},
-                "replica": {"assign": {"drive-04": c2}, "unplaceable": [], "source": "drive-00"}}
+def _mem():
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    for stmt in db._statements(db.SCHEMA_PATH.read_text()):
+        con.execute(stmt)
+    return con
 
+
+def _executor_harness(*, failed=()):
+    con = _mem()
+    con.execute("INSERT INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
+    for label, role, raid, size in (
+        ("drive-00", "primary", 1, 1_000),
+        ("drive-01", "primary", 0, 1_000),
+        ("drive-04", "replica", 0, 2_000),
+    ):
+        con.execute(
+            "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes,annex_uuid) "
+            "VALUES(?,?,?,?,?,?)", [label, role, raid, size, size, f"uuid-{label}"],
+        )
+        con.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('ark',?)", [label])
+    for repo, copies, size in (("a", 1, 300), ("b", 1, 600), ("must", 2, 200)):
+        con.execute("INSERT INTO models(repo_id,numcopies) VALUES(?,?)", [repo, copies])
+        con.execute("INSERT INTO selection(repo_id,finalized_at) VALUES(?,'2026-01-01')", [repo])
+        con.execute(
+            "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+            "VALUES(?,'model.gguf',?,'gguf',NULL)", [repo, size],
+        )
     calls = []
-    def fake_run(drive_label=None, repos=None, max_24h_gb=0, ctx=None, fits=None):
-        calls.append((drive_label, list(repos)))
-        for r in repos:
-            if r not in world.get("bad", set()):
-                world["placed"][r] = 1                                # copy #1 down
 
-    def fake_replica(assign, source, ctx=None):
-        for items in assign.values():
-            for i in items:
-                world["placed"][i["repo"]] = 2                        # copy #2 down
+    def fake_run(*, drive_label, repos, task_manifests, **kwargs):
+        calls.append(("fetch", drive_label, list(repos)))
+        stored, bad = [], []
+        for repo in repos:
+            if repo in failed:
+                bad.append(repo)
+                continue
+            for item in task_manifests[repo]:
+                con.execute(
+                    "INSERT OR IGNORE INTO archived"
+                    "(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed,annex_key) "
+                    "VALUES(?,?,?,?,?,0,?)",
+                    [repo, item.rfilename, drive_label, item.size_bytes, item.size_bytes,
+                     f"key-{repo}-{item.rfilename}"],
+                )
+            stored.append(repo)
+        return {"stored_repos": stored, "failed_repos": bad, "capacity_failure": None,
+                "throttled": False, "stopped": False, "drive_unwritable": False}
 
-    con = sqlite3.connect(":memory:")
-    con.execute("CREATE TABLE models(repo_id TEXT, numcopies INT)")
-    con.execute("CREATE TABLE selection(repo_id TEXT, finalized_at TEXT)")
-    for r, n in world["nc"].items():
-        con.execute("INSERT INTO models VALUES(?,?)", (r, n))
-        con.execute("INSERT INTO selection VALUES(?, '2026-01-01')", (r,))
+    def fake_replica(tasks, ctx=None):
+        calls.append(("replica", tasks[0].target_drive, [task.repo_id for task in tasks]))
+        copied = 0
+        for task in tasks:
+            for name in task.budget.missing_files:
+                row = con.execute(
+                    "SELECT orig_bytes,stored_bytes,compressed,annex_key FROM archived "
+                    "WHERE repo_id=? AND rfilename=? AND drive_label=?",
+                    [task.repo_id, name, task.source_drive],
+                ).fetchone()
+                con.execute(
+                    "INSERT OR IGNORE INTO archived"
+                    "(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed,annex_key) "
+                    "VALUES(?,?,?,?,?,?,?)", [task.repo_id, name, task.target_drive, *row],
+                )
+                copied += 1
+        return {"deferred": False, "source_offline": False, "deferred_targets": [],
+                "copied_targets": [tasks[0].target_drive], "copied_files": copied, "failed": []}
 
-    patches = [
-        mock.patch.object(fill.plan, "active", side_effect=lambda con: dict(_FAKE_PLAN)),
-        mock.patch.object(fill.librarian, "plan_placements", side_effect=fake_plan),
-        mock.patch.object(fill.librarian, "placed_copies", side_effect=lambda con: dict(world["placed"])),
-        mock.patch.object(fill.librarian, "raw_sizes",   # giants-first order (default 1 byte → no giants)
-                          side_effect=lambda con, repos: {r: world.get("raw", {}).get(r, 1) for r in repos}),
-        mock.patch.object(fill, "_fits", side_effect=lambda ctx, pid, prov, rid, label: True),  # capacity tested separately
-        mock.patch.object(fill.fetch, "run", side_effect=fake_run),
-        mock.patch.object(fill.fetch, "run_replica", side_effect=fake_replica),
-        mock.patch.object(fill.fetch, "_bytes_last_24h", side_effect=lambda con: 0),
-        mock.patch.object(fill, "_await_drive", side_effect=(await_fn or (lambda ctx, l, p: True))),
-    ]
-    return con, calls, patches
-
-
-def test_replan_loop_fills_priority_then_advances(tmp_path):
-    # a,c → copy#1 on drive-00 (c also needs copy#2); b → copy#1 on drive-01.
-    world = {"placed": {}, "nc": {"a": 1, "b": 1, "c": 2},
-             "drive": {"a": "drive-00", "b": "drive-00", "c": "drive-00"}, "bad": set()}
-    world["drive"]["b"] = "drive-01"
-    con, calls, patches = _harness(world)
-    for p in patches:
-        p.start()
-    try:
-        res = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
-    finally:
-        for p in patches:
-            p.stop()
-    assert res["ok"], res
-    assert world["placed"] == {"a": 1, "b": 1, "c": 2}, world["placed"]       # all copies down (c got #2)
-    assert calls[0][0] == "drive-00", f"NAS/priority drive first, got {calls}"  # priority order
-    assert any(c[0] == "drive-01" for c in calls), "advanced to drive-01 after drive-00"
+    return con, calls, fake_run, fake_replica
 
 
-def test_giants_first_order(tmp_path):
-    # operator's rule: GIANTS (>250 GB raw) first, then MUST-HAVES, then the rest — regardless of which
-    # drive each lands on. giant→drive-01, must+rest→drive-00; fetch order must be giant, must, rest.
-    world = {"placed": {}, "nc": {"giant": 1, "must": 2, "rest": 1},
-             "drive": {"giant": "drive-01", "must": "drive-00", "rest": "drive-00"},
-             "raw": {"giant": 300 * 10**9, "must": 10 * 10**9, "rest": 5 * 10**9}, "bad": set()}
-    con, calls, patches = _harness(world)
-    for p in patches:
-        p.start()
-    try:
-        res = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
-    finally:
-        for p in patches:
-            p.stop()
-    assert res["ok"], res
-    copy1_order = [r for _, repos in calls for r in repos]         # flatten the per-drive batches, in order
-    assert copy1_order[:3] == ["giant", "must", "rest"], copy1_order
+def test_reconciled_executor_drains_drive_batches_then_replica():
+    con, calls, fake_run, fake_replica = _executor_harness()
+    with mock.patch.object(fill.fetch, "run", side_effect=fake_run), \
+         mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=fake_replica), \
+         mock.patch.object(fill, "_await_drive", return_value=True):
+        result = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
+    assert result["ok"], result
+    assert [kind for kind, _, _ in calls] == ["fetch", "fetch", "replica"], calls
+    assert calls[0][1] == "drive-00" and calls[1][1] == "drive-01", calls
+    assert con.execute("SELECT count(*) FROM archived").fetchone()[0] == 4
 
 
-def test_replan_loop_blocks_a_bad_repo_and_terminates(tmp_path):
-    # 'b' never places — the loop must block it (not spin) and still finish ('a' placed).
-    world = {"placed": {}, "nc": {"a": 1, "b": 1},
-             "drive": {"a": "drive-00", "b": "drive-00"}, "bad": {"b"}}
-    con, calls, patches = _harness(world)
-    for p in patches:
-        p.start()
-    try:
-        res = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
-    finally:
-        for p in patches:
-            p.stop()
-    assert res["ok"], res                                             # terminated (no must-haves → GATE-C ok)
-    assert world["placed"].get("a") == 1 and world["placed"].get("b", 0) == 0
-    b_fetches = sum(1 for d, repos in calls if "b" in repos)
-    assert b_fetches <= fill._MAX_REPO_ATTEMPTS + 1, f"bad repo retried unbounded: {b_fetches}"
+def test_satisfied_home_copy_is_not_reserved_or_fetched_again():
+    con, calls, fake_run, fake_replica = _executor_harness()
+    con.execute(
+        "INSERT INTO archived"
+        "(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed,annex_key) "
+        "VALUES('must','model.gguf','drive-00',200,200,0,'key-must-model.gguf')"
+    )
+    with mock.patch.object(fill.fetch, "run", side_effect=fake_run), \
+         mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=fake_replica), \
+         mock.patch.object(fill, "_await_drive", return_value=True):
+        result = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
+    assert result["ok"], result
+    assert all("must" not in repos for kind, _, repos in calls if kind == "fetch"), calls
+    assert any(kind == "replica" and "must" in repos for kind, _, repos in calls), calls
+    assert con.execute(
+        "SELECT count(*) FROM archived WHERE repo_id='must' AND drive_label='drive-00'"
+    ).fetchone()[0] == 1
 
 
-def test_dead_drive_parks_not_blocks(tmp_path):
-    # DEF-024: a drive whose await can't be satisfied must PARK the loop (await/re-seat), never get
-    # its (or other drives') repos blocked and advance to replica/GATE-C with copy#1 undone (INC-009).
-    world = {"placed": {}, "nc": {"a": 1, "b": 1},
-             "drive": {"a": "drive-00", "b": "drive-01"}, "bad": set()}
-    await_calls = []
-    def dead_00(ctx, label, poll):
-        await_calls.append(label)
-        return label != "drive-00"                                    # drive-00 never becomes ready → stopped
-    con, calls, patches = _harness(world, await_fn=dead_00)
-    for p in patches:
-        p.start()
-    try:
-        res = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
-    finally:
-        for p in patches:
-            p.stop()
-    assert res["stopped"] is True and not res["ok"], res              # parked on the dead drive, not 'done'
-    assert world["placed"] == {}, "parked — must not churn/fetch anything"
-    assert calls == [], "no fetch on a drive that never became writable"
-    assert await_calls and await_calls[-1] == "drive-00", await_calls  # it awaited the dead drive, didn't skip it
+def test_bulk_fetch_always_ranks_before_partial_replica():
+    con, _, _, _ = _executor_harness()
+    con.execute(
+        "INSERT INTO archived"
+        "(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed,annex_key) "
+        "VALUES('must','model.gguf','drive-00',200,200,0,'key-must-model.gguf')"
+    )
+    snapshot = fill._reconcile(fetch.RunCtx(con=con), "ark", "uncompressed", None)
+    fetch_tasks = [task for task in snapshot.ledger.tasks if task.kind == reconcile.TaskKind.FETCH]
+    replica_tasks = [task for task in snapshot.ledger.tasks if task.kind == reconcile.TaskKind.REPLICATE]
+    assert fetch_tasks and replica_tasks
+    assert max(capacity.execution_rank(task, snapshot.graph)[0] for task in fetch_tasks) < min(
+        capacity.execution_rank(task, snapshot.graph)[0] for task in replica_tasks
+    )
+
+
+def test_reconcile_uses_and_closes_dedicated_read_connection():
+    con, _, _, _ = _executor_harness()
+
+    class ReadConnection:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    read_con = ReadConnection()
+    graph = object()
+    ledger = object()
+    ctx = fetch.RunCtx(con=con, read_connection_factory=lambda: read_con)
+    with mock.patch.object(fill.reconcile, "reconcile_plan", return_value=graph) as reconcile_plan, \
+         mock.patch.object(fill.capacity, "plan_capacity", return_value=ledger) as plan_capacity:
+        snapshot = fill._reconcile(ctx, "ark", "uncompressed", None)
+    assert snapshot == fill._Snapshot(graph, ledger)
+    reconcile_plan.assert_called_once_with(read_con, "ark", None)
+    assert plan_capacity.call_args.args[:2] == (read_con, graph)
+    assert read_con.closed
+
+
+def test_reconciled_executor_bounds_failed_task_retries():
+    con, calls, fake_run, fake_replica = _executor_harness(failed={"b"})
+    with mock.patch.object(fill.fetch, "run", side_effect=fake_run), \
+         mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=fake_replica), \
+         mock.patch.object(fill, "_await_drive", return_value=True):
+        result = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
+    assert result["state"] == "error" and result["code"] == "FETCH_TASK_FAILED", result
+    assert sum("b" in repos for kind, _, repos in calls if kind == "fetch") == fill._MAX_TASK_ATTEMPTS
+
+
+def test_dead_drive_parks_without_running_task():
+    con, calls, fake_run, fake_replica = _executor_harness()
+    with mock.patch.object(fill.fetch, "run", side_effect=fake_run), \
+         mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=fake_replica), \
+         mock.patch.object(fill, "_await_drive", return_value=False):
+        result = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
+    assert result["stopped"] and result["code"] == "OPERATOR_STOP", result
+    assert calls == []
 
 
 def test_worker_terminal_labels(tmp_path):
@@ -235,20 +263,11 @@ def test_fetch_run_bails_on_dead_drive_midbatch(tmp_path):
     assert any(e.get("awaiting_drive") == "drive-01" for e in events), "should emit awaiting on dead-drive bail"
 
 
-# ---- #37 per-model capacity failsafe (real catalog + real librarian) ------------------------
-
-def _mem():
-    con = sqlite3.connect(":memory:", isolation_level=None)   # autocommit, matching db.connect()
-    for stmt in db._statements(db.SCHEMA_PATH.read_text()):
-        con.execute(stmt)
-    return con
+# ---- per-file capacity failsafe (real reconciler + ledger) ----------------------------------
 
 
 def _capacity_run(provisioning, free_bytes, a_stored):
-    """Real catalog + real librarian.drives/est/_fits: one small plan drive, two 100-byte models. The
-    plan fits BOTH by estimate up front, but model-a's ACTUAL stored (a_stored) exceeds its estimate,
-    so after a lands the drive can't hold b → a re-plan finds b unplaceable AFTER progress →
-    plan-capacity-stop (resumable), NOT GATE-B blocked (which is only for an up-front-infeasible plan)."""
+    """A fresh per-file guard stops the second model after the first consumes forecast slack."""
     con = _mem()
     con.execute("INSERT INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed) "
                 "VALUES('drive-00',?,?,'primary',0)", [free_bytes, free_bytes])
@@ -260,13 +279,21 @@ def _capacity_run(provisioning, free_bytes, a_stored):
     plan.bootstrap(con)                                   # plan `ark` owns drive-00, active
     plan.set_provisioning(con, "ark", provisioning)
 
-    def fake_run(drive_label=None, repos=None, max_24h_gb=0, ctx=None, fits=None):
+    def fake_run(*, drive_label, repos, task_manifests, before_file, **kwargs):
+        result = {"stored_repos": [], "failed_repos": [], "capacity_failure": None,
+                  "throttled": False, "stopped": False, "drive_unwritable": False}
         for r in repos:
-            if fits is not None and not fits(r):          # the #37 hook: drive full → break the batch
-                break
+            item = task_manifests[r][0]
+            try:
+                before_file(r, item)
+            except fetch.CapacityPreflightError as exc:
+                result["capacity_failure"] = exc.failure
+                return result
             stored = a_stored if r == "a" else 100
             con.execute("INSERT INTO archived(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed) "
                         "VALUES(?, 'model.safetensors', 'drive-00', 100, ?, 0)", [r, stored])
+            result["stored_repos"].append(r)
+        return result
 
     with mock.patch.object(fill.fetch, "run", side_effect=fake_run), \
          mock.patch.object(fill, "_await_drive", side_effect=lambda ctx, l, p: True):
@@ -274,16 +301,13 @@ def _capacity_run(provisioning, free_bytes, a_stored):
 
 
 def test_plan_capacity_stop_uncompressed(tmp_path):
-    # est == raw (100). Both fit at free=220 (rem≈209 ≥ 200); a inflates to 150 → after a, rem≈59 < 100.
-    res = _capacity_run("uncompressed", free_bytes=220, a_stored=150)
+    res = _capacity_run("uncompressed", free_bytes=350, a_stored=250)
     assert res["state"] == "plan-capacity-stop", res
     assert res["ok"] is False and res["stopped"] is False
 
 
 def test_plan_capacity_stop_compressed(tmp_path):
-    # est(a)=int(100*0.67*1.08)=72. Both fit at free=180 (rem≈171 ≥ 144); a raw-fallbacks to 100 (> its
-    # 72 est) → after a, rem≈71 < 72 → b unplaceable AFTER progress → plan-capacity-stop.
-    res = _capacity_run("compressed", free_bytes=180, a_stored=100)
+    res = _capacity_run("compressed", free_bytes=300, a_stored=100)
     assert res["state"] == "plan-capacity-stop", res
 
 
@@ -303,41 +327,72 @@ def test_run_replica_defers_on_offline_source(tmp_path):
 
 
 def test_gatec_pauses_on_deferred_copy2(tmp_path):
-    # DEF-022: copy#1 of the must-have is safe but copy#2 is deferred (offline replica source) → GATE-C
-    # returns PAUSED (resumable), never the red 'error' INC-009 hit.
-    con = sqlite3.connect(":memory:")
-    con.execute("CREATE TABLE models(repo_id TEXT, numcopies INT)")
-    con.execute("CREATE TABLE selection(repo_id TEXT, finalized_at TEXT)")
-    con.execute("INSERT INTO models VALUES('m',2)")
-    con.execute("INSERT INTO selection VALUES('m','2026-01-01')")
-    placed = {"m": 1}                                          # copy#1 down, copy#2 not
+    con, calls, fake_run, _ = _executor_harness()
 
-    def fake_plan(con, scope=None, plan_id=None, provisioning=None):
-        return {"primary": {"assign": {"drive-00": []}, "unplaceable": []},
-                "replica": {"assign": {"drive-04": [{"repo": "m", "size": 1}]},
-                            "unplaceable": [], "source": "drive-00"}}
+    def deferring_replica(tasks, ctx=None):
+        return {"deferred": True, "source_offline": True,
+                "deferred_targets": [tasks[0].target_drive], "copied_targets": [],
+                "copied_files": 0, "failed": []}
 
-    def deferring_replica(assign, source, ctx=None):
-        return {"deferred": True, "source_offline": True, "deferred_targets": ["drive-04"], "copied_targets": []}
-
-    patches = [
-        mock.patch.object(fill.plan, "active", side_effect=lambda con: dict(_FAKE_PLAN)),
-        mock.patch.object(fill.librarian, "plan_placements", side_effect=fake_plan),
-        mock.patch.object(fill.librarian, "placed_copies", side_effect=lambda con: dict(placed)),
-        mock.patch.object(fill, "_fits", side_effect=lambda *a: True),
-        mock.patch.object(fill.fetch, "run", side_effect=lambda **k: None),
-        mock.patch.object(fill.fetch, "run_replica", side_effect=deferring_replica),
-        mock.patch.object(fill, "_await_drive", side_effect=lambda ctx, l, p: True),
-    ]
-    for p in patches:
-        p.start()
-    try:
+    with mock.patch.object(fill.fetch, "run", side_effect=fake_run), \
+         mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=deferring_replica), \
+         mock.patch.object(fill, "_await_drive", return_value=True):
         res = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
-    finally:
-        for p in patches:
-            p.stop()
-    assert res["state"] == "paused", res                       # NOT 'error'
+    assert res["state"] == "paused" and res["code"] == "SOURCE_UNAVAILABLE", res
     assert res["ok"] is False and res["stopped"] is False
+    assert con.execute(
+        "SELECT count(DISTINCT drive_label) FROM archived WHERE repo_id='must'"
+    ).fetchone()[0] == 1
+
+
+def test_replica_records_only_after_target_uuid_proof(tmp_path):
+    con, _, _, _ = _executor_harness()
+    con.execute(
+        "INSERT INTO archived"
+        "(repo_id,rfilename,drive_label,stored_name,stored_relpath,orig_sha256,znn_sha256,"
+        "orig_bytes,stored_bytes,compressed,annex_key) "
+        "VALUES('must','model.gguf','drive-00','model.gguf','must/model.gguf','orig','stored',"
+        "200,200,0,'key-must-model.gguf')"
+    )
+    snapshot = fill._reconcile(fetch.RunCtx(con=con), "ark", "uncompressed", None)
+    task = next(
+        item for item in snapshot.ledger.tasks if item.kind == reconcile.TaskKind.REPLICATE
+    )
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    library = tmp_path / "library"
+    source.mkdir()
+    target.mkdir()
+    library.mkdir()
+
+    def archive_path(_con, label):
+        return source if label == "drive-00" else target
+
+    completed = mock.Mock(returncode=0, stdout="", stderr="")
+    ctx = fetch.RunCtx(con=con)
+    with mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
+         mock.patch.object(fetch.register, "library_root", return_value=library), \
+         mock.patch.object(fetch, "_dest_writable", return_value=True), \
+         mock.patch.object(fetch.subprocess, "run", return_value=completed), \
+         mock.patch.object(fetch, "_annex_key_on_uuid", return_value=False):
+        unverified = fetch.run_replica_tasks([task], ctx=ctx)
+    assert unverified["failed"][0]["code"] == "TARGET_KEY_UNVERIFIED"
+    assert con.execute(
+        "SELECT 1 FROM archived WHERE repo_id='must' AND drive_label='drive-04'"
+    ).fetchone() is None
+
+    with mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
+         mock.patch.object(fetch.register, "library_root", return_value=library), \
+         mock.patch.object(fetch, "_dest_writable", return_value=True), \
+         mock.patch.object(fetch.subprocess, "run", return_value=completed), \
+         mock.patch.object(fetch, "_annex_key_on_uuid", return_value=True):
+        verified = fetch.run_replica_tasks([task], ctx=ctx)
+    assert verified["failed"] == [] and verified["copied_files"] == 1
+    row = con.execute(
+        "SELECT orig_sha256,znn_sha256,stored_bytes,annex_key FROM archived "
+        "WHERE repo_id='must' AND drive_label='drive-04'"
+    ).fetchone()
+    assert row == ("orig", "stored", 200, "key-must-model.gguf")
 
 
 def test_sweep_incomplete(tmp_path):

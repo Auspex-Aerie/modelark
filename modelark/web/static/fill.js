@@ -216,7 +216,16 @@
 
   // ---- run surface: start / stop / live status (task #22) ----
   const shortFile = f => (f && f.length > 34) ? "…" + f.slice(-33) : (f || "");
-  const TERMINAL = { done: "✅ done", stopped: "■ stopped", error: "🔴 error", paused: "⏸ paused", blocked: "⚠ blocked" };
+  const TERMINAL = MA.fillTerminals;
+  let announcedTerminal = null;
+
+  function announceTerminal(s) {
+    if (!s || !MA.isFillTerminal(s.status) || ["done", "stopped"].includes(s.status)) return;
+    const signature = `${s.status}|${s.code || ""}|${s.message || ""}`;
+    if (signature === announcedTerminal) return;
+    announcedTerminal = signature;
+    if (MA.showFillTerminal) MA.showFillTerminal(s);
+  }
 
   function statusLine(s) {
     if (!s || s.status === "idle") return "idle — not running";
@@ -424,7 +433,10 @@
       renderRun(s);
       if (s && s.status === "running") { statusTimer = setTimeout(poll, 1500); return; }
       statusTimer = null;
-      if (s && s.status in TERMINAL) { MA.toast(statusLine(s)); window.loadFill(); }   // plan shrinks as copies land
+      if (s && s.status in TERMINAL) {
+        announceTerminal(s);
+        MA.toast(statusLine(s)); window.loadFill();
+      }   // plan shrinks as copies land
     }).catch(() => {
       if (++pollFails >= 2) showLost();       // say "portal gone" instead of silently freezing on the last frame
       statusTimer = setTimeout(poll, 3000);   // keep trying so the view recovers if the portal comes back
@@ -435,6 +447,7 @@
     MA.api("/api/fill/status").then(s => {
       pollFails = 0;
       renderRun(s);
+      announceTerminal(s);
       if (resumePolling && s && s.status === "running" && !statusTimer) poll();
     }).catch(() => { if (++pollFails >= 2) showLost(); if (!statusTimer) poll(); });   // detect a down portal + keep checking
   }

@@ -5,7 +5,7 @@ import sqlite3
 from pathlib import Path
 from unittest import mock
 
-from modelark import fetch
+from modelark import archive_manifest, fetch
 
 
 def _catalog():
@@ -46,6 +46,37 @@ def test_completion_on_one_drive_does_not_skip_another_drive(tmp_path):
         except RuntimeError as exc:
             assert exc is marker
     download.assert_called_once()
+    con.close()
+
+
+def test_explicit_task_manifest_never_broadens_after_restart(tmp_path):
+    con = _catalog()
+    con.execute(
+        "INSERT INTO files VALUES "
+        "('org/model', 'weights/second.safetensors', 20, NULL, 'safetensors', 'bf16')"
+    )
+    con.execute("INSERT INTO archived VALUES ('org/model', 'weights/model.safetensors', 'drive-01')")
+    exact = (archive_manifest.ManifestFile(
+        rfilename="weights/second.safetensors",
+        size_bytes=20,
+        sha256=None,
+        format="safetensors",
+        quant="bf16",
+        storage_action="compress",
+    ),)
+    marker = RuntimeError("only the durable graph's missing file was attempted")
+    ctx = fetch.RunCtx(con=con)
+    with mock.patch.object(fetch, "_download_shard", side_effect=marker) as download:
+        try:
+            fetch.fetch_model(
+                ctx, "org/model", Path(tmp_path), "drive-01", False,
+                {"max_compress_ram_gb": 4, "threads": 1}, manifest=exact,
+            )
+            raise AssertionError("the exact missing file should be attempted")
+        except RuntimeError as exc:
+            assert exc is marker
+    assert download.call_count == 1
+    assert download.call_args.args[2] == "weights/second.safetensors"
     con.close()
 
 

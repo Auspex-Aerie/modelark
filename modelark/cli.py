@@ -260,7 +260,11 @@ def cmd_library_plan(args):
             # and never self-cancels. fill.execute returns a result rather than raising, so the exit
             # code is decided here.
             print()
-            ctx = fetch.RunCtx(con=con, on_progress=lambda ev: print(ev["say"]) if "say" in ev else None)
+            ctx = fetch.RunCtx(
+                con=con,
+                on_progress=lambda ev: print(ev["say"]) if "say" in ev else None,
+                read_connection_factory=lambda: db.connect(read_only=True),
+            )
             res = fill.execute(ctx, plan_id=pid, max_24h_gb=args.max_24h_gb, repo_scope=args.repo, guided=False)
             if not res["ok"]:
                 raise SystemExit(1)

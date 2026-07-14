@@ -11,11 +11,19 @@ def test_persist_last_ack(tmp_path):
     fill_api._TERMINAL_PATH = tmp_path / "last_fill.json"          # isolate from the real catalog
 
     # a non-DONE terminal is persisted with a timestamp + affected models
-    fill_api._persist_terminal({"status": "plan-capacity-stop", "message": "a drive is full",
-                                "failed": [{"repo": "a", "have": 1, "need": 2}], "gate": None})
+    fill_api._persist_terminal({
+        "status": "plan-capacity-stop", "message": "a drive is full",
+        "failed": [{"repo": "a", "have": 1, "need": 2}], "gate": "B",
+        "code": "CAPACITY_WORKSPACE_SHORT", "evidence": {"shortfall_bytes": 10},
+        "actions": ["add_capacity", "start_fill"],
+    })
     t = fill_api.last_terminal()
     assert t["status"] == "plan-capacity-stop" and t["message"] == "a drive is full" and t.get("when")
+    assert t["version"] == 2 and t["code"] == "CAPACITY_WORKSPACE_SHORT" and t["gate"] == "B"
+    assert t["evidence"] == {"shortfall_bytes": 10}
+    assert t["actions"] == ["add_capacity", "start_fill"]
     assert t["failed"] == [{"repo": "a", "have": 1, "need": 2}]
+    assert not fill_api._TERMINAL_PATH.with_name("last_fill.json.tmp").exists()
 
     # acknowledging clears it (stops popping)
     fill_api.ack_terminal({})

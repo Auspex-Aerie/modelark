@@ -28,10 +28,19 @@ _OOPSIE = {"error", "blocked", "plan-capacity-stop", "paused"}
 def _persist_terminal(term: dict) -> None:
     try:
         if term.get("status") in _OOPSIE:
-            _TERMINAL_PATH.write_text(json.dumps({
+            payload = {
+                "version": 2,
                 "status": term["status"], "message": term.get("message", ""),
                 "when": datetime.now().isoformat(sep=" ", timespec="seconds"),
-                "failed": (term.get("failed") or [])[:12], "gate": term.get("gate")}))
+                "code": term.get("code"), "gate": term.get("gate"),
+                "evidence": term.get("evidence") or {},
+                "actions": list(term.get("actions") or []),
+                "failed": (term.get("failed") or [])[:12],
+            }
+            _TERMINAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _TERMINAL_PATH.with_name(_TERMINAL_PATH.name + ".tmp")
+            tmp.write_text(json.dumps(payload, sort_keys=True))
+            os.replace(tmp, _TERMINAL_PATH)
         else:
             _TERMINAL_PATH.unlink(missing_ok=True)
     except OSError:
@@ -122,7 +131,11 @@ def start(body: dict) -> dict:
             logged_emit({"phase": "planning", "say": "resolving the active plan + placement…"})
             # fill.execute now resolves the active Plan (#33) + re-plans internally per drive-batch,
             # so there is no single up-front plan to compute here.
-            ctx = fetch.RunCtx(con=data.conn(), lock=data._lock, on_progress=logged_emit, should_stop=should_stop)
+            ctx = fetch.RunCtx(
+                con=data.conn(), lock=data._lock, on_progress=logged_emit,
+                should_stop=should_stop,
+                read_connection_factory=lambda: db.connect(read_only=True),
+            )
             res = fill.execute(ctx, max_24h_gb=max_24h_gb, guided=True)
             logged_emit({"result": res})
             log.info("fill finished", ok=res["ok"], stopped=res["stopped"],
@@ -131,18 +144,23 @@ def start(body: dict) -> dict:
             # then translate to the worker's return (None = user Stop; a status dict = paused/blocked/
             # plan-capacity-stop/done; raise = a real error).
             if res["ok"]:
-                terminal = {"status": "done", "message": res["message"]}
+                terminal = {"status": "done", "message": res["message"], "code": res.get("code")}
             elif res["stopped"] and should_stop():
-                terminal = {"status": "stopped", "message": "stopped by request"}
+                terminal = {"status": "stopped", "message": "stopped by request",
+                            "code": "OPERATOR_STOP"}
             else:
                 terminal = {"status": res.get("state", "error"), "message": res["message"],
-                            "failed": res.get("failed"), "gate": res.get("gate")}
+                            "failed": res.get("failed"), "gate": res.get("gate"),
+                            "code": res.get("code"), "evidence": res.get("evidence"),
+                            "actions": res.get("actions")}
             _persist_terminal(terminal)
             if terminal["status"] == "error":
                 raise RuntimeError(res["message"])              # GATE-A/C — a real failure → 'error'
             return None if terminal["status"] == "stopped" else terminal
         except Exception as e:
-            _persist_terminal({"status": "error", "message": str(e)[:300]})
+            _persist_terminal({"status": "error", "message": str(e)[:300],
+                               "code": "UNHANDLED_FILL_ERROR",
+                               "actions": ["inspect_logs", "report_bug"]})
             log.exception("fill worker error", error=str(e)[:200])
             raise
 
