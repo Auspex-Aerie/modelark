@@ -94,6 +94,24 @@ def _browser_flow() -> None:
             time.sleep(1)
             pg.wait_for_selector("#capWarn", state="hidden")
             print("  banner dismissed")
+            # 5. the same public hook used by the live Fill poll must show typed terminals without a
+            # reload; verify the operator-facing evidence/action surface, not merely DOM presence.
+            pg.evaluate("""
+                window.MA.showFillTerminal({
+                  status: "plan-capacity-stop",
+                  message: "remaining work no longer fits",
+                  code: "CAPACITY_WORKSPACE_SHORT",
+                  gate: "B",
+                  evidence: {shortfall_bytes: 123},
+                  actions: ["add_capacity", "start_fill"],
+                  failed: [{repo: "demo/giant-llm"}],
+                })
+            """)
+            pg.wait_for_selector("#oopsieModal", state="visible")
+            assert "CAPACITY_WORKSPACE_SHORT" in pg.inner_text("#oopsieCode")
+            assert "shortfall_bytes" in pg.inner_text("#oopsieEvidence")
+            assert "add_capacity" in pg.inner_text("#oopsieActions")
+            print("  live typed fill terminal shown")
         except Exception:
             pg.screenshot(path="/tmp/e2e-fail.png")
             print("  (screenshot saved to /tmp/e2e-fail.png)")

@@ -90,8 +90,18 @@ def test_no_direct_script_insertion_apis() -> None:
         assert "insertAdjacentHTML" not in source, path.name
 
 
+def test_fill_poll_uses_shared_terminal_classifier_and_modal() -> None:
+    app = (STATIC / "app.js").read_text()
+    fill = (STATIC / "fill.js").read_text()
+    assert '"plan-capacity-stop": "🟠 capacity changed"' in app
+    assert "window.MA.showFillTerminal = show" in app
+    assert "MA.isFillTerminal(s.status)" in fill
+    assert fill.count("announceTerminal(s)") >= 3, "load, poll, and refresh must announce terminals"
+
+
 if __name__ == "__main__":
     test_shared_encoder_and_post_contract()
     test_api_text_fields_use_the_shared_encoder()
     test_no_direct_script_insertion_apis()
+    test_fill_poll_uses_shared_terminal_classifier_and_modal()
     print("web XSS tests passed")

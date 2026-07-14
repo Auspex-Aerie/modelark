@@ -1,59 +1,41 @@
-"""The guided fill orchestrator (task #22) — ONE backend for both surfaces.
+"""Reconciled guided-fill scheduler (DEC-045 Phase 3).
 
-`library plan --apply` (CLI) and the portal's background worker both call `execute()`, so both
-run the identical DEC-019 gates and DEC-020 tiering; they differ only in the injected `RunCtx`
-(see fetch.RunCtx) and one flag:
-
-  • CLI       — own connection, nullcontext lock, prints narration, never stops, `guided=False`:
-                GATE-A refuses up front if any target is unmounted (don't spend days on the bulk
-                only to fail the replica step).
-  • worker    — portal's shared connection + `data._lock` (brief per-file writes), progress
-                callback, cooperative stop, `guided=True`: AWAITS each drive as it's reached
-                (prompts the operator to insert it), so the small replica drive can be hot-swapped
-                in after the bulk has landed.
-
-RE-PLANNING (targeted #37 / DEC-025): the PRIMARY tier re-plans from LIVE reality before each
-drive-batch, instead of marching a single plan computed once at start. That reclaims a drive's
-estimate-vs-actual slack — the fill keeps filling the NAS instead of advancing off it half-empty —
-and fills drives in live-priority order. A WRITE-PROBE guards each drive: mounted != healthy (a USB
-drop leaves a mounted-but-EIO device), so a faulty drive is AWAITED, never silently skipped.
-
-`execute()` RETURNS a result dict and never raises `SystemExit` (which would escape the worker's
-`except Exception` and wedge the thread) — the CLI turns `ok=False` into exit 1, the worker into
-an 'error'/'blocked'/'stopped' status.
+Durable catalog facts are the only completion truth.  Each batch rebuilds an unpersisted work graph,
+admits it through the capacity ledger, pins one drive, executes exact missing manifests, and then
+reconciles again.  A crash discards only ephemeral scheduler state; completed file rows self-heal the
+next graph.  Both CLI and portal call :func:`execute`.
 """
 from __future__ import annotations
 
+import shutil
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
-from modelark import fetch, librarian, plan, register
+from modelark import capacity, fetch, plan, reconcile, register
 
 _PROBE_NAME = ".modelark-write-probe"
-_MAX_REPO_ATTEMPTS = 2          # skip a repo that fails to place this many passes, so one bad repo can't wedge the loop
-_GIANT_BYTES = 250 * 1_000_000_000   # >250 GB (raw download) → fetched UP FRONT (operator's giants-first rule)
+_MAX_TASK_ATTEMPTS = 2
 
 
-def _tier_targets(plan: dict) -> tuple[list, list]:
-    prim = [(label, items) for label, items in plan["primary"]["assign"].items() if items]
-    repl = [(label, items) for label, items in plan["replica"]["assign"].items() if items]
-    return prim, repl
+@dataclass(frozen=True)
+class _Snapshot:
+    graph: reconcile.ReconcileResult
+    ledger: capacity.CapacityPlan
 
 
 def _mounted(ctx, label: str) -> tuple[bool, bool]:
-    """(registered_with_fs_uuid, currently_mounted) for `label`, read under the lock."""
+    """Return (block-registered, mounted) without treating special remotes as awaitable disks."""
     with ctx.lock:
-        uuid = (ctx.con.execute("SELECT fs_uuid FROM drives WHERE drive_label=?", [label]).fetchone()
-                or [None])[0]
+        uuid = (ctx.con.execute(
+            "SELECT fs_uuid FROM drives WHERE drive_label=?", [label]
+        ).fetchone() or [None])[0]
         mounted = uuid is not None and register.archive_path(ctx.con, label) is not None
     return uuid is not None, mounted
 
 
 def _writable(ctx, label: str) -> bool:
-    """Probe that the drive's archive path is actually WRITABLE — a mounted drive can still be dead
-    (a USB enclosure drop leaves a mounted device that EIOs on every access; `limit=0`). Write, read
-    back, and delete a tiny hidden file; any OSError → not writable. This is what turns 'mounted but
-    faulty → silently skip its whole assignment' into 'await + prompt' (the INC that drive-01 hit)."""
+    """A mount is usable only after a write/read/delete probe succeeds."""
     with ctx.lock:
         path = register.archive_path(ctx.con, label)
     if path is None:
@@ -73,239 +55,379 @@ def _writable(ctx, label: str) -> bool:
 
 
 def _await_drive(ctx, label: str, poll_secs: float) -> bool:
-    """Guided worker: block until `label` is a live, WRITABLE mount (operator inserts / re-seats it),
-    emitting an awaiting prompt; return False if a stop is requested first. A label with no fs_uuid (a
-    special remote / never block-registered) isn't awaitable — return True and let fetch handle the
-    miss. A mounted-but-unwritable drive is awaited too (never silently skipped)."""
-    if ctx.should_stop():           # already stopping (e.g. Stop hit mid-fetch on the PREVIOUS drive) →
-        return False                # don't flash a spurious "insert <next drive>" prompt on the way out
+    """Pin the scheduler until the requested drive is live/writable or Stop is requested."""
+    if ctx.should_stop():
+        return False
     registered, mounted = _mounted(ctx, label)
     if not registered:
-        return True                 # special remote / unregistered — let fetch handle the miss
+        return True
     if mounted and _writable(ctx, label):
         return True
     reason = "insert it" if not mounted else "mounted but not writable (I/O error) — re-seat it"
-    ctx.on_progress({"phase": "awaiting-drive", "awaiting_drive": label,
-                     "say": f"⏳ drive {label}: {reason} — the fill continues once it's writable."})
+    ctx.on_progress({
+        "phase": "awaiting-drive", "awaiting_drive": label,
+        "say": f"⏳ drive {label}: {reason} — the fill continues once it's writable.",
+    })
     while not ctx.should_stop():
         time.sleep(poll_secs)
         _, mounted = _mounted(ctx, label)
         if mounted and _writable(ctx, label):
-            ctx.on_progress({"phase": "running", "awaiting_drive": None,
-                             "say": f"✅ {label} writable — continuing."})
+            ctx.on_progress({
+                "phase": "running", "awaiting_drive": None,
+                "say": f"✅ {label} writable — continuing.",
+            })
             return True
     return False
 
 
-def _replan(ctx, plan_id: str, provisioning: str, repo_scope: list[str] | None) -> dict:
-    """Recompute the placement from LIVE reality (live disk free + observed ratio, DEC-025), scoped to
-    the Plan's drive set (#33) + provisioning currency (DEF-016), under the lock. Called before each
-    primary drive-batch so freed slack is reclaimed and a filled drive surfaces as unplaceable."""
+def _live_free(ctx, plan_id: str) -> dict[str, int]:
+    """Snapshot only currently mounted drives; offline drives retain catalog evidence for planning."""
     with ctx.lock:
-        return librarian.plan_placements(ctx.con, repo_scope, plan_id, provisioning)
+        labels = [row[0] for row in ctx.con.execute(
+            "SELECT drive_label FROM plan_drives WHERE plan_id=? ORDER BY drive_label", [plan_id]
+        ).fetchall()]
+        paths = {label: register.archive_path(ctx.con, label) for label in labels}
+    live = {}
+    for label, path in paths.items():
+        if path is None:
+            continue
+        try:
+            live[label] = shutil.disk_usage(path).free
+        except OSError:
+            pass
+    return live
 
 
-def _fits(ctx, plan_id: str, provisioning: str, repo_id: str, label: str) -> bool:
-    """#37 per-model boundary check: does `repo_id` still fit drive `label`'s LIVE remaining (live free
-    − headroom) in the plan's provisioning currency? Uses the SAME `drives()` remaining + est size the
-    librarian packs with, so the fill's per-model check and the re-plan can never disagree — a
-    'break the batch' only ever happens because a PRIOR model in the same batch consumed the slack."""
-    with ctx.lock:
-        d = next((x for x in librarian.drives(ctx.con, plan_id) if x["label"] == label), None)
-        if d is None:
-            return False
-        size = librarian.est_stored_bytes(ctx.con, repo_id, provisioning=provisioning)
-    return d["remaining"] >= size
+def _reconcile(ctx, plan_id: str, provisioning: str, repo_scope: list[str] | None) -> _Snapshot:
+    """Bulk graph/ledger snapshot, using a dedicated read connection in real executions."""
+    live_free = _live_free(ctx, plan_id)
+    if ctx.read_connection_factory is None:  # isolated in-memory/unit harness
+        with ctx.lock:
+            graph = reconcile.reconcile_plan(ctx.con, plan_id, repo_scope)
+            ledger = capacity.plan_capacity(
+                ctx.con, graph, provisioning=provisioning, live_free_by_drive=live_free,
+            )
+        return _Snapshot(graph, ledger)
+    con = ctx.read_connection_factory()
+    try:
+        graph = reconcile.reconcile_plan(con, plan_id, repo_scope)
+        ledger = capacity.plan_capacity(
+            con, graph, provisioning=provisioning, live_free_by_drive=live_free,
+        )
+        return _Snapshot(graph, ledger)
+    finally:
+        con.close()
 
 
-def _primary_order(ctx, plan: dict, blocked: set) -> list[tuple[str, str]]:
-    """GLOBAL copy#1 fetch priority (operator's rule): GIANTS (>250 GB raw download) first, then
-    MUST-HAVES, then the rest — largest-first within each tier. Returns a flat [(drive_label, repo)].
-    The fill DRAINS one drive at a time from this order (the hot-swap workflow — the operator can't keep
-    every USB drive mounted at once), so this ordering picks BOTH the drive asked for first (the one
-    holding the top-priority model — the giant-heaviest) AND the within-drive order (giants first). Each
-    repo lands on the drive the librarian assigned it. Excludes copy#1-done + `blocked` repos.
-    De-risking rationale: a 400 GB model that fails at 90% late in the run wastes the most — get it early."""
-    with ctx.lock:
-        placed = librarian.placed_copies(ctx.con)
-    prim, _ = _tier_targets(plan)
-    pending = [(label, i["repo"]) for label, items in prim for i in items
-               if placed.get(i["repo"], 0) == 0 and i["repo"] not in blocked]
-    if not pending:
-        return []
-    repos = [r for _, r in pending]
-    with ctx.lock:
-        raw = librarian.raw_sizes(ctx.con, repos)
-        ph = ",".join(["?"] * len(repos))
-        must = {r for (r,) in ctx.con.execute(
-            f"SELECT repo_id FROM models WHERE coalesce(numcopies,1) >= 2 AND repo_id IN ({ph})", repos).fetchall()}
-
-    def rank(item):
-        repo = item[1]
-        sz = raw.get(repo, 0)
-        tier = 0 if sz > _GIANT_BYTES else (1 if repo in must else 2)   # giant → must-have → rest
-        return (tier, -sz, repo)                                        # largest-first within a tier; repo = stable tie-break
-    return sorted(pending, key=rank)
+def _failure_dict(failure: capacity.CapacityFailure) -> dict:
+    return {
+        "code": failure.code.value,
+        "requirement_id": failure.requirement_id,
+        "target_tier": failure.target_tier,
+        "eligible_drives": list(failure.eligible_drives),
+        "required_bytes": failure.required_bytes,
+        "available_bytes": failure.available_bytes,
+        "workspace_bytes": failure.workspace_bytes,
+        "shortfall_bytes": failure.shortfall_bytes,
+        "evidence": failure.evidence.value if failure.evidence else None,
+        "actions": list(failure.actions),
+    }
 
 
-def execute(ctx, *, plan_id: str | None = None, max_24h_gb: float = 1000,
-            repo_scope: list[str] | None = None, guided: bool = False, poll_secs: float = 3.0) -> dict:
-    """Run the active Plan's finalized selection through both tiers behind the DEC-019 gates,
-    RE-PLANNING the primary tier from live reality before each drive-batch and enforcing the #37
-    per-model capacity failsafe. Emits progress via `ctx.on_progress`; returns {ok, state, ...} and
-    never raises SystemExit (which would escape the worker's `except` and wedge the thread). `plan_id`
-    selects the plan (default: the active one); its provisioning mode sets the packing currency;
-    `repo_scope` (a `--repo` list) narrows planning + GATE-C to the requested repos."""
-    con = ctx.con
+def _terminal(
+    state: str,
+    message: str,
+    *,
+    code: str,
+    gate: str | None = None,
+    evidence: dict | list | None = None,
+    actions: list[str] | tuple[str, ...] = (),
+    failed: list[dict] | None = None,
+    stopped: bool = False,
+) -> dict:
+    return {
+        "ok": state == "done",
+        "stopped": stopped,
+        "state": state,
+        "message": message,
+        "code": code,
+        "gate": gate,
+        "evidence": evidence or {},
+        "actions": list(actions),
+        "failed": failed or [],
+    }
+
+
+def _admission_terminal(snapshot: _Snapshot, plan_id: str, made_progress: bool) -> dict:
+    ledger = snapshot.ledger
+    state = "plan-capacity-stop" if made_progress else "blocked"
+    if ledger.blocking_diagnostics:
+        codes = list(ledger.blocking_diagnostics)
+        diagnostics = [
+            {
+                "code": item.code,
+                "severity": item.severity.value,
+                "requirement_id": item.requirement_id,
+                "detail": dict(item.detail),
+            }
+            for item in snapshot.graph.diagnostics
+            if item.severity in {
+                reconcile.DiagnosticSeverity.BLOCKING,
+                reconcile.DiagnosticSeverity.ERROR,
+            }
+        ]
+        message = (
+            f"{len(diagnostics)} archive-policy/invariant blocker(s) prevent plan '{plan_id}' admission. "
+            "Review the typed evidence, change policy or selection, then re-run. (No bytes written.)"
+        )
+        return _terminal(
+            state, message, code=codes[0], gate="B",
+            evidence={"blocking_diagnostics": diagnostics},
+            actions=["review_manifest_policy", "trim_selection", "replan"],
+        )
+    failures = [_failure_dict(item) for item in ledger.failures]
+    first = failures[0] if failures else {
+        "code": "GRAPH_UNASSIGNED", "shortfall_bytes": 0, "actions": ["replan"]
+    }
+    short = sum(item.get("shortfall_bytes", 0) for item in failures)
+    if made_progress:
+        message = (
+            f"live capacity changed and {len(failures) or len(ledger.unassigned_intents)} requirement(s) "
+            f"cannot be admitted ({short / 1e12:.2f} TB short). Add eligible capacity, then re-run. "
+            "Completed files remain safe."
+        )
+    else:
+        message = (
+            f"plan '{plan_id}' cannot safely admit its committed work: "
+            f"{len(failures) or len(ledger.unassigned_intents)} requirement(s), "
+            f"{short / 1e12:.2f} TB short. Add capacity or trim the selection. (No bytes written.)"
+        )
+    return _terminal(
+        state, message, code=first["code"], gate="B",
+        evidence={"capacity_failures": failures, "unassigned": [
+            item.requirement_id for item in ledger.unassigned_intents
+        ]},
+        actions=first.get("actions", ["replan"]),
+    )
+
+
+def _stop_terminal() -> dict:
+    return _terminal(
+        "stopped", "stopped by request", code="OPERATOR_STOP", stopped=True,
+        actions=["start_fill"],
+    )
+
+
+def _file_guard(ctx, plan_id: str, provisioning: str, task: capacity.AssignedTask):
+    budgets = {item.rfilename: item for item in task.budget.file_budgets}
+
+    def before_file(repo_id, item):
+        with ctx.lock:
+            if ctx.con.execute(
+                "SELECT 1 FROM archived WHERE repo_id=? AND rfilename=? AND drive_label=?",
+                [repo_id, item.rfilename, task.target_drive],
+            ).fetchone():
+                return False
+            path = register.archive_path(ctx.con, task.target_drive)
+        if path is None:
+            with ctx.lock:
+                drive = next(entry for entry in capacity.inspect_drives(ctx.con, plan_id)
+                             if entry.drive_label == task.target_drive)
+        else:
+            try:
+                free = shutil.disk_usage(path).free
+            except OSError:
+                free = 0
+            with ctx.lock:
+                drive = next(entry for entry in capacity.inspect_drives(
+                    ctx.con, plan_id, live_free_by_drive={task.target_drive: free}
+                ) if entry.drive_label == task.target_drive)
+        failure = capacity.preflight_file(
+            drive, budgets[item.rfilename], capacity.mode_from_legacy(provisioning),
+            requirement_id=task.requirement_id,
+            task_id=task.task_id,
+        )
+        if failure is not None:
+            raise fetch.CapacityPreflightError(failure)
+        return True
+
+    return before_file
+
+
+def _ready_tasks(snapshot: _Snapshot) -> list[capacity.AssignedTask]:
+    satisfied = snapshot.graph.satisfied
+    return [
+        task for task in snapshot.ledger.tasks
+        if task.depends_on_requirement is None or task.depends_on_requirement in satisfied
+    ]
+
+
+def execute(
+    ctx,
+    *,
+    plan_id: str | None = None,
+    max_24h_gb: float = 1000,
+    repo_scope: list[str] | None = None,
+    guided: bool = False,
+    poll_secs: float = 3.0,
+) -> dict:
+    """Execute the reconciled graph without persisting scheduler completion state."""
     ctx.stats["t0"] = time.monotonic()
     ctx.stats.setdefault("by_drive", {})
-
-    # Resolve the Plan (#33): its FIXED drive set + provisioning currency drive everything below.
     with ctx.lock:
-        prow = (plan.get(con, plan_id) if plan_id else plan.active(con)) or plan.bootstrap(con)
+        prow = (plan.get(ctx.con, plan_id) if plan_id else plan.active(ctx.con)) or plan.bootstrap(ctx.con)
     pid, provisioning = prow["plan_id"], prow["provisioning"]
-    ctx.on_progress({"phase": "plan", "plan_id": pid, "provisioning": provisioning,
-                     "say": f"plan '{pid}' · provisioning={provisioning} · {len(prow['drives'])} drive(s)"})
+    ctx.on_progress({
+        "phase": "plan", "plan_id": pid, "provisioning": provisioning,
+        "say": f"plan '{pid}' · capacity={provisioning} · {len(prow['drives'])} drive(s)",
+    })
 
-    # GATE-A (DEC-019, CLI only): every drive we FETCH onto must resolve to a live mount (a special
-    # remote or unmounted clone silently no-ops in fetch.run). The guided worker awaits+probes each
-    # drive when it reaches it (below), so it doesn't need the up-front check.
-    if not guided:
-        plan0 = _replan(ctx, pid, provisioning, repo_scope)
-        prim0, repl0 = _tier_targets(plan0)
-        targets = [label for label, _ in prim0] + [label for label, _ in repl0]
-        unmounted = [label for label in dict.fromkeys(targets) if _mounted(ctx, label) == (True, False)]
-        if unmounted:
-            msg = f"fetch target(s) not mounted: {', '.join(unmounted)}. Mount them, then re-run. (No bytes fetched.)"
-            ctx.on_progress({"phase": "blocked", "gate": "A", "say": "🔴 refusing --apply: " + msg})
-            return {"ok": False, "stopped": False, "gate": "A", "state": "blocked",
-                    "message": msg, "unmounted": unmounted}
-
-    # PRIMARY tier (bulk + must-have copy #1), RE-PLANNED per drive-batch, with the #37 failsafe.
-    ctx.on_progress({"phase": "primary", "say": "=== PRIMARY tier (bulk + must-have copy #1) ==="})
-    blocked: set = set()
-    attempts: dict = {}
-    fetched_any = False
+    attempts: dict[str, int] = {}
+    made_progress = False
+    first = True
+    pinned_drive: str | None = None
     while not ctx.should_stop():
-        placement = _replan(ctx, pid, provisioning, repo_scope)
-        # GATE-B / #37 boundary: a model that fits NO plan drive's live free. Up front (nothing fetched
-        # this run) → the selection is too big for the fleet (or a single model exceeds every drive) →
-        # GATE-B 'blocked'. After we've been filling → a drive ran out → 'plan-capacity-stop' (resumable:
-        # add a drive to the plan, re-run). Both say "add capacity"; the state distinguishes the cause.
-        un_p, un_r = placement["primary"]["unplaceable"], placement["replica"]["unplaceable"]
-        if un_p or un_r:
-            tb = sum(i["size"] for i in un_p + un_r) / 1e12
-            if fetched_any:
-                msg = (f"a drive is full — {len(un_p) + len(un_r)} model(s) / {tb:.2f} TB no longer fit "
-                       f"plan '{pid}' live free. Add a drive to the plan, then re-run. (Nothing lost.)")
-                ctx.on_progress({"phase": "plan-capacity-stop", "plan_id": pid, "say": "🟠 " + msg})
-                return {"ok": False, "stopped": False, "state": "plan-capacity-stop",
-                        "message": msg, "plan_id": pid}
-            msg = (f"{len(un_p)} bulk model(s) unplaceable, {len(un_r)} must-have(s) short of their copies "
-                   f"({tb:.2f} TB) — the selection exceeds plan '{pid}'. Add a drive or trim. (Nothing fetched.)")
-            ctx.on_progress({"phase": "blocked", "gate": "B", "say": "🔴 " + msg})
-            return {"ok": False, "stopped": False, "gate": "B", "state": "blocked", "message": msg}
+        snapshot = _reconcile(ctx, pid, provisioning, repo_scope)
+        if not snapshot.ledger.feasible:
+            terminal = _admission_terminal(snapshot, pid, made_progress)
+            ctx.on_progress({
+                "phase": terminal["state"], "gate": "B", "code": terminal["code"],
+                "evidence": terminal["evidence"], "actions": terminal["actions"],
+                "say": ("🟠 " if made_progress else "🔴 ") + terminal["message"],
+            })
+            return terminal
 
-        order = _primary_order(ctx, placement, blocked)     # global giants-first priority [(drive, repo)]
-        if not order:
-            break                                            # all first copies down → primary tier complete
+        ready = _ready_tasks(snapshot)
+        if not ready:
+            if snapshot.ledger.tasks:
+                return _terminal(
+                    "error", "work graph has tasks but none have a satisfied dependency",
+                    code="GRAPH_DEPENDENCY_DEADLOCK", gate="C",
+                    evidence={"requirements": [task.requirement_id for task in snapshot.ledger.tasks]},
+                    actions=["inspect_plan_explain", "report_bug"],
+                )
+            n_must = sum(
+                requirement.kind == reconcile.RequirementKind.PROTECTED_REPLICA
+                for requirement in snapshot.graph.requirements
+            )
+            message = f"fill complete — all {n_must} finalized must-have(s) hold their copies"
+            ctx.on_progress({"phase": "done", "code": "PLAN_SATISFIED", "say": "✅ " + message})
+            return _terminal("done", message, code="PLAN_SATISFIED")
 
-        # DRAIN ONE DRIVE PER PASS (the hot-swap workflow: the operator can't keep every USB drive mounted
-        # at once — DEC-023 / _await_drive prompts for each in turn). Pick the drive holding the single
-        # highest-priority pending model, then fetch ALL of that drive's pending models — giants-first
-        # WITHIN the drive — before asking for the next drive. So giants land early without swap-thrashing.
-        label = order[0][0]
-        batch = [repo for d, repo in order if d == label]
-        # DEF-024: AWAIT + write-probe the target FIRST. A dead / absent / unwritable drive PARKS here
-        # (insert/re-seat prompt) — never mistaken for "no progress", never gets a repo blocked.
-        if guided and not _await_drive(ctx, label, poll_secs):
-            return {"ok": False, "stopped": True, "state": "stopped", "message": "stopped by request"}
+        if first and not guided:
+            involved = {task.target_drive for task in ready}
+            involved.update(task.source_drive for task in ready if task.source_drive)
+            unmounted = [
+                label for label in sorted(involved)
+                if _mounted(ctx, label) == (True, False)
+            ]
+            if unmounted:
+                message = (
+                    f"required drive(s) not mounted: {', '.join(unmounted)}. Mount them, then re-run. "
+                    "(No bytes fetched.)"
+                )
+                return _terminal(
+                    "blocked", message, code="DRIVE_UNAVAILABLE", gate="A",
+                    evidence={"drives": unmounted}, actions=["mount_drives", "replan"],
+                )
+        first = False
+
+        labels = {task.target_drive for task in ready}
+        if pinned_drive not in labels:
+            pinned_drive = next(
+                (label for label in snapshot.ledger.batch_order if label in labels),
+                sorted(labels)[0],
+            )
+        batch = sorted(
+            (task for task in ready if task.target_drive == pinned_drive),
+            key=lambda task: capacity.execution_rank(task, snapshot.graph),
+        )
+        if guided and not _await_drive(ctx, pinned_drive, poll_secs):
+            return _stop_terminal()
         if ctx.should_stop():
-            return {"ok": False, "stopped": True, "state": "stopped", "message": "stopped by request"}
-        ctx.on_progress({"phase": "primary", "drive": label, "n_repos": len(batch),
-                         "say": f"== {label} ({len(batch)} model(s) need copy #1, giants first) =="})
-        # #37: the per-model fits hook breaks the batch if THIS drive's live free runs out mid-batch, so
-        # the next re-plan re-homes the overflow (or stops as plan-capacity-stop) — never an ENOSPC.
-        fetch.run(drive_label=label, repos=batch, max_24h_gb=max_24h_gb, ctx=ctx,
-                  fits=lambda rid, _l=label: _fits(ctx, pid, provisioning, rid, _l))
+            return _stop_terminal()
 
-        # Progress judged on THIS batch (the drive was writable — await passed). Any copy#1 landed → next
-        # pass. NOTHING landed: 24h cap (clean pause) · the fits hook broke on batch[0] because the drive
-        # is full (let the re-plan re-home / stop — DON'T block) · else these repos fail → block ONLY them.
-        with ctx.lock:
-            placed_after = librarian.placed_copies(con)
-        if any(placed_after.get(r, 0) >= 1 for r in batch):
-            fetched_any = True
-            continue
-        if max_24h_gb:
-            with ctx.lock:
-                used = fetch._bytes_last_24h(con)
-            if used >= max_24h_gb * 1e9:
-                ctx.on_progress({"phase": "throttled",
-                                 "say": "24h download cap reached — stopping (resumable, re-run to continue)."})
-                return {"ok": False, "stopped": True, "state": "paused",
-                        "message": "24h download cap reached (resumable)"}
-        # `_fits` takes ctx.lock internally; the lock is NOT held here. If batch[0] still fits the drive,
-        # nothing landing was a real fetch failure → block after N; else the drive filled → re-plan handles it.
-        if _fits(ctx, pid, provisioning, batch[0], label):
-            for r in batch:
-                attempts[r] = attempts.get(r, 0) + 1
-                if attempts[r] >= _MAX_REPO_ATTEMPTS:
-                    blocked.add(r)
+        fetch_tasks = [task for task in batch if task.kind == reconcile.TaskKind.FETCH]
+        replica_tasks = [task for task in batch if task.kind == reconcile.TaskKind.REPLICATE]
+        if fetch_tasks:
+            ctx.on_progress({
+                "phase": "primary", "drive": pinned_drive, "n_repos": len(fetch_tasks),
+                "say": f"== {pinned_drive} ({len(fetch_tasks)} exact fetch task(s)) ==",
+            })
+            manifests = {
+                task.repo_id: tuple(
+                    item for item in snapshot.graph.manifests[task.repo_id]
+                    if item.rfilename in task.budget.missing_files
+                )
+                for task in fetch_tasks
+            }
+            guards = {
+                task.repo_id: _file_guard(ctx, pid, provisioning, task) for task in fetch_tasks
+            }
+            outcome = fetch.run(
+                drive_label=pinned_drive,
+                repos=[task.repo_id for task in fetch_tasks],
+                max_24h_gb=max_24h_gb,
+                ctx=ctx,
+                task_manifests=manifests,
+                before_file=lambda repo_id, item: guards[repo_id](repo_id, item),
+            )
+            if outcome["stored_repos"]:
+                made_progress = True
+            if outcome["stopped"] or ctx.should_stop():
+                return _stop_terminal()
+            if outcome["throttled"]:
+                return _terminal(
+                    "paused", "24h download cap reached (resumable)", code="DOWNLOAD_THROTTLED",
+                    evidence={"max_24h_gb": max_24h_gb}, actions=["wait_for_window", "start_fill"],
+                )
+            if outcome["capacity_failure"] is not None:
+                # Reconcile immediately.  If no alternative target is feasible the next loop emits
+                # plan-capacity-stop; otherwise deterministic placement re-homes the stale task.
+                pinned_drive = None
+                continue
+            for repo_id in outcome["failed_repos"]:
+                attempts[repo_id] = attempts.get(repo_id, 0) + 1
+                if attempts[repo_id] >= _MAX_TASK_ATTEMPTS:
+                    return _terminal(
+                        "error", f"fetch task for {repo_id} failed {_MAX_TASK_ATTEMPTS} times",
+                        code="FETCH_TASK_FAILED", gate="C",
+                        evidence={"repo": repo_id, "attempts": attempts[repo_id]},
+                        actions=["inspect_fetch_events", "retry_repo", "trim_selection"],
+                        failed=[{"repo": repo_id, "attempts": attempts[repo_id]}],
+                    )
+            if outcome["drive_unwritable"]:
+                pinned_drive = None
+                continue
 
-    if ctx.should_stop():
-        return {"ok": False, "stopped": True, "state": "stopped", "message": "stopped by request"}
+        if replica_tasks:
+            ctx.on_progress({
+                "phase": "replica", "drive": pinned_drive, "n_repos": len(replica_tasks),
+                "say": f"== {pinned_drive} ({len(replica_tasks)} exact replica task(s)) ==",
+            })
+            outcome = fetch.run_replica_tasks(replica_tasks, ctx=ctx)
+            if outcome["copied_files"]:
+                made_progress = True
+            if outcome["failed"]:
+                return _terminal(
+                    "error", f"{len(outcome['failed'])} replica key operation(s) failed verification",
+                    code="REPLICA_KEY_FAILED", gate="C", evidence={"failures": outcome["failed"]},
+                    actions=["inspect_annex_whereis", "verify_source", "retry_replica"],
+                    failed=outcome["failed"][:12],
+                )
+            if outcome["deferred"]:
+                # INV-13 / DEF-022: every ready replica has a safe source copy.  An unavailable
+                # source/target is a resumable pause, never a red missing-copy error.
+                return _terminal(
+                    "paused", "copy #1 is safe; copy #2 is deferred until its drive is available",
+                    code="SOURCE_UNAVAILABLE", gate="C",
+                    evidence={"source_offline": outcome["source_offline"],
+                              "deferred_targets": outcome["deferred_targets"]},
+                    actions=["mount_or_reseat_drive", "start_fill"],
+                )
 
-    # REPLICA tier (must-have copy #2 ← local copy from the RAID/primary home) — fresh plan.
-    placement = _replan(ctx, pid, provisioning, repo_scope)
-    _, repl = _tier_targets(placement)
-    repl_result = {"deferred": False}
-    if repl and not ctx.should_stop():
-        ctx.on_progress({"phase": "replica",
-                         "say": "=== REPLICA tier (must-have copy #2 ← local copy from the home) ==="})
-        if guided:
-            for label, _ in repl:
-                if not _await_drive(ctx, label, poll_secs):
-                    return {"ok": False, "stopped": True, "state": "stopped", "message": "stopped by request"}
-        # DEF-022: run_replica probes the source (INC-009: the RAID can die) + targets and returns a
-        # deferral report, so GATE-C can PAUSE on an offline copy#2 drive instead of churning + erroring.
-        repl_result = fetch.run_replica(placement["replica"]["assign"],
-                                        placement["replica"]["source"], ctx=ctx) or {"deferred": False}
+        # The pinned snapshot batch is exhausted. Rebuild from durable facts before selecting the
+        # next drive; this preserves drive affinity without persisting task claims.
+        pinned_drive = None
 
-    if ctx.should_stop():
-        return {"ok": False, "stopped": True, "state": "stopped"}
-
-    # GATE-C (DEC-019): post-condition — every finalized must-have now holds >= numcopies COMPLETE
-    # copies. Silent under-replication becomes a loud failure (exit 1 on the CLI, error in the UI).
-    ctx.on_progress({"phase": "gate-c", "say": "checking copy counts…"})
-    with ctx.lock:
-        placed = librarian.placed_copies(con)
-        if repo_scope:
-            musts = con.execute(
-                "SELECT repo_id, coalesce(numcopies,1) FROM models WHERE coalesce(numcopies,1) >= 2 "
-                f"AND repo_id IN ({','.join(['?']*len(repo_scope))})", repo_scope).fetchall()
-        else:
-            musts = con.execute(
-                "SELECT repo_id, coalesce(numcopies,1) FROM models WHERE coalesce(numcopies,1) >= 2 "
-                "AND repo_id IN (SELECT repo_id FROM selection WHERE finalized_at IS NOT NULL)").fetchall()
-    failed = [{"repo": r, "need": nc, "have": placed.get(r, 0)} for r, nc in musts if placed.get(r, 0) < nc]
-    if failed:
-        # DEF-022: copy #1 of every must-have is safe (have >= 1) and the only shortfall is copy #2,
-        # deferred because the replica source/target is offline → PAUSE (resumable), not a red error
-        # (INC-009: a dead RAID source hard-errored a run whose copy #1 was all safe). A genuinely
-        # missing copy #1 (have == 0) is real under-replication → error.
-        c1_missing = [f for f in failed if f["have"] == 0]
-        if not c1_missing and repl_result.get("deferred"):
-            msg = (f"copy #1 of every must-have is safe; copy #2 of {len(failed)} is deferred — the replica "
-                   f"source/target is offline. Re-seat it, then re-run to finish replication. (Nothing lost.)")
-            ctx.on_progress({"phase": "awaiting-drive", "say": "⏸ " + msg})
-            return {"ok": False, "stopped": False, "state": "paused", "failed": failed, "message": msg}
-        lines = "; ".join(f"{f['repo']} {f['have']}/{f['need']}" for f in failed[:12])
-        ctx.on_progress({"phase": "error", "gate": "C",
-                         "say": f"🔴 POST-CHECK FAILED (DEC-019): {len(failed)} must-have(s) below copies: {lines}"})
-        return {"ok": False, "stopped": False, "gate": "C", "state": "error", "failed": failed,
-                "message": f"{len(failed)} must-have(s) below their copy count"}
-    ctx.on_progress({"phase": "done",
-                     "say": "✅ post-check: all finalized must-haves hold their required copies."})
-    return {"ok": True, "stopped": False, "state": "done", "n_must": len(musts),
-            "message": f"fill complete — all {len(musts)} finalized must-have(s) hold their copies"}
+    return _stop_terminal()

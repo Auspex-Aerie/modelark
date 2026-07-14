@@ -23,6 +23,12 @@ window.MA = {
   },
 };
 
+window.MA.fillTerminals = {
+  done: "✅ done", stopped: "■ stopped", error: "🔴 error", paused: "⏸ paused",
+  blocked: "⚠ blocked", "plan-capacity-stop": "🟠 capacity changed",
+};
+window.MA.isFillTerminal = status => !!window.MA.fillTerminals[status];
+
 let diskLoaded = false;
 document.querySelectorAll(".navbtn").forEach(b => b.onclick = () => {
   if (b.disabled) return;
@@ -69,12 +75,20 @@ else document.addEventListener("DOMContentLoaded", applyPlanGate);
   function show(t) {
     document.getElementById("oopsieHead").textContent = TITLE[t.status] || ("Fill: " + t.status);
     document.getElementById("oopsieMsg").textContent = t.message || "";
+    document.getElementById("oopsieCode").textContent = t.code
+      ? `code: ${t.code}${t.gate ? ` · gate ${t.gate}` : ""}` : "";
     const fel = document.getElementById("oopsieFailed");
     fel.textContent = (t.failed && t.failed.length)
-      ? "affected: " + t.failed.map(f => `${f.repo} ${f.have}/${f.need}`).join(" · ") : "";
+      ? "affected: " + t.failed.map(f => f.repo || f.requirement_id || f.code || "unknown").join(" · ") : "";
+    const evidence = t.evidence || {};
+    document.getElementById("oopsieEvidence").textContent = Object.keys(evidence).length
+      ? "evidence: " + JSON.stringify(evidence) : "";
+    document.getElementById("oopsieActions").textContent = (t.actions && t.actions.length)
+      ? "next: " + t.actions.join(" · ") : "";
     document.getElementById("oopsieWhen").textContent = t.when ? ("when: " + t.when) : "";
     overlay.hidden = false;
   }
+  window.MA.showFillTerminal = show;
   document.getElementById("oopsieAck").onclick = () =>
     window.MA.post("/api/fill/ack-terminal", {}).finally(() => { overlay.hidden = true; });
   document.getElementById("oopsieView").onclick = () => {

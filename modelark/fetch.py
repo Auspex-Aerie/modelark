@@ -29,7 +29,7 @@ import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, Sequence
 
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
@@ -71,6 +71,14 @@ class _StopRequested(Exception):
     """Raised inside the download loop when a stop is requested mid-shard, so run() can stop cleanly."""
 
 
+class CapacityPreflightError(RuntimeError):
+    """The fresh per-file ledger check refuses an operation before any download/write."""
+
+    def __init__(self, failure):
+        super().__init__(f"{failure.code.value}: short by {failure.shortfall_bytes} bytes")
+        self.failure = failure
+
+
 ArchivePolicyError = archive_manifest.ArchivePolicyError
 
 
@@ -94,6 +102,7 @@ class RunCtx:
     on_progress: Callable[[dict], None] = _noop
     should_stop: Callable[[], bool] = _never
     stats: dict = field(default_factory=dict)
+    read_connection_factory: Callable[[], Any] | None = None
 
     def q1(self, sql: str, params: list | None = None):
         with self.lock:
@@ -360,11 +369,29 @@ def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, model_dir: Path, 
     raise RuntimeError(last_detail)                     # exhausted retries → run() isolates the repo
 
 
-def fetch_model(ctx: RunCtx, repo_id: str, dest: Path, drive_label: str, annex: bool,
-                compress_cfg: dict) -> dict:
+def fetch_model(
+    ctx: RunCtx,
+    repo_id: str,
+    dest: Path,
+    drive_label: str,
+    annex: bool,
+    compress_cfg: dict,
+    *,
+    manifest: Sequence[archive_manifest.ManifestFile] | None = None,
+    before_file: Callable[[archive_manifest.ManifestFile], None] | None = None,
+) -> dict:
+    """Execute only the explicit task manifest, with a stale-work DB check per file.
+
+    ``manifest=None`` retains the standalone fetch CLI behavior.  The reconciled fill always passes
+    an exact missing manifest and a live-capacity guard, so the executor cannot silently broaden a
+    task back to every repository file.
+    """
     con = ctx.con
     with ctx.lock:                                      # brief: read the plan + resume set
-        files = plan(con, repo_id)
+        task_manifest = tuple(manifest) if manifest is not None else tuple(
+            archive_manifest.manifest_for_repo(con, repo_id)
+        )
+        files = [item.as_fetch_record() for item in task_manifest]
         have = {r[0] for r in con.execute(
             "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
             [repo_id, drive_label]).fetchall()}
@@ -391,6 +418,10 @@ def fetch_model(ctx: RunCtx, repo_id: str, dest: Path, drive_label: str, annex: 
         base = {"drive": drive_label, "repo": repo_id, "file": f["rfilename"],
                 "file_index": i + 1, "n_files": n, "n_shards": n_shards,
                 "shard_no": (shard_names.index(f["rfilename"]) + 1) if f["fmt"] == "safetensors" else None}
+        if before_file is not None:
+            item = next(entry for entry in task_manifest if entry.rfilename == f["rfilename"])
+            if before_file(item) is False:               # another durable writer satisfied stale work
+                continue
         ctx.on_progress({**base, "file_phase": "download"})
         local = _download_shard(ctx, repo_id, f["rfilename"], model_dir, base)
         if f["sha256"]:
@@ -474,8 +505,17 @@ def fetch_model(ctx: RunCtx, repo_id: str, dest: Path, drive_label: str, annex: 
         if freed:
             print(f"    [swept] {freed/1e9:.1f} GB orphaned .incomplete reclaimed")
             ctx.on_progress({**base, "file_phase": "swept", "reclaimed": freed})
+    # A task may be only the missing suffix of a copy.  Mark the model archived only when the target
+    # now contains the complete canonical manifest; task completion itself is never inferred from
+    # this presentation status.
     with ctx.lock:
-        con.execute("UPDATE models SET status='archived' WHERE repo_id=?", [repo_id])
+        canonical = archive_manifest.manifest_for_repo(con, repo_id)
+        present = {row[0] for row in con.execute(
+            "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
+            [repo_id, drive_label],
+        ).fetchall()}
+        if {item.rfilename for item in canonical} <= present:
+            con.execute("UPDATE models SET status='archived' WHERE repo_id=?", [repo_id])
     return {"repo_id": repo_id, "files": done, "skipped": len(files) - len(todo), "bytes": dl_bytes}
 
 
@@ -499,11 +539,15 @@ def _bytes_last_24h(con) -> int:
 
 
 def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_24h_gb=1000,
-        ctx: RunCtx | None = None, fits: Callable[[str], bool] | None = None) -> None:
+        ctx: RunCtx | None = None, fits: Callable[[str], bool] | None = None,
+        task_manifests: Mapping[str, Sequence[archive_manifest.ManifestFile]] | None = None,
+        before_file: Callable[[str, archive_manifest.ManifestFile], None] | None = None) -> dict:
     """`fits(repo_id) -> bool` (optional, #37): a per-model boundary check the caller (fill.execute)
     supplies — 'does this repo still fit the target drive's LIVE free in the plan's provisioning
     currency?'. On a non-fit, break the batch (emit `plan-capacity`) so fill re-plans instead of
     ENOSPC-ing mid-shard. None (the CLI/plain-fetch path) → no capacity gating, as before."""
+    result = {"stored_repos": [], "failed_repos": [], "capacity_failure": None,
+              "throttled": False, "stopped": False, "drive_unwritable": False}
     own = ctx is None                               # CLI/plain-fetch path owns its connection
     con = db.connect() if own else ctx.con
     if own:
@@ -521,7 +565,7 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
             ids = repos or finalized(con)
         if not ids:
             print("Nothing to fetch — finalize a set in the portal (Finish) or pass --repo.")
-            return
+            return result
         if limit:
             ids = ids[:limit]
 
@@ -541,16 +585,16 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                 print(f"  {rid:48} {len(files):>3} files · {(comp+raw)/1e9:7.1f} GB raw "
                       f"(~{comp*0.67/1e9:.1f} GB compressed + {raw/1e9:.1f} GB)")
             print(f"\nTotal: ~{grand/1e12:.2f} TB raw → ~{grand*0.7/1e12:.2f} TB on disk (bf16 ZipNN est).")
-            return
+            return result
 
         if dest is None:
             print(f"drive '{drive_label}' is not registered or not mounted — run "
                   f"`modelark drive register --dev /dev/sdX --label {drive_label or 'drive-01'}`, "
                   f"or pass --dest PATH.")
-            return
+            return result
         if not drive_label:
             print("give --drive LABEL so the archive is recorded against a fleet drive.")
-            return
+            return result
 
         annex = _is_annex(dest)
         if not annex:
@@ -569,6 +613,7 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                 ctx.write(lambda c: _event(c, None, "throttled", detail=f"{used/1e9:.0f} GB in 24h"))
                 ctx.on_progress({"phase": "throttled", "say":
                                  f"  throttle: {used/1e12:.2f} TB in 24h ≥ cap — stopping (resumable)."})
+                result["throttled"] = True
                 break
             if fits is not None and not fits(rid):
                 # #37 per-model failsafe: this drive's LIVE free can no longer hold `rid` in the plan's
@@ -582,19 +627,34 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
             ctx.on_progress({"drive": drive_label, "repo": rid, "repo_index": k + 1, "n_repos": len(ids),
                              "used_24h": used, "cap_24h": cap})
             try:
-                r = fetch_model(ctx, rid, dest, drive_label, annex, compress_cfg)
+                task_args = {}
+                if task_manifests is not None:
+                    task_args["manifest"] = task_manifests.get(rid)
+                if before_file is not None:
+                    task_args["before_file"] = lambda item, _rid=rid: before_file(_rid, item)
+                r = fetch_model(ctx, rid, dest, drive_label, annex, compress_cfg, **task_args)
                 tag = f"{r['files']} files" + (f" (+{r['skipped']} already had)" if r["skipped"] else "")
                 print(f"  [archived] {rid}  ({tag})")
                 ctx.write(lambda c: _event(c, rid, "archived", bytes=r["bytes"], detail=tag))
+                result["stored_repos"].append(rid)
             except _StopRequested:
+                result["stopped"] = True
                 break                                    # clean stop requested mid-shard (INC-004)
+            except CapacityPreflightError as exc:
+                result["capacity_failure"] = exc.failure
+                ctx.on_progress({"phase": "plan-capacity", "drive": drive_label, "repo": rid,
+                                 "code": exc.failure.code.value,
+                                 "say": f"  {drive_label} lacks safe workspace for {rid} — re-planning."})
+                break
             except ArchivePolicyError as e:
                 print(f"  [policy  ] {rid}: {e}")
                 detail = str(e)[:200]
                 ctx.write(lambda c: _event(c, rid, "policy", detail=detail))
+                result["failed_repos"].append(rid)
             except GatedRepoError:
                 print(f"  [gated   ] {rid}  — needs `hf auth login` + accepted license")
                 ctx.write(lambda c: _event(c, rid, "auth", detail="gated / needs accepted license"))
+                result["failed_repos"].append(rid)
             except HfHubHTTPError as e:
                 code = getattr(getattr(e, "response", None), "status_code", None)
                 if code == 429:
@@ -603,22 +663,27 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                           + (f", Retry-After={ra:.0f}s" if ra else "") + "; stopping (resumable).")
                     ctx.write(lambda c: _event(c, rid, "rate_limited", wait_seconds=ra, detail="429; stopped run"))
                     ctx.on_progress({"phase": "rate_limited", "say": f"  [429] {rid} — HF rate limit; stopping."})
+                    result["throttled"] = True
                     break
                 print(f"  [error   ] {rid}: {str(e)[:100]}")
                 detail = str(e)[:200]
                 ctx.write(lambda c: _event(c, rid, "error", detail=detail))
+                result["failed_repos"].append(rid)
             except RepositoryNotFoundError as e:
                 print(f"  [error   ] {rid}: {str(e)[:100]}")
                 ctx.write(lambda c: _event(c, rid, "error", detail="repo not found"))
+                result["failed_repos"].append(rid)
             except Exception as e:                       # INC-004: isolate ANY other repo failure (stalled
                 print(f"  [error   ] {rid}: {type(e).__name__}: {str(e)[:100]}")   # download exhausted retries,
                 detail = f"{type(e).__name__}: {str(e)[:180]}"
                 ctx.write(lambda c: _event(c, rid, "error", detail=detail))
+                result["failed_repos"].append(rid)
                 if not _dest_writable(dest):             # the DRIVE went unwritable mid-batch (USB drop), not just this
                     ctx.write(lambda c: _event(c, rid, "awaiting-drive",           # DEF-021: a disruption boundary
                               detail=f"{drive_label} went unwritable mid-fill"))
                     ctx.on_progress({"phase": "awaiting-drive", "awaiting_drive": drive_label,   # repo → bail; the guided
                                      "say": f"⚠ {drive_label} stopped accepting writes mid-fill — re-seat it."})
+                    result["drive_unwritable"] = True
                     break                                # re-plan loop re-awaits + write-probes it (no silent churn)
                 if ctx.should_stop():                    # canary fail, etc.) — log + move on, don't wedge the fill
                     break
@@ -633,6 +698,7 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                 print("  synced drive + map (location log + index)")
             else:
                 print(f"  sync warning: {((s.stderr or s.stdout) + ' ' + (m.stderr or m.stdout)).strip()[:160]}")
+        return result
     finally:
         if own:
             con.close()
@@ -647,6 +713,180 @@ def _remote_name_for_uuid(lib, uuid: str) -> str | None:
         if len(parts) == 2 and parts[1] == uuid:
             return parts[0].split(".", 2)[1]        # remote.<name>.annex-uuid
     return None
+
+
+def _annex_key_on_uuid(repo: Path, key: str, target_uuid: str) -> bool:
+    """Require git-annex's per-key location evidence for the concrete target UUID."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "annex", "whereis", f"--key={key}", "--json"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return False
+    try:
+        records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    except json.JSONDecodeError:
+        return False
+    return any(
+        location.get("uuid") == target_uuid
+        for record in records
+        for location in (record.get("whereis") or [])
+    )
+
+
+def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
+    """Execute exact replica tasks and record only per-key target-UUID proofs.
+
+    The task graph may choose a different source for each repository.  A stale target row is checked
+    before every key, copy publication is verified through ``annex whereis --key`` against the
+    registered target UUID, and only that verified file is then mirrored into ``archived``.
+    """
+    own = ctx is None
+    con = db.connect() if own else ctx.con
+    if own:
+        ctx = RunCtx(con=con)
+    result = {
+        "deferred": False,
+        "source_offline": False,
+        "deferred_targets": [],
+        "copied_targets": [],
+        "copied_files": 0,
+        "failed": [],
+    }
+    try:
+        grouped: dict[tuple[str | None, str], list[Any]] = {}
+        for task in tasks:
+            grouped.setdefault((task.source_drive, task.target_drive), []).append(task)
+        lib = register.library_root()
+        copied_any = False
+        for (source, target), group in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0] or "")):
+            if source is None:
+                result["failed"].append({
+                    "code": "SOURCE_INCOMPLETE",
+                    "target": target,
+                    "requirements": [task.requirement_id for task in group],
+                })
+                continue
+            with ctx.lock:
+                source_path = register.archive_path(con, source)
+                target_path = register.archive_path(con, target)
+                target_uuid = (con.execute(
+                    "SELECT annex_uuid FROM drives WHERE drive_label=?", [target]
+                ).fetchone() or [None])[0]
+            if source_path is None or not _dest_writable(Path(source_path)):
+                result.update(deferred=True, source_offline=True)
+                result["deferred_targets"].append(target)
+                ctx.on_progress({
+                    "phase": "awaiting-drive", "awaiting_drive": source,
+                    "say": f"⏳ replica source {source} is offline/read-only — copy #2 deferred; re-seat it.",
+                })
+                continue
+            if target_path is None or not _dest_writable(Path(target_path)):
+                result["deferred"] = True
+                result["deferred_targets"].append(target)
+                ctx.on_progress({
+                    "phase": "awaiting-drive", "awaiting_drive": target,
+                    "say": f"⏳ replica target {target} is offline/unwritable — copy #2 deferred; re-seat it.",
+                })
+                continue
+            if not target_uuid:
+                result["failed"].append({
+                    "code": "TARGET_ANNEX_UUID_MISSING", "target": target,
+                    "requirements": [task.requirement_id for task in group],
+                })
+                continue
+            source_repo, target_repo = Path(source_path), Path(target_path)
+            remote = subprocess.run(
+                ["git", "-C", str(source_repo), "remote", "set-url", target, str(target_repo)],
+                capture_output=True,
+                text=True,
+            )
+            if remote.returncode != 0:
+                subprocess.run(
+                    ["git", "-C", str(source_repo), "remote", "add", target, str(target_repo)],
+                    capture_output=True,
+                    text=True,
+                )
+            ctx.on_progress({
+                "phase": "replica", "drive": target, "n_repos": len(group),
+                "say": f"-- replica {target} ← {source} ({len(group)} task(s)) --",
+            })
+            group_deferred = False
+            for task in sorted(group, key=lambda item: item.requirement_id):
+                for rfilename in task.budget.missing_files:
+                    with ctx.lock:
+                        if con.execute(
+                            "SELECT 1 FROM archived WHERE repo_id=? AND rfilename=? AND drive_label=?",
+                            [task.repo_id, rfilename, target],
+                        ).fetchone():
+                            continue
+                        source_row = con.execute(
+                            "SELECT stored_name,stored_relpath,orig_sha256,znn_sha256,orig_bytes,"
+                            "stored_bytes,compressed,annex_key FROM archived "
+                            "WHERE repo_id=? AND rfilename=? AND drive_label=?",
+                            [task.repo_id, rfilename, source],
+                        ).fetchone()
+                    if source_row is None or not source_row[7]:
+                        result["failed"].append({
+                            "code": "SOURCE_KEY_MISSING", "requirement_id": task.requirement_id,
+                            "repo": task.repo_id, "file": rfilename, "source": source,
+                        })
+                        continue
+                    key = source_row[7]
+                    copied = subprocess.run(
+                        ["git", "-C", str(source_repo), "annex", "copy", "--to", target, f"--key={key}"],
+                        capture_output=True,
+                        text=True,
+                    )
+                    if copied.returncode != 0:
+                        if not _dest_writable(target_repo):
+                            result["deferred"] = True
+                            result["deferred_targets"].append(target)
+                            group_deferred = True
+                            break
+                        result["failed"].append({
+                            "code": "ANNEX_COPY_FAILED", "requirement_id": task.requirement_id,
+                            "repo": task.repo_id, "file": rfilename, "target": target,
+                        })
+                        continue
+                    if not _annex_key_on_uuid(source_repo, key, target_uuid):
+                        result["failed"].append({
+                            "code": "TARGET_KEY_UNVERIFIED", "requirement_id": task.requirement_id,
+                            "repo": task.repo_id, "file": rfilename, "target": target,
+                        })
+                        continue
+                    stored_name, stored_relpath, orig_sha, znn_sha, orig_bytes, stored_bytes, compressed, _ = source_row
+                    ctx.write(lambda c, _task=task, _file=rfilename, _target=target, _values=(
+                        stored_name, stored_relpath, orig_sha, znn_sha, orig_bytes, stored_bytes,
+                        compressed, key,
+                    ): db.upsert(c, "archived", {
+                        "repo_id": _task.repo_id, "rfilename": _file,
+                        "stored_name": _values[0], "stored_relpath": _values[1],
+                        "drive_label": _target, "orig_sha256": _values[2],
+                        "znn_sha256": _values[3], "orig_bytes": _values[4],
+                        "stored_bytes": _values[5], "compressed": _values[6],
+                        "annex_key": _values[7],
+                    }, pk=["repo_id", "rfilename", "drive_label"], touch=["verified_at"]))
+                    result["copied_files"] += 1
+                    copied_any = True
+                if group_deferred:
+                    break
+            if group_deferred:
+                ctx.on_progress({
+                    "phase": "awaiting-drive", "awaiting_drive": target,
+                    "say": f"⏳ replica target {target} went unwritable mid-copy — deferred; re-seat it.",
+                })
+            elif target not in result["deferred_targets"]:
+                result["copied_targets"].append(target)
+        if copied_any:
+            subprocess.run(["git", "-C", str(lib), "annex", "sync"], capture_output=True, text=True)
+        result["deferred_targets"] = sorted(set(result["deferred_targets"]))
+        result["copied_targets"] = sorted(set(result["copied_targets"]))
+        return result
+    finally:
+        if own:
+            con.close()
 
 
 def run_replica(replica_assign: dict, source: str | None, ctx: RunCtx | None = None) -> dict:

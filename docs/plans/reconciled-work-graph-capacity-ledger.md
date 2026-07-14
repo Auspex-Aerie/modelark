@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| Status | **Phase 2 implemented in shadow mode — local validation complete; implementation review and empirical gates pending** |
+| Status | **Phases 1–2 merged; Phase 3 implementation in review after empirical gates and policy decision** |
 | Scope | Fill planning, copy reconciliation, capacity accounting, execution, terminal failures, and operator surfaces |
 | Impact | Large blast radius across every fill safety path; phased shadow rollout is mandatory |
 | Trigger | A live legacy fill falsely reported a capacity stop after double-counting protected first copies already stored on the RAID home |
@@ -1108,10 +1108,9 @@ executor.
 
 ### Phase 2 — capacity ledger and typed feasibility
 
-Implementation status (2026-07-14): complete locally on `feat/reconciled-work-graph-phase2`, pending
-implementation review. `tiered_v1`, candidate-specific budgets, typed failures, file preflight, and
-codec caps are visible through read-only CLI/API shadow diagnostics only. No fill gate or executor
-consumes them.
+Implementation status (2026-07-14): merged as PR #11 after CI and Greptile implementation review.
+`tiered_v1`, candidate-specific budgets, typed failures, file preflight, and codec caps are visible
+through read-only CLI/API shadow diagnostics only. No fill gate or executor consumes them.
 
 1. Implement the deterministic behavior-preserving placement policy from Section 6.4.
 2. Implement internal canonical capacity modes behind an old-value adapter; do not migrate schema yet.
@@ -1151,8 +1150,19 @@ Local evidence recorded before implementation review:
   target temporary object atomically renamed into place. The conservative workspace term remains
   active pending review.
 
-Still required before Phase 3: implementation review, an operator-approved real-bf16 StreamZNN
-high-water run, and the copied/sanitized legacy-catalog replay plus release-host latency/lock evidence.
+Both empirical gates now pass. The operator-approved real-bf16 StreamZNN run used a SHA-verified
+29.36 GB restored shard and measured 19.47 GB filesystem high-water against a 29.36 GB enforced
+ceiling. The copied-catalog release-host replay measured the production graph-plus-ledger path at
+271.724 ms p95 and 329.878 ms maximum, below the 500 ms budget, while a concurrent writer held the
+disposable clone. Sanitized evidence is in `docs/capacity-evidence.md`.
+
+The replay also found 50 pickle-only repositories refused by the safe public default and four
+repositories whose intended artifacts are outside the current safetensors/GGUF/opted-in-pickle
+manifest. The operator retained `exclude.pickle_only: true` for public defaults, retained the explicit
+private opt-in that stores pickle as inert raw bytes without loading it (DEC-040/DEF-011), and parked
+the four unsupported repositories for the current fill. First-class support for their formats remains
+deferred. The executor does not silently skip or auto-deselect any blocker: a committed unsupported
+selection still produces a typed whole-plan Gate B refusal.
 
 ### Phase 3 — executor conversion
 

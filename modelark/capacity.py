@@ -606,24 +606,29 @@ def _ledgers(drives: Sequence[CapacityDrive], tasks: Sequence[AssignedTask]) -> 
     return tuple(out)
 
 
+def execution_rank(task: AssignedTask, result: ReconcileResult) -> tuple:
+    """Stable within/between-drive priority without weakening bulk-before-replica."""
+    manifest = result.manifests[task.repo_id]
+    raw_size = sum(item.size_bytes for item in manifest)
+    resumes_partial = len(task.budget.missing_files) < len(manifest)
+    if task.kind == TaskKind.FETCH and resumes_partial:
+        tier = 0
+    elif task.kind == TaskKind.FETCH and raw_size > 250_000_000_000:
+        tier = 1
+    elif task.kind == TaskKind.FETCH and task.requirement_id.startswith("protected_home:"):
+        tier = 2
+    elif task.kind == TaskKind.FETCH:
+        tier = 3
+    else:
+        tier = 4
+    return tier, -raw_size, task.repo_id, task.requirement_id
+
+
 def _batch_order(tasks: Sequence[AssignedTask], result: ReconcileResult) -> tuple[str, ...]:
     """DEC-034: global priority chooses a drive batch; tasks never change target."""
     by_drive: dict[str, list[tuple]] = {}
     for task in tasks:
-        manifest = result.manifests[task.repo_id]
-        raw_size = sum(item.size_bytes for item in manifest)
-        resumes_partial = len(task.budget.missing_files) < len(manifest)
-        if resumes_partial:
-            tier = 0
-        elif task.kind == TaskKind.FETCH and raw_size > 250_000_000_000:
-            tier = 1
-        elif task.requirement_id.startswith("protected_home:"):
-            tier = 2
-        elif task.kind == TaskKind.FETCH:
-            tier = 3
-        else:
-            tier = 4
-        by_drive.setdefault(task.target_drive, []).append((tier, -raw_size, task.repo_id))
+        by_drive.setdefault(task.target_drive, []).append(execution_rank(task, result))
     return tuple(
         label for label, _ in sorted(
             ((label, min(ranks)) for label, ranks in by_drive.items()),
