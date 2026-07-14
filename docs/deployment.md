@@ -56,7 +56,8 @@ The generated unit contains those resolved paths. It does not depend on a servic
 interactive-shell XDG variables.
 
 If the checkout contains `catalog/catalog.sqlite` or `catalog/catalog.duckdb` while the selected data
-directory has no migrated SQLite catalog, deployment stops before creating the venv or unit. This
+directory has no migrated SQLite catalog, a dry run prints a loud warning and the full preview; live
+deployment stops before creating the venv or unit. This
 prevents a non-editable install from silently starting with an empty catalog beside ignored legacy
 state. Point `--data-dir` at existing SQLite state or complete the attended migration first.
 

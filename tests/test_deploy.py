@@ -92,6 +92,22 @@ def test_legacy_catalog_cannot_be_silently_ignored(tmp_path):
     deploy._guard_legacy_catalog(source, destination)
 
 
+def test_legacy_catalog_dry_run_warns_and_prints_plan(tmp_path, capsys):
+    source = tmp_path / "checkout"
+    (source / "catalog").mkdir(parents=True)
+    (source / "catalog/catalog.sqlite").touch()
+    (source / "pyproject.toml").touch()
+    deploy.main([
+        "--source", str(source), "--venv", str(tmp_path / "venv"),
+        "--data-dir", str(tmp_path / "new-data"), "--dry-run",
+    ])
+    captured = capsys.readouterr()
+    assert "ModelArk deployment plan" in captured.out
+    assert "WARNING: live deployment would stop" in captured.err
+    assert "has no valid migrated catalog.sqlite" in captured.err
+    assert not (tmp_path / "venv").exists() and not (tmp_path / "new-data").exists()
+
+
 def test_dry_run_creates_nothing(tmp_path, capsys):
     home = tmp_path / "home"
     source = ROOT

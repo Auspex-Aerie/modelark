@@ -274,7 +274,10 @@ def main(argv: list[str] | None = None) -> None:
     try:
         _guard_legacy_catalog(source, data_dir)
     except RuntimeError as exc:
-        parser.error(str(exc))
+        if args.dry_run:
+            print(f"WARNING: live deployment would stop: {exc}", file=sys.stderr)
+        else:
+            parser.error(str(exc))
 
     print("ModelArk deployment plan")
     print(f"  source:  {source}")
