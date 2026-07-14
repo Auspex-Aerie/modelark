@@ -1,12 +1,13 @@
 # ModelArk (modelark)
 
-An ark for open model weights: catalog open models broadly, archive curated
-language-model weights across an offline git-annex drive library, and verify each
-is intact and loadable. See `README.md` for architecture and `catalog_discussions.md`
+An ark for open model weights: catalog open models broadly, archive curated language, audio,
+world-model, and image-generation weights across an offline git-annex drive library, and verify each
+has valid remote-header evidence and physically intact archived copies. See `README.md` for architecture and `catalog_discussions.md`
 for the evolving catalog scope (what we collect and why).
 
 Package: `modelark.core` (shared catalog/db) + `modelark` (discover/verify/cli).
-Tooling: `.venv` (hf 1.x, duckdb, httpx), `hf` CLI for Hub auth, `git-annex` for bytes.
+Tooling: `.venv` for runtime, `.venv-dev` for tests/builds, `hf` CLI for Hub auth, and
+`git-annex` for bytes. DuckDB is optional and used only for legacy migration.
 
 ## Decision log
 

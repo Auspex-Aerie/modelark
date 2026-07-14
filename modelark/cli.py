@@ -320,7 +320,8 @@ def cmd_drive_register(args):
     r = register.register_drive(dev=args.dev, label=args.label, mount=args.mount,
                                 format_fs=args.format_fs, location=args.location,
                                 library=args.library, dry_run=args.dry_run, role=args.role,
-                                skip_smart=args.skip_smart)
+                                skip_smart=args.skip_smart,
+                                confirm_format=args.confirm_format)
     if args.dry_run:
         b = r["smart"]
         print(f"DRY RUN — {args.dev}: {b['model']} {b['serial']}")
@@ -475,6 +476,8 @@ def main(argv=None):
     reg.add_argument("--mount", help="existing mountpoint (else auto-mount to /mnt/<label>)")
     reg.add_argument("--format", dest="format_fs", choices=["ext4", "xfs"],
                      help="reformat the device first (DESTRUCTIVE)")
+    reg.add_argument("--confirm-format", metavar="DEVICE",
+                     help="required with --format: repeat the exact --dev value after reviewing --dry-run")
     reg.add_argument("--location", help="physical location note, e.g. 'shelf box A slot 3'")
     reg.add_argument("--library", help="map repo path (default ~/modelark-library)")
     reg.add_argument("--dry-run", action="store_true", help="qualify + show the plan, change nothing")

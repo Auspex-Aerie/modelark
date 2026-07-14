@@ -30,13 +30,13 @@ savings, and it **streams** — a giant shard compresses and restores in O(chunk
 (hundreds of MB), never fully materialized in RAM. On top of that:
 
 - **Integrity you can trust** — every compression passes a round-trip *canary* (decompress →
-  hash → match HF's sha256) *before* the original is dropped, so a model can't be archived in an
-  unrestorable state.
+  hash → match HF's sha256) *before* the original is dropped, so compression never replaces an
+  original with a blob that failed its restore proof.
 - **Drive-health monitoring** — SMART vetting before a volume ever holds archives.
-- **Plans** — multiple archive sets, each with its own drive fleet and budget.
-- **Smart resume** — a crash re-processes only the interrupted shard; no re-download.
+- **Plans** — explicit storage/fill contexts, each with its own drive fleet and budget mode.
+- **Smart resume** — completed files are never fetched again; only the interrupted file is retried.
 - **Tiered storage** — mark keepers *must-have* (kept redundantly) vs bulk that's cheap to re-fetch.
-- **N-copies redundancy** — copy counts enforced from a durable record, not guessed.
+- **1/2-copy redundancy** — required copy counts are enforced from a durable record, not guessed.
 
 …and there's plenty more in the [decision log](docs/decision_log.md). The product is **early**,
 put out deliberately in a build-in-public stance — [contributions welcome](contributing/contributions.md).
@@ -90,8 +90,9 @@ Tiered drive fleet (git-annex remotes)      ← the actual TBs of weights
    the RAID, bulk consolidated onto the big primaries, must-have copy #2 on a replica drive).
 4. **Fill** — per shard: HF download → sha256 vs HF's canonical hash → compress → **canary**
    → drop the original → git-annex add → record. Throttled by a rolling 24 h cap (1 TB/day by default;
-   `0` disables it), resumable at
-   the file level (a crash re-processes only the interrupted shard, no re-download).
+   `0` disables it), resumable at the file level (completed files are skipped; the interrupted
+   shard is retried). Classic HTTP may reuse its partial download, while `hf_xet` currently starts
+   that interrupted shard from zero.
 5. **Replicate** — must-have copy #2 is a *local* clone→clone transfer from copy #1 (no second
    HF download).
 6. **Restore** — retrieve a readable annex copy, reconstruct the original Hugging Face paths,
@@ -102,7 +103,8 @@ Tiered drive fleet (git-annex remotes)      ← the actual TBs of weights
 Weights are stored **ZipNN**-compressed (`.znn`, lossless, float-aware) and decompressed on
 use. Every compression is gated by a mandatory **round-trip canary**: decompress the `.znn`,
 hash the result, and require it equal HF's canonical sha256 **before** the uncompressed
-original is ever deleted. A model can never be archived in an unrestorable state.
+original is ever deleted. This proves the compressed blob at write time; later media health is
+covered separately by physical re-verification and restore hashes.
 
 **StreamZNN** (`modelark/streamznn.py`, MIT, standalone) wraps ZipNN so a shard of *any* size
 compresses and restores in **O(chunk) memory** — a 10 GB shard peaks ~800 MB instead of the
@@ -171,7 +173,7 @@ exclude:
 compression:            # DEC-022 codec gate
   max_compress_ram_gb: 4.0   # whole-file peak ≈ 4× shard; over this, don't use whole-file
   stream_compress: true      # over budget → StreamZNN; false → zstd-stream if installed, else raw
-  threads: 1                 # ZipNN internal threads (was 4; its native threaded path can double-free — INC-005)
+  threads: 1                 # conservative setting; process isolation is the native-crash safety boundary
 ```
 
 Must-have status (a replicated 2nd copy) is set with `modelark protect --repo <id>` (there is
@@ -184,15 +186,21 @@ no cart UI for it yet — see gaps below).
 python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
-`zipnn` is a hard dependency (compression + the canary). Optional capabilities are explicit extras:
+`zipnn` is a hard dependency (compression + the canary). Its current upstream package also declares
+Torch and safetensors even though ModelArk uses only ZipNN's byte mode. On Linux, the default PyPI
+Torch dependency can bring several gigabytes of CUDA/NVIDIA and Triton packages; budget roughly
+4–5 GB for the environment. This is known dependency overhead, not GPU use by ModelArk. `DEF-014`
+tracks extracting the proven byte-compatible StreamZNN/native path into a smaller published package
+without making compression optional. Optional capabilities are explicit extras:
 
 ```bash
 .venv/bin/pip install -e ".[zstd]"       # stream-off zstd fallback
 .venv/bin/pip install -e ".[migration]"  # one-time DuckDB → SQLite conversion
 ```
 
-Without the `zstd` extra, the stream-off fallback stores raw. Normal installs do not pull DuckDB,
-Torch, CUDA, or a workstation-specific dependency freeze.
+Without the `zstd` extra, the stream-off fallback stores raw. Normal installs do not pull DuckDB or
+a workstation-specific dependency freeze; Torch/CUDA currently arrive transitively through ZipNN as
+described above.
 
 For development, use a separate environment with the declared tooling extra:
 ```bash
@@ -207,6 +215,11 @@ Writable state is never placed in the installed package. The catalog defaults to
 `--data-dir`, `--state-dir`, and `--config` to override them. An existing checkout-local
 `catalog/catalog.sqlite` is not moved automatically: start with
 `modelark --data-dir ./catalog ...` until you deliberately migrate it.
+For a legacy working-copy cutover, use the backup-first
+[`scripts/migrate_legacy_runtime.py`](scripts/migrate_legacy_runtime.py) tool and the
+operator-attended [`docs/legacy-cutover.md`](docs/legacy-cutover.md) runbook. Do not migrate a running
+fill or replace its checkout in place. Installed distributions expose the same tool as
+`modelark-migrate`.
 
 **System packages (apt):**
 ```bash
@@ -250,6 +263,19 @@ fill controllers against the same plan; stop the portal worker before starting t
 Disk Health needs SMART access — grant passwordless sudo for `smartctl` (see **Setup**); don't run
 the portal as root.
 
+Formatting during registration is deliberately two-step and Linux-only. First review a real safety
+preflight, then repeat the exact device path as destructive confirmation:
+
+```bash
+modelark drive register --dev /dev/sdX --label drive-07 --format ext4 --dry-run
+modelark drive register --dev /dev/sdX --label drive-07 --format ext4 \
+  --confirm-format /dev/sdX
+```
+
+The command refuses regular files, the system/root device, mounted descendants, active swap,
+encrypted/LVM/RAID stacks, and failed topology probes. It never auto-unmounts a volume; unmount or
+detach it explicitly and rerun the preflight.
+
 ## Verification tiers
 
 | Tier | Proves | Cost |
@@ -272,7 +298,8 @@ executes. Opcode scanning and Hugging Face scan integration are not implemented.
   GATE-C (post-fill assertion that every must-have holds ≥ numcopies complete copies).
 - **Codec gate** (`DEC-022`) — streaming/zstd/raw chosen by an explicit RAM budget, logged per shard.
 - **Crash-resume** — per-file transactional writes; a portal death loses at most the in-flight
-  shard, which resume re-processes from the on-disk cache (no HF re-download).
+  shard. Completed files are skipped; the interrupted shard is retried. With `hf_xet`, that one
+  shard currently starts from zero (`INC-010` / `DEF-026`).
 
 Every architecture/policy decision, deferral, and incident is in
 [`docs/decision_log.md`](docs/decision_log.md) (ADRLight-style ledger).
@@ -282,8 +309,9 @@ Every architecture/policy decision, deferral, and incident is in
 **Working + proven end-to-end:** catalog (~4.1k models) + Tier A remote-header evidence +
 architecture-first classification; the librarian placement plan; the full fetch pipeline
 (download → verify → ZipNN + canary → git-annex → record); StreamZNN streaming (no OOM on
-10 GB shards); the codec gate; must-have 2-copy replication; verified atomic restore; crash-resume; first-class Plans
-(per-set drive fleet + a capacity failsafe) + on-demand re-verification; and the portal's six
+10 GB shards); the codec gate; must-have 2-copy replication; verified atomic restore; file-level
+crash-resume; first-class Plans (per-plan drive fleet + a capacity failsafe; selection/archive rows
+remain global in this release) + on-demand re-verification; and the portal's six
 views including the live Fill run surface. Restorability is production-verified (`DIS-002`).
 
 Tested here on a mix of reliable and junk external drives, plus one iSCSI volume on a RAID5 NAS

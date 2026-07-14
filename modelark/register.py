@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -209,19 +210,100 @@ def _disk_bytes(dev: str) -> int:
     return int(out.splitlines()[0]) if out else 0
 
 
+def _flatten_block_devices(nodes: list[dict]) -> list[dict]:
+    flat: list[dict] = []
+    for node in nodes:
+        flat.append(node)
+        flat.extend(_flatten_block_devices(node.get("children") or []))
+    return flat
+
+
+def _validate_format_target(dev: str) -> None:
+    """Fail closed unless *dev* is an idle disk/partition with no mounted, swap,
+    encrypted, RAID, or LVM descendants.
+
+    Formatting is the only destructive path in ModelArk. Do not auto-unmount a
+    device here: an operator must inspect and unmount it separately, which makes
+    active use an explicit stop rather than a side effect of registration.
+    """
+    try:
+        mode = os.stat(dev).st_mode
+    except OSError as exc:
+        raise RuntimeError(f"refusing to format {dev}: cannot stat block device: {exc}") from exc
+    if not stat.S_ISBLK(mode):
+        raise RuntimeError(f"refusing to format {dev}: path is not a block device")
+
+    probe = _run("lsblk", "--json", "-p", "-o", "PATH,TYPE,MOUNTPOINTS,FSTYPE", dev,
+                 check=False)
+    if probe.returncode != 0:
+        raise RuntimeError(f"refusing to format {dev}: lsblk topology inspection failed: "
+                           f"{(probe.stderr or probe.stdout).strip()[:400]}")
+    try:
+        roots = json.loads(probe.stdout).get("blockdevices") or []
+    except (json.JSONDecodeError, AttributeError) as exc:
+        raise RuntimeError(f"refusing to format {dev}: invalid lsblk topology output") from exc
+    nodes = _flatten_block_devices(roots)
+    canonical = os.path.realpath(dev)
+    target = next((n for n in nodes if os.path.realpath(str(n.get("path") or "")) == canonical), None)
+    if target is None:
+        raise RuntimeError(f"refusing to format {dev}: device is absent from lsblk topology")
+    if target.get("type") not in {"disk", "part"}:
+        raise RuntimeError(f"refusing to format {dev}: unsupported block-device type "
+                           f"{target.get('type')!r} (only disk/part are accepted)")
+
+    mounted: list[str] = []
+    for node in nodes:
+        points = node.get("mountpoints") or []
+        if isinstance(points, str):
+            points = [points]
+        mounted.extend(f"{node.get('path')} at {point}" for point in points if point)
+    if mounted:
+        raise RuntimeError(f"refusing to format {dev}: mounted device(s) detected: "
+                           f"{', '.join(mounted)}. Unmount them explicitly and retry.")
+
+    active_types = sorted({str(n.get("type")) for n in nodes
+                           if n is not target and n.get("type") in
+                           {"crypt", "lvm", "md", "raid0", "raid1", "raid4", "raid5", "raid6", "raid10"}})
+    if active_types:
+        raise RuntimeError(f"refusing to format {dev}: active storage stack detected "
+                           f"({', '.join(active_types)}); detach it explicitly first")
+
+    swap = _run("swapon", "--show=NAME", "--noheadings", "--raw", check=False)
+    if swap.returncode != 0:
+        raise RuntimeError(f"refusing to format {dev}: could not inspect active swap devices")
+    node_paths = {os.path.realpath(str(n.get("path") or "")) for n in nodes}
+    active_swap = [name.strip() for name in swap.stdout.splitlines()
+                   if name.strip() and os.path.realpath(name.strip()) in node_paths]
+    if active_swap:
+        raise RuntimeError(f"refusing to format {dev}: active swap detected on "
+                           f"{', '.join(active_swap)}; swapoff explicitly and retry")
+
+    root = _run("findmnt", "-nro", "SOURCE", "/", check=False)
+    if root.returncode != 0 or not root.stdout.strip():
+        raise RuntimeError(f"refusing to format {dev}: could not identify the system root device")
+    if os.path.realpath(root.stdout.strip()) in node_paths:
+        raise RuntimeError(f"refusing to format {dev}: it backs the system root filesystem")
+
+
+def _require_format_confirmation(dev: str, confirmation: str | None) -> None:
+    if confirmation != dev:
+        raise RuntimeError(
+            f"--format destroys all data on {dev}; repeat the exact device with "
+            f"--confirm-format {dev} after reviewing --dry-run output")
+
+
 def _mkfs(dev: str, fs: str, label: str) -> None:
-    root_src = _run("findmnt", "-nro", "SOURCE", "/", check=False).stdout.strip()
+    _validate_format_target(dev)
+    root_result = _run("findmnt", "-nro", "SOURCE", "/", check=False)
+    if root_result.returncode != 0 or not root_result.stdout.strip():
+        raise RuntimeError(
+            f"refusing to format {dev}: could not re-confirm system root device before mkfs")
+    root_src = root_result.stdout.strip()
     if _parent_disk(dev) == _parent_disk(root_src):
         raise RuntimeError(f"refusing to format {dev}: it is the system/root disk.")
-    # Unmount anything mounted from this disk or its partitions (e.g. a desktop
-    # auto-mount of the drive's previous filesystem), then wipe old signatures so
-    # mkfs doesn't stop on an "existing filesystem, proceed?" prompt.
-    lb = _run("lsblk", "-nro", "NAME,MOUNTPOINT", _parent_disk(dev), check=False).stdout
-    for line in lb.splitlines():
-        parts = line.split(None, 1)
-        if len(parts) == 2 and parts[1].strip():
-            _run(*_sudo("umount", parts[1].strip()), check=False)
-    _run(*_sudo("wipefs", "-a", dev), check=False)
+    # Mounted/active devices were refused above. Signature removal must succeed;
+    # never continue into a forced mkfs after a failed safety operation.
+    _run(*_sudo("wipefs", "-a", dev))
     if fs == "ext4":
         # -m 0: no root-reserved blocks — this is a write-once archive volume, not a
         # system disk, so the default 5% reserve (~365 GB on an 8 TB drive) is pure waste.
@@ -260,12 +342,19 @@ def register_drive(dev: str, label: str, mount: str | None = None,
                    format_fs: str | None = None, location: str | None = None,
                    library: str | None = None, dry_run: bool = False,
                    role: str = "primary", raid_backed: bool = False,
-                   skip_smart: bool = False) -> dict:
+                   skip_smart: bool = False, confirm_format: str | None = None) -> dict:
     """Qualify, prepare, and register a drive as a fleet member. A RAID-backed LUN
     (iSCSI — auto-detected — or forced with raid_backed=True) has no physical SMART:
     redundancy is the array's, integrity is our sha256 + canary, so SMART is skipped.
     `skip_smart` (INC-002) registers a drive whose USB bridge won't pass SMART with an
     'unchecked' verdict — an explicit operator override; verify health externally."""
+    if confirm_format and not format_fs:
+        raise ValueError("--confirm-format is valid only together with --format")
+    if format_fs and not osplat.BLOCKDEV_OPS_SUPPORTED:
+        raise RuntimeError(
+            f"--format isn't supported on {osplat.OS_LABEL}. Pre-format the drive "
+            f"(e.g. NTFS via Disk Management), then register by its mount path with "
+            f"--mount <drive path>.")
     if not raid_backed and _transport(dev) == "iscsi":
         raid_backed = True
     if raid_backed:
@@ -277,6 +366,10 @@ def register_drive(dev: str, label: str, mount: str | None = None,
         base = smart_baseline(dev)
     plan = {"dev": dev, "label": label, "smart": base,
             "format": format_fs, "mount": mount}
+    # Make --dry-run a real safety preflight. The final format validates again immediately
+    # before wipefs to narrow the device-use race between review and execution.
+    if format_fs:
+        _validate_format_target(dev)
     if dry_run:
         return plan
 
@@ -287,11 +380,7 @@ def register_drive(dev: str, label: str, mount: str | None = None,
             f"offline_uncorrectable={base['offline_uncorrectable']}. Not registering.")
 
     if format_fs:
-        if not osplat.BLOCKDEV_OPS_SUPPORTED:
-            raise RuntimeError(
-                f"--format isn't supported on {osplat.OS_LABEL}. Pre-format the drive "
-                f"(e.g. NTFS via Disk Management), then register by its mount path with "
-                f"--mount <drive path>.")
+        _require_format_confirmation(dev, confirm_format)
         _mkfs(dev, format_fs, label)
 
     if osplat.BLOCKDEV_OPS_SUPPORTED:

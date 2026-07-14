@@ -6,6 +6,23 @@ Canonical build order and parked work. **Design rationale** lives in the append-
 
 > Task numbers (`#NN`) are stable cross-reference labels; a live task board may assign its own IDs.
 
+## Public-release closeout — active
+
+The external audit's numbered blockers are fixed. These are the remaining release gates, in order:
+
+| ID | Work | Done when | Execution gate |
+|---|---|---|---|
+| **RC-1** | ✅ Harden destructive `drive register --format` | Complete block-device topology checks protect every active/system-backed device; unmount/wipe failures stop; destructive intent is explicit; command construction is covered without touching real disks | Canonical checkout + mocked/synthetic devices only |
+| **RC-2** | Resolve roadmap task #30 (“resume re-fetch durability”) | ✅ Reconciled: durable per-(repo,file,drive) completion is covered by DEC-019 and regression tests; interrupted `hf_xet` file restart is the known INC-010 residual, explicitly deferred as DEF-026 | Canonical checkout only |
+| **RC-3** | ✅ Final public documentation/governance pass | README/setup/scope claims match code; conventional contribution/conduct entrypoints and issue/PR templates exist; deferred work is named honestly | Canonical checkout only |
+| **RC-4** | ✅ Build the legacy-checkout migration/cutover tool + runbook | Dry-run-first inspection, non-overwriting database backup/manifest, copied-data migration, git-remote plan, validation, and rollback paths are tested without accessing the running checkout | Tooling and fixtures only; **do not touch the live legacy checkout** |
+| **RC-5** | Canonical release candidate — local checks green, PR checks/review pending | Fresh normal/dev installs, wheel/sdist, full standalone + browser suites, dependency/secret/history checks, CI, and Greptile are green | Canonical checkout only |
+| **RC-6** | Cut over the operator's legacy working copy | After its fill is explicitly stopped: verify no writers, back up live state, run the approved migration, re-origin to `Auspex-Aerie/modelark`, pull `main`, validate archive/restore/service behavior, and prove rollback | **Operator-attended only; never run autonomously** (DEC-042) |
+
+Post-release deferrals remain deferrals: the Torch-free StreamZNN package split (`DEF-014`), automated
+host/systemd setup (`DEF-025`), tensor/sub-shard checkpointing (`DEF-026`), and deeper pickle scanning
+and quarantine (`DEF-011`).
+
 ## The Plan epic (#33–#38) — ✅ DONE (2026-07-11)
 
 **Shipped** and verified (unit tests + Playwright): #33 Plan entity +
@@ -81,7 +98,7 @@ three numbers computed **live**.
 | #19 | SMART / write-surface hardening | Rides with registration (#34) later — remediation is spec'd in the ledger under "task #19" |
 | #21 | Replication tab | Still valid; not next |
 | #23 | Library audit | Now naturally plan-scoped |
-| #30 | Resume re-fetch durability | **A real bug** — the Plan work does *not* fix it; kept on the list, **not buried** |
+| #30 | Resume re-fetch durability | **Closed as a duplicate label:** completed-file durability shipped in DEC-019; the only evidenced residual is interrupted-file `hf_xet` restart (INC-010), retained visibly as DEF-026 |
 
 - **Closed: #22** (Library Fill core — done, incl. this session's resilience: supervision/resume,
   compress-crash isolation, download watchdog, SQLite/WAL cutover, reality-tracking placement).

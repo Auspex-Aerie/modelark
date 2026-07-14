@@ -7,7 +7,8 @@ streams through without needing 1.4TB of scratch.
 
 The fetch set is `selection` rows with finalized_at set (the "Finish" button in
 the portal). Companion files (config/tokenizer/index) ride along uncompressed so
-the archived model is actually loadable.
+restore can reconstruct the original Hugging Face layout. Functional loadability
+is not claimed by this pipeline (Tier B is unimplemented).
 
 Execution context (DEC-019/020, task #22). `run`/`fetch_model`/`run_replica` take an
 optional `RunCtx` so the SAME code serves the CLI and the portal's background worker.
@@ -43,7 +44,8 @@ _FLOAT = {None, "bf16", "bfloat16", "fp16", "f16", "float16", "fp32", "f32", "fl
 # it wasn't even reached — the download sat in poll() for hours), so downloads run in a killable child
 # (download_worker.py, which keeps its own belt-and-suspenders socket timeout) and the parent:
 #   1) KILLS the child if its .incomplete stops growing (the no-progress watchdog — the real guard);
-#   2) bounded retries per shard — the child resumes the on-disk .incomplete (no re-download);
+#   2) bounded retries per shard — classic HTTP may resume .incomplete; hf_xet restarts that shard
+#      from zero (INC-010). Completed files remain durable and are never fetched again;
 #   3) a circuit-breaker: clustered stalls → a full cooldown instead of hammering a flaky network;
 #   4) per-repo isolation in run() — one repo's failure can't wedge the whole fill.
 _DL_RETRIES = 4                 # attempts per shard before giving up on it
@@ -335,8 +337,9 @@ def _annex_metadata(dest: Path, key: str | None, repo_id: str, params, fmt: str,
 def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, model_dir: Path, base: dict) -> Path:
     """Download one file in a KILLABLE child process (DEC-023 stage-2 watchdog + INC-004). The parent
     kills the child if its `.incomplete` stops growing for _DL_STALL_SECS — the hang the socket timeout
-    can't catch (the 2026-07-09 Falcon-H1 stall, blocked in poll() for hours) — then retries; hf resumes
-    the on-disk `.incomplete` (no re-download of what landed). Terminal errors (gated / not-found / 4xx
+    can't catch (the 2026-07-09 Falcon-H1 stall, blocked in poll() for hours) — then retries. Classic
+    HTTP may resume the on-disk `.incomplete`; hf_xet restarts that file (INC-010). Terminal errors
+    (gated / not-found / 4xx
     incl 429), reconstructed from the child's result, propagate unretried so run() classifies them as
     before. A stop mid-download kills the child and raises _StopRequested."""
     dl_cache = model_dir / ".cache" / "huggingface" / "download"

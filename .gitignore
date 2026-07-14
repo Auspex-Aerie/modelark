@@ -6,8 +6,8 @@ __pycache__/
 build/
 dist/
 
-# Catalog: the DuckDB file is a rebuildable cache; JSONL export under
-# catalog/export/ is the versioned source of truth and IS committed.
+# Catalog: SQLite is the current writable cache; DuckDB patterns remain for legacy migrations.
+# The sanitized JSONL export under catalog/export/ is committed.
 catalog/*.duckdb
 catalog/*.duckdb.wal
 catalog/*.duckdb.bak

@@ -4,18 +4,19 @@ Living notes on **what ModelArk collects and why**. Scope decisions are formaliz
 `docs/decision_log.md` (see DEC-001, DEF-001, DEF-002); this file holds the supporting
 research and the running candidate landscape.
 
-## Current scope (DEC-001 + DEF-002)
+## Current scope (DEC-001, DEC-010, DEC-011)
 
-- **Domain: language models only, for now.** Generative LLMs (`text-generation`),
+- **Domain:** language models remain the core, and the active scope now also includes audio/speech,
+  world models, and image generation. Generative LLMs (`text-generation`),
   encoder/BERT-family (`fill-mask`), embeddings/retrieval (`sentence-similarity`,
   `feature-extraction`), classification/NER (`text-classification`, `token-classification`).
 - **All geographies.** Lead with the Chinese frontier labs (now top of the open-weight
   leaderboards) while also fully covering Western labs; expand lab *diversity* (Arcee
   line), not just more from the same big labs.
-- **Deferred (DEF-002):** image / video / audio-speech / vision-language. Landscape for
-  these is preserved at the bottom of this file for when we expand.
-- **Mechanism:** org allowlist × language-pipeline-tag filter — broad orgs, but only
-  language-type repos get cataloged/downloaded.
+- **Still deferred/excluded:** video and general vision-language coverage beyond the explicitly
+  included categories. The older landscape notes below are historical research, not current policy.
+- **Mechanism:** org allowlist × architecture-derived category filter. Hugging Face pipeline tags
+  are retained as hints but do not define archive eligibility.
 - **Archive policy:** full-precision/largest weights are the primary target; quantize
   on demand later.
 
