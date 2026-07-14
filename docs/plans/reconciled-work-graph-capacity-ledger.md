@@ -1150,10 +1150,12 @@ Local evidence recorded before implementation review:
   target temporary object atomically renamed into place. The conservative workspace term remains
   active pending review.
 
-Still required before Phase 3 executor adoption: an operator-approved real-bf16 StreamZNN high-water
-run, and the copied/sanitized legacy-catalog replay plus release-host latency/lock evidence. The
-sanitized collector is `scripts/phase3_gate_evidence.py`; its source inputs are opened read-only and
-all temporary output is constrained to an explicit scratch directory.
+Still required before Phase 3 executor adoption: the copied/sanitized legacy-catalog replay plus
+release-host latency/lock evidence. The operator-approved real-bf16 StreamZNN high-water gate passed
+on a SHA-verified 29.36 GB restored shard with 19.47 GB measured filesystem high-water against a
+29.36 GB enforced ceiling; sanitized evidence is in `docs/capacity-evidence.md`. The collector is
+`scripts/phase3_gate_evidence.py`; its source inputs are opened read-only and all temporary output is
+constrained to an explicit scratch directory.
 
 ### Phase 3 — executor conversion
 

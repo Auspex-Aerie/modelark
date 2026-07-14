@@ -42,8 +42,27 @@ The guaranteed StreamZNN ceiling is:
 raw_size + len(SZNN_MAGIC) + 4 * ceil(raw_size / chunk_size)
 ```
 
-Synthetic bf16-like round-trip and incompressible raw-fallback tests pass. A high-water run against an
-operator-approved representative real bf16 shard remains required before Phase 3 executor activation.
+Synthetic bf16-like round-trip and incompressible raw-fallback tests pass. The required real-shard
+gate was run on 2026-07-14 against an operator-approved archived safetensors shard restored into
+disposable scratch. Before measurement, the 29,359,329,168-byte restore matched the catalog's
+canonical SHA-256 exactly. The source repository, filename, drive label, and local paths are omitted.
+
+```text
+tensor dtypes:                 BF16, F32
+chunk bytes:                   67,108,864
+input bytes:                   29,359,329,168
+StreamZNN output bytes:        19,472,559,872
+filesystem high-water bytes:   19,472,559,872
+enforced cap bytes:            29,359,330,925
+cap headroom bytes:             9,886,771,053
+compression ratio:                       0.663249
+compression duration seconds:                 68.289
+round-trip SHA-256 verified:                    yes
+```
+
+The measured high-water remained 9.89 GB below the enforced raw-plus-framing ceiling and no expanded
+write occurred. The output size also matched the independently archived StreamZNN object's recorded
+size, providing a reproducibility cross-check. This closes the real-bf16 gate for Phase 3.
 
 The repository provides a sanitized, self-cleaning collector. It validates that the input is a BF16
 safetensors shard, writes only below the explicit scratch directory, verifies the restored SHA-256,
