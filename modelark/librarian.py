@@ -17,7 +17,7 @@ from __future__ import annotations
 import shutil
 
 from modelark import capacity as capacity_model
-from modelark import fetch, register  # noqa: F401
+from modelark import fetch, reconcile, register  # noqa: F401
 
 _ZIPNN_FLOAT_RATIO = capacity_model.DEFAULT_FLOAT_RATIO
 _SIZE_MARGIN = capacity_model.EXPECTED_MARGIN
@@ -286,47 +286,214 @@ def plan_placements(con, repos: list[str] | None = None, plan_id: str | None = N
             "n_planned": len(pool), "n_done": n_done, "n_must": len(must_items), "n_bulk": len(bulk)}
 
 
+def _reconciled_projection(con, repos, plan_id, capacity_mode):
+    """Build one read-only graph/ledger snapshot using live free space where it is observable."""
+    if plan_id is None:
+        row = con.execute(
+            "SELECT plan_id FROM plans WHERE is_active ORDER BY plan_id LIMIT 1"
+        ).fetchone()
+        if row is None:
+            raise ValueError("no active plan; select a plan before requesting library placement")
+        plan_id = row[0]
+    labels = [row[0] for row in con.execute(
+        "SELECT drive_label FROM plan_drives WHERE plan_id=? ORDER BY drive_label", [plan_id]
+    ).fetchall()]
+    live_free = {}
+    for label in labels:
+        path = register.archive_path(con, label)
+        if path is None:
+            continue
+        try:
+            live_free[label] = shutil.disk_usage(str(path)).free
+        except OSError:
+            pass
+    graph = reconcile.reconcile_plan(con, plan_id, repos)
+    ledger = capacity_model.plan_capacity(
+        con, graph, capacity_mode=capacity_mode, live_free_by_drive=live_free,
+    )
+    return graph, ledger
+
+
+def _diagnostic_payload(graph) -> list[dict]:
+    return [{
+        "code": item.code,
+        "severity": item.severity.value,
+        "recovery": item.recovery.value,
+        "requirement_id": item.requirement_id,
+        "detail": dict(item.detail),
+    } for item in graph.diagnostics]
+
+
+def _blocked_repos(graph, ledger) -> dict[str, list[str]]:
+    """Map every selected repo with a blocking graph/capacity condition to stable typed codes."""
+    requirement_repo = {
+        item.requirement_id: item.repo_id for item in graph.requirements
+    }
+    blocked: dict[str, set[str]] = {}
+    for item in graph.diagnostics:
+        if item.severity not in {
+            reconcile.DiagnosticSeverity.BLOCKING,
+            reconcile.DiagnosticSeverity.ERROR,
+        }:
+            continue
+        detail = dict(item.detail)
+        repo_id = detail.get("repo_id") or requirement_repo.get(item.requirement_id)
+        if repo_id:
+            blocked.setdefault(str(repo_id), set()).add(item.code)
+    for item in ledger.failures:
+        repo_id = requirement_repo.get(item.requirement_id)
+        if repo_id:
+            blocked.setdefault(repo_id, set()).add(item.code.value)
+    for item in ledger.unassigned_intents:
+        blocked.setdefault(item.repo_id, set()).add("GRAPH_UNASSIGNED")
+    return {repo_id: sorted(codes) for repo_id, codes in sorted(blocked.items())}
+
+
+def _projection_advisories(diagnostics: list[dict], failures: list[dict]) -> list[dict]:
+    """Make typed evidence prominent without rendering hundreds of near-identical banners."""
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for item in diagnostics:
+        grouped.setdefault((item["severity"], item["code"]), []).append(item)
+    advisories = []
+    levels = {"blocking": "error", "error": "error", "warning": "warn", "info": "info"}
+    for (severity, code), items in sorted(grouped.items()):
+        repos = sorted({
+            str(item["detail"].get("repo_id"))
+            for item in items if item["detail"].get("repo_id")
+        })
+        examples = ", ".join(repos[:3])
+        tail = (f" — {examples}" + (f" (+{len(repos) - 3} more)" if len(repos) > 3 else "")) \
+            if examples else ""
+        advisories.append({
+            "level": levels.get(severity, "warn"),
+            "code": code,
+            "count": len(items),
+            "msg": f"{code}: {len(items)} reconciled diagnostic(s){tail}",
+        })
+    failures_by_code: dict[str, list[dict]] = {}
+    for item in failures:
+        failures_by_code.setdefault(item["code"], []).append(item)
+    for code, items in sorted(failures_by_code.items()):
+        shortfall = sum(int(item.get("shortfall_bytes", 0) or 0) for item in items)
+        advisories.append({
+            "level": "error",
+            "code": code,
+            "count": len(items),
+            "msg": (f"{code}: {len(items)} capacity requirement(s) blocked; "
+                    f"combined shortfall {shortfall / 1e12:.3f} TB"),
+        })
+    return advisories
+
+
 def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
               capacity_mode: str = "guaranteed") -> dict:
-    """The placement plan as UI-ready JSON — the librarian's results 'published' for the portal
-    Fill tab (and `library plan --json`). Per drive: tier/role/raid, capacity + headroom, planned
-    models {repo, size, category, copy}, and fill %. Plus copy#1→copy#2 links (the dotted lines),
-    advisories, and totals. Scoped to a Plan's drive set + capacity mode (#33). The SAME
-    backend the CLI and the UI both call."""
-    p = plan_placements(con, repos, plan_id, capacity_mode)
-    dinfo = {d["label"]: d for d in drives(con, plan_id)}
-    cats = dict(con.execute("SELECT repo_id, coalesce(category, '?') FROM models").fetchall())
-    # A must-have's copy #1 stays in the plan's primary assign even after it's archived (it's still in
-    # the pool for copy #2), so a drive's raw assign double-counts bytes already on it. Track what's
-    # actually on each drive so `planned` means NEW work (the archived bytes are the card's grey base).
-    arch_pairs = set(con.execute("SELECT DISTINCT repo_id, drive_label FROM archived").fetchall())
-    src = p["replica"]["source"]
+    """Publish the canonical reconciled work graph in the existing Fill-view JSON shape.
 
-    def models_of(assign, copy):
-        return [{"repo": i["repo"], "size": i["size"], "category": cats.get(i["repo"], "?"), "copy": copy}
-                for i in assign]
+    DEC-045 retired the legacy placement result as execution authority.  This adapter deliberately
+    keeps the established drive/model/advisory fields for the CLI and browser, but derives every
+    assignment and byte from ``reconcile_plan`` + ``plan_capacity``.  Policy-invalid repositories
+    remain in typed diagnostics instead of raising on the first one or disappearing from the cart.
+    """
+    graph, ledger = _reconciled_projection(con, repos, plan_id, capacity_mode)
+    diagnostics = _diagnostic_payload(graph)
+    failures = ledger.to_dict()["failures"]
+    cats = dict(con.execute("SELECT repo_id, coalesce(category, '?') FROM models").fetchall())
+    archived = dict(con.execute(
+        "SELECT drive_label,coalesce(sum(stored_bytes),0) FROM archived GROUP BY drive_label"
+    ).fetchall())
+    drive_rows = con.execute(
+        "SELECT d.drive_label,coalesce(d.role,'primary'),coalesce(d.raid_backed,0),"
+        "coalesce(d.capacity_bytes,d.free_bytes,0) "
+        "FROM plan_drives pd JOIN drives d USING(drive_label) WHERE pd.plan_id=? "
+        "ORDER BY d.drive_label",
+        [graph.plan_id],
+    ).fetchall()
+    ledger_by_drive = {item.drive_label: item for item in ledger.ledgers}
+    tasks_by_drive: dict[str, list] = {}
+    for task in ledger.tasks:
+        tasks_by_drive.setdefault(task.target_drive, []).append(task)
 
     out = []
-    for label in sorted(dinfo):
-        d = dinfo[label]
-        raid, role = d["raid_backed"], d["role"]
+    for label, role, raid, drive_capacity in drive_rows:
+        raid = bool(raid)
         tier = "raid" if raid else ("replica" if role == "replica" else "primary")
-        models = models_of(p["primary"]["assign"].get(label, []), "1" if raid else "bulk") \
-            + models_of(p["replica"]["assign"].get(label, []), "2")
-        models = [m for m in models if (m["repo"], label) not in arch_pairs]   # NEW work only; already-archived = grey base
-        planned = sum(m["size"] for m in models)
-        usable = max(0, d["capacity"] - d["headroom"])
+        models = []
+        for task in tasks_by_drive.get(label, []):
+            copy = ("2" if task.kind == reconcile.TaskKind.REPLICATE else
+                    ("1" if task.requirement_id.startswith("protected_home:") else "bulk"))
+            models.append({
+                "repo": task.repo_id,
+                "size": task.budget.durable_for(ledger.mode),
+                "category": cats.get(task.repo_id, "?"),
+                "copy": copy,
+            })
+        models.sort(key=lambda item: (-item["size"], item["repo"], item["copy"]))
+        drive_ledger = ledger_by_drive[label]
+        safety_floor = drive_ledger.safety_floor
+        usable = max(0, int(drive_capacity or 0) - safety_floor)
+        planned = sum(item["size"] for item in models)
         out.append({
             "label": label, "tier": tier, "role": role, "raid_backed": raid,
-            "capacity": d["capacity"], "headroom": d["headroom"], "free": d["free"], "usable": usable,
-            "planned_bytes": planned, "archived_bytes": d["archived"], "n_models": len(models),
-            "fill_pct": round(planned / usable, 4) if usable else 0.0, "models": models,
+            "capacity": int(drive_capacity or 0), "headroom": safety_floor,
+            "free": drive_ledger.physical_free, "usable": usable,
+            "planned_bytes": planned, "archived_bytes": int(archived.get(label, 0) or 0),
+            "n_models": len(models),
+            "fill_pct": round(planned / usable, 4) if usable else 0.0,
+            "models": models,
         })
-    links = [{"from": src, "to": label} for label, items in p["replica"]["assign"].items() if items and src]
-    return {"drives": out, "links": links, "source": src, "freed": p["freed"],
-            "advisories": p["advisories"],
-            "totals": {"n_planned": p["n_planned"], "n_done": p["n_done"],
-                       "n_must": p["n_must"], "n_bulk": p["n_bulk"]}}
+
+    task_target = {task.requirement_id: task.target_drive for task in ledger.tasks}
+    links = []
+    for task in ledger.tasks:
+        if task.kind != reconcile.TaskKind.REPLICATE:
+            continue
+        source = task.source_drive or task_target.get(task.depends_on_requirement or "")
+        if source:
+            links.append({"from": source, "to": task.target_drive})
+    links = [dict(pair) for pair in sorted({tuple(sorted(item.items())) for item in links})]
+    sources = sorted({item["from"] for item in links})
+
+    requirements_by_repo: dict[str, list[str]] = {}
+    for requirement in graph.requirements:
+        requirements_by_repo.setdefault(requirement.repo_id, []).append(requirement.requirement_id)
+    valid_repos = set(graph.manifests)
+    done = {
+        repo_id for repo_id, requirement_ids in requirements_by_repo.items()
+        if requirement_ids and all(item in graph.satisfied for item in requirement_ids)
+    }
+    incomplete = valid_repos - done
+    copies = dict(con.execute(
+        "SELECT repo_id,coalesce(numcopies,1) FROM models"
+    ).fetchall())
+    blocked_repos = _blocked_repos(graph, ledger)
+    freed = [
+        item["label"] for item in out
+        if item["role"] == "primary" and not tasks_by_drive.get(item["label"])
+    ]
+    blocking_codes = sorted(set(ledger.blocking_diagnostics) | {
+        item["code"] for item in failures
+    })
+    return {
+        "drives": out,
+        "links": links,
+        "source": sources[0] if len(sources) == 1 else None,
+        "freed": freed,
+        "advisories": _projection_advisories(diagnostics, failures),
+        "diagnostics": diagnostics,
+        "capacity_failures": failures,
+        "blocking_diagnostics": blocking_codes,
+        "feasible": ledger.feasible,
+        "placement_policy": ledger.placement_policy,
+        "capacity_mode": ledger.mode.value,
+        "totals": {
+            "n_planned": len(incomplete),
+            "n_done": len(done),
+            "n_must": sum(int(copies.get(repo_id, 1) or 1) >= 2 for repo_id in incomplete),
+            "n_bulk": sum(int(copies.get(repo_id, 1) or 1) < 2 for repo_id in incomplete),
+            "n_blocked": len(blocked_repos),
+            "n_selected": len(graph.repo_ids),
+        },
+    }
 
 
 def queue_view(con, plan_id: str | None = None, capacity_mode: str = "guaranteed") -> dict:
@@ -337,41 +504,61 @@ def queue_view(con, plan_id: str | None = None, capacity_mode: str = "guaranteed
     (queue_state) and positions each row under the drive of its NEXT unfinished copy — done rows
     settle under their copy#1 home (done-placement 'b'). Heavy (~one plan pass): the Fill tab fetches
     it once on open; the cheap queue_state refreshes state at model boundaries without re-planning."""
-    p = plan_placements(con, None, plan_id, capacity_mode)
-    copy1, copy2 = {}, {}                                       # repo -> planned copy#1 / copy#2 drive
-    for label, items in p["primary"]["assign"].items():
-        for it in items:
-            copy1.setdefault(it["repo"], label)
-    for label, items in p["replica"]["assign"].items():
-        for it in items:
-            copy2.setdefault(it["repo"], label)
-    ds = drives(con, plan_id)
-    replica_labels = [d["label"] for d in ds if d["role"] == "replica"]
-    is_replica = {d["label"]: (d["role"] == "replica") for d in ds}
-    # DONE models have left the plan pool → copy#1 home = a NON-replica drive they're archived on.
-    arch_home = {}
-    for repo, label in con.execute("SELECT DISTINCT repo_id, drive_label FROM archived").fetchall():
-        if not is_replica.get(label, False):
-            arch_home.setdefault(repo, label)
-
+    graph, ledger = _reconciled_projection(con, None, plan_id, capacity_mode)
+    diagnostics = _diagnostic_payload(graph)
+    failures = ledger.to_dict()["failures"]
+    copy1, copy2 = {}, {}
+    for requirement_id, label in graph.matches:
+        repo = requirement_id.split(":", 1)[1]
+        (copy2 if requirement_id.startswith("protected_replica:") else copy1)[repo] = label
+    for task in ledger.tasks:
+        target = copy2 if task.kind == reconcile.TaskKind.REPLICATE else copy1
+        target.setdefault(task.repo_id, task.target_drive)
     numcopies = dict(con.execute("SELECT repo_id, coalesce(numcopies,1) FROM models").fetchall())
     cats = dict(con.execute("SELECT repo_id, coalesce(category,'?') FROM models").fetchall())
-    ratio = plan_float_ratio(con)
+    ratio = capacity_model.plan_float_ratio(con)
+    blocked = _blocked_repos(graph, ledger)
     models = []
-    for repo in fetch.finalized(con):
+    for repo in graph.repo_ids:
         n = numcopies.get(repo, 1)
+        manifest = graph.manifests.get(repo)
+        size = 0 if manifest is None else sum(
+            int((item.size_bytes * ratio if item.storage_action == "compress" else item.size_bytes)
+                * capacity_model.EXPECTED_MARGIN)
+            for item in manifest
+        )
         models.append({
             "repo": repo,
-            "size": est_stored_bytes(con, repo, ratio, "compression_aware"),
+            "size": size,
+            "size_known": manifest is not None,
             "category": cats.get(repo, "?"),
             "numcopies": n,
-            "copy1": copy1.get(repo) or arch_home.get(repo),
-            "copy2": copy2.get(repo) or (replica_labels[0] if (n >= 2 and replica_labels) else None),
+            "copy1": copy1.get(repo),
+            "copy2": copy2.get(repo),
+            "blocking_diagnostics": blocked.get(repo, []),
         })
-    drive_info = [{"label": d["label"],
-                   "tier": "raid" if d["raid_backed"] else ("replica" if d["role"] == "replica" else "primary"),
-                   "capacity": d["capacity"]} for d in ds]
-    return {"models": models, "drives": drive_info}
+    drive_info = [{
+        "label": row[0],
+        "tier": "raid" if row[2] else ("replica" if row[1] == "replica" else "primary"),
+        "capacity": int(row[3] or 0),
+    } for row in con.execute(
+        "SELECT d.drive_label,coalesce(d.role,'primary'),coalesce(d.raid_backed,0),"
+        "coalesce(d.capacity_bytes,d.free_bytes,0) "
+        "FROM plan_drives pd JOIN drives d USING(drive_label) WHERE pd.plan_id=? "
+        "ORDER BY d.drive_label",
+        [graph.plan_id],
+    ).fetchall()]
+    blocking_codes = sorted(set(ledger.blocking_diagnostics) | {
+        item["code"] for item in failures
+    })
+    return {
+        "models": models,
+        "drives": drive_info,
+        "diagnostics": diagnostics,
+        "capacity_failures": failures,
+        "blocking_diagnostics": blocking_codes,
+        "feasible": ledger.feasible,
+    }
 
 
 def queue_state(con) -> dict:

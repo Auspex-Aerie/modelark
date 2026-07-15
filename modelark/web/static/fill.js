@@ -96,7 +96,10 @@
       .telq.done{color:#aab3bf}.telq.done .qname{text-decoration:line-through}.telq.done .telqdot{opacity:.35}
       .telq.partial{background:#fdf2e4;color:#9a6f30;box-shadow:inset 3px 0 0 #d98a2b}
       .telq.partial .qname{color:#8a6528}
+      .telq.blocked{background:#fbf1f0;color:#a4342c;box-shadow:inset 3px 0 0 #a4342c}
+      .telq.blocked .qname{color:#8f2d27}
       .qrem{font:700 9.5px/1 ui-monospace,monospace;letter-spacing:.02em;color:#b9701f;background:#f6e0c2;padding:3px 6px;border-radius:4px;flex:none}
+      .qblock{font:700 9.5px/1 ui-monospace,monospace;letter-spacing:.02em;color:#8f2d27;background:#f1d5d2;padding:3px 6px;border-radius:4px;flex:none}
       .telq.cur{background:#e9f1f9;color:#12447a;font-weight:700;box-shadow:inset 3px 0 0 #2c5f8f}
       .telqdrive{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font:700 9.5px/1 ui-monospace,monospace;letter-spacing:.09em;text-transform:uppercase;color:#8792a0;padding:10px 8px 5px;border-top:1px solid #edf1f6;margin-top:2px}
       .telqdrive:first-child{border-top:none;margin-top:0;padding-top:2px}
@@ -210,7 +213,14 @@
       (data.advisories || []).map(a => `<div class="fadv ${esc(a.level)}">${esc(a.msg)}</div>`).join("");
     const t = data.totals || {};
     document.getElementById("fillNote").textContent =
-      `${t.n_planned} to place · ${t.n_must} must-have · ${t.n_bulk} bulk` + (t.n_done ? ` · ${t.n_done} done` : "");
+      `${t.n_planned} to place · ${t.n_must} must-have · ${t.n_bulk} bulk` +
+      (t.n_blocked ? ` · ${t.n_blocked} blocked` : "") + (t.n_done ? ` · ${t.n_done} done` : "");
+    const start = document.getElementById("fillStart");
+    if (start) {
+      start.disabled = data.feasible === false;
+      start.title = data.feasible === false
+        ? `Plan admission blocked: ${(data.blocking_diagnostics || []).join(", ")}` : "";
+    }
     if (lastStatus) renderRun(lastStatus);   // re-apply live overlays/telemetry after the cards are rebuilt
   }
 
@@ -264,11 +274,12 @@
     const curRepo = lastStatus && lastStatus.repo;
     const items = queueModels.map(m => {
       const p = placedMap[m.repo] || 0, N = m.numcopies || 1;
-      let state = p >= N ? "done" : (p > 0 ? "partial" : "upcoming");
-      const drive = (state === "partial" ? (m.copy2 || m.copy1) : m.copy1) || "?";
+      const blockers = m.blocking_diagnostics || [];
+      let state = blockers.length ? "blocked" : (p >= N ? "done" : (p > 0 ? "partial" : "upcoming"));
+      const drive = state === "blocked" ? "blocked" : ((state === "partial" ? (m.copy2 || m.copy1) : m.copy1) || "?");
       if (m.repo === curRepo) state = "current";
       return { repo: m.repo, size: m.size || 0, category: m.category, numcopies: N,
-               remaining: Math.max(0, N - p), state, drive };
+               remaining: Math.max(0, N - p), state, drive, blockers };
     });
     const order = [...(queueDrives || [])].sort((a, b) =>
       (TIER_RANK[a.tier] - TIER_RANK[b.tier]) || (b.capacity - a.capacity) || String(a.label).localeCompare(b.label))
@@ -339,8 +350,9 @@
     }
     const doneN = items.filter(i => i.state === "done").length;
     const partN = items.filter(i => i.state === "partial").length;
+    const blockedN = items.filter(i => i.state === "blocked").length;
     const curRepo = (lastStatus && lastStatus.repo) || "";
-    const sig = `${items.length}|${doneN}|${partN}|${curRepo}`;   // rebuild only when this changes, not per poll
+    const sig = `${items.length}|${doneN}|${partN}|${blockedN}|${curRepo}`;   // rebuild only when this changes, not per poll
     if (sig === queueSig) return;
     const wasBuilt = queueSig !== null;
     const prevEl = document.getElementById("telQueue");
@@ -356,13 +368,16 @@
         const st = dstat[it.drive];
         div = `<div class="telqdrive"><span>${esc(it.drive)}</span><span class="qsub">${esc(st.n)} · ${esc(MA.gb(st.b))}</span></div>`;
       }
-      const cls = { done: "done", partial: "partial", current: "cur" }[it.state] || "";
+      const cls = { done: "done", partial: "partial", blocked: "blocked", current: "cur" }[it.state] || "";
       const rem = it.state === "partial"
         ? `<span class="qrem">${it.remaining} cop${it.remaining === 1 ? "y" : "ies"} left</span>` : "";
-      return div + `<div class="telq ${cls}"><span class="telqdot" style="background:${CAT[it.category] || hashColor(it.category || "?")}"></span><span class="qname">${esc(it.repo)}</span>${rem}<span class="qsz">${esc(MA.gb(it.size))}</span></div>`;
+      const block = it.state === "blocked"
+        ? `<span class="qblock">${esc(it.blockers.join(", "))}</span>` : "";
+      return div + `<div class="telq ${cls}"><span class="telqdot" style="background:${CAT[it.category] || hashColor(it.category || "?")}"></span><span class="qname">${esc(it.repo)}</span>${rem}${block}<span class="qsz">${esc(MA.gb(it.size))}</span></div>`;
     }).join("");
-    const left = items.reduce((a, it) => a + it.remaining * it.size, 0);   // Σ (copies still owed) × size
-    const head = `${doneN} / ${items.length} done · ${MA.gb(left)} left`;
+    const left = items.filter(it => it.state !== "blocked").reduce((a, it) => a + it.remaining * it.size, 0);
+    const head = `${doneN} / ${items.length} done · ${MA.gb(left)} schedulable left` +
+      (blockedN ? ` · ${blockedN} blocked` : "");
     host.innerHTML = `<div class="telpanel"><div class="telcap"><span class="telhead">Queue · whole fleet</span><span class="telhead" style="letter-spacing:.04em">${head}</span></div><div class="telqueue" id="telQueue">${rows}</div></div>`;
     queueSig = sig;
 

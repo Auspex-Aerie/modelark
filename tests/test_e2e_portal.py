@@ -40,6 +40,23 @@ def _seed(con) -> None:
                     (repo, author, p, cat, var, lic, dl))
         con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
                     "VALUES(?, 'model.safetensors', ?, 'safetensors', 'bf16')", (repo, size))
+    con.execute(
+        "INSERT INTO models(repo_id,author,params_b,category,variant,license,downloads_30d,"
+        "gated,status) VALUES('demo/pickle-only','demo',2.0,'generative-llm','base','mit',10,"
+        "'false','discovered')"
+    )
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+        "VALUES('demo/pickle-only','pytorch_model.bin',2000000000,'pytorch','fp16')"
+    )
+    con.executemany(
+        "INSERT INTO selection(repo_id,finalized_at) VALUES(?,'2026-07-15')",
+        [("demo/tiny-llm",), ("demo/pickle-only",)],
+    )
+    con.execute(
+        "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes) "
+        "VALUES('drive-00','primary',0,10000000000000,10000000000000)"
+    )
 
 
 def _wait_port(port: int, timeout: int = 40) -> bool:
@@ -83,25 +100,36 @@ def _browser_flow() -> None:
             time.sleep(3)                                # reload fires ~300ms after select; let it settle
             pg.wait_for_load_state("networkidle")
             print("  selected the ark plan")
-            # 2. open Catalog, wait for rows, confirm the giant is there
+            # 2. the migrated-cart shape (valid + pickle-only) must render typed blockers rather
+            # than turning the Fill plan/queue requests into HTTP 500s or omitting the bad row.
+            pg.click("button[data-view='fill']")
+            pg.wait_for_selector("#fillAdvisories .fadv.error")
+            advisory = pg.inner_text("#fillAdvisories")
+            assert "MANIFEST_POLICY" in advisory and "demo/pickle-only" in advisory
+            pg.wait_for_selector("#fillQueue .telq.blocked")
+            blocked = pg.inner_text("#fillQueue .telq.blocked")
+            assert "demo/pickle-only" in blocked and "MANIFEST_POLICY" in blocked
+            assert pg.locator("#fillStart").is_disabled()
+            print("  typed mixed-cart blocker rendered; Start fill disabled")
+            # 3. open Catalog, wait for rows, confirm the giant is there
             pg.click("button[data-view='catalog']")
             time.sleep(2)
             pg.wait_for_selector("#tbody tr")
             assert pg.query_selector("tr[data-id='demo/giant-llm']"), "giant row missing from catalog"
             print("  catalog rendered")
-            # 3. tick the giant -> the over-cap banner should appear
+            # 4. tick the giant -> the over-cap banner should appear
             pg.check("tr[data-id='demo/giant-llm'] input[type=checkbox]")
             time.sleep(3)                                # selection round-trip + renderBudget
             pg.wait_for_selector("#capWarn", state="visible")
             msg = pg.inner_text("#capWarnMsg")
             assert "24-hour" in msg and "considerate" in msg, f"unexpected banner text: {msg!r}"
             print("  over-cap banner shown")
-            # 4. dismiss hides it
+            # 5. dismiss hides it
             pg.click("#capWarnDismiss")
             time.sleep(1)
             pg.wait_for_selector("#capWarn", state="hidden")
             print("  banner dismissed")
-            # 5. the same public hook used by the live Fill poll must show typed terminals without a
+            # 6. the same public hook used by the live Fill poll must show typed terminals without a
             # reload; verify the operator-facing evidence/action surface, not merely DOM presence.
             pg.evaluate("""
                 window.MA.showFillTerminal({
@@ -136,7 +164,7 @@ def main() -> None:
         _seed(con)
         con.close()
         assert db.DB_PATH.parent == data_dir and db.DB_PATH.is_file()
-        print("  seeded 4 models (1 giant) in an isolated catalog")
+        print("  seeded 5 models (1 giant, 1 pickle-only blocker) in an isolated catalog")
 
         serve = Path(sys.executable).with_name("modelark")  # .venv-dev/bin/modelark
         proc = subprocess.Popen(
@@ -155,7 +183,7 @@ def main() -> None:
             assert plans["plans"][0]["provisioning"] == "uncompressed"  # one-release alias
             ids = [m["id"] for m in _get("/api/models")["rows"]]
             assert "demo/giant-llm" in ids, f"giant model missing from catalog: {ids}"
-            print(f"  api ok: cap={sel['cap_24h_gb']} GB · {len(ids)} models incl. the giant")
+            print(f"  api ok: cap={sel['cap_24h_gb']} GB · {len(ids)} models incl. giant + pickle blocker")
             _browser_flow()
             print("all passed")
         finally:
