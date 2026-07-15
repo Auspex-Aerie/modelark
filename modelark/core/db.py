@@ -109,8 +109,12 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
         con.execute("PRAGMA busy_timeout=15000")
         con.execute("PRAGMA foreign_keys=ON")
         con.execute("PRAGMA query_only=ON")
-        version = con.execute("PRAGMA user_version").fetchone()[0]
-        _validate_catalog_version(version, read_only=True)
+        try:
+            version = con.execute("PRAGMA user_version").fetchone()[0]
+            _validate_catalog_version(version, read_only=True)
+        except Exception:
+            con.close()
+            raise
         return con
 
     CATALOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -275,12 +279,11 @@ def _migrate_capacity_mode_v2(con: sqlite3.Connection, *, backup_existing: bool)
     if backup_existing:
         _backup_before_migration(con, "pre-capacity-v2")
 
-    columns = {row[1] for row in con.execute('PRAGMA table_info("plans")').fetchall()}
-    if "capacity_mode" not in columns and "provisioning" not in columns:
-        raise RuntimeError("Cannot migrate plans: neither capacity_mode nor provisioning exists")
-
     con.execute("BEGIN IMMEDIATE")
     try:
+        columns = {row[1] for row in con.execute('PRAGMA table_info("plans")').fetchall()}
+        if "capacity_mode" not in columns and "provisioning" not in columns:
+            raise RuntimeError("Cannot migrate plans: neither capacity_mode nor provisioning exists")
         if "capacity_mode" not in columns:
             con.execute('DROP TABLE IF EXISTS "plans__capacity_v2"')
             con.execute(_canonical_table_sql("plans", "plans__capacity_v2"))

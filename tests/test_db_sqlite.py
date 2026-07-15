@@ -266,6 +266,23 @@ def test_v1_capacity_modes_map_transactionally_and_idempotently(tmp_path):
     assert backup.stat().st_mtime_ns == before, "the recovery backup must never be overwritten"
 
 
+def test_capacity_mode_schema_inspection_runs_under_immediate_lock(tmp_path):
+    con = _fresh(tmp_path)
+    con.execute("PRAGMA foreign_keys=OFF")
+    statements = []
+    con.set_trace_callback(statements.append)
+    db._migrate_capacity_mode_v2(con, backup_existing=False)
+    con.set_trace_callback(None)
+    normalized = [statement.strip().lower() for statement in statements]
+    begin = normalized.index("begin immediate")
+    inspect = next(
+        index for index, statement in enumerate(normalized)
+        if statement.startswith('pragma table_info("plans")')
+    )
+    assert begin < inspect
+    con.close()
+
+
 def test_v2_capacity_mode_migration_rolls_back_invalid_legacy_value(tmp_path):
     legacy = _legacy_v1_plans(tmp_path, constrained=False)
     legacy.execute(
@@ -324,6 +341,32 @@ def test_read_only_open_refuses_an_unmigrated_v1_catalog(tmp_path):
         row[1] for row in raw.execute("PRAGMA table_info(plans)").fetchall()
     }
     raw.close()
+
+
+def test_read_only_version_validation_failure_closes_connection(tmp_path):
+    writer = _fresh(tmp_path)
+    writer.close()
+    raw = sqlite3.connect(str(db.DB_PATH), isolation_level=None)
+
+    class TracedConnection:
+        closed = False
+
+        def execute(self, sql, *args):
+            return raw.execute(sql, *args)
+
+        def close(self):
+            self.closed = True
+            raw.close()
+
+    traced = TracedConnection()
+    with mock.patch.object(db.sqlite3, "connect", return_value=traced), \
+         mock.patch.object(db, "_validate_catalog_version", side_effect=RuntimeError("old")):
+        try:
+            db.connect(read_only=True)
+            raise AssertionError("schema validation failure must propagate")
+        except RuntimeError as exc:
+            assert str(exc) == "old"
+    assert traced.closed
 
 
 def test_foreign_keys_domains_and_single_active_plan_are_enforced(tmp_path):
