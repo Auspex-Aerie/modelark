@@ -67,6 +67,7 @@ def test_default_inspection_creates_nothing(tmp_path):
     destination, backups = tmp_path / "new-data", tmp_path / "backups"
     report = MIGRATION.inspect(source, destination, backups)
     assert report["mode"] == "inspection-only" and report["source_kind"] == "sqlite"
+    assert report["source_selection"] == "automatic"
     assert report["source"]["integrity_check"] == "ok"
     assert report["source"]["tables"]["archived"] == 1
     assert not destination.exists() and not backups.exists()
@@ -100,6 +101,13 @@ def test_explicit_source_kind_must_exist(tmp_path):
         raise AssertionError("a missing explicitly selected catalog must be refused")
     except RuntimeError as exc:
         assert "explicit duckdb source requested" in str(exc)
+
+    try:
+        MIGRATION.inspect(
+            source, tmp_path / "new-data", tmp_path / "backups", source_kind="sqlite3")
+        raise AssertionError("an unknown source kind must be refused")
+    except RuntimeError as exc:
+        assert "unknown source kind 'sqlite3'" in str(exc)
 
 
 def test_execute_backs_up_migrates_validates_and_publishes(tmp_path):

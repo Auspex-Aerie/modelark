@@ -38,6 +38,7 @@ from modelark.core import db
 _CONFIRMATION = "MODELARK-STOPPED"
 _RUNTIME_CONFIGS = ("library.json",)
 _RUN_ID = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SOURCE_KINDS = ("sqlite", "duckdb")
 
 
 def _sha256(path: Path) -> str:
@@ -76,6 +77,9 @@ def _source_kind(source_dir: Path, requested_kind: str | None = None) -> tuple[s
     if duckdb_path.is_file():
         found.append(("duckdb", duckdb_path))
     if requested_kind is not None:
+        if requested_kind not in _SOURCE_KINDS:
+            raise RuntimeError(
+                f"unknown source kind {requested_kind!r}; must be 'sqlite' or 'duckdb'")
         requested = dict(found).get(requested_kind)
         if requested is None:
             raise RuntimeError(
@@ -350,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--destination-data-dir", type=Path, required=True)
     parser.add_argument("--backup-root", type=Path, required=True)
     parser.add_argument(
-        "--source-kind", choices=("sqlite", "duckdb"),
+        "--source-kind", choices=_SOURCE_KINDS,
         help="explicit active catalog engine; required to disambiguate when both catalogs exist",
     )
     parser.add_argument("--execute", action="store_true",
