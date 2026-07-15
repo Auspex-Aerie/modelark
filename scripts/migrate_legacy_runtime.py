@@ -69,12 +69,19 @@ def _paths(source: Path, destination: Path, backup_root: Path) -> tuple[Path, Pa
     return source, destination, backup_root
 
 
-def _source_kind(source_dir: Path) -> tuple[str, Path]:
+def _source_kind(source_dir: Path, requested_kind: str | None = None) -> tuple[str, Path]:
     sqlite_path = source_dir / "catalog.sqlite"
     duckdb_path = source_dir / "catalog.duckdb"
     found = [("sqlite", sqlite_path)] if sqlite_path.is_file() else []
     if duckdb_path.is_file():
         found.append(("duckdb", duckdb_path))
+    if requested_kind is not None:
+        requested = dict(found).get(requested_kind)
+        if requested is None:
+            raise RuntimeError(
+                f"explicit {requested_kind} source requested, but its catalog does not exist in "
+                f"{source_dir}")
+        return requested_kind, requested
     if not found:
         raise RuntimeError(
             f"no catalog.sqlite or catalog.duckdb found in source data directory {source_dir}")
@@ -124,13 +131,15 @@ def _duckdb_inventory(path: Path) -> dict:
         con.close()
 
 
-def inspect(source_data_dir: Path, destination_data_dir: Path, backup_root: Path) -> dict:
+def inspect(source_data_dir: Path, destination_data_dir: Path, backup_root: Path,
+            source_kind: str | None = None) -> dict:
     source, destination, backups = _paths(source_data_dir, destination_data_dir, backup_root)
-    kind, catalog = _source_kind(source)
+    kind, catalog = _source_kind(source, source_kind)
     inventory = _sqlite_inventory(catalog) if kind == "sqlite" else _duckdb_inventory(catalog)
     return {
         "mode": "inspection-only",
         "source_kind": kind,
+        "source_selection": "explicit" if source_kind else "automatic",
         "source_catalog": str(catalog),
         "destination_data_dir": str(destination),
         "backup_root": str(backups),
@@ -249,12 +258,13 @@ def _publish_current_catalog(source_kind: str, backup_catalog: Path, stage: Path
 
 
 def execute(source_data_dir: Path, destination_data_dir: Path, backup_root: Path,
-            confirmation: str, run_id: str | None = None) -> dict:
+            confirmation: str, run_id: str | None = None,
+            source_kind: str | None = None) -> dict:
     if confirmation != _CONFIRMATION:
         raise RuntimeError(
             f"execution requires --confirm-stopped {_CONFIRMATION} after every ModelArk writer is stopped")
     source, destination, backups = _paths(source_data_dir, destination_data_dir, backup_root)
-    kind, catalog = _source_kind(source)
+    kind, catalog = _source_kind(source, source_kind)
     if destination.exists():
         raise RuntimeError(f"destination already exists; refusing to overwrite {destination}")
     run_id = run_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -272,6 +282,7 @@ def execute(source_data_dir: Path, destination_data_dir: Path, backup_root: Path
         "status": "started", "run_id": run_id,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "source_kind": kind, "source_catalog": str(catalog),
+        "source_selection": "explicit" if source_kind else "automatic",
         "destination_data_dir": str(destination), "backup_dir": str(run_backup),
     }
     guard = None
@@ -338,6 +349,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-data-dir", type=Path, required=True)
     parser.add_argument("--destination-data-dir", type=Path, required=True)
     parser.add_argument("--backup-root", type=Path, required=True)
+    parser.add_argument(
+        "--source-kind", choices=("sqlite", "duckdb"),
+        help="explicit active catalog engine; required to disambiguate when both catalogs exist",
+    )
     parser.add_argument("--execute", action="store_true",
                         help="create backup and publish a new migrated destination (default: inspect only)")
     parser.add_argument("--confirm-stopped", metavar="TEXT",
@@ -347,11 +362,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.execute:
             result = execute(args.source_data_dir, args.destination_data_dir, args.backup_root,
-                             args.confirm_stopped or "", args.run_id)
+                             args.confirm_stopped or "", args.run_id, args.source_kind)
         else:
             if args.confirm_stopped or args.run_id:
                 parser.error("--confirm-stopped/--run-id are valid only with --execute")
-            result = inspect(args.source_data_dir, args.destination_data_dir, args.backup_root)
+            result = inspect(args.source_data_dir, args.destination_data_dir, args.backup_root,
+                             args.source_kind)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     except RuntimeError as exc:
