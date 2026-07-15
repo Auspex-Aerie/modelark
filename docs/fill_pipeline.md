@@ -5,10 +5,10 @@ are the only completion truth: ModelArk never persists a work queue or infers su
 `.incomplete` file. At every drive-batch boundary it derives missing work again from canonical
 manifests, exact per-drive `archived` rows, plan policy, and drive facts (DEC-045).
 
-The active Plan owns a fixed drive set. Its legacy `provisioning` value is translated internally to a
-capacity mode: `uncompressed` means guaranteed/raw-bounded admission and `compressed` means
-compression-aware admission. The schema and operator-facing terminology are renamed separately in
-Phase 4 so that migration risk cannot withhold the INC-014 correctness fix.
+The active Plan owns a fixed drive set and a capacity mode. `guaranteed` uses raw-bounded admission;
+`compression_aware` admits against expected stored bytes plus a safety margin. The API and CLI retain
+the old `provisioning` / `uncompressed` / `compressed` spellings as deprecated one-release aliases,
+but the schema and operator surfaces are canonical.
 
 ## Control flow
 

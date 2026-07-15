@@ -10,6 +10,13 @@ raw database/WAL sidecars for rollback evidence, copies `library.json`, migrates
 validates the current schema and foreign keys, and atomically publishes a new data directory. Its
 default mode is read-only inspection; `--execute` requires the exact `MODELARK-STOPPED` assertion.
 
+Current ModelArk catalogs use schema v2. During copied-data migration, the v1
+`plans.provisioning` values map without changing admission policy: `uncompressed` becomes
+`capacity_mode='guaranteed'` and `compressed` becomes `capacity_mode='compression_aware'`. A catalog
+newer than the installed program is refused. Once a copied catalog reaches v2, no legacy ModelDump
+binary may open it: that binary predates the monotonic version guard and can stamp the schema back to
+v1. The untouched source remains the only legacy rollback catalog.
+
 ## Phase 0 — canonical rehearsal (safe now)
 
 These checks use only synthetic fixtures in the canonical checkout:
@@ -75,6 +82,11 @@ Keep both generated manifests. The backup manifest contains hashes for the consi
 source database/WAL files, and copied runtime config. The destination manifest records schema and
 foreign-key checks, source/destination row counts, the bootstrapped active plan, and the published
 catalog hash. The source remains in place and is the rollback authority.
+
+Confirm the destination reports `user_version=2`, has `plans.capacity_mode` and no
+`plans.provisioning` column, and preserves each plan's mapped policy. Do this against the copied
+destination only. Do not open that v2 destination with the stopped legacy executable, even for a
+read-only-looking command.
 
 **Gate:** any failed integrity check, foreign-key violation, unexpected row-count change, missing
 `library.json`, or surprising annex root stops the cutover. Diagnose from the backup; do not repair the
@@ -160,6 +172,7 @@ work item before leaving it unattended.
 Acceptance requires all of the following:
 
 - migrated catalog integrity and foreign keys are green;
+- migrated schema is v2 and every legacy plan mode has the expected canonical mapping;
 - source/destination counts and intentional `ark` bootstrap additions are explained;
 - annex map and mounted-copy resolution agree with the pre-cutover record;
 - one real restore verifies byte-for-byte;

@@ -8,6 +8,7 @@ are exercised too). No portal, no drives mounted — totals() reads the catalog 
 from __future__ import annotations
 
 import sqlite3
+import warnings
 
 from modelark.core import db
 from modelark import librarian, plan
@@ -67,17 +68,35 @@ def test_active_exclusivity():
     assert plan.active(con)["plan_id"] == "ark"
 
 
-def test_add_drive_idempotent_and_bad_provisioning():
+def test_add_drive_idempotent_and_bad_capacity_mode():
     con = _mem()
     plan.bootstrap(con)
     plan.add_drive(con, "ark", "drive-09")
     plan.add_drive(con, "ark", "drive-09")                                   # idempotent
     assert plan.plan_drive_labels(con, "ark") == ["drive-09"]               # (no drives seeded)
     try:
-        plan.create(con, "bad", provisioning="lz4")
-        assert False, "bad provisioning must raise"
+        plan.create(con, "bad", capacity_mode="lz4")
+        assert False, "bad capacity mode must raise"
     except ValueError:
         pass
+
+
+def test_capacity_mode_is_canonical_with_one_release_legacy_alias():
+    con = _mem()
+    current = plan.bootstrap(con)
+    assert current["capacity_mode"] == "guaranteed"
+    assert current["provisioning"] == "uncompressed"
+    aware = plan.create(con, "aware", capacity_mode="compression_aware")
+    assert aware["capacity_mode"] == "compression_aware"
+    assert aware["provisioning"] == "compressed"
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        legacy = plan.create(con, "legacy", provisioning="compressed")
+        updated = plan.set_provisioning(con, "legacy", "uncompressed")
+    assert legacy["capacity_mode"] == "compression_aware"
+    assert updated["capacity_mode"] == "guaranteed"
+    assert any("deprecated" in str(item.message) for item in caught)
 
 
 # ---- totals: the three live numbers -----------------------------------------

@@ -270,6 +270,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(plan_api.select(body))
             elif u.path == "/api/plan/create":
                 self._json(plan_api.create(body))
+            elif u.path == "/api/plan/capacity-mode":
+                self._json(plan_api.set_capacity_mode(body))
             elif u.path == "/api/plan/provisioning":
                 self._json(plan_api.set_provisioning(body))
             elif u.path == "/api/verify/run":

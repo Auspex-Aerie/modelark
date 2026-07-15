@@ -166,7 +166,7 @@ def test_bulk_fetch_always_ranks_before_partial_replica():
         "(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed,annex_key) "
         "VALUES('must','model.gguf','drive-00',200,200,0,'key-must-model.gguf')"
     )
-    snapshot = fill._reconcile(fetch.RunCtx(con=con), "ark", "uncompressed", None)
+    snapshot = fill._reconcile(fetch.RunCtx(con=con), "ark", "guaranteed", None)
     fetch_tasks = [task for task in snapshot.ledger.tasks if task.kind == reconcile.TaskKind.FETCH]
     replica_tasks = [task for task in snapshot.ledger.tasks if task.kind == reconcile.TaskKind.REPLICATE]
     assert fetch_tasks and replica_tasks
@@ -190,7 +190,7 @@ def test_reconcile_uses_and_closes_dedicated_read_connection():
     ctx = fetch.RunCtx(con=con, read_connection_factory=lambda: read_con)
     with mock.patch.object(fill.reconcile, "reconcile_plan", return_value=graph) as reconcile_plan, \
          mock.patch.object(fill.capacity, "plan_capacity", return_value=ledger) as plan_capacity:
-        snapshot = fill._reconcile(ctx, "ark", "uncompressed", None)
+        snapshot = fill._reconcile(ctx, "ark", "guaranteed", None)
     assert snapshot == fill._Snapshot(graph, ledger)
     reconcile_plan.assert_called_once_with(read_con, "ark", None)
     assert plan_capacity.call_args.args[:2] == (read_con, graph)
@@ -200,13 +200,13 @@ def test_reconcile_uses_and_closes_dedicated_read_connection():
 def test_file_guard_types_a_target_removed_after_reconciliation(tmp_path):
     con, _, _, _ = _executor_harness()
     ctx = fetch.RunCtx(con=con)
-    snapshot = fill._reconcile(ctx, "ark", "uncompressed", None)
+    snapshot = fill._reconcile(ctx, "ark", "guaranteed", None)
     task = next(item for item in snapshot.ledger.tasks if item.kind == reconcile.TaskKind.FETCH)
     manifest_item = next(
         item for item in snapshot.graph.manifests[task.repo_id]
         if item.rfilename in task.budget.missing_files
     )
-    guard = fill._file_guard(ctx, "ark", "uncompressed", task)
+    guard = fill._file_guard(ctx, "ark", "guaranteed", task)
 
     for archive_path in (None, tmp_path):
         with mock.patch.object(fill.register, "archive_path", return_value=archive_path), \
@@ -290,7 +290,7 @@ def test_fetch_run_bails_on_dead_drive_midbatch(tmp_path):
 # ---- per-file capacity failsafe (real reconciler + ledger) ----------------------------------
 
 
-def _capacity_run(provisioning, free_bytes, a_stored):
+def _capacity_run(capacity_mode, free_bytes, a_stored):
     """A fresh per-file guard stops the second model after the first consumes forecast slack."""
     con = _mem()
     con.execute("INSERT INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed) "
@@ -301,7 +301,7 @@ def _capacity_run(provisioning, free_bytes, a_stored):
                     "VALUES(?, 'model.safetensors', 100, 'safetensors', 'bf16')", [r])
         con.execute("INSERT INTO selection(repo_id,finalized_at) VALUES(?, '2026-01-01')", [r])
     plan.bootstrap(con)                                   # plan `ark` owns drive-00, active
-    plan.set_provisioning(con, "ark", provisioning)
+    plan.set_capacity_mode(con, "ark", capacity_mode)
 
     def fake_run(*, drive_label, repos, task_manifests, before_file, **kwargs):
         result = {"stored_repos": [], "failed_repos": [], "capacity_failure": None,
@@ -324,14 +324,14 @@ def _capacity_run(provisioning, free_bytes, a_stored):
         return fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
 
 
-def test_plan_capacity_stop_uncompressed(tmp_path):
-    res = _capacity_run("uncompressed", free_bytes=350, a_stored=250)
+def test_plan_capacity_stop_guaranteed(tmp_path):
+    res = _capacity_run("guaranteed", free_bytes=350, a_stored=250)
     assert res["state"] == "plan-capacity-stop", res
     assert res["ok"] is False and res["stopped"] is False
 
 
-def test_plan_capacity_stop_compressed(tmp_path):
-    res = _capacity_run("compressed", free_bytes=300, a_stored=100)
+def test_plan_capacity_stop_compression_aware(tmp_path):
+    res = _capacity_run("compression_aware", free_bytes=300, a_stored=100)
     assert res["state"] == "plan-capacity-stop", res
 
 
@@ -378,7 +378,7 @@ def test_replica_records_only_after_target_uuid_proof(tmp_path):
         "VALUES('must','model.gguf','drive-00','model.gguf','must/model.gguf','orig','stored',"
         "200,200,0,'key-must-model.gguf')"
     )
-    snapshot = fill._reconcile(fetch.RunCtx(con=con), "ark", "uncompressed", None)
+    snapshot = fill._reconcile(fetch.RunCtx(con=con), "ark", "guaranteed", None)
     task = next(
         item for item in snapshot.ledger.tasks if item.kind == reconcile.TaskKind.REPLICATE
     )

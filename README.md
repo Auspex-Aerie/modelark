@@ -33,7 +33,7 @@ savings, and it **streams** — a giant shard compresses and restores in O(chunk
   hash → match HF's sha256) *before* the original is dropped, so compression never replaces an
   original with a blob that failed its restore proof.
 - **Drive-health monitoring** — SMART vetting before a volume ever holds archives.
-- **Plans** — explicit storage/fill contexts, each with its own drive fleet and budget mode.
+- **Plans** — explicit storage/fill contexts, each with its own drive fleet and capacity mode.
 - **Smart resume** — completed files are never fetched again; only the interrupted file is retried.
 - **Tiered storage** — mark keepers *must-have* (kept redundantly) vs bulk that's cheap to re-fetch.
 - **1/2-copy redundancy** — required copy counts are enforced from a durable record, not guessed.
@@ -47,7 +47,7 @@ This is pre-1.0 and built in public, so a few sharp edges are worth knowing befo
 
 **Downloading giants.** Hugging Face's `hf_xet` transport isn't byte-range resumable, so if a shard stalls or the process is killed mid-download, that shard restarts from zero — painful on a 30 GB shard of a larger model. A watchdog kills genuinely-hung transfers and a sweep clears the orphaned partials, so nothing corrupts and disk never leaks — but you re-spend the bandwidth. Tensor-level checkpointing is on the roadmap; for now, big models just want a stable connection for however long it takes to grab one shard.
 
-**Compression isn't guaranteed per shard.** Every compression is proven by a round-trip canary before the original is dropped, so you can never end up with an unrestorable archive. But if some rare shard format or other unexpected input trips a bug in ZipNN or our handling of it (which has happened, and been patched, already), the shard gets stored *raw* instead. This is the correct and deliberate fallback: the file is intact and verified. However, it misses the (~⅓) savings — and recompute at model boundaries by the Librarian can start to push you past estimates. We show you both an uncompressed and an "optimally compressed" fill indication, but depending on how optimistically you target your own fleet, this behavior can throw the end of the downloads off the final drive in your Library — and you'll be unable to complete the archive. This is all logged; in the meantime we recommend being as un-optimistic on compression as you can — use the fully uncompressed value to budget wherever possible. "Rebase Existing Plan" (fill the gaps left by better-than-assumed compression rates) will come later. Note that rates are only strong on BF16; FP8 does not compress at all.
+**Compression isn't guaranteed per shard.** Every compression is proven by a round-trip canary before the original is dropped, so you can never end up with an unrestorable archive. But if some rare shard format or other unexpected input trips a bug in ZipNN or our handling of it (which has happened, and been patched, already), the shard gets stored *raw* instead. This is the correct and deliberate fallback: the file is intact and verified. However, it misses the (~⅓) savings — and recompute at model boundaries by the Librarian can start to push you past estimates. We show both a raw forecast and an expected-stored forecast. Use the default **Guaranteed capacity** mode when the archive must fit without assuming any compression dividend; **Compression-aware capacity** deliberately admits against the expected-stored forecast and can stop resumably if real results run high. "Rebase Existing Plan" (fill the gaps left by better-than-assumed compression rates) will come later. Note that rates are only strong on BF16; FP8 does not compress at all.
 
 **Hardware honesty.** SMART read through some USB-to-SATA bridges is synthetic, so take health readings on bridged drives with a grain of salt (during testing here, a genuinely-failing drive passed its synthetic check and then got crushed on the first load). A NAS iSCSI LUN won't auto-reattach after a reboot: that's deliberate — we won't couple boot to a network mount and risk a boot hang — so re-login is manual. And the fill is a single worker that asks for drives in sequence, so expect to hot-swap externals during a large run rather than mounting the whole fleet at once. More automation here is needed, and planned.
 
@@ -141,7 +141,7 @@ Remote/operator text rendered into structured views is centrally HTML-escaped, a
 a restrictive Content Security Policy. There is intentionally no non-loopback mode until
 authentication exists.
 
-- **Plans** — create or recall an archive set (its own drive fleet, budget, and provisioning mode);
+- **Plans** — create or recall an archive set (its own drive fleet, budget, and capacity mode);
   you pick an active plan per session before the other tabs unlock.
 - **Catalog** — browse/curate the set within a size budget; filters, bulk select, finalize.
 - **Disk Health** — SMART for attached drives (vet a volume before it holds archives).

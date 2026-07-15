@@ -543,8 +543,8 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
         task_manifests: Mapping[str, Sequence[archive_manifest.ManifestFile]] | None = None,
         before_file: Callable[[str, archive_manifest.ManifestFile], None] | None = None) -> dict:
     """`fits(repo_id) -> bool` (optional, #37): a per-model boundary check the caller (fill.execute)
-    supplies — 'does this repo still fit the target drive's LIVE free in the plan's provisioning
-    currency?'. On a non-fit, break the batch (emit `plan-capacity`) so fill re-plans instead of
+    supplies — 'does this repo still fit the target drive's LIVE free under the plan's capacity
+    mode?'. On a non-fit, break the batch (emit `plan-capacity`) so fill re-plans instead of
     ENOSPC-ing mid-shard. None (the CLI/plain-fetch path) → no capacity gating, as before."""
     result = {"stored_repos": [], "failed_repos": [], "capacity_failure": None,
               "throttled": False, "stopped": False, "drive_unwritable": False}
@@ -617,7 +617,7 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                 break
             if fits is not None and not fits(rid):
                 # #37 per-model failsafe: this drive's LIVE free can no longer hold `rid` in the plan's
-                # provisioning currency (actual > estimate, or a compressed-mode bet coming up short).
+                # capacity mode (actual > estimate, or a compression-aware forecast coming up short).
                 # Break the batch so fill.execute re-plans — it re-homes rid onto another plan drive, or
                 # (nothing fits anywhere) stops cleanly as plan-capacity-stop. Prevents an ENOSPC mid-shard.
                 print(f"  [plan-capacity] {drive_label} full for {rid} — breaking batch to re-plan.")

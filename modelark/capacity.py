@@ -1,12 +1,13 @@
-"""Shadow capacity placement and byte ledger for DEC-045 Phase 2.
+"""Capacity placement and byte ledger for the reconciled DEC-045 executor.
 
-The legacy fill executor does not consume this module.  It turns Phase-1 work intents into
-deterministically assigned tasks, accounts durable and transient bytes once, and returns typed
-feasibility evidence suitable for read-only comparison.
+This turns derived work intents into deterministically assigned tasks, accounts durable and
+transient bytes once, and returns typed feasibility evidence used by both execution and read-only
+diagnostics.
 """
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Sequence
@@ -247,7 +248,9 @@ class CapacityPlan:
         }
 
 
-def mode_from_legacy(value: str) -> CapacityMode:
+def mode_from_value(value: str | CapacityMode) -> CapacityMode:
+    if isinstance(value, CapacityMode):
+        return value
     aliases = {
         "uncompressed": CapacityMode.GUARANTEED,
         "compressed": CapacityMode.COMPRESSION_AWARE,
@@ -258,6 +261,16 @@ def mode_from_legacy(value: str) -> CapacityMode:
         return aliases[value]
     except KeyError as exc:
         raise ValueError(f"unsupported capacity mode {value!r}") from exc
+
+
+def mode_from_legacy(value: str) -> CapacityMode:
+    """Deprecated one-release adapter for callers using storage-sounding mode names."""
+    warnings.warn(
+        "mode_from_legacy() is deprecated; use mode_from_value() with a canonical capacity mode",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return mode_from_value(value)
 
 
 def headroom_bytes(capacity: int) -> int:
@@ -667,12 +680,23 @@ def plan_capacity(
     con,
     result: ReconcileResult,
     *,
-    provisioning: str = "uncompressed",
+    capacity_mode: str | CapacityMode | None = None,
     live_free_by_drive: Mapping[str, int] | None = None,
     compression_cfg: Mapping[str, object] | None = None,
+    provisioning: str | None = None,
 ) -> CapacityPlan:
-    """Materialize deterministic ``tiered_v1`` assignments and shadow feasibility."""
-    mode = mode_from_legacy(provisioning)
+    """Materialize deterministic ``tiered_v1`` assignments and feasibility evidence."""
+    if provisioning is not None:
+        warnings.warn(
+            "plan_capacity(provisioning=...) is deprecated; use capacity_mode=...",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        legacy = mode_from_value(provisioning)
+        if capacity_mode is not None and mode_from_value(capacity_mode) != legacy:
+            raise ValueError("capacity_mode and deprecated provisioning disagree")
+        capacity_mode = legacy
+    mode = mode_from_value(capacity_mode or CapacityMode.GUARANTEED)
     drives = inspect_drives(con, result.plan_id, live_free_by_drive=live_free_by_drive)
     drive_by_label = {item.drive_label: item for item in drives}
     facts = _fact_by_repo_drive(result)

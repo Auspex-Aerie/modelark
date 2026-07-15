@@ -31,6 +31,30 @@ def _source(root: Path) -> Path:
         con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
                     "compressed) VALUES ('org/model','nested/model.safetensors',"
                     "'model.safetensors.znn','nested/model.safetensors.znn','drive-01',true)")
+        # Shape the source like the pre-v2 operator catalog. The cutover must migrate the staged
+        # copy, never the live source, and preserve compressed -> compression_aware semantics.
+        con.execute("PRAGMA foreign_keys=OFF")
+        con.execute("DROP INDEX IF EXISTS idx_plans_one_active")
+        con.execute("""
+            CREATE TABLE plans__v1 (
+                plan_id VARCHAR PRIMARY KEY NOT NULL,
+                name VARCHAR, annex_root VARCHAR,
+                provisioning VARCHAR NOT NULL DEFAULT 'uncompressed'
+                    CHECK (provisioning IN ('uncompressed','compressed')),
+                status VARCHAR NOT NULL DEFAULT 'active',
+                is_active BOOLEAN NOT NULL DEFAULT false,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                notes VARCHAR
+            )
+        """)
+        con.execute(
+            "INSERT INTO plans__v1(plan_id,name,provisioning,status,is_active) "
+            "VALUES ('ark','Archive','compressed','active',true)"
+        )
+        con.execute("DROP TABLE plans")
+        con.execute("ALTER TABLE plans__v1 RENAME TO plans")
+        con.execute("CREATE UNIQUE INDEX idx_plans_one_active ON plans(is_active) WHERE is_active=1")
+        con.execute("PRAGMA user_version=1")
         con.close()
     finally:
         db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = old
@@ -62,6 +86,8 @@ def test_execute_backs_up_migrates_validates_and_publishes(tmp_path):
     assert con.execute("SELECT stored_relpath FROM archived").fetchone()[0] == \
         "nested/model.safetensors.znn"
     assert con.execute("SELECT plan_id,is_active FROM plans").fetchone() == ("ark", 1)
+    assert con.execute("SELECT capacity_mode FROM plans").fetchone()[0] == "compression_aware"
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 2
     assert con.execute("SELECT drive_label FROM plan_drives").fetchone()[0] == "drive-01"
     con.close()
     run = backups / "modelark-migration-fixture"

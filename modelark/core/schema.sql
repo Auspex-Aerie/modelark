@@ -150,8 +150,8 @@ CREATE TABLE IF NOT EXISTS fetch_events (
 );
 
 -- A first-class Plan (#33, DEF-016) — one fill campaign's identity: a FIXED set of registered
--- drives (plan_drives) + the global selection/archived it fills + a provisioning mode. The three
--- LIVE numbers (uncompressed/compressed/capacity, modelark.plan.totals) fuel the level-1
+-- drives (plan_drives) + the global selection/archived it fills + a capacity mode. The three
+-- LIVE forecasts (raw/expected-stored/capacity, modelark.plan.totals) fuel the level-1
 -- capacity failsafe. One plan for now (`ark`); selection/archived stay GLOBAL — a future plan_id
 -- column on them is the multi-plan future (a DEF). Exactly one row has is_active (the current
 -- backend/portal context); the #35 UI gate additionally forces an explicit operator pick per session.
@@ -159,8 +159,8 @@ CREATE TABLE IF NOT EXISTS plans (
     plan_id      VARCHAR PRIMARY KEY NOT NULL CHECK (length(trim(plan_id)) > 0),
     name         VARCHAR,
     annex_root   VARCHAR,                         -- the git-annex map root this plan fills
-    provisioning VARCHAR NOT NULL DEFAULT 'uncompressed'
-                 CHECK (provisioning IN ('uncompressed','compressed')),
+    capacity_mode VARCHAR NOT NULL DEFAULT 'guaranteed'
+                  CHECK (capacity_mode IN ('guaranteed','compression_aware')),
     status       VARCHAR NOT NULL DEFAULT 'active' CHECK (status IN ('active','archived')),
     is_active    BOOLEAN NOT NULL DEFAULT false CHECK (is_active IN (0, 1)),
     created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

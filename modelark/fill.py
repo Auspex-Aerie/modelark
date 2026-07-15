@@ -98,21 +98,21 @@ def _live_free(ctx, plan_id: str) -> dict[str, int]:
     return live
 
 
-def _reconcile(ctx, plan_id: str, provisioning: str, repo_scope: list[str] | None) -> _Snapshot:
+def _reconcile(ctx, plan_id: str, capacity_mode: str, repo_scope: list[str] | None) -> _Snapshot:
     """Bulk graph/ledger snapshot, using a dedicated read connection in real executions."""
     live_free = _live_free(ctx, plan_id)
     if ctx.read_connection_factory is None:  # isolated in-memory/unit harness
         with ctx.lock:
             graph = reconcile.reconcile_plan(ctx.con, plan_id, repo_scope)
             ledger = capacity.plan_capacity(
-                ctx.con, graph, provisioning=provisioning, live_free_by_drive=live_free,
+                ctx.con, graph, capacity_mode=capacity_mode, live_free_by_drive=live_free,
             )
         return _Snapshot(graph, ledger)
     con = ctx.read_connection_factory()
     try:
         graph = reconcile.reconcile_plan(con, plan_id, repo_scope)
         ledger = capacity.plan_capacity(
-            con, graph, provisioning=provisioning, live_free_by_drive=live_free,
+            con, graph, capacity_mode=capacity_mode, live_free_by_drive=live_free,
         )
         return _Snapshot(graph, ledger)
     finally:
@@ -218,9 +218,9 @@ def _stop_terminal() -> dict:
     )
 
 
-def _file_guard(ctx, plan_id: str, provisioning: str, task: capacity.AssignedTask):
+def _file_guard(ctx, plan_id: str, capacity_mode: str, task: capacity.AssignedTask):
     budgets = {item.rfilename: item for item in task.budget.file_budgets}
-    mode = capacity.mode_from_legacy(provisioning)
+    mode = capacity.mode_from_value(capacity_mode)
 
     def before_file(repo_id, item):
         with ctx.lock:
@@ -285,10 +285,12 @@ def execute(
     ctx.stats.setdefault("by_drive", {})
     with ctx.lock:
         prow = (plan.get(ctx.con, plan_id) if plan_id else plan.active(ctx.con)) or plan.bootstrap(ctx.con)
-    pid, provisioning = prow["plan_id"], prow["provisioning"]
+    pid, capacity_mode = prow["plan_id"], prow["capacity_mode"]
     ctx.on_progress({
-        "phase": "plan", "plan_id": pid, "provisioning": provisioning,
-        "say": f"plan '{pid}' · capacity={provisioning} · {len(prow['drives'])} drive(s)",
+        "phase": "plan", "plan_id": pid, "capacity_mode": capacity_mode,
+        "provisioning": plan.legacy_capacity_mode(capacity_mode),
+        "deprecated_fields": ["provisioning"],
+        "say": f"plan '{pid}' · capacity mode={capacity_mode} · {len(prow['drives'])} drive(s)",
     })
 
     attempts: dict[str, int] = {}
@@ -296,7 +298,7 @@ def execute(
     first = True
     pinned_drive: str | None = None
     while not ctx.should_stop():
-        snapshot = _reconcile(ctx, pid, provisioning, repo_scope)
+        snapshot = _reconcile(ctx, pid, capacity_mode, repo_scope)
         if not snapshot.ledger.feasible:
             terminal = _admission_terminal(snapshot, pid, made_progress)
             ctx.on_progress({
@@ -371,7 +373,7 @@ def execute(
                 for task in fetch_tasks
             }
             guards = {
-                task.repo_id: _file_guard(ctx, pid, provisioning, task) for task in fetch_tasks
+                task.repo_id: _file_guard(ctx, pid, capacity_mode, task) for task in fetch_tasks
             }
             outcome = fetch.run(
                 drive_label=pinned_drive,

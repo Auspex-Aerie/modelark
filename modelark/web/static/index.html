@@ -23,7 +23,7 @@
 <section id="view-plans" class="view" hidden>
   <div class="page">
     <h1 class="ph">Plans</h1>
-    <p class="psub">A <b>plan</b> is one fill campaign: a fixed set of registered drives + this catalog's selection + a provisioning mode. Pick a plan to unlock the rest of the app — nothing fills against the wrong drive set by accident.</p>
+    <p class="psub">A <b>plan</b> is one fill campaign: a fixed set of registered drives + this catalog's selection + a capacity mode. Pick a plan to unlock the rest of the app — nothing fills against the wrong drive set by accident.</p>
     <div id="plansGateMsg" class="disknote" hidden></div>
     <div id="plansList" class="planslist"></div>
     <div class="plancreate">
@@ -32,8 +32,8 @@
         <input id="newPlanId" placeholder="id — a slug like ark or cold-2026" maxlength="32">
         <input id="newPlanName" placeholder="name (optional)">
         <select id="newPlanProv">
-          <option value="uncompressed">uncompressed — over-provision, never runs out (default)</option>
-          <option value="compressed">compressed — bet on ZipNN to fit more</option>
+          <option value="guaranteed">guaranteed — raw-bounded admission (default)</option>
+          <option value="compression_aware">compression-aware — observed compression plus margin</option>
         </select>
         <button id="newPlanBtn" class="primary">Create</button>
       </div>

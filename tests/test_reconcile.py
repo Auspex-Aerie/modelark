@@ -73,7 +73,7 @@ def test_incident_shape_creates_only_nine_home_fetches_and_shadow_removes_116_ph
     report = reconcile.shadow_report(con, "ark")
     assert report["shadow"]["satisfied_legacy_reservations_removed"] == 116
     assert report["shadow"]["new_intents"] == 134
-    assert report["shadow"]["executor"].startswith("legacy")
+    assert report["shadow"]["executor"].startswith("reconciled")
     assert report["placement_comparison"]["target_equivalent"] is True
 
 
@@ -216,7 +216,7 @@ def test_cli_explain_is_read_only_and_reports_shadow_json(capsys):
         cli.cmd_library_plan(args)
     connect.assert_called_once_with(read_only=True)
     output = capsys.readouterr().out
-    assert '"executor": "legacy (shadow result is not consumed)"' in output
+    assert '"executor": "reconciled (legacy data is comparison-only)"' in output
     assert '"graph_hash"' in output
 
 
