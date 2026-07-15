@@ -67,9 +67,47 @@ def test_default_inspection_creates_nothing(tmp_path):
     destination, backups = tmp_path / "new-data", tmp_path / "backups"
     report = MIGRATION.inspect(source, destination, backups)
     assert report["mode"] == "inspection-only" and report["source_kind"] == "sqlite"
+    assert report["source_selection"] == "automatic"
     assert report["source"]["integrity_check"] == "ok"
     assert report["source"]["tables"]["archived"] == 1
     assert not destination.exists() and not backups.exists()
+
+
+def test_multiple_catalogs_require_an_explicit_source_kind(tmp_path):
+    source = _source(tmp_path)
+    stale_duckdb = source / "catalog.duckdb"
+    stale_duckdb.write_bytes(b"obsolete catalog sentinel")
+    destination, backups = tmp_path / "new-data", tmp_path / "backups"
+
+    try:
+        MIGRATION.inspect(source, destination, backups)
+        raise AssertionError("ambiguous catalogs must be refused")
+    except RuntimeError as exc:
+        assert "both catalog.sqlite and catalog.duckdb exist" in str(exc)
+
+    report = MIGRATION.inspect(source, destination, backups, source_kind="sqlite")
+    assert report["source_kind"] == "sqlite"
+    assert report["source_selection"] == "explicit"
+    assert report["source_catalog"] == str(source / "catalog.sqlite")
+    assert stale_duckdb.read_bytes() == b"obsolete catalog sentinel"
+    assert not destination.exists() and not backups.exists()
+
+
+def test_explicit_source_kind_must_exist(tmp_path):
+    source = _source(tmp_path)
+    try:
+        MIGRATION.inspect(
+            source, tmp_path / "new-data", tmp_path / "backups", source_kind="duckdb")
+        raise AssertionError("a missing explicitly selected catalog must be refused")
+    except RuntimeError as exc:
+        assert "explicit duckdb source requested" in str(exc)
+
+    try:
+        MIGRATION.inspect(
+            source, tmp_path / "new-data", tmp_path / "backups", source_kind="sqlite3")
+        raise AssertionError("an unknown source kind must be refused")
+    except RuntimeError as exc:
+        assert "unknown source kind 'sqlite3'" in str(exc)
 
 
 def test_execute_backs_up_migrates_validates_and_publishes(tmp_path):
@@ -96,6 +134,25 @@ def test_execute_backs_up_migrates_validates_and_publishes(tmp_path):
     assert (run / "catalog.sqlite.snapshot").is_file()
     assert (run / "raw-source" / "catalog.sqlite").is_file()
     assert (destination / "migration-manifest.json").is_file()
+
+
+def test_execute_records_explicit_source_selection_without_touching_other_catalog(tmp_path):
+    source = _source(tmp_path)
+    stale_duckdb = source / "catalog.duckdb"
+    stale_duckdb.write_bytes(b"obsolete catalog sentinel")
+    destination, backups = tmp_path / "new-data", tmp_path / "backups"
+
+    report = MIGRATION.execute(
+        source, destination, backups, "MODELARK-STOPPED", "explicit-sqlite",
+        source_kind="sqlite",
+    )
+    assert report["status"] == "published"
+    assert report["source_kind"] == "sqlite"
+    assert report["source_selection"] == "explicit"
+    assert stale_duckdb.read_bytes() == b"obsolete catalog sentinel"
+    manifest = json.loads(
+        (backups / "modelark-migration-explicit-sqlite" / "manifest.json").read_text())
+    assert manifest["source_selection"] == "explicit"
 
 
 def test_execution_refuses_confirmation_busy_source_and_existing_destination(tmp_path):

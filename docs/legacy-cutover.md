@@ -66,7 +66,9 @@ From the canonical checkout, first run inspection mode with the agreed paths:
 
 Review the detected engine, source catalog, table counts, runtime config list, and destination. If
 both SQLite and DuckDB are present, stop and determine which one the service actually opened; the tool
-refuses to guess. DuckDB input requires `.[migration]`.
+refuses to guess. After proving the active engine from the stopped process inventory, rerun inspection
+with `--source-kind sqlite` or `--source-kind duckdb`; that explicit selection is recorded in both
+manifests. DuckDB input requires `.[migration]`.
 
 After review, execute against the stopped source:
 
@@ -75,6 +77,7 @@ After review, execute against the stopped source:
   --source-data-dir <LEGACY_DATA_DIR> \
   --destination-data-dir <NEW_DATA_DIR> \
   --backup-root <BACKUP_ROOT> \
+  --source-kind <sqlite-or-duckdb> \
   --execute --confirm-stopped MODELARK-STOPPED
 ```
 
