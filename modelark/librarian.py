@@ -466,6 +466,7 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
         "SELECT repo_id,coalesce(numcopies,1) FROM models"
     ).fetchall())
     blocked_repos = _blocked_repos(graph, ledger)
+    ready = incomplete - set(blocked_repos)
     freed = [
         item["label"] for item in out
         if item["role"] == "primary" and not tasks_by_drive.get(item["label"])
@@ -476,7 +477,10 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
     return {
         "drives": out,
         "links": links,
-        "source": sources[0] if len(sources) == 1 else None,
+        # `source` is the deterministic one-release compatibility alias. `sources` is complete
+        # for reconciled topologies whose already-safe homes span more than one drive.
+        "source": sources[0] if sources else None,
+        "sources": sources,
         "freed": freed,
         "advisories": _projection_advisories(diagnostics, failures),
         "diagnostics": diagnostics,
@@ -486,10 +490,10 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
         "placement_policy": ledger.placement_policy,
         "capacity_mode": ledger.mode.value,
         "totals": {
-            "n_planned": len(incomplete),
+            "n_planned": len(ready),
             "n_done": len(done),
-            "n_must": sum(int(copies.get(repo_id, 1) or 1) >= 2 for repo_id in incomplete),
-            "n_bulk": sum(int(copies.get(repo_id, 1) or 1) < 2 for repo_id in incomplete),
+            "n_must": sum(int(copies.get(repo_id, 1) or 1) >= 2 for repo_id in ready),
+            "n_bulk": sum(int(copies.get(repo_id, 1) or 1) < 2 for repo_id in ready),
             "n_blocked": len(blocked_repos),
             "n_selected": len(graph.repo_ids),
         },
@@ -508,12 +512,40 @@ def queue_view(con, plan_id: str | None = None, capacity_mode: str = "guaranteed
     diagnostics = _diagnostic_payload(graph)
     failures = ledger.to_dict()["failures"]
     copy1, copy2 = {}, {}
+    copy2_evidence = {}
     for requirement_id, label in graph.matches:
         repo = requirement_id.split(":", 1)[1]
-        (copy2 if requirement_id.startswith("protected_replica:") else copy1)[repo] = label
+        if requirement_id.startswith("protected_replica:"):
+            copy2[repo] = label
+            copy2_evidence[repo] = "satisfied"
+        else:
+            copy1[repo] = label
     for task in ledger.tasks:
         target = copy2 if task.kind == reconcile.TaskKind.REPLICATE else copy1
         target.setdefault(task.repo_id, task.target_drive)
+        if task.kind == reconcile.TaskKind.REPLICATE:
+            copy2_evidence.setdefault(task.repo_id, "assigned")
+    replica_candidates = {
+        item.repo_id: list(item.eligible_drives)
+        for item in graph.requirements
+        if item.kind == reconcile.RequirementKind.PROTECTED_REPLICA
+    }
+    replica_intents = {
+        item.repo_id: item
+        for item in graph.intents
+        if item.kind == reconcile.TaskKind.REPLICATE
+    }
+    # Preserve the old queue's copy-2 location hint without confusing eligibility with placement.
+    # A ledger task remains the only assigned target. This fallback is display evidence for an
+    # unassigned/blocked intent, and the frontend parks such a row under its typed `blocked` group.
+    for repo, intent in replica_intents.items():
+        if repo in copy2:
+            continue
+        candidates = replica_candidates.get(repo, [])
+        hint = intent.pinned_target or (candidates[0] if candidates else None)
+        if hint:
+            copy2[repo] = hint
+            copy2_evidence[repo] = "eligible_hint"
     numcopies = dict(con.execute("SELECT repo_id, coalesce(numcopies,1) FROM models").fetchall())
     cats = dict(con.execute("SELECT repo_id, coalesce(category,'?') FROM models").fetchall())
     ratio = capacity_model.plan_float_ratio(con)
@@ -535,6 +567,8 @@ def queue_view(con, plan_id: str | None = None, capacity_mode: str = "guaranteed
             "numcopies": n,
             "copy1": copy1.get(repo),
             "copy2": copy2.get(repo),
+            "copy2_candidates": replica_candidates.get(repo, []),
+            "copy2_evidence": copy2_evidence.get(repo),
             "blocking_diagnostics": blocked.get(repo, []),
         })
     drive_info = [{
