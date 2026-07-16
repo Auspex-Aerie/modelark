@@ -312,7 +312,11 @@ def cmd_plan(args):
                       f"raw={_tb(t['uncompressed'])}  expected={_tb(t['compressed'])}")
         elif sub == "show":
             pid = args.plan or (plan.active(con) or {}).get("plan_id")
-            if not pid or plan.get(con, pid) is None:
+            if not pid:
+                raise SystemExit(
+                    "no active plan; create/select a plan before running show"
+                )
+            if plan.get(con, pid) is None:
                 raise SystemExit(f"no such plan: {pid}")
             p, t = plan.get(con, pid), plan.totals(con, pid)
             print(f"Plan {p['plan_id']} ({p['name']}) — {'ACTIVE' if p['is_active'] else 'inactive'}, "

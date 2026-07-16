@@ -118,6 +118,19 @@ def test_plan_list_and_show_are_read_only_diagnostics():
         assert "ark" in output.getvalue()
 
 
+def test_plan_show_without_active_plan_has_a_clear_read_only_error():
+    con = _mem()
+    with mock.patch.object(db, "connect", return_value=con) as connect, \
+         mock.patch.object(plan, "bootstrap") as bootstrap:
+        try:
+            cli.cmd_plan(Namespace(plan_cmd="show", plan=None))
+            assert False, "show must require an existing active plan"
+        except SystemExit as exc:
+            assert str(exc) == "no active plan; create/select a plan before running show"
+    connect.assert_called_once_with(read_only=True)
+    bootstrap.assert_not_called()
+
+
 # ---- totals: the three live numbers -----------------------------------------
 
 def test_totals_empty_archive():
