@@ -99,6 +99,10 @@ td.cb{width:34px;text-align:center}input[type=checkbox]{width:15px;height:15px;a
 .stub{color:var(--mut);background:var(--panel);border:1px dashed var(--line2);border-radius:10px;padding:28px;text-align:center}
 .diskgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
 .drive{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--line2);border-radius:10px;padding:14px 16px}
+.libdrive{font:inherit;color:inherit;text-align:left;min-width:0;cursor:pointer}
+.libdrive:hover{border-color:var(--steel)}
+.libdrive.on{box-shadow:0 0 0 2px var(--brass);border-color:var(--brass)}
+.libdrive:focus-visible{outline:2px solid var(--steel);outline-offset:2px}
 .drive.ok{border-left-color:var(--ok)}.drive.watch{border-left-color:var(--warn)}.drive.evacuate{border-left-color:var(--crit)}.drive.unknown{border-left-color:var(--mut)}
 .drive h3{margin:0 0 2px;font-size:1rem;font-family:ui-monospace,Menlo,monospace}
 .drive .sub{color:var(--mut);font-size:.8rem;margin-bottom:10px}
@@ -110,6 +114,12 @@ td.cb{width:34px;text-align:center}input[type=checkbox]{width:15px;height:15px;a
 .attrs .v.bad{color:var(--crit);font-weight:600}.attrs .v.warn{color:var(--warn)}
 .disknote{color:var(--warn);background:rgba(216,161,58,.1);border:1px solid rgba(216,161,58,.3);border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:.85rem}
 .fixcmd{display:block;margin-top:8px;background:#0b0f14;border:1px solid var(--line2);border-radius:6px;padding:8px 10px;font-family:ui-monospace,Menlo,monospace;font-size:.74rem;color:var(--steel);white-space:pre-wrap;word-break:break-all;user-select:all;cursor:text}
+#view-library .page{max-width:none}
+.libcontrols{display:flex;align-items:center;gap:12px;margin:-10px 0 9px}
+#libSearch{flex:1;max-width:720px;background:var(--panel);border:1px solid var(--line2);border-radius:8px;color:var(--ink);padding:9px 12px;font:inherit}
+#libSearch:focus{outline:none;border-color:var(--brass)}
+.libfilters{margin:0 0 12px}
+#libBody .stub{margin-top:8px}
 
 /* plans (#35) */
 .navbtn.gated{opacity:.4;cursor:not-allowed}

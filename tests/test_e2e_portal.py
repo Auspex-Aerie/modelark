@@ -70,6 +70,18 @@ def _seed(con) -> None:
         "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes) "
         "VALUES('drive-replica','replica',0,1000000000,1000000000)"
     )
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
+        "orig_bytes,stored_bytes,compressed,annex_key) VALUES("
+        "'demo/small-llm','model.safetensors','model.safetensors','model.safetensors',"
+        "'drive-00',3000000000,2000000000,1,'KEY-small')"
+    )
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
+        "orig_bytes,stored_bytes,compressed,annex_key) VALUES("
+        "'demo/embed','model.safetensors','model.safetensors','model.safetensors',"
+        "'drive-replica',1000000000,600000000,1,'KEY-embed')"
+    )
 
 
 def _wait_port(port: int, timeout: int = 40) -> bool:
@@ -130,25 +142,60 @@ def _browser_flow() -> None:
             assert "1 to place" in fill_note and "2 blocked" in fill_note, fill_note
             assert pg.locator("#fillStart").is_disabled()
             print("  policy + capacity blockers rendered with disjoint totals; Start fill disabled")
-            # 3. open Catalog, wait for rows, confirm the giant is there
+
+            # The established drive's planned segment remains left-aligned; the durable archived
+            # occupancy trails in grey instead of pushing the useful planned colors to the right.
+            segments = pg.locator("#dc-drive-00 .dcbarfill > .seg")
+            assert segments.count() >= 2
+            assert "segarch" not in (segments.first.get_attribute("class") or "")
+            assert "segarch" in (segments.last.get_attribute("class") or "")
+            assert segments.first.bounding_box()["x"] < segments.last.bounding_box()["x"]
+            print("  drive progress segments remain left-aligned")
+
+            # 3. Library search and multi-drive filters operate over every archived model. Clicking
+            # a fleet card toggles the same filter chip, while multiple drives use OR semantics.
+            pg.click("button[data-view='library']")
+            pg.wait_for_selector("#libBody tbody tr")
+            assert pg.locator("#libBody tbody tr").count() == 2
+            assert pg.inner_text("#libShown") == "2 of 2 models"
+            pg.click("#libFleet .libdrive[data-drive='drive-00']")
+            assert pg.locator("#libBody tbody tr").count() == 1
+            assert "demo/small-llm" in pg.inner_text("#libBody")
+            assert pg.locator("#libDriveFilters [data-drive='drive-00'].on").count() == 1
+            pg.click("#libDriveFilters [data-drive='drive-replica']")
+            assert pg.locator("#libBody tbody tr").count() == 2
+            pg.click("#libFleet .libdrive[data-drive='drive-00']")
+            assert pg.locator("#libBody tbody tr").count() == 1
+            assert "demo/embed" in pg.inner_text("#libBody")
+            pg.fill("#libSearch", "small")
+            pg.wait_for_selector("#libBody .stub")
+            assert pg.inner_text("#libShown") == "0 of 2 models"
+            assert pg.inner_text("#libDriveFilters [data-drive='drive-00']") == "drive-00 · 1"
+            assert pg.inner_text("#libDriveFilters [data-drive='drive-replica']") == "drive-replica · 0"
+            pg.click("#libDriveFilters [data-drive='drive-replica']")
+            assert pg.locator("#libBody tbody tr").count() == 1
+            assert "demo/small-llm" in pg.inner_text("#libBody")
+            print("  library repository search + clickable multi-drive filters rendered")
+
+            # 4. open Catalog, wait for rows, confirm the giant is there
             pg.click("button[data-view='catalog']")
             time.sleep(2)
             pg.wait_for_selector("#tbody tr")
             assert pg.query_selector("tr[data-id='demo/giant-llm']"), "giant row missing from catalog"
             print("  catalog rendered")
-            # 4. tick the giant -> the over-cap banner should appear
+            # 5. tick the giant -> the over-cap banner should appear
             pg.check("tr[data-id='demo/giant-llm'] input[type=checkbox]")
             time.sleep(3)                                # selection round-trip + renderBudget
             pg.wait_for_selector("#capWarn", state="visible")
             msg = pg.inner_text("#capWarnMsg")
             assert "24-hour" in msg and "considerate" in msg, f"unexpected banner text: {msg!r}"
             print("  over-cap banner shown")
-            # 5. dismiss hides it
+            # 6. dismiss hides it
             pg.click("#capWarnDismiss")
             time.sleep(1)
             pg.wait_for_selector("#capWarn", state="hidden")
             print("  banner dismissed")
-            # 6. the same public hook used by the live Fill poll must show typed terminals without a
+            # 7. the same public hook used by the live Fill poll must show typed terminals without a
             # reload; verify the operator-facing evidence/action surface, not merely DOM presence.
             pg.evaluate("""
                 window.MA.showFillTerminal({
