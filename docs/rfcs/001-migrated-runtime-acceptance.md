@@ -1,6 +1,6 @@
 # RFC-001: Operator-attended migrated-runtime acceptance
 
-- **Status:** in execution — Phases A–C passed; Phase D read-only correction pending
+- **Status:** in execution — Phases A–D passed; stopped before operator-attended Phase E
 - **Date:** 2026-07-15
 - **Owners:** Auspex-Aerie + operator
 - **Related:** DEC-035, DEC-037, DEC-038, DEC-040, DEC-042, DEC-044, DEC-045,
@@ -109,8 +109,7 @@ back to these explicit paths.
 - [x] No Git operation beyond read-only inspection was performed during the recorded runtime
   acceptance pass.
 
-These checks must be repeated after the post-PR-16 follow-up is merged and installed; the checkmarks
-record the completed initial canonical-install gate, not acceptance of a stale revision.
+These checks were repeated after PR #19 was merged and installed from reviewed public `main`.
 
 ### C. Migration publication
 
@@ -133,14 +132,14 @@ All commands use explicit `--data-dir`, `--state-dir`, and `--config` values.
 
 - [x] CLI help/import passes from the installed environment.
 - [x] `modelark plan` shows the migrated active plan and canonical capacity mode.
-- [ ] `modelark library plan --json` derives placement without `--apply`.
+- [x] `modelark library plan --json` derives placement without `--apply`.
 - [x] `modelark library plan --explain` derives the DEC-045 graph/ledger read-only.
 - [x] The explain payload has no phantom reservations for satisfied copies.
-- [ ] Typed manifest/policy diagnostics are preserved rather than silently dropped.
+- [x] Typed manifest/policy diagnostics are preserved rather than silently dropped.
 - [x] Plan membership contains every migrated registered drive exactly once.
 - [x] Nominal capacity includes every plan member, independent of current mounts.
 - [x] Mounted, offline, read-only, primary, replica, and RAID-backed facts remain distinct.
-- [x] No catalog count or capacity-mode value changed during the initial CLI diagnostics.
+- [x] No catalog count or capacity-mode value changed during the repeated CLI diagnostics.
 - [x] No archive file, annex key, drive registration, selection, or fill state changed.
 
 **Stop condition:** schema write, policy drift, unexplained count change, missing plan member,
@@ -282,3 +281,33 @@ Installed-quality continuation — 2026-07-16:
   and non-apply `library plan --json` still used an RW/bootstrap connection;
 - acceptance stopped without invoking those paths against the migrated catalog. `INC-016` requires
   enforced read-only connections and no bootstrap for diagnostics before Phase D resumes.
+
+## Execution continuation — 2026-07-16
+
+Disposition: **Phase D passed; stopped before Phase E; portal not started.**
+
+| Phase | Result | Evidence |
+|---|---|---|
+| B — canonical install and identity | Pass | Clean reviewed public `main`; non-editable site-packages import; dependency consistency and focused installed-wheel regressions passed |
+| D — CLI/catalog | Pass | Help, plan list/show, JSON projection, and graph/ledger explanation completed with explicit paths and no `--apply` |
+| E — portal | Operator boundary | Not started; service remained inactive and no production/test portal listener remained |
+| F–H | Deferred | Cart decisions, restore, deployment, and real fill remain operator-attended continuations |
+
+Sanitized Phase-D evidence:
+
+- the schema-v2 catalog passed integrity and foreign-key checks with one active `guaranteed` plan,
+  seven unique plan members, and 444 selected repositories;
+- 390 valid manifests produced 494 requirements, 102 satisfied requirements, and 392 exact tasks
+  across seven ledgers;
+- 54 typed `MANIFEST_POLICY` blockers and 95 `COPY_POLICY_DRIFT` diagnostics remained visible;
+- no task was unassigned, no byte-capacity failure existed, and no satisfied requirement appeared
+  in the scheduled task set;
+- all seven durable plan members were currently offline. Planning retained their registered capacity
+  without presenting any as a live write target;
+- catalog/WAL/SHM, library-map, and config hashes, sizes, mtimes, logical row counts, schema version,
+  capacity mode, selection, and archive state were identical before and after the commands;
+- both rollback snapshots still passed immutable read-only integrity checks with the expected
+  schema-v0 model and selection counts.
+
+No portal, service, fill worker, fetch, restore, replica, registration, mount, or archive mutation was
+started by this continuation.
