@@ -15,7 +15,7 @@ from modelark.core import db
 from modelark.web import data, server
 
 
-def _catalog() -> sqlite3.Connection:
+def _empty_catalog() -> sqlite3.Connection:
     con = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
     for statement in db._statements(db.SCHEMA_PATH.read_text()):
         con.execute(statement)
@@ -23,11 +23,44 @@ def _catalog() -> sqlite3.Connection:
         "INSERT INTO plans(plan_id,name,capacity_mode,is_active) "
         "VALUES('ark','Ark','guaranteed',1)"
     )
+    return con
+
+
+def _drive(con, label, *, role="primary", raid=False, capacity=1_000_000):
     con.execute(
         "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes) "
-        "VALUES('drive-00','primary',0,1000000,1000000)"
+        "VALUES(?,?,?,?,?)",
+        [label, role, int(raid), capacity, capacity],
     )
-    con.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('ark','drive-00')")
+    con.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('ark',?)", [label])
+
+
+def _repo(con, repo, *, copies=1, size=100):
+    con.execute(
+        "INSERT INTO models(repo_id,category,numcopies) VALUES(?,'generative-llm',?)",
+        [repo, copies],
+    )
+    con.execute(
+        "INSERT INTO selection(repo_id,finalized_at) VALUES(?,'2026-07-15')", [repo]
+    )
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+        "VALUES(?,'model.safetensors',?,'safetensors','bf16')",
+        [repo, size],
+    )
+
+
+def _archive(con, repo, drive, *, stored=67, original=100):
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,stored_bytes,orig_bytes,compressed) "
+        "VALUES(?,'model.safetensors',?,?,?,1)",
+        [repo, drive, stored, original],
+    )
+
+
+def _catalog() -> sqlite3.Connection:
+    con = _empty_catalog()
+    _drive(con, "drive-00")
     con.executemany(
         "INSERT INTO models(repo_id,category,numcopies) VALUES(?,?,1)",
         [("demo/safe", "generative-llm"), ("demo/pickle-only", "generative-llm")],
@@ -75,6 +108,59 @@ def test_library_views_adapt_reconciled_mixed_cart_without_omission():
         plan = librarian.plan_view(con, plan_id="ark", capacity_mode="guaranteed")
         queue = librarian.queue_view(con, plan_id="ark", capacity_mode="guaranteed")
     _assert_mixed_cart(plan, queue)
+    con.close()
+
+
+def test_capacity_blocked_valid_repo_is_not_also_counted_as_ready():
+    con = _empty_catalog()
+    _drive(con, "raid", raid=True, capacity=10_000)
+    _drive(con, "replica", role="replica", capacity=100)
+    _repo(con, "demo/ready", size=100)
+    _repo(con, "demo/replica-blocked", copies=2, size=200)
+
+    plan = librarian.plan_view(con, plan_id="ark", capacity_mode="guaranteed")
+    queue = librarian.queue_view(con, plan_id="ark", capacity_mode="guaranteed")
+
+    assert plan["feasible"] is False
+    assert plan["totals"] == {
+        "n_planned": 1,
+        "n_done": 0,
+        "n_must": 0,
+        "n_bulk": 1,
+        "n_blocked": 1,
+        "n_selected": 2,
+    }
+    assert plan["capacity_failures"]
+    blocked = {item["repo"]: item for item in queue["models"]}["demo/replica-blocked"]
+    assert blocked["blocking_diagnostics"]
+    assert blocked["copy2"] == "replica"
+    assert blocked["copy2_candidates"] == ["replica"]
+    assert blocked["copy2_evidence"] == "eligible_hint"
+    con.close()
+
+
+def test_plural_replica_sources_preserve_deterministic_compatibility_alias():
+    con = _empty_catalog()
+    _drive(con, "raid-a", raid=True, capacity=10_000)
+    _drive(con, "raid-b", raid=True, capacity=10_000)
+    _drive(con, "replica", role="replica", capacity=10_000)
+    _repo(con, "demo/from-a", copies=2)
+    _repo(con, "demo/from-b", copies=2)
+    _archive(con, "demo/from-a", "raid-a")
+    _archive(con, "demo/from-b", "raid-b")
+
+    plan = librarian.plan_view(con, plan_id="ark", capacity_mode="guaranteed")
+    queue = librarian.queue_view(con, plan_id="ark", capacity_mode="guaranteed")
+
+    assert plan["sources"] == ["raid-a", "raid-b"]
+    assert plan["source"] == "raid-a"
+    assert plan["links"] == [
+        {"from": "raid-a", "to": "replica"},
+        {"from": "raid-b", "to": "replica"},
+    ]
+    by_repo = {item["repo"]: item for item in queue["models"]}
+    assert by_repo["demo/from-a"]["copy2_evidence"] == "assigned"
+    assert by_repo["demo/from-b"]["copy2_evidence"] == "assigned"
     con.close()
 
 
@@ -127,3 +213,11 @@ def test_http_plan_and_queue_return_typed_mixed_cart_instead_of_500():
     assert plan_status == 200 and queue_status == 200
     _assert_mixed_cart(plan, queue)
     con.close()
+
+
+if __name__ == "__main__":
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            fn()
+            print(f"ok  {name}")
+    print("all passed")

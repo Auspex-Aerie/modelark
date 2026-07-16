@@ -49,13 +49,26 @@ def _seed(con) -> None:
         "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
         "VALUES('demo/pickle-only','pytorch_model.bin',2000000000,'pytorch','fp16')"
     )
+    con.execute(
+        "INSERT INTO models(repo_id,author,params_b,category,variant,license,downloads_30d,"
+        "gated,status,numcopies) VALUES('demo/replica-blocked','demo',2.0,'generative-llm',"
+        "'base','mit',10,'false','discovered',2)"
+    )
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+        "VALUES('demo/replica-blocked','model.safetensors',2000000000,'safetensors','bf16')"
+    )
     con.executemany(
         "INSERT INTO selection(repo_id,finalized_at) VALUES(?,'2026-07-15')",
-        [("demo/tiny-llm",), ("demo/pickle-only",)],
+        [("demo/tiny-llm",), ("demo/pickle-only",), ("demo/replica-blocked",)],
     )
     con.execute(
         "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes) "
         "VALUES('drive-00','primary',0,10000000000000,10000000000000)"
+    )
+    con.execute(
+        "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes) "
+        "VALUES('drive-replica','replica',0,1000000000,1000000000)"
     )
 
 
@@ -100,17 +113,23 @@ def _browser_flow() -> None:
             time.sleep(3)                                # reload fires ~300ms after select; let it settle
             pg.wait_for_load_state("networkidle")
             print("  selected the ark plan")
-            # 2. the migrated-cart shape (valid + pickle-only) must render typed blockers rather
-            # than turning the Fill plan/queue requests into HTTP 500s or omitting the bad row.
+            # 2. The migrated-cart shape includes both a policy blocker and a valid manifest whose
+            # replica cannot fit. It must render typed, disjoint blockers rather than HTTP 500s,
+            # omitted rows, or inflated "to place" totals.
             pg.click("button[data-view='fill']")
             pg.wait_for_selector("#fillAdvisories .fadv.error")
             advisory = pg.inner_text("#fillAdvisories")
             assert "MANIFEST_POLICY" in advisory and "demo/pickle-only" in advisory
+            assert "CAPACITY_" in advisory
             pg.wait_for_selector("#fillQueue .telq.blocked")
-            blocked = pg.inner_text("#fillQueue .telq.blocked")
+            blocked = pg.inner_text("#fillQueue")
             assert "demo/pickle-only" in blocked and "MANIFEST_POLICY" in blocked
+            assert "demo/replica-blocked" in blocked and "CAPACITY_" in blocked
+            assert pg.locator("#fillQueue .telq.blocked").count() == 2
+            fill_note = pg.inner_text("#fillNote")
+            assert "1 to place" in fill_note and "2 blocked" in fill_note, fill_note
             assert pg.locator("#fillStart").is_disabled()
-            print("  typed mixed-cart blocker rendered; Start fill disabled")
+            print("  policy + capacity blockers rendered with disjoint totals; Start fill disabled")
             # 3. open Catalog, wait for rows, confirm the giant is there
             pg.click("button[data-view='catalog']")
             time.sleep(2)
@@ -164,7 +183,7 @@ def main() -> None:
         _seed(con)
         con.close()
         assert db.DB_PATH.parent == data_dir and db.DB_PATH.is_file()
-        print("  seeded 5 models (1 giant, 1 pickle-only blocker) in an isolated catalog")
+        print("  seeded 6 models (1 giant, policy + capacity blockers) in an isolated catalog")
 
         serve = Path(sys.executable).with_name("modelark")  # .venv-dev/bin/modelark
         proc = subprocess.Popen(
@@ -183,7 +202,7 @@ def main() -> None:
             assert plans["plans"][0]["provisioning"] == "uncompressed"  # one-release alias
             ids = [m["id"] for m in _get("/api/models")["rows"]]
             assert "demo/giant-llm" in ids, f"giant model missing from catalog: {ids}"
-            print(f"  api ok: cap={sel['cap_24h_gb']} GB · {len(ids)} models incl. giant + pickle blocker")
+            print(f"  api ok: cap={sel['cap_24h_gb']} GB · {len(ids)} models incl. giant + blockers")
             _browser_flow()
             print("all passed")
         finally:

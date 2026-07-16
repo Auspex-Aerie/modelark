@@ -1,9 +1,10 @@
 # RFC-001: Operator-attended migrated-runtime acceptance
 
-- **Status:** committed for acceptance execution
+- **Status:** in execution — Phases A–C passed; Phase D follow-up pending
 - **Date:** 2026-07-15
 - **Owners:** Auspex-Aerie + operator
-- **Related:** DEC-035, DEC-037, DEC-038, DEC-042, DEC-044, DEC-045, INC-014
+- **Related:** DEC-035, DEC-037, DEC-038, DEC-040, DEC-042, DEC-044, DEC-045,
+  DEF-011, DEF-027, DEF-028, INC-014, INC-015
 - **Execution record:** check boxes are completed only from observed evidence; an unchecked item is
   not implied by a later successful item.
 
@@ -84,59 +85,63 @@ back to these explicit paths.
 
 ### A. Source freeze and rollback evidence
 
-- [ ] Legacy fill is stopped.
-- [ ] Legacy portal supervisor is stopped, not merely its child process.
-- [ ] No legacy portal, CLI fill, download, compression, or replica worker remains.
-- [ ] No process holds the source SQLite/DuckDB catalog or WAL sidecars open.
-- [ ] The old portal port has no listener.
-- [ ] A raw SQLite copy including present WAL/SHM sidecars exists.
-- [ ] A consistent SQLite backup snapshot exists and passes `PRAGMA integrity_check`.
-- [ ] A portable SQL dump exists.
-- [ ] SHA-256 values and row counts are recorded in a non-overwriting manifest.
-- [ ] Source hashes are unchanged by the safety-backup operation.
+- [x] Legacy fill is stopped.
+- [x] Legacy portal supervisor is stopped, not merely its child process.
+- [x] No legacy portal, CLI fill, download, compression, or replica worker remains.
+- [x] No process holds the source SQLite/DuckDB catalog or WAL sidecars open.
+- [x] The old portal port has no listener.
+- [x] A raw SQLite copy including present WAL/SHM sidecars exists.
+- [x] A consistent SQLite backup snapshot exists and passes `PRAGMA integrity_check`.
+- [x] A portable SQL dump exists.
+- [x] SHA-256 values and row counts are recorded in a non-overwriting manifest.
+- [x] Source hashes are unchanged by the safety-backup operation.
 
 **Stop condition:** any writer, listener, missing backup, integrity failure, or changing source hash.
 
 ### B. Canonical install and identity
 
-- [ ] Canonical checkout is clean and equals reviewed `origin/main`.
-- [ ] Origin is `Auspex-Aerie/modelark`.
-- [ ] GitHub CLI/API identity is `auspexlabs` before any later GitHub write.
-- [ ] Installed package is non-editable and imports outside its source checkout.
-- [ ] `pip check` passes.
-- [ ] `modelark --help` and installed migration entry points load.
-- [ ] No Git operation beyond read-only inspection is performed during runtime acceptance.
+- [x] Canonical checkout is clean and equals the then-reviewed `origin/main`.
+- [x] Origin is `Auspex-Aerie/modelark`.
+- [x] GitHub CLI/API identity was `auspexlabs` before publication actions.
+- [x] Installed package is non-editable and imports outside its source checkout.
+- [x] `pip check` passes.
+- [x] `modelark --help` and installed migration entry points load.
+- [x] No Git operation beyond read-only inspection was performed during the recorded runtime
+  acceptance pass.
+
+These checks must be repeated after the post-PR-16 follow-up is merged and installed; the checkmarks
+record the completed initial canonical-install gate, not acceptance of a stale revision.
 
 ### C. Migration publication
 
-- [ ] Destination was absent before migration.
-- [ ] Migration selected the proven active engine explicitly when multiple legacy catalogs existed.
-- [ ] Migration worked from a consistent backup and never replaced the source.
-- [ ] Destination was published atomically.
-- [ ] Backup and destination manifests report `status=published`.
-- [ ] Source/destination row counts match, except only documented bootstrap additions.
-- [ ] Destination `PRAGMA user_version=2`.
-- [ ] Destination has `plans.capacity_mode` and no `plans.provisioning` column.
-- [ ] Legacy `uncompressed` maps to `guaranteed`; legacy `compressed` maps to
+- [x] Destination was absent before migration.
+- [x] Migration selected the proven active engine explicitly when multiple legacy catalogs existed.
+- [x] Migration worked from a consistent backup and never replaced the source.
+- [x] Destination was published atomically.
+- [x] Backup and destination manifests report `status=published`.
+- [x] Source/destination row counts match, except only documented bootstrap additions.
+- [x] Destination `PRAGMA user_version=2`.
+- [x] Destination has `plans.capacity_mode` and no `plans.provisioning` column.
+- [x] Legacy `uncompressed` maps to `guaranteed`; legacy `compressed` maps to
   `compression_aware` without policy drift.
-- [ ] Destination integrity and foreign-key checks pass.
-- [ ] The migrated library map matches the reviewed annex root.
+- [x] Destination integrity and foreign-key checks pass.
+- [x] The migrated library map matches the reviewed annex root.
 
 ### D. CLI and catalog acceptance
 
 All commands use explicit `--data-dir`, `--state-dir`, and `--config` values.
 
-- [ ] CLI help/import passes from the installed environment.
-- [ ] `modelark plan` shows the migrated active plan and canonical capacity mode.
+- [x] CLI help/import passes from the installed environment.
+- [x] `modelark plan` shows the migrated active plan and canonical capacity mode.
 - [ ] `modelark library plan --json` derives placement without `--apply`.
-- [ ] `modelark library plan --explain` derives the DEC-045 graph/ledger read-only.
-- [ ] The explain payload has no phantom reservations for satisfied copies.
+- [x] `modelark library plan --explain` derives the DEC-045 graph/ledger read-only.
+- [x] The explain payload has no phantom reservations for satisfied copies.
 - [ ] Typed manifest/policy diagnostics are preserved rather than silently dropped.
-- [ ] Plan membership contains every migrated registered drive exactly once.
-- [ ] Nominal capacity includes every plan member, independent of current mounts.
-- [ ] Mounted, offline, read-only, primary, replica, and RAID-backed facts remain distinct.
-- [ ] No catalog count or capacity-mode value changes during CLI diagnostics.
-- [ ] No archive file, annex key, drive registration, selection, or fill state is changed.
+- [x] Plan membership contains every migrated registered drive exactly once.
+- [x] Nominal capacity includes every plan member, independent of current mounts.
+- [x] Mounted, offline, read-only, primary, replica, and RAID-backed facts remain distinct.
+- [x] No catalog count or capacity-mode value changed during the initial CLI diagnostics.
+- [x] No archive file, annex key, drive registration, selection, or fill state changed.
 
 **Stop condition:** schema write, policy drift, unexplained count change, missing plan member,
 untyped blocker, archive mutation, or any command attempting execution.
@@ -248,7 +253,7 @@ Required correction before resuming this RFC:
 - add CLI, HTTP, and browser regressions for a mixed valid + pickle-only migrated cart;
 - repeat Phase D from a reviewed canonical build before starting the portal.
 
-Local remediation candidate — 2026-07-15 (not yet a reviewed canonical build):
+Published remediation — 2026-07-15 (not yet installed into the canonical acceptance tree):
 
 - the CLI and both portal projections now adapt the canonical reconciled graph and capacity ledger;
 - the response retains the legacy drive/queue fields plus typed diagnostics, capacity failures,
@@ -258,5 +263,11 @@ Local remediation candidate — 2026-07-15 (not yet a reviewed canonical build):
 - the full suite passes (210 tests), and a read-only migrated-catalog replay returns all 444 queue
   rows, all 54 manifest-policy blockers, no capacity failures, and sub-second plan/queue projections.
 
-The RFC remains stopped in Phase D until that candidate is reviewed, published, installed into the
-canonical acceptance tree, and rerun there. No working-tree build is promoted by this note.
+PR #16 merged with green Python 3.10/3.12 and isolated Playwright CI. Greptile's delayed 4/5 review
+confirmed the safety behavior and found three bounded projection defects: pending/blocked totals can
+overlap for a capacity-blocked valid manifest, the singular compatibility `source` field is lossy
+for plural sources, and an unassigned replica can lose its copy-2 eligibility hint. `INC-015` carries
+those fixes. Their focused regressions, the exact direct-file core-CI loop, a strengthened isolated
+Playwright flow, and the full 212-test suite now pass locally. The RFC remains stopped in Phase D
+until that follow-up is reviewed, public `main` is installed into the hidden canonical tree, and all
+Phase-D checks are repeated there.
