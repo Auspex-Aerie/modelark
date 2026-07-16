@@ -1,10 +1,10 @@
 # RFC-001: Operator-attended migrated-runtime acceptance
 
-- **Status:** in execution — Phases A–D passed; stopped before operator-attended Phase E
+- **Status:** in execution — Phases A–F passed; stopped before verified restore
 - **Date:** 2026-07-15
 - **Owners:** Auspex-Aerie + operator
 - **Related:** DEC-035, DEC-037, DEC-038, DEC-040, DEC-042, DEC-044, DEC-045,
-  DEF-011, DEF-027, DEF-028, INC-014, INC-015, INC-016
+  DEF-011, DEF-027, DEF-028, DEF-031, INC-014, INC-015, INC-016
 - **Execution record:** check boxes are completed only from observed evidence; an unchecked item is
   not implied by a later successful item.
 
@@ -169,11 +169,11 @@ Fill** on the operator's behalf.
 - [x] Operator explicitly selects the intended plan for the browser session.
 - [x] Operator reviews the migrated selection before changing it.
 - [x] Operator chooses and confirms the cart.
-- [ ] Capacity bars and graduated selection gate update after each change.
+- [x] Capacity bars and graduated selection gate update after each change.
 - [x] Operator stops before **Start Fill** and hands control back for diagnostics.
-- [ ] Re-run `library plan --json` and `--explain` against the chosen cart.
-- [ ] Review exact tasks, targets, dependencies, capacity ledgers, and typed blockers.
-- [ ] Explain any offline-drive dependency without removing that drive from the durable plan.
+- [x] Re-run `library plan --json` and `--explain` against the chosen cart.
+- [x] Review exact tasks, targets, dependencies, capacity ledgers, and typed blockers.
+- [x] Explain any offline-drive dependency without removing that drive from the durable plan.
 
 No new drive is a test prerequisite. If the chosen cart does not fit, the acceptance result is the
 typed capacity failure; resolution is an explicit cart reduction or capacity addition, not a test
@@ -314,13 +314,12 @@ started by this continuation.
 
 ## Execution continuation — 2026-07-16 Phase E/F
 
-Disposition: **Phase E passed; Phase F cart chosen; stopped before Start Fill and final CLI
-diagnostics.**
+Disposition: **Phases E and F passed; stopped before verified restore and Start Fill.**
 
 | Phase | Result | Evidence |
 |---|---|---|
 | E — loopback portal smoke | Pass | Canonical explicit-path process, loopback listener, packaged assets, hostile-web boundary, all six views, active `ark`, durable fleet, live mount resolution, canonical terminology, and idle worker were exercised |
-| F — operator cart | In progress | Operator reviewed 444 finalized repositories, privately preserved every typed exclusion and reason, removed exactly 54 manifest-policy blockers, and stopped with 390 finalized repositories before Start Fill |
+| F — operator cart | Pass | Reviewed UI build and read-only CLI diagnostics agree on the 390-repository cart; exact graph, placement, dependencies, ledgers, legacy differences, and live/offline drive evidence were reviewed before Start Fill |
 | G–H | Deferred | Restore, installed service, and real fill remain separately approved operator continuations |
 
 Sanitized Phase-E/F evidence:
@@ -343,6 +342,30 @@ Sanitized Phase-E/F evidence:
   progress, with isolated Chromium, XSS, projection, Ruff, and full-suite coverage;
 - DEF-029 records the separate drive-identity lifecycle gap found while distinguishing shelved,
   same-identity re-registration, mount-path drift, and genuinely stale/replaced media.
+- PR #21's Greptile-5/5 reviewed build was installed non-editably from public `main`. Live Chromium
+  confirmed 140 archived Library rows, exact repository search, synchronized multi-drive facets with
+  search-relative counts, and planned Fill segments to the left of durable archived occupancy;
+- repeated `library plan --json` and `--explain` used explicit paths without `--apply`. The diagnostic
+  catalog hash, size, mtime, schema version, integrity/FK result, selection, archive, plan-membership,
+  and capacity-mode evidence were identical before and after;
+- the chosen cart produces 390 manifests, 494 requirements, 102 satisfied requirements, and 392
+  assigned tasks: 288 fetches plus 104 replicas, including nine replica tasks dependent on unfinished
+  protected homes. The four active batches contain 13, 83, 192, and 104 tasks respectively; no task
+  is unassigned and no typed blocker or byte-capacity failure remains;
+- the shadow comparator deliberately reports seven reconciled-only protected-home tasks. Those
+  repositories have only `.gitattributes` or `.gitattributes` plus `README.md` recorded while their
+  canonical safetensors/config/tokenizer files are absent; the legacy completeness shortcut omitted
+  that work. Correcting those requirements and using exact file budgets transparently reflows 16
+  downstream bulk targets instead of normalizing the differences away;
+- Drives 00, 01, and 04 currently resolve; Drives 00/01 are writable while Drive 04 is read-only.
+  Drives 02/03/05/06 remain offline but retain durable plan membership. The accepted batch order will
+  eventually require Drive 02, and replica execution requires Drive 04 to be writable; these are
+  future execution preconditions, not reasons to delete capacity from the plan;
+- the refreshed process remained loopback-only and non-resuming. Host, Origin, CSRF, content-type,
+  and CSP checks passed; Fill stayed `idle`, and **Start Fill** was never clicked. A tab kept open
+  across the restart safely rejected its stale per-process CSRF capability; a hard refresh restored
+  mutation access. DEF-031 tracks replacing that raw error with explicit refresh guidance without
+  replaying the rejected action.
 
-The remaining Phase-F gate is to install the reviewed UI build, confirm its live filters/bars against
-the 390-repository cart, and repeat `library plan --json` plus `--explain` before any restore or fill.
+Phase F is complete. Phase G now requires the operator to choose a small archived repository and
+disposable restore destination. Phase H and any real Fill remain separate explicit approvals.
