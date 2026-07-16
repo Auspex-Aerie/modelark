@@ -52,6 +52,7 @@ jobs:
           pip install --no-deps /tmp/modelark-wheel/modelark-*.whl
           cd /tmp
           python -c "import tempfile; from pathlib import Path; from importlib.metadata import distribution; import scripts; from modelark import wishlist; from modelark.core import db; from modelark.web import server; d=tempfile.mkdtemp(); db.configure(d); c=db.connect(_bootstrapping=True); c.close(); assert wishlist.download()['max_24h_gb']==1000; assert (server.STATIC/'index.html').is_file(); assert db.DB_PATH.is_file() and Path(d) in db.DB_PATH.parents; assert scripts.__file__; names={e.name for e in distribution('modelark').entry_points}; assert {'modelark-migrate','modelark-deploy'} <= names"
+          python "$GITHUB_WORKSPACE/tests/test_runtime_paths.py"
           python -m scripts.phase4_wheel_migration_smoke
           python -c "import re; from importlib.metadata import metadata, requires; m=metadata('modelark'); r=requires('modelark') or []; name=lambda x: re.match(r'[A-Za-z0-9._-]+', x).group(0); canon=lambda x: re.sub(r'[-_.]+','-',name(x).lower()); assert m['License-Expression']=='Apache-2.0'; assert m['Project-URL']; assert not any(canon(x) in {'duckdb','hf-transfer'} and 'extra ==' not in x for x in r)"
           modelark-migrate --help
