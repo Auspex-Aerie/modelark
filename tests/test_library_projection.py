@@ -168,10 +168,13 @@ def test_library_plan_json_cli_returns_typed_policy_result():
     con = _catalog()
     args = Namespace(explain=False, apply=False, json=True, repo=None)
     output = io.StringIO()
-    with mock.patch.object(db, "connect", return_value=con), \
+    with mock.patch.object(db, "connect", return_value=con) as connect, \
+         mock.patch("modelark.plan.bootstrap") as bootstrap, \
          mock.patch("modelark.wishlist.exclude_pickle_only", return_value=True), \
          redirect_stdout(output):
         cli.cmd_library_plan(args)
+    connect.assert_called_once_with(read_only=True)
+    bootstrap.assert_not_called()
     payload = json.loads(output.getvalue())
     assert payload["feasible"] is False
     assert payload["blocking_diagnostics"] == ["MANIFEST_POLICY"]
