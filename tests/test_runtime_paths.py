@@ -61,7 +61,10 @@ def test_packaged_default_works_without_source_checkout(tmp_path):
 
 @_isolated_runtime
 def test_packaged_default_matches_source_policy(tmp_path):
-    source = db.REPO_ROOT / "wishlist.yaml"
+    # This is a source-fixture comparison, not a runtime path lookup. Under a non-editable wheel
+    # install db.REPO_ROOT correctly lives in site-packages, while this test still runs from the
+    # checkout and must name the checked-in operator policy explicitly.
+    source = Path(__file__).resolve().parents[1] / "wishlist.yaml"
     source_policy = yaml.safe_load(source.read_text())
     with mock.patch.object(db, "REPO_ROOT", tmp_path), \
             mock.patch.object(wishlist, "_user_config_path", return_value=tmp_path / "missing.yaml"):
