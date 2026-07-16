@@ -22,7 +22,9 @@ The external audit's numbered blockers are fixed. These are the remaining releas
 
 Post-release deferrals remain deferrals: the Torch-free StreamZNN package split (`DEF-014`), the
 privileged SMART/sudoers remainder of host setup (`DEF-025`), tensor/sub-shard checkpointing
-(`DEF-026`), and deeper pickle scanning and quarantine (`DEF-011`).
+(`DEF-026`), deeper pickle scanning and quarantine (`DEF-011`), and the public
+[artifact-support backlog](deferred-artifact-support.md) for the 54 real repositories tracked by
+`DEF-030`.
 
 ## The Plan epic (#33–#38) — ✅ DONE (2026-07-11)
 

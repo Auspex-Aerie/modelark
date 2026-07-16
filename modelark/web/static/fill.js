@@ -43,7 +43,7 @@
       .dcbadge.raid{background:#0f766e}.dcbadge.primary{background:#2c5f8f}.dcbadge.replica{background:#a8620a}
       .dcbar{height:22px;background:#eef1f6;border-radius:4px;overflow:hidden;border:1px solid #e0e5ec}
       .dcbarfill{display:flex;height:100%}
-      .seg{height:100%;min-width:1px}
+      .seg{height:100%;min-width:1px;flex:0 0 auto}
       .seg.segarch{background:#c7cfd9}
       .dcfoot{display:flex;justify-content:space-between;margin-top:8px;font:500 12px ui-monospace,monospace;color:#5c6675;font-variant-numeric:tabular-nums}
       .filllegend{display:flex;flex-wrap:wrap;gap:12px;margin:22px 0 4px;font-size:12px;color:#333}
@@ -135,8 +135,9 @@
     for (const m of d.models) { const k = keyOf(m); groups[k] = (groups[k] || 0) + m.size; }
     const usable = d.usable || 1;
     const archived = d.archived_bytes || 0;
-    // True fill = what's ALREADY archived (grey base) + what's PLANNED (category segments). The old
-    // fill_pct counted only new-planned bytes, so a near-full drive (lots archived) read ~half-empty.
+    // True fill = what's PLANNED (category segments) + what's ALREADY archived (grey). Planned work
+    // stays left-aligned; emitting the large archived segment first pushed the useful colors to the
+    // far right on an established drive and regressed the original progress-bar reading direction.
     const archSeg = archived > 0
       ? `<div class="seg segarch" style="width:${(100 * archived / usable).toFixed(2)}%" title="already archived: ${MA.gb(archived)}"></div>`
       : "";
@@ -147,7 +148,7 @@
     const totalPct = usable ? Math.min(100, Math.round(100 * total / usable)) : 0;
     return `<div class="drivecard${(d.n_models || archived) ? "" : " empty"}" id="dc-${esc(d.label)}">
       <div class="dchead"><span class="dclabel">${esc(d.label)}</span><span class="dcbadge ${esc(d.tier)}">${esc(badge)}</span></div>
-      <div class="dcbar"><div class="dcbarfill">${archSeg}${segs}</div></div>
+      <div class="dcbar"><div class="dcbarfill">${segs}${archSeg}</div></div>
       <div class="dcfoot"><span>${totalPct}% · ${MA.gb(total)}/${MA.gb(usable)}</span><span>${d.n_models} planned</span></div>
       <div class="dcdone" id="done-${esc(d.label)}"${archived ? "" : " hidden"}>${archived ? doneRowHTML(archived, usable) : ""}</div>
     </div>`;

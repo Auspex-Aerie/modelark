@@ -362,7 +362,7 @@ apply them quickly.
 
 The [decision log](docs/decision_log.md) has the full picture; the headline deferrals:
 
-- **Curation & safety** — a must-have toggle in the cart (CLI-only today), first-class gated/license-accept model handling, and deeper pickle hygiene (opcode scanning, quarantine, safetensors conversion).
+- **Curation & safety** — a must-have toggle in the cart (CLI-only today), first-class gated/license-accept model handling, and deeper pickle hygiene (opcode scanning, quarantine, safetensors conversion). The [deferred artifact-support backlog](docs/deferred-artifact-support.md) preserves the real repositories currently waiting on that full contract.
 - **Placement** — letting one model's shards span drives when it won't fit whole, compression-*aware* predictive packing (today it's a capacity failsafe), and growing or rebalancing a plan's fleet mid-run.
 - **Fill & transport** — tensor-level download checkpointing so a giant shard resumes instead of restarting, plus in-flight queue edits (append / re-download / re-verify) during a run.
 - **Verification & visibility** — a scheduled fleet-wide audit (on-demand re-verification already exists) and a download-status view over recorded `fetch_events`.

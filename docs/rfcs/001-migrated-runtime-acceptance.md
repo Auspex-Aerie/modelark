@@ -147,18 +147,18 @@ untyped blocker, archive mutation, or any command attempting execution.
 
 ### E. Loopback portal smoke
 
-- [ ] Start canonical `modelark serve --no-open` with explicit paths and without `--resume`.
-- [ ] Confirm the process executable and working tree are canonical.
-- [ ] Confirm the listener is loopback-only on the reviewed port.
-- [ ] Confirm the health endpoint responds.
-- [ ] Confirm Host/Origin/content-type/CSRF protections remain active.
-- [ ] Confirm Plans, Catalog, Disk, Library, Fill, and Verify views load.
-- [ ] Confirm the migrated `ark` plan is present and selectable.
-- [ ] Confirm all registered plan drives remain visible even when shelved.
-- [ ] Confirm currently mounted drives resolve only where expected.
-- [ ] Confirm Fill reports not running and no worker begins automatically.
-- [ ] Confirm capacity forecasts and admission evidence use canonical terminology.
-- [ ] Confirm no service unit is installed, enabled, or started by this manual smoke.
+- [x] Start canonical `modelark serve --no-open` with explicit paths and without `--resume`.
+- [x] Confirm the process executable and working tree are canonical.
+- [x] Confirm the listener is loopback-only on the reviewed port.
+- [x] Confirm the health endpoint responds.
+- [x] Confirm Host/Origin/content-type/CSRF protections remain active.
+- [x] Confirm Plans, Catalog, Disk, Library, Fill, and Verify views load.
+- [x] Confirm the migrated `ark` plan is present and selectable.
+- [x] Confirm all registered plan drives remain visible even when shelved.
+- [x] Confirm currently mounted drives resolve only where expected.
+- [x] Confirm Fill reports not running and no worker begins automatically.
+- [x] Confirm capacity forecasts and admission evidence use canonical terminology.
+- [x] Confirm no service unit is installed, enabled, or started by this manual smoke.
 
 **Mandatory operator boundary:** stop automated work here. Leave the non-resuming portal available for
 the operator to inspect the plan and choose the model cart. Do not select models or press **Start
@@ -166,11 +166,11 @@ Fill** on the operator's behalf.
 
 ### F. Operator cart selection (later continuation)
 
-- [ ] Operator explicitly selects the intended plan for the browser session.
-- [ ] Operator reviews the migrated selection before changing it.
-- [ ] Operator chooses and confirms the cart.
+- [x] Operator explicitly selects the intended plan for the browser session.
+- [x] Operator reviews the migrated selection before changing it.
+- [x] Operator chooses and confirms the cart.
 - [ ] Capacity bars and graduated selection gate update after each change.
-- [ ] Operator stops before **Start Fill** and hands control back for diagnostics.
+- [x] Operator stops before **Start Fill** and hands control back for diagnostics.
 - [ ] Re-run `library plan --json` and `--explain` against the chosen cart.
 - [ ] Review exact tasks, targets, dependencies, capacity ledgers, and typed blockers.
 - [ ] Explain any offline-drive dependency without removing that drive from the durable plan.
@@ -311,3 +311,38 @@ Sanitized Phase-D evidence:
 
 No portal, service, fill worker, fetch, restore, replica, registration, mount, or archive mutation was
 started by this continuation.
+
+## Execution continuation — 2026-07-16 Phase E/F
+
+Disposition: **Phase E passed; Phase F cart chosen; stopped before Start Fill and final CLI
+diagnostics.**
+
+| Phase | Result | Evidence |
+|---|---|---|
+| E — loopback portal smoke | Pass | Canonical explicit-path process, loopback listener, packaged assets, hostile-web boundary, all six views, active `ark`, durable fleet, live mount resolution, canonical terminology, and idle worker were exercised |
+| F — operator cart | In progress | Operator reviewed 444 finalized repositories, privately preserved every typed exclusion and reason, removed exactly 54 manifest-policy blockers, and stopped with 390 finalized repositories before Start Fill |
+| G–H | Deferred | Restore, installed service, and real fill remain separately approved operator continuations |
+
+Sanitized Phase-E/F evidence:
+
+- the portal served only on loopback and rejected untrusted Host, missing/untrusted Origin, invalid
+  CSRF capability, and non-JSON mutation envelopes; all packaged scripts/styles and read-only API
+  surfaces loaded;
+- Fill remained `idle` throughout and no user service or automatic resume worker started;
+- seven durable plan members remained visible; live resolution distinguished mounted media from
+  shelved members without removing any plan capacity;
+- the 54 exclusions comprised 50 pickle-only repositories refused by the safe public default and
+  four unsupported-only repositories. Their public product backlog and cumulative reasons are in
+  `docs/deferred-artifact-support.md` under DEF-030;
+- the authorized cart mutation changed only the selection from 444 to 390. The canonical portal
+  projection then reported 383 ready, seven done, zero blocked, zero capacity failures, and
+  `feasible=true`; the worker remained idle;
+- acceptance exposed two bounded UI defects: Library lacked repository/drive filtering, and durable
+  occupancy pushed Drive 00's planned progress colors to the right. The accompanying implementation
+  adds clickable multi-drive filters plus repository search and restores left-aligned planned
+  progress, with isolated Chromium, XSS, projection, Ruff, and full-suite coverage;
+- DEF-029 records the separate drive-identity lifecycle gap found while distinguishing shelved,
+  same-identity re-registration, mount-path drift, and genuinely stale/replaced media.
+
+The remaining Phase-F gate is to install the reviewed UI build, confirm its live filters/bars against
+the 390-repository cart, and repeat `library plan --json` plus `--explain` before any restore or fill.

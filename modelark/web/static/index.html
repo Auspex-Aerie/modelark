@@ -107,7 +107,7 @@
   </div>
 </section>
 
-<!-- ===== Library view (stub) ===== -->
+<!-- ===== Library view ===== -->
 <section id="view-library" class="view" hidden>
   <div class="page">
     <h1 class="ph">Library</h1>
@@ -116,6 +116,11 @@
     <p class="psub"><b>Fleet</b></p>
     <div id="libFleet" class="diskgrid"></div>
     <p class="psub"><b>Archived models</b></p>
+    <div class="libcontrols">
+      <input id="libSearch" type="search" placeholder="Search archived repository…" autocomplete="off">
+      <span class="shown" id="libShown"></span>
+    </div>
+    <div class="filters libfilters" id="libDriveFilters"></div>
     <div id="libBody" class="tablewrap"></div>
   </div>
 </section>

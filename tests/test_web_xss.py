@@ -62,6 +62,7 @@ def test_api_text_fields_use_the_shared_encoder() -> None:
         "library.js": (
             "${esc(m.repo_id)}",
             "${esc((m.drives || []).join(\", \"))}",
+            'data-drive="${esc(x.label)}"',
         ),
         "fill.js": (
             "${esc(a.msg)}",
