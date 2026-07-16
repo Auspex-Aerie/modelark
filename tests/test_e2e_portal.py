@@ -161,7 +161,7 @@ def _browser_flow() -> None:
             pg.click("#libFleet .libdrive[data-drive='drive-00']")
             assert pg.locator("#libBody tbody tr").count() == 1
             assert "demo/small-llm" in pg.inner_text("#libBody")
-            assert pg.locator("#libDriveFilters [data-drive='drive-00']").get_attribute("class").endswith(" on")
+            assert pg.locator("#libDriveFilters [data-drive='drive-00'].on").count() == 1
             pg.click("#libDriveFilters [data-drive='drive-replica']")
             assert pg.locator("#libBody tbody tr").count() == 2
             pg.click("#libFleet .libdrive[data-drive='drive-00']")
@@ -170,6 +170,8 @@ def _browser_flow() -> None:
             pg.fill("#libSearch", "small")
             pg.wait_for_selector("#libBody .stub")
             assert pg.inner_text("#libShown") == "0 of 2 models"
+            assert pg.inner_text("#libDriveFilters [data-drive='drive-00']") == "drive-00 · 1"
+            assert pg.inner_text("#libDriveFilters [data-drive='drive-replica']") == "drive-replica · 0"
             pg.click("#libDriveFilters [data-drive='drive-replica']")
             assert pg.locator("#libBody tbody tr").count() == 1
             assert "demo/small-llm" in pg.inner_text("#libBody")

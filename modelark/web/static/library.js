@@ -51,14 +51,20 @@ window.loadLibrary = async function () {
 
   const render = () => {
     const query = searchEl.value.trim().toLowerCase();
-    const models = d.models.filter(m => {
-      const matchesRepo = !query || String(m.repo_id || "").toLowerCase().includes(query);
+    const searchedModels = d.models.filter(m =>
+      !query || String(m.repo_id || "").toLowerCase().includes(query)
+    );
+    const matchesByDrive = new Map(d.fleet.map(x => [x.label, 0]));
+    searchedModels.forEach(m => (m.drives || []).forEach(label => {
+      if (matchesByDrive.has(label)) matchesByDrive.set(label, matchesByDrive.get(label) + 1);
+    }));
+    const models = searchedModels.filter(m => {
       const matchesDrive = !selectedDrives.size || (m.drives || []).some(label => selectedDrives.has(label));
-      return matchesRepo && matchesDrive;
+      return matchesDrive;
     });
     shownEl.textContent = `${models.length} of ${d.models.length} models`;
     filtersEl.innerHTML = '<span class="flabel">drives</span>' + d.fleet.map(x =>
-      `<button type="button" class="chip toggle${selectedDrives.has(x.label) ? " on" : ""}" data-drive="${esc(x.label)}">${esc(x.label)} · ${esc(x.n_models)}</button>`
+      `<button type="button" class="chip toggle${selectedDrives.has(x.label) ? " on" : ""}" data-drive="${esc(x.label)}">${esc(x.label)} · ${esc(matchesByDrive.get(x.label) || 0)}</button>`
     ).join("");
     fleet.querySelectorAll(".libdrive").forEach(card => {
       const on = selectedDrives.has(card.dataset.drive);
