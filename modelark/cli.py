@@ -214,9 +214,17 @@ def cmd_library_plan(args):
         finally:
             con.close()
         return
-    con = db.connect()          # RW like fetch: portal must be stopped; replays any dirty WAL
-    try:                        # one connection for the whole command (plan → apply → post-check)
-        prow = plan.active(con) or plan.bootstrap(con)   # #33: scope planning to the active Plan
+    # Planning is a diagnostic until --apply is explicit. In particular, do not let an apparently
+    # read-only JSON projection replay/bootstrap the catalog while an operator is qualifying a
+    # migrated runtime (RFC-001). Execution retains one RW connection for plan → apply → check.
+    read_only = not args.apply
+    con = db.connect(read_only=read_only)
+    try:
+        prow = plan.active(con)
+        if prow is None:
+            if read_only:
+                raise SystemExit("no active plan; create/select a plan before requesting placement")
+            prow = plan.bootstrap(con)
         pid, capacity_mode = prow["plan_id"], prow["capacity_mode"]
         if getattr(args, "json", False):
             print(json.dumps(librarian.plan_view(
@@ -287,10 +295,14 @@ def _tb(n):
 def cmd_plan(args):
     """The first-class Plan (#33): identity + fixed drive set + the three live capacity numbers."""
     from modelark import plan
-    con = db.connect()
+    sub = args.plan_cmd
+    read_only = sub in ("list", "show")
+    con = db.connect(read_only=read_only)
     try:
-        plan.bootstrap(con)                              # idempotent: ensure `ark` exists + owns the fleet
-        sub = args.plan_cmd
+        # Mutations retain the historical bootstrap convenience. List/show must reflect durable
+        # facts without upserting plan membership merely because an operator inspected it.
+        if not read_only:
+            plan.bootstrap(con)
         if sub == "list":
             for p in plan.list_plans(con):
                 t = plan.totals(con, p["plan_id"])
@@ -300,7 +312,11 @@ def cmd_plan(args):
                       f"raw={_tb(t['uncompressed'])}  expected={_tb(t['compressed'])}")
         elif sub == "show":
             pid = args.plan or (plan.active(con) or {}).get("plan_id")
-            if not pid or plan.get(con, pid) is None:
+            if not pid:
+                raise SystemExit(
+                    "no active plan; create/select a plan before running show"
+                )
+            if plan.get(con, pid) is None:
                 raise SystemExit(f"no such plan: {pid}")
             p, t = plan.get(con, pid), plan.totals(con, pid)
             print(f"Plan {p['plan_id']} ({p['name']}) — {'ACTIVE' if p['is_active'] else 'inactive'}, "

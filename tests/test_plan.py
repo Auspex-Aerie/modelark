@@ -7,11 +7,15 @@ are exercised too). No portal, no drives mounted — totals() reads the catalog 
 """
 from __future__ import annotations
 
+import io
 import sqlite3
 import warnings
+from argparse import Namespace
+from contextlib import redirect_stdout
+from unittest import mock
 
 from modelark.core import db
-from modelark import librarian, plan
+from modelark import cli, librarian, plan
 
 
 def _mem() -> sqlite3.Connection:
@@ -97,6 +101,34 @@ def test_capacity_mode_is_canonical_with_one_release_legacy_alias():
     assert legacy["capacity_mode"] == "compression_aware"
     assert updated["capacity_mode"] == "guaranteed"
     assert any("deprecated" in str(item.message) for item in caught)
+
+
+def test_plan_list_and_show_are_read_only_diagnostics():
+    for command in (Namespace(plan_cmd="list"), Namespace(plan_cmd="show", plan=None)):
+        con = _mem()
+        _seed_drives(con)
+        plan.bootstrap(con)
+        output = io.StringIO()
+        with mock.patch.object(db, "connect", return_value=con) as connect, \
+             mock.patch.object(plan, "bootstrap") as bootstrap, \
+             redirect_stdout(output):
+            cli.cmd_plan(command)
+        connect.assert_called_once_with(read_only=True)
+        bootstrap.assert_not_called()
+        assert "ark" in output.getvalue()
+
+
+def test_plan_show_without_active_plan_has_a_clear_read_only_error():
+    con = _mem()
+    with mock.patch.object(db, "connect", return_value=con) as connect, \
+         mock.patch.object(plan, "bootstrap") as bootstrap:
+        try:
+            cli.cmd_plan(Namespace(plan_cmd="show", plan=None))
+            assert False, "show must require an existing active plan"
+        except SystemExit as exc:
+            assert str(exc) == "no active plan; create/select a plan before running show"
+    connect.assert_called_once_with(read_only=True)
+    bootstrap.assert_not_called()
 
 
 # ---- totals: the three live numbers -----------------------------------------

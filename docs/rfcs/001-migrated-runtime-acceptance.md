@@ -1,10 +1,10 @@
 # RFC-001: Operator-attended migrated-runtime acceptance
 
-- **Status:** in execution — Phases A–C passed; Phase D follow-up pending
+- **Status:** in execution — Phases A–C passed; Phase D read-only correction pending
 - **Date:** 2026-07-15
 - **Owners:** Auspex-Aerie + operator
 - **Related:** DEC-035, DEC-037, DEC-038, DEC-040, DEC-042, DEC-044, DEC-045,
-  DEF-011, DEF-027, DEF-028, INC-014, INC-015
+  DEF-011, DEF-027, DEF-028, INC-014, INC-015, INC-016
 - **Execution record:** check boxes are completed only from observed evidence; an unchecked item is
   not implied by a later successful item.
 
@@ -271,3 +271,14 @@ those fixes. Their focused regressions, the exact direct-file core-CI loop, a st
 Playwright flow, and the full 212-test suite now pass locally. The RFC remains stopped in Phase D
 until that follow-up is reviewed, public `main` is installed into the hidden canonical tree, and all
 Phase-D checks are repeated there.
+
+Installed-quality continuation — 2026-07-16:
+
+- PR #17's projection corrections and PR #18's wheel-installed test contract were installed from
+  reviewed public `main`;
+- the exact direct-file suite against site-packages, the full 212-test pytest suite, Ruff, a fresh
+  wheel's resource/runtime-path/schema-migration smokes, and isolated Chromium E2E passed;
+- before opening the migrated catalog for Phase D, inspection found that `plan list`, `plan show`,
+  and non-apply `library plan --json` still used an RW/bootstrap connection;
+- acceptance stopped without invoking those paths against the migrated catalog. `INC-016` requires
+  enforced read-only connections and no bootstrap for diagnostics before Phase D resumes.
