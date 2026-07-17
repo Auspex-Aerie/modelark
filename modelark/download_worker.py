@@ -9,13 +9,14 @@ partial; hf_xet currently reconstructs that interrupted file from zero (INC-010)
 
 Protocol: argv[1] = JSON {repo_id, rfilename, local_dir, result}. Writes a JSON result and exits 0:
     {"ok": true,  "path": "<downloaded file>"}
-    {"ok": false, "error_type": "gated|not_found|http|transient",
+    {"ok": false, "error_type": "gated|not_found|http|local_io|transient",
                   "status_code": int|null, "retry_after": float|null, "detail": "..."}
 A stall/kill exits via signal WITHOUT writing the result; the parent reads the negative return code.
 The result travels by file (not stdout) — hf/its deps may write to stdout and would corrupt it.
 """
 from __future__ import annotations
 
+import errno
 import json
 import socket
 import sys
@@ -25,6 +26,9 @@ from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
 _SOCKET_TIMEOUT = 120       # belt-and-suspenders; the parent's no-progress watchdog is the real guard
+_LOCAL_ERRNOS = {
+    errno.EACCES, errno.EIO, errno.ENOSPC, errno.ENOTDIR, errno.EPERM, errno.EROFS,
+}
 
 
 def _retry_after(e) -> float | None:
@@ -49,6 +53,17 @@ def run(req: dict) -> dict:
         code = getattr(getattr(e, "response", None), "status_code", None)
         return {"ok": False, "error_type": "http", "status_code": code,
                 "retry_after": _retry_after(e), "detail": str(e)[:300]}
+    except (FileNotFoundError, IsADirectoryError, PermissionError) as e:
+        return {"ok": False, "error_type": "local_io", "status_code": None,
+                "retry_after": None, "errno": e.errno,
+                "detail": f"{type(e).__name__}: {e}"[:300]}
+    except OSError as e:
+        if e.errno in _LOCAL_ERRNOS:
+            return {"ok": False, "error_type": "local_io", "status_code": None,
+                    "retry_after": None, "errno": e.errno,
+                    "detail": f"{type(e).__name__}: {e}"[:300]}
+        return {"ok": False, "error_type": "transient", "status_code": None,
+                "retry_after": None, "detail": f"{type(e).__name__}: {e}"[:300]}
     except Exception as e:      # timeout / connection reset / chunked-encoding → transient; parent retries
         return {"ok": False, "error_type": "transient", "status_code": None, "retry_after": None,
                 "detail": f"{type(e).__name__}: {e}"[:300]}

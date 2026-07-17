@@ -293,6 +293,20 @@ def execute(
         "say": f"plan '{pid}' · capacity mode={capacity_mode} · {len(prow['drives'])} drive(s)",
     })
 
+    if ctx.check_hf_auth:
+        auth_failure = fetch.hf_auth_preflight(ctx)
+        if auth_failure is not None:
+            ctx.on_progress({
+                "phase": "auth-invalid", "code": auth_failure["code"],
+                "evidence": auth_failure["evidence"], "actions": auth_failure["actions"],
+                "say": f"🔴 {auth_failure['message']}",
+            })
+            return _terminal(
+                "blocked", auth_failure["message"], code=auth_failure["code"],
+                gate=auth_failure["gate"], evidence=auth_failure["evidence"],
+                actions=auth_failure["actions"],
+            )
+
     attempts: dict[str, int] = {}
     made_progress = False
     first = True
@@ -387,6 +401,16 @@ def execute(
                 made_progress = True
             if outcome["stopped"] or ctx.should_stop():
                 return _stop_terminal()
+            if outcome.get("terminal_failure") is not None:
+                failure = outcome["terminal_failure"]
+                state = "paused" if made_progress else "blocked"
+                return _terminal(
+                    state, failure["message"], code=failure["code"],
+                    gate=failure.get("gate", "C"), evidence=failure.get("evidence"),
+                    actions=failure.get("actions", ()),
+                    failed=([{"repo": outcome["terminal_repo"]}]
+                            if outcome.get("terminal_repo") else []),
+                )
             if outcome["throttled"]:
                 return _terminal(
                     "paused", "24h download cap reached (resumable)", code="DOWNLOAD_THROTTLED",

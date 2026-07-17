@@ -84,8 +84,9 @@ def _log_event(log, ev: dict) -> None:
     elif fp == "compress-crashed":
         log.warning("compressor crashed → stored raw", repo=ev.get("repo"), file=ev.get("file"))
     elif fp == "download-retry":
-        log.warning("download stalled → retry", repo=ev.get("repo"), file=ev.get("file"),
-                    cooldown=bool(ev.get("stall_cooldown")))
+        log.warning("transient download retry", repo=ev.get("repo"), file=ev.get("file"),
+                    attempt=ev.get("retry_attempt"), limit=ev.get("retry_limit"),
+                    reason=ev.get("retry_reason"), cooldown=bool(ev.get("stall_cooldown")))
     elif fp == "stored" and "session_bytes" in ev:                 # the per-file completion (carries stats)
         log.info("stored", repo=ev.get("repo"), file=ev.get("file"),
                  ratio=ev.get("ratio"), session_gb=round((ev.get("session_bytes") or 0) / 1e9, 1))
@@ -135,6 +136,7 @@ def start(body: dict) -> dict:
                 con=data.conn(), lock=data._lock, on_progress=logged_emit,
                 should_stop=should_stop,
                 read_connection_factory=lambda: db.connect(read_only=True),
+                check_hf_auth=True,
             )
             res = fill.execute(ctx, max_24h_gb=max_24h_gb, guided=True)
             logged_emit({"result": res})

@@ -104,7 +104,8 @@ def _executor_harness(*, failed=()):
                 )
             stored.append(repo)
         return {"stored_repos": stored, "failed_repos": bad, "capacity_failure": None,
-                "throttled": False, "stopped": False, "drive_unwritable": False}
+                "terminal_failure": None, "terminal_repo": None, "throttled": False,
+                "stopped": False, "drive_unwritable": False}
 
     def fake_replica(tasks, ctx=None):
         calls.append(("replica", tasks[0].target_drive, [task.repo_id for task in tasks]))
@@ -231,6 +232,50 @@ def test_reconciled_executor_bounds_failed_task_retries():
     assert sum("b" in repos for kind, _, repos in calls if kind == "fetch") == fill._MAX_TASK_ATTEMPTS
 
 
+def test_executor_blocks_before_reconciliation_when_configured_hf_token_is_invalid():
+    con, calls, _, _ = _executor_harness()
+    failure = {
+        "code": "HF_AUTH_INVALID",
+        "message": "configured Hugging Face credential is invalid",
+        "evidence": {"credential_source": "cached"},
+        "actions": ["hf_auth_login_force", "retry_fill"],
+        "gate": "A",
+    }
+    ctx = fetch.RunCtx(con=con, check_hf_auth=True)
+    with mock.patch.object(fill.fetch, "hf_auth_preflight", return_value=failure), \
+         mock.patch.object(fill, "_reconcile") as reconcile_plan:
+        result = fill.execute(ctx, guided=True, max_24h_gb=0)
+    assert result["state"] == "blocked" and result["code"] == "HF_AUTH_INVALID", result
+    assert result["gate"] == "A" and result["evidence"] == failure["evidence"]
+    reconcile_plan.assert_not_called()
+    assert calls == []
+
+
+def test_executor_stops_batch_on_typed_fetch_terminal_after_durable_progress():
+    con, calls, fake_run, fake_replica = _executor_harness()
+    terminal = {
+        "code": "TARGET_PATH_CONFLICT",
+        "message": "archive target is not safely replaceable",
+        "evidence": {"rfilename": "model.gguf"},
+        "actions": ["inspect_annex_placeholder", "retry_fill"],
+        "gate": "C",
+    }
+
+    def terminal_run(**kwargs):
+        outcome = fake_run(**kwargs)
+        outcome["terminal_failure"] = terminal
+        outcome["terminal_repo"] = kwargs["repos"][-1]
+        return outcome
+
+    with mock.patch.object(fill.fetch, "run", side_effect=terminal_run), \
+         mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=fake_replica), \
+         mock.patch.object(fill, "_await_drive", return_value=True):
+        result = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
+    assert result["state"] == "paused" and result["code"] == "TARGET_PATH_CONFLICT", result
+    assert result["failed"] and result["failed"][0]["repo"]
+    assert len(calls) == 1, "a typed terminal must stop the batch without cycling repositories"
+
+
 def test_dead_drive_parks_without_running_task():
     con, calls, fake_run, fake_replica = _executor_harness()
     with mock.patch.object(fill.fetch, "run", side_effect=fake_run), \
@@ -287,6 +332,34 @@ def test_fetch_run_bails_on_dead_drive_midbatch(tmp_path):
     assert any(e.get("awaiting_drive") == "drive-01" for e in events), "should emit awaiting on dead-drive bail"
 
 
+def test_fetch_run_stops_on_midrun_unauthorized_without_repo_churn(tmp_path):
+    import httpx
+    from huggingface_hub.errors import HfHubHTTPError
+
+    calls = []
+
+    def unauthorized(ctx, rid, dest, label, annex, cfg):
+        calls.append(rid)
+        response = httpx.Response(401, request=httpx.Request("GET", "https://huggingface.co"))
+        raise HfHubHTTPError("unauthorized", response=response)
+
+    ctx = fetch.RunCtx(con=object())
+    with mock.patch.object(fetch.register, "archive_path", return_value=tmp_path), \
+         mock.patch.object(fetch, "_is_annex", return_value=False), \
+         mock.patch.object(fetch, "fetch_model", side_effect=unauthorized), \
+         mock.patch.object(fetch, "_bytes_last_24h", return_value=0), \
+         mock.patch.object(fetch, "_event"), \
+         mock.patch.object(fetch.wishlist, "compression", return_value={}):
+        result = fetch.run(
+            drive_label="drive-00", repos=["first", "second", "third"],
+            max_24h_gb=0, ctx=ctx,
+        )
+    assert calls == ["first"], "a systemic 401 must stop immediately, not rotate through repositories"
+    assert result["terminal_failure"]["code"] == "HF_AUTH_INVALID"
+    assert result["terminal_repo"] == "first"
+    assert result["failed_repos"] == []
+
+
 # ---- per-file capacity failsafe (real reconciler + ledger) ----------------------------------
 
 
@@ -305,7 +378,8 @@ def _capacity_run(capacity_mode, free_bytes, a_stored):
 
     def fake_run(*, drive_label, repos, task_manifests, before_file, **kwargs):
         result = {"stored_repos": [], "failed_repos": [], "capacity_failure": None,
-                  "throttled": False, "stopped": False, "drive_unwritable": False}
+                  "terminal_failure": None, "terminal_repo": None, "throttled": False,
+                  "stopped": False, "drive_unwritable": False}
         for r in repos:
             item = task_manifests[r][0]
             try:

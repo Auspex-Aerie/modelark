@@ -195,7 +195,34 @@ def _browser_flow() -> None:
             time.sleep(1)
             pg.wait_for_selector("#capWarn", state="hidden")
             print("  banner dismissed")
-            # 7. the same public hook used by the live Fill poll must show typed terminals without a
+
+            # 7. A bounded transport retry must be visibly identified as network work, with its
+            # attempt count, instead of looking like rapid model churn or an unexplained stall.
+            retry_status = {
+                "status": "running", "running": True, "phase": "primary",
+                "drive": "drive-00", "repo": "demo/small-llm",
+                "file": "model.safetensors", "file_phase": "download-retry",
+                "retry_attempt": 2, "retry_limit": 4, "retry_reason": "transient_network",
+            }
+            pg.route(
+                "**/api/fill/status",
+                lambda route: route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(retry_status)
+                ),
+            )
+            pg.evaluate("window.loadFill()")
+            for _ in range(40):
+                if "network attempt 2/4" in pg.inner_text("#fillStatus"):
+                    break
+                time.sleep(0.25)
+            else:
+                raise AssertionError(f"retry attempt was not rendered: {pg.inner_text('#fillStatus')!r}")
+            assert "transient network retry" in pg.inner_text("#fillTelemetry")
+            assert "2 / 4" in pg.inner_text("#fillTelemetry")
+            pg.unroute("**/api/fill/status")
+            print("  transient retry reason + attempt count rendered")
+
+            # 8. the same public hook used by the live Fill poll must show typed terminals without a
             # reload; verify the operator-facing evidence/action surface, not merely DOM presence.
             pg.evaluate("""
                 window.MA.showFillTerminal({

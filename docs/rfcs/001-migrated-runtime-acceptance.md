@@ -1,11 +1,12 @@
 # RFC-001: Operator-attended migrated-runtime acceptance
 
-- **Status:** in execution — Phases A–F passed; Phase G remediation merged and awaits installation
-  plus operator-approved audit/restore
+- **Status:** in execution — Phases A–G passed; Phase H stopped safely after the first successful
+  archive task exposed typed acquisition-boundary gaps tracked by public issue #28
 - **Date:** 2026-07-15
 - **Owners:** Auspex-Aerie + operator
 - **Related:** DEC-035, DEC-037, DEC-038, DEC-040, DEC-042, DEC-044, DEC-045,
-  DEF-011, DEF-027, DEF-028, DEF-031, INC-014, INC-015, INC-016, INC-017
+  DEC-046, DEF-011, DEF-027, DEF-028, DEF-031, INC-014, INC-015, INC-016, INC-017,
+  INC-018, INC-019
 - **Execution record:** check boxes are completed only from observed evidence; an unchecked item is
   not implied by a later successful item.
 
@@ -182,32 +183,32 @@ fixture disguised as production storage.
 
 ### G. Verified restore (later continuation)
 
-- [ ] Operator chooses a small archived repository and disposable destination.
-- [ ] Every required archived file has at least one currently readable recorded copy.
-- [ ] A read-only `repair-hashes --repo ...` audit reports every legacy hash gap and proves each
+- [x] Operator chooses a small archived repository and disposable destination.
+- [x] Every required archived file has at least one currently readable recorded copy.
+- [x] A read-only `repair-hashes --repo ...` audit reports every legacy hash gap and proves each
       proposed digest against the archive's committed Git blob.
-- [ ] If repair is needed, operator separately approves `--apply`, confirms the consistent catalog
+- [x] If repair is needed, operator separately approves `--apply`, confirms the consistent catalog
       backup, and re-runs the read-only audit before restore.
-- [ ] Prefer already-present content; do not rely on annex retrieval onto read-only media.
-- [ ] Restore stages atomically beneath `rehearsal/` and never overwrites an existing destination.
-- [ ] Every restored file matches its recorded original-byte SHA-256, and every Hub-provided
+- [x] Prefer already-present content; do not rely on annex retrieval onto read-only media.
+- [x] Restore stages atomically beneath `rehearsal/` and never overwrites an existing destination.
+- [x] Every restored file matches its recorded original-byte SHA-256, and every Hub-provided
       canonical SHA-256 remains identical to that evidence.
-- [ ] Nested Hugging Face paths are reconstructed correctly.
-- [ ] Missing/offline copies are reported without false success.
-- [ ] Operator reviews evidence before disposable output cleanup.
+- [x] Nested Hugging Face paths are reconstructed correctly.
+- [x] Missing/offline copies are reported without false success.
+- [x] Operator reviews evidence before disposable output cleanup.
 
 ### H. Deployment and real fill (separate approval)
 
 - [ ] Resolve any intended write target that is mounted read-only.
-- [ ] Review the generated systemd user unit before installation.
-- [ ] Install the unit without `--start` and without `--resume-fill`.
-- [ ] Confirm executable, data, state, config, port, and resume settings in `ExecStart`.
-- [ ] Start the portal once without auto-resume and repeat the health check.
-- [ ] Obtain explicit operator approval before enabling resume or pressing **Start Fill**.
-- [ ] Confirm the first reconciled task recognizes durable completed files and does not re-fetch them.
-- [ ] Confirm live free-space and per-file preflight agree with the selected target.
+- [x] Review the generated systemd user unit before installation.
+- [x] Install the unit without `--start` and without `--resume-fill`.
+- [x] Confirm executable, data, state, config, port, and resume settings in `ExecStart`.
+- [x] Start the portal once without auto-resume and repeat the health check.
+- [x] Obtain explicit operator approval before enabling resume or pressing **Start Fill**.
+- [x] Confirm the first reconciled task recognizes durable completed files and does not re-fetch them.
+- [x] Confirm live free-space and per-file preflight agree with the selected target.
 - [ ] Confirm the next requested drive matches drive-affinity scheduling.
-- [ ] Preserve legacy source, rollback checkout, and both backup sets through acceptance.
+- [x] Preserve legacy source, rollback checkout, and both backup sets through acceptance.
 
 ## Evidence and reporting
 
@@ -403,3 +404,45 @@ Disposition: **code gate passed; runtime gate not yet run.** PR #23 merged after
 Playwright CI passed, with Greptile 5/5 on the final revision. No real catalog or archive was opened by
 that publication step. The next action is to refresh the isolated install, repeat the read-only
 `repair-hashes` audit against the migrated catalog, and stop for operator review before any apply.
+
+## Execution continuation — 2026-07-17 Phase G acceptance
+
+Disposition: **Phase G passed.** The installed reviewed build audited 194 legacy hash gaps, proved all
+194 against committed Git blobs, created a consistent non-overwriting catalog backup, and applied the
+repair only after separate operator approval. A repeated read-only audit then found no unresolved
+gap; all 2,311 archived file rows had usable verification evidence.
+
+The operator selected a small, already-readable compressed repository for the disposable restore.
+ModelArk reconstructed 12 files (91,571,868 original bytes), including nested paths, and every final
+original-byte hash matched the catalog evidence. The restore used its atomic staging boundary,
+reported no missing/offline source as success, and the disposable output was removed only after the
+operator reviewed the evidence. The backup remained present and passed its integrity check.
+
+## Execution continuation — 2026-07-17 Phase H first fill
+
+Disposition: **stopped safely; completed bytes remain durable; issue #28 gates the next resume.**
+
+The reviewed installed service and loopback portal started without automatic fill resume. The
+operator explicitly started Fill. The first attempt exposed `INC-018`: an expired cached browser
+OAuth credential made every public Hub request return HTTP 401, while the executor rotated across a
+batch and eventually blamed a repository rather than the systemic credential. The operator refreshed
+the browser login, confirmed the credential, and explicitly started again.
+
+The next run resumed from durable facts and completed the first repository: 11 missing files were
+downloaded and archived while already-complete work was not fetched again. Six weight shards passed
+StreamZNN round-trip canaries; approximately 28.94 GB of original payload became 19.21 GB stored.
+Live space and per-file admission remained coherent.
+
+The following repositories exposed `INC-019`: their worktree paths were dangling git-annex
+placeholders whose content objects were absent despite stale location evidence. The download helper
+wrote through the final worktree path, followed the dangling link, raised local `FileNotFoundError`,
+and the watchdog misclassified it as a transient network stall with cooldowns. No arbitrary path was
+replaced and no completed bytes were lost. The operator pressed Stop; the terminal became
+`OPERATOR_STOP`, no download/compression child remained, the archive worktree was clean, and the
+successful repository had already synchronized.
+
+Issue #28 owns the reviewed correction: same-filesystem private staging, hash/canary verification
+before atomic publication, replacement only for a proven dangling annex placeholder, fail-closed
+handling of every other conflict, immediate typed local-I/O terminals, and a pre-write credential
+gate. Fill remains stopped until that change merges, is installed, and the operator separately
+approves another resume. The read-only replica target and next-drive affinity checks remain open.

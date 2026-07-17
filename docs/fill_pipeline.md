@@ -19,6 +19,11 @@ CLI / portal
 resolve active Plan + fixed plan_drives
     |
     v
+validate configured Hub credential
+    | HTTP 401
+    +------------------------------> Gate A typed auth terminal
+    |
+    v
 reconcile durable facts ──> exact requirements ──> unassigned intents
     |                                               |
     |                                               v
@@ -42,9 +47,11 @@ reconcile durable facts ──> exact requirements ──> unassigned intents
   FETCH exact missing files   REPLICATE exact annex keys
   - stale-row check/file      - stale-row check/key
   - live per-file preflight   - copy from chosen safe source
-  - download + SHA check      - whereis target UUID proof
-  - bounded compression       - only then record target row
-  - store + archived row
+  - same-filesystem stage     - whereis target UUID proof
+  - download + SHA check      - only then record target row
+  - bounded compression
+  - atomic publish + annex
+  - archived row
           |                       |
           +-----------+-----------+
                       |
@@ -63,6 +70,12 @@ have different costs without changing the definition of completion.
   avoiding USB hot-swap thrash.
 - Each fetch receives an explicit task manifest. The fetch layer cannot broaden it to every file in a
   repository. Before every file, it rechecks the target row and current usable capacity.
+- Download retries write beneath a deterministic private staging directory on the target filesystem,
+  never through a final worktree path. Original-byte verification and any compression canary finish
+  before atomic publication. Staging is ephemeral and never counts as task completion.
+- A dangling worktree link may be replaced only when `git annex lookupkey` proves it is an annex
+  placeholder in that archive. Identical verified bytes are reused. Arbitrary links, mismatched files,
+  directories, cross-filesystem staging, and local I/O errors fail closed without network cooldowns.
 - A process crash loses only in-memory placement. On restart, already-recorded files disappear from
   the next derived task and only the missing suffix remains.
 - Replica work is per requirement and source. A successful `git annex copy` is insufficient evidence:
@@ -85,10 +98,10 @@ entry gates are recorded in `docs/capacity-evidence.md`.
 
 | State | Meaning | Recovery |
 |---|---|---|
-| `blocked` | Gate A/B refused the run before writes: unavailable CLI drive, policy blocker, invariant failure, or infeasible committed capacity | Follow the typed actions, then start again |
+| `blocked` | Gate A/B refused the run before writes: invalid configured credential, unavailable CLI drive, policy blocker, invariant failure, or infeasible committed capacity | Follow the typed actions, then start again |
 | `plan-capacity-stop` | Live capacity changed after useful progress and the remaining graph is no longer feasible | Add eligible capacity or trim/re-plan; completed rows remain safe |
-| `paused` | Download window reached, or copy #1 is safe while an offline source/target defers copy #2 (DEF-022) | Wait or re-seat the named drive, then resume |
-| `error` | A bounded fetch retry, annex-key proof, or graph invariant failed | Inspect the typed evidence and logs; correct the fault before retrying |
+| `paused` | Useful work is durable but a typed acquisition conflict, download window, or offline source/target prevents continued copy #2 work (DEF-022) | Follow typed recovery actions, then explicitly resume |
+| `error` | A bounded transient fetch retry, annex-key proof, or graph invariant failed | Inspect the typed evidence and logs; correct the fault before retrying |
 | `stopped` | Operator requested Stop | Start again; reconciliation resumes missing files |
 | `done` | Every committed requirement is satisfied by complete copies | None |
 
@@ -111,3 +124,6 @@ the same terminal classifier and show the prominent modal immediately; acknowled
 - DEC-040 / DEF-011: pickle-only is refused by default; an explicit private policy may archive it as
   inert raw bytes, but ModelArk never loads it and deeper scanning remains deferred.
 - DEC-045 / INC-014: derive exact missing work from durable facts and admit it through one ledger.
+- DEC-046 / INC-018 / INC-019: validate configured credentials before work; stage and verify on the
+  target filesystem before proof-driven atomic publication; never retry local namespace/I/O failures
+  as transient network stalls.

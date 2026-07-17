@@ -64,6 +64,14 @@ def test_worker_transient(tmp_path):
     assert r["ok"] is False and r["error_type"] == "transient", r
 
 
+def test_worker_local_io_is_not_transient(tmp_path):
+    error = FileNotFoundError(2, "missing annex object", str(tmp_path / "broken"))
+    with mock.patch("modelark.download_worker.hf_hub_download", side_effect=error):
+        r = download_worker.run({"repo_id": "a", "rfilename": "b", "local_dir": str(tmp_path)})
+    assert r["ok"] is False and r["error_type"] == "local_io", r
+    assert r["errno"] == 2
+
+
 def test_worker_gated(tmp_path):
     from huggingface_hub.errors import GatedRepoError
     exc = GatedRepoError("gated", response=_Resp(403))
@@ -124,6 +132,51 @@ def test_download_transient_exhausts(tmp_path):
             assert "conn reset" in str(e)
             return
     raise AssertionError("expected RuntimeError after exhausting retries")
+
+
+def test_download_local_io_fails_once_without_network_cooldown(tmp_path):
+    result = {"ok": False, "error_type": "local_io", "status_code": None,
+              "retry_after": None, "errno": 2, "detail": "broken annex placeholder"}
+    with mock.patch("modelark.fetch._run_monitored", side_effect=_monitored_writes(result)) as monitored, \
+         mock.patch("modelark.fetch.time.sleep") as sleep:
+        try:
+            fetch._download_shard(fetch.RunCtx(con=None), "repo", "f.bin", tmp_path, {})
+        except fetch.DownloadLocalError as exc:
+            assert exc.code == "DOWNLOAD_LOCAL_IO"
+        else:
+            raise AssertionError("expected typed local I/O failure")
+    assert monitored.call_count == 1
+    sleep.assert_not_called()
+
+
+def test_download_staging_enospc_is_typed_before_worker_start(tmp_path):
+    import errno
+
+    with mock.patch("modelark.fetch.tempfile.mkstemp", side_effect=OSError(errno.ENOSPC, "full")), \
+         mock.patch("modelark.fetch._run_monitored") as monitored:
+        try:
+            fetch._download_shard(fetch.RunCtx(con=None), "repo", "f.bin", tmp_path, {})
+        except fetch.DownloadLocalError as exc:
+            assert exc.code == "DOWNLOAD_LOCAL_IO" and exc.evidence["errno"] == errno.ENOSPC
+        else:
+            raise AssertionError("staging ENOSPC must be a typed local failure")
+    monitored.assert_not_called()
+
+
+def test_hf_auth_preflight_types_only_rejected_credentials(tmp_path):
+    response = _Resp(401)
+    rejected = fetch.HfHubHTTPError("invalid", response=response)
+    api = mock.Mock()
+    api.whoami.side_effect = rejected
+    with mock.patch("modelark.fetch.get_token", return_value="hf_oauth_test"), \
+         mock.patch("modelark.fetch.HfApi", return_value=api):
+        failure = fetch.hf_auth_preflight(fetch.RunCtx(con=None))
+    assert failure["code"] == "HF_AUTH_INVALID" and failure["gate"] == "A", failure
+
+    with mock.patch("modelark.fetch.get_token", return_value=None), \
+         mock.patch("modelark.fetch.HfApi") as hf_api:
+        assert fetch.hf_auth_preflight(fetch.RunCtx(con=None)) is None
+    hf_api.assert_not_called()
 
 
 class _Resp:                       # minimal response so an hf error constructs in a test
