@@ -37,4 +37,4 @@ body:
     attributes:
       label: Integrity impact
       options:
-        - label: This may involve data loss, corruption, a false verification pass, or destructive drive behavior (mark the issue P1).
+        - label: This may involve data loss, corruption, a false verification pass, or destructive drive behavior (prefix the title `[P1]`).

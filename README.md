@@ -1,21 +1,22 @@
 # ModelArk
 
-> 🚧 **Building in public.** An in-progress project, developed openly (with Claude). It works
-> end-to-end and its write-time restore canary is production-verified — but it isn't 1.0. The honest
-> [Status](#status) + gaps are at the bottom; feedback and contributions are welcome.
+> 🚧 **Building in public.** ModelArk is an alpha: the archive pipeline, reconciled capacity
+> engine, and verified restore command are implemented, and StreamZNN's write-time restore proof has
+> been validated on real archive data. The first operator-attended restore from the migrated archive
+> is still a release-acceptance gate. See [Status](#status) for the exact boundary.
 
 An ark for open model weights: catalog every open model worth
 knowing about, archive the ones worth keeping across an offline drive library —
-**compressed and integrity-proven at write time** — and re-check the physical archive copies,
-even for giants you cannot load locally.
+with **lossless compression where eligible and byte-integrity evidence at write time** — and
+re-check the physical archive copies, even for giants you cannot load locally.
 
 ## Why
 
-Hugging Face has north of a million repos — really, have you checked lately? Most you'll
-never keep. ModelArk catalogs the metadata broadly (cheap — a few MB), then downloads only
-the curated, full-precision weights you find are worth archiving, tracked by **git-annex** across a fleet
-of external HDDs + network attached storage (iSCSI). The git repo is the *map* of the library;
-the bytes never touch git.
+The Hugging Face Hub is vast and changes quickly. Most repositories are not things you will
+personally preserve. ModelArk catalogs metadata broadly (cheap — a few MB), then downloads only
+the supported weights you curate, tracked by **git-annex** across a fleet of external HDDs and,
+optionally, network-attached block storage such as iSCSI. The git repository is the *map* of the
+library; model bytes are annex content, not ordinary Git objects.
 
 ## Why else?
 
@@ -25,17 +26,20 @@ let it spread downloads across whatever drives you have — efficiently, instead
 
 ## Is that it?
 
-Not even close. Weights are stored **ZipNN-compressed** (lossless, float-aware) for real
-savings, and it **streams** — a giant shard compresses and restores in O(chunk) memory
-(hundreds of MB), never fully materialized in RAM. On top of that:
+Not even close. By default, eligible floating-point safetensors are stored **ZipNN-compressed**
+(lossless, float-aware) for real savings, and it **streams** — a giant shard compresses and restores
+in O(chunk) memory (hundreds of MB), never fully materialized in RAM. If streaming is disabled, an
+oversized eligible shard uses optional zstd or verified raw fallback. Quantized safetensors, GGUF,
+auxiliary files, and explicit pickle opt-ins are stored as inert raw bytes. On top of that:
 
 - **Integrity you can trust** — every downloaded original is hashed; an HF-provided sha256 must
   match when available, and every compression passes a round-trip *canary* against the ingested
   original's sha256 *before* that original is dropped. Compression therefore never replaces an
   original with a blob that failed its restore proof.
-- **Drive-health monitoring** — SMART vetting before a volume ever holds archives.
+- **Drive-health monitoring** — SMART qualification during Linux drive registration, with explicit
+  `unchecked` and RAID-backed paths when physical SMART is unavailable.
 - **Plans** — explicit storage/fill contexts, each with its own drive fleet and capacity mode.
-- **Smart resume** — completed files are never fetched again; only the interrupted file is retried.
+- **Smart resume** — durably completed files are skipped after restart; the interrupted file is retried.
 - **Tiered storage** — mark keepers *must-have* (kept redundantly) vs bulk that's cheap to re-fetch.
 - **1/2-copy redundancy** — required copy counts are enforced from a durable record, not guessed.
 
@@ -48,7 +52,7 @@ This is pre-1.0 and built in public, so a few sharp edges are worth knowing befo
 
 **Downloading giants.** Hugging Face's `hf_xet` transport isn't byte-range resumable, so if a shard stalls or the process is killed mid-download, that shard restarts from zero — painful on a 30 GB shard of a larger model. A watchdog kills genuinely-hung transfers and a sweep clears the orphaned partials, so nothing corrupts and disk never leaks — but you re-spend the bandwidth. Tensor-level checkpointing is on the roadmap; for now, big models just want a stable connection for however long it takes to grab one shard.
 
-**Compression isn't guaranteed per shard.** Every compression is proven by a round-trip canary before the original is dropped, so you can never end up with an unrestorable archive. But if some rare shard format or other unexpected input trips a bug in ZipNN or our handling of it (which has happened, and been patched, already), the shard gets stored *raw* instead. This is the correct and deliberate fallback: the file is intact and verified. However, it misses the (~⅓) savings — and recompute at model boundaries by the Librarian can start to push you past estimates. We show both a raw forecast and an expected-stored forecast. Use the default **Guaranteed capacity** mode when the archive must fit without assuming any compression dividend; **Compression-aware capacity** deliberately admits against the expected-stored forecast and can stop resumably if real results run high. "Rebase Existing Plan" (fill the gaps left by better-than-assumed compression rates) will come later. Note that rates are only strong on BF16; FP8 does not compress at all.
+**Compression isn't guaranteed per shard.** Every compression is proven by a round-trip canary before the original is dropped, so you can never end up with an unrestorable archive. But if some rare shard format or other unexpected input trips a bug in ZipNN or our handling of it (which has happened, and been patched, already), the shard gets stored *raw* instead. This is the correct and deliberate fallback: the file is intact and verified. However, it misses the (~⅓) savings and consumes forecast margin. Per-file live preflight and reconciliation stop before the next unsafe write. We show both a raw forecast and an expected-stored forecast. Use the default **Guaranteed capacity** mode when the archive must fit without assuming any compression dividend; **Compression-aware capacity** deliberately admits against the expected-stored forecast and can stop resumably if real results run high. "Rebase Existing Plan" (fill the gaps left by better-than-assumed compression rates) will come later. Note that rates are only strong on BF16; FP8 does not compress at all.
 
 **Hardware honesty.** SMART read through some USB-to-SATA bridges is synthetic, so take health readings on bridged drives with a grain of salt (during testing here, a genuinely-failing drive passed its synthetic check and then got crushed on the first load). A NAS iSCSI LUN won't auto-reattach after a reboot: that's deliberate — we won't couple boot to a network mount and risk a boot hang — so re-login is manual. And the fill is a single worker that asks for drives in sequence, so expect to hot-swap externals during a large run rather than mounting the whole fleet at once. More automation here is needed, and planned.
 
@@ -77,7 +81,8 @@ Tiered drive fleet (git-annex remotes)      ← the actual TBs of weights
 - **git-annex** — authority for *where bytes physically live*; tracks drives even
   unplugged, enforces N-copies redundancy, `fsck`s integrity.
 - **modelark.core** — reusable catalog/db primitives.
-- **modelark** — discovery, placement (the "librarian"), fetch, compression, verify.
+- **modelark** — discovery, manifest policy, reconciliation, capacity/placement, fetch, compression,
+  verification, and restore.
 - **modelark.streamznn** — standalone MIT streaming-compression module (see below).
 
 ## The pipeline
@@ -86,25 +91,28 @@ Tiered drive fleet (git-annex remotes)      ← the actual TBs of weights
 
 1. **Discover** metadata for the wishlist orgs (architecture-first classification, not HF's
    unreliable pipeline tags).
-2. **Curate** in the portal — build a set within a size budget; mark keepers *must-have*.
+2. **Curate** in the portal — build a set within a size budget; use the CLI's `protect` command to
+   mark current keepers *must-have*.
 3. **Plan** — the librarian bin-packs the set across the tiered fleet (must-have copy #1 on
    the RAID, bulk consolidated onto the big primaries, must-have copy #2 on a replica drive).
 4. **Fill** — per file: HF download → compute sha256 (and match HF's digest when supplied) →
-   compress → **canary**
-   → drop the original → git-annex add → record. Throttled by a rolling 24 h cap (1 TB/day by default;
+   compress + **canary** when eligible, otherwise retain verified raw bytes → git-annex add →
+   record. Throttled by a rolling 24 h cap (1 TB/day by default;
    `0` disables it), resumable at the file level (completed files are skipped; the interrupted
    shard is retried). Classic HTTP may reuse its partial download, while `hf_xet` currently starts
    that interrupted shard from zero.
 5. **Replicate** — must-have copy #2 is a *local* clone→clone transfer from copy #1 (no second
    HF download).
-6. **Restore** — retrieve a readable annex copy, reconstruct the original Hugging Face paths,
+6. **Restore** — retrieve a readable annex copy, reconstruct the archived Hugging Face paths,
    decompress into a hidden staging tree, verify every recorded original-byte sha256, then publish
    atomically.
 
 ## Compression & integrity
 
-Weights are stored **ZipNN**-compressed (`.znn`, lossless, float-aware) and decompressed on
-use. Every compression is gated by a mandatory **round-trip canary**: decompress the `.znn`,
+By default, eligible floating-point safetensors are stored **ZipNN**-compressed (`.znn`, lossless,
+float-aware) and decompressed on use; an explicit stream-off configuration can select zstd or raw
+fallback for oversized shards, and other manifest files are retained as verified raw bytes. Every
+ZipNN or zstd compression is gated by a mandatory **round-trip canary**: decompress the stored blob,
 hash the result, and require it equal the downloaded original's sha256 **before** the uncompressed
 original is ever deleted. When Hugging Face supplies a canonical sha256, ingestion first requires
 the downloaded bytes to match it. This proves the compressed blob at write time; later media health
@@ -114,9 +122,11 @@ is covered separately by physical re-verification and restore hashes.
 compresses and restores in **O(chunk) memory** — a 10 GB shard peaks ~800 MB instead of the
 ~26 GB that whole-file compression needs (which OOM-killed the portal once; see `INC-003`).
 It frames independent, self-describing ZipNN blobs; writes are atomic; corruption fails loud;
-and the canary shares the exact restore decompress path, so "canary passed" *means* "restore
-is byte-identical." Proven in production: every archived file independently re-decompresses to
-HF's canonical hash (`DIS-002`), including the four ~8 GB shards of the model that OOM'd.
+and the canary shares the exact decompression path used by restore, so "canary passed" proves that
+the stored blob reconstructs the ingested bytes. In `DIS-002`, all 11 StreamZNN blobs then present in
+the real archive independently decompressed in a fresh process to their Hugging Face canonical
+hashes, including four ~8 GB shards from the model that had previously OOM'd. This is strong codec
+evidence; the separate end-to-end `modelark restore` acceptance remains open in `RFC-001` Phase G.
 
 **Codec gate** (`DEC-022`) — the codec is chosen *per shard* from config, so the new streaming
 path isn't used unless it's warranted:
@@ -159,12 +169,11 @@ authentication exists.
 - **Fill** — the librarian's placement plan as a live run surface: **Start/Stop**, a "now
   fetching" panel (per-shard phase, throughput, ZipNN ratio, 24 h-cap gauge), a queue, and
   per-drive fill bars. The fill runs in a single safe background worker inside the portal
-  (one at a time, clean stop at a file boundary, dies with the process, per-file transactional).
+  (one at a time, monitored download/compression can be interrupted, dies with the process,
+  completed files are durable and per-file transactional).
 - **Verify** — re-check archived copies on demand (record consistency + a decompress canary when the
   drive is mounted), and auto-surface anything that looks disrupted: a raw-fallback, a partial copy,
   or an archive written near a recorded interruption.
-
-![The Fill run surface](docs/fill-dashboard.png)
 
 ## Configuration — `wishlist.yaml`
 
@@ -193,8 +202,9 @@ no cart UI for it yet — see gaps below).
 
 ## Deploy
 
-The supported supervised path is a normal install in a checkout-local `.venv` plus an unprivileged
-`systemd --user` service. Inspect it before it changes anything:
+The supported supervised path is Linux with Python 3.10+ and systemd: a normal install in a
+checkout-local `.venv` plus an unprivileged `systemd --user` service. Inspect it before it changes
+anything:
 
 ```bash
 python3 scripts/deploy.py --dry-run
@@ -298,7 +308,7 @@ modelark export                              # dump JSONL for git
 The fill runs either from the **Fill tab's Start button** (worker inside the running portal) or
 from `library plan --apply`. SQLite/WAL allows concurrent readers, but do not run two independent
 fill controllers against the same plan; stop the portal worker before starting the CLI fill.
-Disk Health needs SMART access — grant passwordless sudo for `smartctl` (see **Setup**); don't run
+Disk Health needs SMART access — grant passwordless sudo for `smartctl` (see **Manual setup**); don't run
 the portal as root.
 
 Formatting during registration is deliberately two-step and Linux-only. First review a real safety
@@ -344,20 +354,25 @@ Every architecture/policy decision, deferral, and incident is in
 
 ## Status
 
-**Working + proven end-to-end:** catalog (~4.1k models) + Tier A remote-header evidence +
-architecture-first classification; the librarian placement plan; the full fetch pipeline
-(download → verify → ZipNN + canary → git-annex → record); StreamZNN streaming (no OOM on
-10 GB shards); the codec gate; must-have 2-copy replication; verified atomic restore; file-level
-crash-resume; first-class Plans (per-plan drive fleet + a capacity failsafe; selection/archive rows
-remain global in this release) + on-demand re-verification; and the portal's six
-views including the live Fill run surface. Restorability is production-verified (`DIS-002`).
+**Implemented and exercised:** catalog (~4.1k models) and architecture-first classification; Tier A
+remote-header evidence; canonical archive manifests; the reconciled work graph, deterministic
+placement, and exact capacity ledger; download → hash → compression/canary → git-annex → durable
+record; StreamZNN on large real shards; must-have 2-copy replication; staged, hash-verified atomic
+restore; file-level crash recovery; first-class Plans; on-demand physical re-verification; and the
+portal's six operator views. `DIS-002` is production evidence for StreamZNN blobs, not a claim that
+the complete restore workflow has already passed the migrated-runtime acceptance.
 
-Tested here on a mix of reliable and junk external drives, plus one iSCSI volume on a RAID5 NAS
-(Synology DiskStation). The iterative bug fixes and breaks along the way are in the decision log and
-commit history. Branch protection and PR checks are active. The intended public history begins with a
-sanitized repository snapshot and grows from there; the private release history still has a final
-infrastructure-identifier sanitation gate ([`RC-0`](docs/roadmap.md#public-release-closeout--active)),
-so do not change visibility until that scan and rewrite/recreation are complete.
+The current release candidate has passed clean-install, installed-wheel, schema migration,
+standalone, Playwright, hostile-web, read-only migrated-catalog, and capacity-ledger checks. The
+operator-attended migrated-runtime checklist has passed Phases A–F. Phase G still requires installing
+the reviewed hash-repair build, auditing and (if approved) repairing legacy Git-tracked hash evidence,
+and completing one real verified restore. Service installation and the first reconciled Fill are the
+separate Phase-H approval. See [`RFC-001`](docs/rfcs/001-migrated-runtime-acceptance.md) and the
+[`release closeout`](docs/roadmap.md#public-release-closeout--active).
+
+Repository visibility is a separate release operation. Before making a private canonical remote
+public, inspect every reachable ref—not only the working tree—for credentials, local paths, hardware
+identifiers, catalog runtime state, and unintended author identity linkage.
 
 For now: use it to archive, and use it carefully. We've built in tools to help you spot where problems
 may have occurred and to give you options to fix them. Bad drives can and will fail after an extended
@@ -374,11 +389,12 @@ apply them quickly.
 The [decision log](docs/decision_log.md) has the full picture; the headline deferrals:
 
 - **Curation & safety** — a must-have toggle in the cart (CLI-only today), first-class gated/license-accept model handling, and deeper pickle hygiene (opcode scanning, quarantine, safetensors conversion). The [deferred artifact-support backlog](docs/deferred-artifact-support.md) preserves the real repositories currently waiting on that full contract.
-- **Placement** — letting one model's shards span drives when it won't fit whole, compression-*aware* predictive packing (today it's a capacity failsafe), and growing or rebalancing a plan's fleet mid-run.
+- **Placement** — letting one model's shards span drives when it cannot fit whole, explicit
+  partial continuation past a blocked whole-plan Gate B, and safe plan growth/rebalancing.
 - **Fill & transport** — tensor-level download checkpointing so a giant shard resumes instead of restarting, plus in-flight queue edits (append / re-download / re-verify) during a run.
 - **Verification & visibility** — a scheduled fleet-wide audit (on-demand re-verification already exists) and a download-status view over recorded `fetch_events`.
 - **Recovery enhancements** — richer progress for multi-model restores, explicit conflict policies,
-  and restore manifests. The safe repeatable-`--repo` verified workflow exists today.
+  and exported restore manifests. The safe repeatable-`--repo` verified workflow exists today.
 - **Ops & packaging** — a safer privileged SMART-access helper (the unprivileged user-service deploy
   is shipped) and spinning StreamZNN out into its own MIT repo.
 

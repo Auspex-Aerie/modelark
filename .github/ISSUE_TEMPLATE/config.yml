@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/Auspex-Aerie/modelark/security/advisories/new
-    about: Report exploitable vulnerabilities privately.
+    url: https://github.com/Auspex-Aerie/modelark/blob/main/SECURITY.md
+    about: Follow the current private-reporting instructions; do not open a public issue.
   - name: Support policy
     url: https://github.com/Auspex-Aerie/modelark/blob/main/SUPPORT.md
     about: Read what information to include and where to ask.

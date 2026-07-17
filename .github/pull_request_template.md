@@ -6,7 +6,7 @@
 
 - [ ] Focused tests added or updated
 - [ ] Standalone test suite passes
-- [ ] `ruff check modelark tests` passes
+- [ ] `ruff check modelark scripts tests` passes
 - [ ] Browser E2E run when portal behavior changed
 - [ ] Documentation/decision ledger updated when claims or policy changed
 - [ ] No tokens, private infrastructure identifiers, catalog runtime state, or model bytes included

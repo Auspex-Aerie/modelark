@@ -5,6 +5,13 @@ rehearsal and a maintenance-window cutover. Do not point the migration tool at t
 checkout, stop its service, change its remotes, or start the final validation without the operator
 present.
 
+The first real execution has completed source freeze, rollback backups, copied-data migration, and
+RFC-001 Phases A–F (installed CLI/catalog, loopback portal, and operator cart acceptance). The
+canonical execution record is [`rfcs/001-migrated-runtime-acceptance.md`](rfcs/001-migrated-runtime-acceptance.md):
+legacy-hash audit/repair, one verified restore, final service installation, and Fill remain the
+operator-attended Phase-G/H boundary. The procedure below remains the reusable runbook, not a claim
+that those final gates have passed.
+
 The migration tool never replaces its source. It creates a consistent catalog snapshot, preserves
 raw database/WAL sidecars for rollback evidence, copies `library.json`, migrates only from the backup,
 validates the current schema and foreign keys, and atomically publishes a new data directory. Its

@@ -14,13 +14,17 @@ Each line is `{"repo_id", "model_name", "params_b", "category"}`.
 
 ## Using a set
 
-Curate visually in the portal (`modelark serve` → **Catalog**), or fetch a set's repos directly:
+Curate visually in the portal (`modelark serve` → **Catalog**). The CLI accepts repeatable
+`--repo` values for an explicit, read-only placement preview:
 
 ```bash
-# fetch everything in one angle
-xargs -a <(python -c "import json;[print(json.loads(l)['repo_id']) for l in open('examples/selections/fits-24gb.jsonl')]") \
-      -I{} modelark fetch --repo {}
+modelark library plan --repo org/model-a --repo org/model-b
 ```
+
+There is not yet a bulk-import command for these JSONL samples. Do not pipe them into bare
+`modelark fetch`: direct fetch also requires an explicit registered drive, and bypassing the active
+Plan is not the recommended fleet workflow. Copy the repositories you want into the Catalog cart,
+then review the Fill plan before execution.
 
 Mark anything you want a redundant second copy of with `modelark protect --repo <id>`.
 

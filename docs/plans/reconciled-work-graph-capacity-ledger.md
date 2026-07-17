@@ -2,16 +2,18 @@
 
 | Field | Value |
 |---|---|
-| Status | **Phases 1–2 merged; Phase 3 implementation in review after empirical gates and policy decision** |
+| Status | **Approved plan; Phases 1–4 implemented, reviewed, merged, and installed through RFC-001 Phase F** |
 | Scope | Fill planning, copy reconciliation, capacity accounting, execution, terminal failures, and operator surfaces |
 | Impact | Large blast radius across every fill safety path; phased shadow rollout is mandatory |
 | Trigger | A live legacy fill falsely reported a capacity stop after double-counting protected first copies already stored on the RAID home |
 | Related decisions | DEC-014, DEC-017, DEC-019, DEC-020, DEC-025, DEC-029, DEC-030, DEC-031, DEC-032, DEC-034, DEC-042, DEC-045 |
 | Review gates | Architecture review, external review, implementation reviews per phase, read-only legacy-catalog replay, operator-attended cutover |
 
-This document is an implementation proposal. It does not supersede an accepted decision, authorize a
-live deployment, or authorize writes to the legacy ModelDump catalog. Line references describe the
-code at the time this plan was written and will drift after implementation begins.
+This document is the reviewed implementation-plan record behind `DEC-045`. The current shipped
+architecture is summarized in [`docs/fill_pipeline.md`](../fill_pipeline.md); this plan's line
+references describe the code as it existed before implementation and are intentionally historical.
+Neither the plan nor its completed code rollout authorizes writes to a legacy catalog or unattended
+deployment.
 
 ## 1. Executive decision
 
@@ -1545,5 +1547,6 @@ disposition below, and send the amended revision through another pass.
 | 2 | External reviewer (operator-supplied) | Revised working-tree draft after pass 1, 2026-07-14 | Revise; Phase 1 may proceed after approval, resolve F1–F4 before Phase 2 | F1: §6.4/§13–14; F2: §7.4/§14/§18; F3: §7.3/§13–14; F4: §7.5 pending operator acknowledgment; F5: §13 Phase 1/6 gates |
 | 3 | External reviewer (operator-supplied) | Revised working-tree draft after pass 2, 2026-07-14 | **Approve for phased implementation** | N1: §7.5/DEC-045; N2: §6.1/§6.4/§14; N3: §6.4/§8.2/§14; N4: §9.1/§14 |
 
-Phase 1 may begin. Later phases remain subject to their evidence/review gates. Approval of this plan
-does not approve the later live migration or cutover.
+All four implementation phases subsequently passed their evidence and review gates; the decision log
+contains the per-PR record. Approval and completion of this plan do not approve the operator-attended
+runtime repair, restore, service installation, or Fill in RFC-001 Phases G/H.

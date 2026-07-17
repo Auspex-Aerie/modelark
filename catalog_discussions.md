@@ -2,7 +2,9 @@
 
 Living notes on **what ModelArk collects and why**. Scope decisions are formalized in
 `docs/decision_log.md` (see DEC-001, DEF-001, DEF-002); this file holds the supporting
-research and the running candidate landscape.
+research and the running candidate landscape. It is non-normative and intentionally dated:
+`wishlist.yaml` is the executable discovery scope, the catalog is live evidence, and upstream model
+repositories are the authority for current names, files, and licenses.
 
 ## Current scope (DEC-001, DEC-010, DEC-011)
 
@@ -20,7 +22,18 @@ research and the running candidate landscape.
 - **Archive policy:** full-precision/largest weights are the primary target; quantize
   on demand later.
 
-## Approved org allowlist
+## Allowlist shape
+
+The canonical, case-sensitive organization list is maintained once in `wishlist.yaml`; do not copy
+this section into acquisition code. At present it covers:
+
+- Chinese, Western, and other frontier labs;
+- diverse independent labs;
+- encoder, embedding, and reranking organizations;
+- audio/speech/music organizations; and
+- image-generation organizations.
+
+The historical text-focused subset that motivated the first walk was:
 
 **Chinese frontier:** `deepseek-ai`, `Qwen`, `moonshotai`, `zai-org`, `MiniMaxAI`,
 `tencent`, `stepfun-ai`, `OpenGVLab`, `XiaomiMiMo`, `baidu`, `01-ai`, `OpenBMB`
@@ -146,6 +159,9 @@ weights not released. Reference-only (no bytes).
 | Video gen | Wan 2.1/2.2, HunyuanVideo, LTX-Video, CogVideoX, Mochi 1, SkyReels | `Wan-AI`,`tencent`,`Lightricks`,`THUDM`,`genmo` |
 | Audio / speech | Whisper-v3, Voxtral TTS, Nemotron Speech, StepAudio 2.5, Bark, Kokoro, MusicGen | `openai`,`mistralai`,`nvidia`,`stepfun-ai`,`suno` |
 
-## Future ideas (not scoped)
-- **Local management web UI** for selecting downloads + library management (DEF-001).
-  Keep architectural space (status lifecycle, JSONL export, query layer); don't build yet.
+## Current follow-up
+
+The local management portal has shipped. Current catalog and artifact-support work is tracked in
+[`docs/roadmap.md`](docs/roadmap.md), `DEF-011`, `DEF-027`, and the
+[`deferred-artifact-support`](docs/deferred-artifact-support.md) backlog rather than in this historical
+landscape note.

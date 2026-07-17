@@ -2,10 +2,14 @@
 
 ModelArk is pre-1.0 and built in public.
 
-At this stage ModelArk is **entirely locally hosted** — the portal binds only to loopback, and
-downloads are strictly between you and Hugging Face. Localhost is still a security boundary: a
-hostile webpage may try to send requests to a service on the visitor's machine, and catalog or
-operator text must not become executable HTML.
+During alpha, security fixes target the latest reviewed `main`; include the exact commit in every
+report. Older commits are not maintained as separate supported release lines.
+
+ModelArk has no Auspex-operated application backend. The portal binds only to loopback; Hub fetches
+go from the operator's machine to Hugging Face, while git-annex retrieval and replication use the
+operator's configured local or network storage. Localhost is still a security boundary: a hostile
+webpage may try to send requests to a service on the visitor's machine, and catalog or operator text
+must not become executable HTML.
 
 The portal therefore validates the loopback Host and port on every request. Mutations require an
 exact same-origin `Origin`, `application/json`, a bounded body, and a per-process CSRF capability.
@@ -29,11 +33,12 @@ system beyond its remit, etc.). If you can demonstrate that, treat it as securit
 
 ## Reporting
 
-**If it's genuinely adversarial** (an actual attack path, not just a severe bug) — do both:
+**If it is genuinely adversarial** (an actual attack path, not just a severe bug):
 
-1. **Strongly preferred:** open a private security advisory on GitHub (repo → **Security** →
-   **Advisories** → *Report a vulnerability*).
-2. **Then** email `dev@auspexlabs.sh` with a link to your advisory.
+1. Email `dev@auspexlabs.sh` with the subject `ModelArk security report`.
+2. If GitHub shows **Security → Advisories → Report a vulnerability**, you may open a private
+   advisory and include its link in the email. The email path remains valid when GitHub private
+   vulnerability reporting is unavailable.
 
 Please include reproduction steps and the affected version/commit. We'll acknowledge and work a fix.
 There is no bounty program at this time; should we spin up public-facing services, we'll initiate one.
@@ -41,12 +46,14 @@ There is no bounty program at this time; should we spin up public-facing service
 **If it's not adversarial** — a bug, especially a serious one — file it in the repo's **Issues** and
 tag **@auspexlabs**; we'll review.
 
-**Anything with data loss or potential corruption** — even if it's situational and hasn't actually
-happened yet — mark the issue **P1**.
+**Anything with data loss or potential corruption** — even if it is situational and has not actually
+happened yet — prefix the issue title with **`[P1]`** so it is visible even when the repository has no
+priority-label taxonomy.
 
 ## What matters most (restated)
 
 ModelArk's core promise is integrity: every compression is gated by a round-trip **canary** before
 the uncompressed original is ever dropped (`DEC-003`), and copy counts come from a durable record,
 not a guess. Security reports are welcome — but please keep the *security* channel to actual
-adversarial behavior. For bugs affecting the core promise, use **Issues** (and P1 them).
+adversarial behavior. For bugs affecting the core promise, use **Issues** and prefix the title
+`[P1]`.
