@@ -1,9 +1,10 @@
 # ModelArk
 
-> 🚧 **Building in public.** ModelArk is an alpha: the archive pipeline, reconciled capacity
-> engine, and verified restore command are implemented, and StreamZNN's write-time restore proof has
-> been validated on real archive data. The first operator-attended restore from the migrated archive
-> is still a release-acceptance gate. See [Status](#status) for the exact boundary.
+> 🚧 **ModelArk 0.1.0 — Public Alpha.** The archive pipeline, reconciled capacity engine, and
+> verified restore command are implemented and extensively tested, and StreamZNN's write-time restore
+> proof has been validated on real archive data. "Alpha" reflects pre-1.0 interface stability and the
+> remaining operator-attended migrated-archive acceptance—not a prototype implementation. See
+> [Status](#status) for the exact boundary.
 
 An ark for open model weights: catalog every open model worth
 knowing about, archive the ones worth keeping across an offline drive library —
@@ -43,8 +44,8 @@ auxiliary files, and explicit pickle opt-ins are stored as inert raw bytes. On t
 - **Tiered storage** — mark keepers *must-have* (kept redundantly) vs bulk that's cheap to re-fetch.
 - **1/2-copy redundancy** — required copy counts are enforced from a durable record, not guessed.
 
-…and there's plenty more in the [decision log](docs/decision_log.md). The product is **early**,
-put out deliberately in a build-in-public stance — [contributions welcome](contributing/contributions.md).
+…and there's plenty more in the [decision log](docs/decision_log.md). The product is **pre-1.0** and
+released deliberately in a build-in-public stance — [contributions welcome](contributing/contributions.md).
 
 ## Honest callouts
 
@@ -362,7 +363,7 @@ restore; file-level crash recovery; first-class Plans; on-demand physical re-ver
 portal's six operator views. `DIS-002` is production evidence for StreamZNN blobs, not a claim that
 the complete restore workflow has already passed the migrated-runtime acceptance.
 
-The current release candidate has passed clean-install, installed-wheel, schema migration,
+The current 0.1.0 public-alpha build has passed clean-install, installed-wheel, schema migration,
 standalone, Playwright, hostile-web, read-only migrated-catalog, and capacity-ledger checks. The
 operator-attended migrated-runtime checklist has passed Phases A–F. Phase G still requires installing
 the reviewed hash-repair build, auditing and (if approved) repairing legacy Git-tracked hash evidence,

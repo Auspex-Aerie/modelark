@@ -4,6 +4,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## Unreleased
 
+## 0.1.0 - 2026-07-16
+
 ### Added
 
 - First-class staged restore with replica fallback, original-path reconstruction, final hash checks,
@@ -37,7 +39,3 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 - The loopback portal enforces Host, Origin, content type, request size, per-process CSRF, output
   escaping, and a restrictive Content Security Policy.
-
-## 0.1.0 - 2026-07-11
-
-- Initial sanitized release-candidate snapshot; subsequent work remains under **Unreleased**.
