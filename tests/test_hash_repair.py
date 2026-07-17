@@ -125,6 +125,45 @@ def test_repair_preserves_nested_original_paths(tmp_path):
     con.close()
 
 
+def test_backup_publish_error_is_clean_and_leaves_catalog_unchanged(tmp_path):
+    repo, name, drive, archive, _, data = _legacy_git_file(tmp_path)
+    catalog = tmp_path / "catalog.sqlite"
+    con = _catalog(catalog)
+    _record_legacy_file(con, repo, name, drive, data)
+    with mock.patch.object(hash_repair.os, "link", side_effect=OSError("hard links unavailable")):
+        try:
+            hash_repair.repair_hashes(
+                con, [repo], apply=True, archive_resolver=lambda _c, _d: archive
+            )
+            raise AssertionError("backup publication failure must stop before catalog mutation")
+        except hash_repair.HashRepairError as exc:
+            assert "catalog backup publication failed: hard links unavailable" in str(exc)
+    assert con.execute("SELECT orig_sha256 FROM archived").fetchone()[0] is None
+    assert not list(tmp_path.glob("catalog.sqlite.pre-hash-repair-*.bak"))
+    assert not list(tmp_path.glob(".catalog.sqlite.hash-repair-*.tmp"))
+    con.close()
+
+
+def test_apply_rejects_preexisting_transaction_even_when_nothing_needs_repair(tmp_path):
+    repo, name, drive, archive, _, data = _legacy_git_file(tmp_path)
+    con = _catalog(tmp_path / "catalog.sqlite")
+    _record_legacy_file(con, repo, name, drive, data)
+    con.execute("UPDATE archived SET orig_sha256=?", [_sha(data)])
+    con.execute("BEGIN")
+    try:
+        try:
+            hash_repair.repair_hashes(
+                con, [repo], apply=True, archive_resolver=lambda _c, _d: archive
+            )
+            raise AssertionError("apply must reject a caller-owned transaction on every path")
+        except hash_repair.HashRepairError as exc:
+            assert "no active transaction" in str(exc)
+        assert con.in_transaction
+    finally:
+        con.execute("ROLLBACK")
+        con.close()
+
+
 def test_repair_refuses_modified_bytes_without_backup(tmp_path):
     repo, name, drive, archive, stored, data = _legacy_git_file(tmp_path)
     catalog = tmp_path / "catalog.sqlite"

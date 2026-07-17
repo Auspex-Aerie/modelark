@@ -293,6 +293,13 @@ def _consistent_backup(con) -> Path:
     except OSError as exc:
         raise HashRepairError(f"cannot reserve catalog-backup staging file: {exc}") from exc
     backup = None
+
+    def cleanup_staging() -> None:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
     try:
         backup = sqlite3.connect(str(temporary), isolation_level=None)
         con.backup(backup)
@@ -315,11 +322,19 @@ def _consistent_backup(con) -> Path:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+    except Exception as exc:
+        if backup is not None:
+            backup.close()
+            backup = None
+        cleanup_staging()
+        if isinstance(exc, HashRepairError):
+            raise
+        raise HashRepairError(f"catalog backup publication failed: {exc}") from exc
     except BaseException:
         if backup is not None:
             backup.close()
             backup = None
-        temporary.unlink(missing_ok=True)
+        cleanup_staging()
         raise
     finally:
         if backup is not None:
@@ -343,6 +358,8 @@ def repair_hashes(
     report = audit_hashes(con, scope, archive_resolver=archive_resolver)
     if not apply:
         return report
+    if getattr(con, "in_transaction", False):
+        raise HashRepairError("hash repair requires a connection with no active transaction")
     if report["errors"]:
         first = report["errors"][0]
         raise HashRepairError(
@@ -352,8 +369,6 @@ def repair_hashes(
         )
     if not report["repairs"]:
         return {**report, "mode": "apply"}
-    if getattr(con, "in_transaction", False):
-        raise HashRepairError("hash repair requires a connection with no active transaction")
 
     backup = _consistent_backup(con)
     con.execute("BEGIN IMMEDIATE")
