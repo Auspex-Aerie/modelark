@@ -172,6 +172,7 @@ def test_hf_auth_preflight_types_only_rejected_credentials(tmp_path):
          mock.patch("modelark.fetch.HfApi", return_value=api):
         failure = fetch.hf_auth_preflight(fetch.RunCtx(con=None))
     assert failure["code"] == "HF_AUTH_INVALID" and failure["gate"] == "A", failure
+    assert failure == fetch._hf_auth_invalid_failure()
 
     with mock.patch("modelark.fetch.get_token", return_value=None), \
          mock.patch("modelark.fetch.HfApi") as hf_api:

@@ -8,6 +8,9 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest import mock
+
+import pytest
 
 from modelark import fetch
 
@@ -36,7 +39,10 @@ def test_staging_is_private_stable_and_same_filesystem():
 
 def test_verified_stage_replaces_only_proven_broken_annex_placeholder():
     if shutil.which("git-annex") is None:
-        return
+        if __name__ == "__main__":
+            print("skip test_verified_stage_replaces_only_proven_broken_annex_placeholder: git-annex missing")
+            return
+        pytest.skip("git-annex not installed")
     with tempfile.TemporaryDirectory() as td:
         root = Path(td) / "archive"
         _annex_repo(root)
@@ -94,6 +100,26 @@ def test_verified_stage_replaces_only_proven_broken_annex_placeholder():
         except fetch.TargetPathConflictError:
             pass
         assert rogue.is_symlink() and rogue_stage.read_bytes() == payload
+
+
+def test_annex_placeholder_proof_timeout_is_typed_and_preserves_both_paths():
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        target = root / "org/model/config.json"
+        target.parent.mkdir(parents=True)
+        target.symlink_to(root / "missing-annex-object")
+        staged = root / ".stage/config.json"
+        staged.parent.mkdir()
+        staged.write_bytes(b"verified")
+        digest = hashlib.sha256(b"verified").hexdigest()
+        timeout = subprocess.TimeoutExpired(["git", "ls-files"], fetch._GIT_PROBE_TIMEOUT)
+        with mock.patch.object(fetch.subprocess, "run", side_effect=timeout):
+            try:
+                fetch._publish_staged(root, staged, target, digest, "config.json", annex=True)
+                raise AssertionError("a hung annex proof must stop publication")
+            except fetch.DownloadLocalError as exc:
+                assert exc.code == "DOWNLOAD_LOCAL_IO" and "exceeded" in str(exc)
+        assert target.is_symlink() and staged.read_bytes() == b"verified"
 
 
 def test_unproven_broken_symlink_and_conflicting_file_are_preserved():

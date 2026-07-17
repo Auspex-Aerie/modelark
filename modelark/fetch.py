@@ -69,6 +69,7 @@ _COMPRESS_STALL_PER_GB = 60     # +sec of window per shard-GB: the child's canar
 #                                 measured ~26 s/GB, so the window covers the canary with margin; compress
 #                                 itself grows the temp every few sec so it never approaches the window.
 _MONITOR_POLL = 5               # sec between progress samples / stop checks while a child runs
+_GIT_PROBE_TIMEOUT = 30         # bounded proof lookup on removable/network-backed archive worktrees
 
 
 class _StopRequested(Exception):
@@ -238,6 +239,22 @@ def _stored_relative_path(stored: Path, model_dir: Path) -> str:
     return rel.as_posix()
 
 
+def _hf_auth_invalid_failure() -> dict:
+    """One operator contract for both preflight and mid-run credential rejection."""
+    return {
+        "code": "HF_AUTH_INVALID",
+        "message": (
+            "the configured Hugging Face credential is invalid; correct or unset HF_TOKEN, "
+            "or run `hf auth login --force`, then retry"
+        ),
+        "evidence": {
+            "credential_source": "environment" if os.environ.get("HF_TOKEN") else "cached"
+        },
+        "actions": ["hf_auth_login_force", "check_hf_token_environment", "retry_fill"],
+        "gate": "A",
+    }
+
+
 def _hf_auth_failure() -> dict | None:
     """Return typed evidence only when a configured credential is definitively rejected.
 
@@ -257,17 +274,7 @@ def _hf_auth_failure() -> dict | None:
         code = getattr(getattr(exc, "response", None), "status_code", None)
         if code != 401:
             return None
-        source = "environment" if os.environ.get("HF_TOKEN") else "cached"
-        return {
-            "code": "HF_AUTH_INVALID",
-            "message": (
-                "the configured Hugging Face credential is invalid; correct or unset HF_TOKEN, "
-                "or run `hf auth login --force`, then retry"
-            ),
-            "evidence": {"credential_source": source},
-            "actions": ["hf_auth_login_force", "check_hf_token_environment", "retry_fill"],
-            "gate": "A",
-        }
+        return _hf_auth_invalid_failure()
     except Exception:
         return None
     return None
@@ -296,16 +303,21 @@ def _annex_key_for_path(dest: Path, target: Path) -> str | None:
         rel = target.relative_to(dest).as_posix()
     except ValueError:
         return None
-    tracked = subprocess.run(
-        ["git", "-C", str(dest), "ls-files", "--error-unmatch", "--", rel],
-        capture_output=True, text=True,
-    )
-    if tracked.returncode != 0:
-        return None
-    result = subprocess.run(
-        ["git", "-C", str(dest), "annex", "lookupkey", "--", rel],
-        capture_output=True, text=True,
-    )
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(dest), "ls-files", "--error-unmatch", "--", rel],
+            capture_output=True, text=True, timeout=_GIT_PROBE_TIMEOUT,
+        )
+        if tracked.returncode != 0:
+            return None
+        result = subprocess.run(
+            ["git", "-C", str(dest), "annex", "lookupkey", "--", rel],
+            capture_output=True, text=True, timeout=_GIT_PROBE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DownloadLocalError(
+            f"git-annex placeholder proof exceeded {_GIT_PROBE_TIMEOUT}s"
+        ) from exc
     key = result.stdout.strip()
     return key if result.returncode == 0 and key else None
 
@@ -876,18 +888,7 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
             except HfHubHTTPError as e:
                 code = getattr(getattr(e, "response", None), "status_code", None)
                 if code == 401:
-                    failure = {
-                        "code": "HF_AUTH_INVALID",
-                        "message": (
-                            "Hugging Face rejected the configured credential; correct or unset HF_TOKEN, "
-                            "or run `hf auth login --force`, then retry"
-                        ),
-                        "evidence": {"credential_source": (
-                            "environment" if os.environ.get("HF_TOKEN") else "cached"
-                        )},
-                        "actions": ["hf_auth_login_force", "check_hf_token_environment", "retry_fill"],
-                        "gate": "A",
-                    }
+                    failure = _hf_auth_invalid_failure()
                     result["terminal_failure"] = failure
                     result["terminal_repo"] = rid
                     ctx.write(lambda c: _event(c, rid, "auth", detail="configured HF credential rejected"))

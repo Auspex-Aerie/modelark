@@ -355,7 +355,7 @@ def test_fetch_run_stops_on_midrun_unauthorized_without_repo_churn(tmp_path):
             max_24h_gb=0, ctx=ctx,
         )
     assert calls == ["first"], "a systemic 401 must stop immediately, not rotate through repositories"
-    assert result["terminal_failure"]["code"] == "HF_AUTH_INVALID"
+    assert result["terminal_failure"] == fetch._hf_auth_invalid_failure()
     assert result["terminal_repo"] == "first"
     assert result["failed_repos"] == []
 
