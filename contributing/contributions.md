@@ -3,7 +3,7 @@
 ModelArk is built in public and pre-1.0 — bug reports, fixes, docs, and curation ideas are all
 welcome. Expect rough edges, and read the honest gaps in the [README](../README.md#status) first.
 
-By taking part you agree to the (one-line) [Code of Conduct](code_of_conduct.md).
+By taking part you agree to the canonical [Code of Conduct](../CODE_OF_CONDUCT.md).
 
 ## Development setup
 
@@ -22,7 +22,8 @@ and optionally `open-iscsi` (NAS LUN) or `xfsprogs` (XFS formatting). See the RE
 
 ## Running the tests
 
-Each test file is a self-contained harness (no pytest needed) — run one, or all:
+Each test file is a self-contained harness, so focused tests do not require the pytest runner. Run
+one file, the same direct-file loop CI uses, or the full pytest collection:
 
 ```bash
 .venv-dev/bin/python tests/test_plan.py
@@ -30,11 +31,14 @@ for t in tests/test_*.py; do
   [ "$t" = tests/test_e2e_portal.py ] && continue
   .venv-dev/bin/python "$t"
 done
+.venv-dev/bin/pytest -q
 ```
 
 A file prints `all passed` on success and raises (non-zero exit) on the first failing assertion.
 CI runs the core suite on every push and PR; the browser E2E is a separate job (below).
 Run the correctness-oriented static checks with `.venv-dev/bin/ruff check modelark scripts tests`.
+Build artifacts with `.venv-dev/bin/python -m build`; package metadata and runtime dependencies are
+authoritative in `pyproject.toml`, not `requirements.txt`.
 
 ### End-to-end tests
 

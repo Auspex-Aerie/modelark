@@ -8,17 +8,19 @@ Canonical build order and parked work. **Design rationale** lives in the append-
 
 ## Public-release closeout — active
 
-The external audit's numbered blockers are fixed. These are the remaining release gates, in order:
+The external audit's numbered code blockers are fixed. Public visibility and the operator's archive
+activation are deliberately separate gates: publishing an alpha does not authorize a catalog write,
+restore output, service installation, or Fill.
 
 | ID | Work | Done when | Execution gate |
 |---|---|---|---|
-| **RC-0** | Sanitize private release history before visibility | Current tree and every public/reachable ref are free of physical hardware identifiers and other private infrastructure data; the canonical remote is rescanned after the rewrite/recreation | **Operator-approved destructive history operation; repository remains private until complete** |
+| **RC-0** | Sanitize and approve release history before visibility | Current tree and every reachable ref are free of credentials, local/runtime data, hardware identifiers, and unintended identity linkage; the canonical remote is rescanned immediately before visibility changes | **Operator owns history/identity acceptance and the visibility switch** |
 | **RC-1** | ✅ Harden destructive `drive register --format` | Complete block-device topology checks protect every active/system-backed device; unmount/wipe failures stop; destructive intent is explicit; command construction is covered without touching real disks | Canonical checkout + mocked/synthetic devices only |
 | **RC-2** | Resolve roadmap task #30 (“resume re-fetch durability”) | ✅ Reconciled: durable per-(repo,file,drive) completion is covered by DEC-019 and regression tests; interrupted `hf_xet` file restart is the known INC-010 residual, explicitly deferred as DEF-026 | Canonical checkout only |
-| **RC-3** | ✅ Final public documentation/governance pass | README/setup/scope claims match code; conventional contribution/conduct entrypoints and issue/PR templates exist; deferred work is named honestly | Canonical checkout only |
+| **RC-3** | Documentation/governance reconciled; repository settings pending | README, changelog, governance, examples, roadmap, and RFC status match the reviewed implementation; local links and commands validate. Remaining: remove the GitHub description's loadability claim, disable the empty Wiki, and enable dependency alerts plus secret-scanning/push-protection/private-reporting where available | Merge the docs change, then perform an explicit repository-settings review before visibility |
 | **RC-4** | ✅ Build the legacy-checkout migration/cutover tool + runbook | Dry-run-first inspection, non-overwriting database backup/manifest, copied-data migration, git-remote plan, validation, and rollback paths are tested without accessing the running checkout | Tooling and fixtures only; **do not touch the live legacy checkout** |
-| **RC-5** | Deployable release candidate — in progress | Minimal user-service deploy is dry-run/idempotence tested; reconciled capacity Phases 1–3 are merged; schema-v2 capacity terminology, fresh normal/dev installs, wheel/sdist, full standalone + browser suites, dependency/secret/history checks, CI, and review are green | Canonical checkout only; no live archive |
-| **RC-6** | Cut over the operator's legacy working copy | After its fill is explicitly stopped: verify no writers, back up live state, run the approved migration, re-origin to `Auspex-Aerie/modelark`, pull `main`, validate archive/restore/service behavior, and prove rollback | **Operator-attended only; never run autonomously** (DEC-042) |
+| **RC-5** | ✅ Deployable code release candidate | Minimal user-service deploy, reconciled capacity engine, schema-v2 migration, normal/dev and wheel installs, standalone/browser suites, packaging, and reviewed security/correctness fixes are green through PR #23 | Canonical checkout only; no live archive |
+| **RC-6** | Complete operator-attended migrated-runtime acceptance | RFC-001 Phases A–F are complete. Refresh the isolated install from reviewed main; run the read-only legacy-hash audit; separately approve any repair and one real restore; then install the user service and approve the first reconciled Fill | **Phases G/H remain operator-attended; never run autonomously** (DEC-042 / RFC-001) |
 
 Post-release deferrals remain deferrals: the Torch-free StreamZNN package split (`DEF-014`), the
 privileged SMART/sudoers remainder of host setup (`DEF-025`), tensor/sub-shard checkpointing
@@ -33,7 +35,8 @@ copy-aware totals (**DEC-030**); #34 registration→plan_drives; #37 per-model c
 provisioning-aware fill + DEF-022 fail-soft replica (**DEC-031**); #35 Plans tab + gate / #36 two
 capacity bars / #38 graduated catalog gate / DEF-023 loud oopsies (**DEC-032**); DEF-021 Verifier
 (**DEC-033**); DEC-029 conservative RAID headroom folded into the capacity math. All three deferred
-DEFs (021/022/023) resolved. Next: the guided storage startover (§7 of the handoff) + a fresh fill.
+DEFs (021/022/023) resolved. The active next step is RFC-001 Phase G, followed by the separately
+approved service/Fill work in Phase H.
 
 The historical specification below retains the original `provisioning` terminology. Current code
 uses capacity modes: `guaranteed` (formerly `uncompressed`) and `compression_aware` (formerly

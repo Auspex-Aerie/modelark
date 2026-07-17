@@ -112,5 +112,6 @@ The production graph-plus-ledger path passes its latency/locking gate. An initia
 incorrectly timed the shadow-only legacy planner too and reported about 601 ms; separating that review
 seam produced the figures above. The replay also exposed 54 blocking manifest-policy diagnostics (50
 pickle-only selections under the safe default and four unsupported artifact formats) plus 95 policy-
-drift warnings. Those are not byte-capacity failures, but Phase 3 executor adoption remains gated on
-an explicit operator policy decision for the selected artifacts.
+drift warnings. Those are not byte-capacity failures. The operator subsequently retained the safe
+pickle default, parked the 54 unsupported selections in `docs/deferred-artifact-support.md`, and
+approved Phase 3 adoption; the decision and reviewed rollout are recorded under `DEC-045`.

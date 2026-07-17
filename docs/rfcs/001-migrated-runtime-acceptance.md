@@ -1,6 +1,7 @@
 # RFC-001: Operator-attended migrated-runtime acceptance
 
-- **Status:** in execution — Phases A–F passed; Phase G stopped on INC-017 before restore
+- **Status:** in execution — Phases A–F passed; Phase G remediation merged and awaits installation
+  plus operator-approved audit/restore
 - **Date:** 2026-07-15
 - **Owners:** Auspex-Aerie + operator
 - **Related:** DEC-035, DEC-037, DEC-038, DEC-040, DEC-042, DEC-044, DEC-045,
@@ -390,7 +391,15 @@ content they have no SHA256 annex key fallback. Physical presence therefore coul
 expected digest required by DEC-037 restore verification.
 
 No restore, annex retrieval, fill, catalog update, archive write, or disposable-output cleanup ran.
-Phase G resumes only after ingestion hashes every original file and a reviewed dry-run-by-default
-repair validates legacy bytes against the blob committed at the same Git path, creates a consistent
-catalog backup before explicit apply, and passes an end-to-end repair-plus-restore regression. The
-real migrated catalog repair and restore remain separate operator approvals.
+PR #23 now supplies universal ingestion hashing and the reviewed dry-run-by-default repair. It
+validates legacy bytes against the blob committed at the same Git path, creates a consistent catalog
+backup before explicit apply, and has end-to-end repair-plus-restore regression coverage. Phase G
+resumes only after this reviewed main revision is installed into the isolated acceptance runtime.
+The real migrated-catalog dry run, any explicit apply, and restore remain separate operator approvals.
+
+## Execution continuation — 2026-07-16 Phase G remediation review
+
+Disposition: **code gate passed; runtime gate not yet run.** PR #23 merged after Python 3.10/3.12 and
+Playwright CI passed, with Greptile 5/5 on the final revision. No real catalog or archive was opened by
+that publication step. The next action is to refresh the isolated install, repeat the read-only
+`repair-hashes` audit against the migrated catalog, and stop for operator review before any apply.
