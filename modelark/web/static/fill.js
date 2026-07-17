@@ -11,7 +11,7 @@
   };
   const TYPE = { "1": "#0f766e", "bulk": "#2c5f8f", "2": "#a8620a" };
   const TYPE_LABEL = { "1": "copy #1 (RAID)", "bulk": "bulk", "2": "copy #2 (replica)" };
-  const PHASE_COLOR = { download: "#2c5f8f", verify: "#7a8496", compress: "#b45309", canary: "#7c3aed", annex: "#15803d", stored: "#0f766e", store: "#0f766e" };
+  const PHASE_COLOR = { download: "#2c5f8f", "download-retry": "#be123c", verify: "#7a8496", compress: "#b45309", canary: "#7c3aed", publish: "#0e7490", annex: "#15803d", stored: "#0f766e", store: "#0f766e" };
   const TIERS = [
     ["raid", "RAID · safe home (must-have copy #1)"],
     ["primary", "Primary · bulk (re-fetchable, 1 copy)"],
@@ -246,6 +246,9 @@
       if (s.drive) bits.push(s.drive + (s.n_drives ? ` (${s.drive_index}/${s.n_drives})` : ""));
       if (s.repo) bits.push(s.repo + (s.n_repos ? ` [${s.repo_index || "?"}/${s.n_repos}]` : ""));
       if (s.file) bits.push((s.file_phase || "") + " " + shortFile(s.file));
+      if (s.file_phase === "download-retry" && s.retry_attempt) {
+        bits.push(`network attempt ${s.retry_attempt}/${s.retry_limit || "?"}`);
+      }
       return "▶ " + bits.join(" · ");
     }
     return (TERMINAL[s.status] || s.status) + (s.message ? " — " + s.message : "");
@@ -318,6 +321,9 @@
     html += `<div class="telcap"><span class="telhead">Now fetching</span>${s.drive ? `<span class="telpill" style="background:#2c5f8f">${esc(s.drive)}</span>` : ""}</div>`;
     html += `<div class="telcur">${esc(s.repo || "—")}</div>`;
     if (s.file) html += `<div><span class="telphase" style="background:${PHASE_COLOR[phase] || "#7a8496"}">${esc(phase || "…")}</span><span class="telfile">${esc(shortFile(s.file))}</span></div>`;
+    if (s.file_phase === "download-retry" && s.retry_attempt) {
+      html += `<div class="tellabel"><span>transient network retry</span><span>${esc(s.retry_attempt)} / ${esc(s.retry_limit || "?")}</span></div>`;
+    }
     if (s.n_repos) html += `<div class="telrow"><div class="tellabel"><span>model</span><span>${esc(s.repo_index || 0)} / ${esc(s.n_repos)}</span></div><div class="telbar"><div class="telbarfill" style="width:${repoPct.toFixed(1)}%"></div></div></div>`;
     if (s.shard_no) html += `<div class="telrow"><div class="tellabel"><span>shard</span><span>${esc(s.shard_no)} / ${esc(s.n_shards)}</span></div><div class="telbar"><div class="telbarfill file" style="width:${shardPct.toFixed(1)}%"></div></div></div>`;
     html += `<div class="telstats">`

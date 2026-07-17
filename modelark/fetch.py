@@ -22,7 +22,9 @@ freezes), plus a progress callback and a cooperative stop checked at file bounda
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -32,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from huggingface_hub import HfApi, get_token
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
 from modelark.core import db
@@ -66,6 +69,7 @@ _COMPRESS_STALL_PER_GB = 60     # +sec of window per shard-GB: the child's canar
 #                                 measured ~26 s/GB, so the window covers the canary with margin; compress
 #                                 itself grows the temp every few sec so it never approaches the window.
 _MONITOR_POLL = 5               # sec between progress samples / stop checks while a child runs
+_GIT_PROBE_TIMEOUT = 30         # bounded proof lookup on removable/network-backed archive worktrees
 
 
 class _StopRequested(Exception):
@@ -78,6 +82,51 @@ class CapacityPreflightError(RuntimeError):
     def __init__(self, failure):
         super().__init__(f"{failure.code.value}: short by {failure.shortfall_bytes} bytes")
         self.failure = failure
+
+
+class FetchTerminalError(RuntimeError):
+    """A deterministic operator boundary that must not enter repo/network retry loops."""
+
+    def __init__(self, code: str, message: str, *, evidence: dict | None = None,
+                 actions: Sequence[str] = (), gate: str = "C"):
+        super().__init__(message)
+        self.code = code
+        self.evidence = evidence or {}
+        self.actions = tuple(actions)
+        self.gate = gate
+
+    def as_dict(self) -> dict:
+        return {
+            "code": self.code,
+            "message": str(self),
+            "evidence": dict(self.evidence),
+            "actions": list(self.actions),
+            "gate": self.gate,
+        }
+
+
+class DownloadLocalError(FetchTerminalError):
+    """The isolated download child hit local filesystem state, not a transient network stall."""
+
+    def __init__(self, detail: str, error_number: int | None = None):
+        super().__init__(
+            "DOWNLOAD_LOCAL_IO",
+            f"local archive staging failed: {detail}",
+            evidence={"errno": error_number},
+            actions=("inspect_target_filesystem", "check_free_space", "retry_fill"),
+        )
+
+
+class TargetPathConflictError(FetchTerminalError):
+    """A staged verified file cannot safely replace the existing worktree entry."""
+
+    def __init__(self, rfilename: str, reason: str):
+        super().__init__(
+            "TARGET_PATH_CONFLICT",
+            f"archive target for {rfilename} is not safely replaceable: {reason}",
+            evidence={"rfilename": rfilename, "reason": reason},
+            actions=("inspect_annex_placeholder", "verify_existing_path", "retry_fill"),
+        )
 
 
 ArchivePolicyError = archive_manifest.ArchivePolicyError
@@ -104,6 +153,7 @@ class RunCtx:
     should_stop: Callable[[], bool] = _never
     stats: dict = field(default_factory=dict)
     read_connection_factory: Callable[[], Any] | None = None
+    check_hf_auth: bool = False
 
     def q1(self, sql: str, params: list | None = None):
         with self.lock:
@@ -187,6 +237,120 @@ def _stored_relative_path(stored: Path, model_dir: Path) -> str:
     if rel.is_absolute() or ".." in rel.parts or not rel.parts:
         raise RuntimeError(f"unsafe stored relative path: {rel}")
     return rel.as_posix()
+
+
+def _hf_auth_invalid_failure() -> dict:
+    """One operator contract for both preflight and mid-run credential rejection."""
+    return {
+        "code": "HF_AUTH_INVALID",
+        "message": (
+            "the configured Hugging Face credential is invalid; correct or unset HF_TOKEN, "
+            "or run `hf auth login --force`, then retry"
+        ),
+        "evidence": {
+            "credential_source": "environment" if os.environ.get("HF_TOKEN") else "cached"
+        },
+        "actions": ["hf_auth_login_force", "check_hf_token_environment", "retry_fill"],
+        "gate": "A",
+    }
+
+
+def _hf_auth_failure() -> dict | None:
+    """Return typed evidence only when a configured credential is definitively rejected.
+
+    No token is valid for public repositories. Transient whoami/network failures are left to the
+    download worker's bounded retry path; only HTTP 401 is an authentication blocker. ``get_token``
+    also gives huggingface_hub a chance to refresh browser OAuth credentials before validation.
+    """
+    try:
+        token = get_token()
+    except Exception:
+        return None
+    if not token:
+        return None
+    try:
+        HfApi().whoami()
+    except HfHubHTTPError as exc:
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        if code != 401:
+            return None
+        return _hf_auth_invalid_failure()
+    except Exception:
+        return None
+    return None
+
+
+def hf_auth_preflight(ctx: RunCtx) -> dict | None:
+    """Validate a configured HF credential once per execution context, before archive writes."""
+    if ctx.stats.get("hf_auth_checked"):
+        return None
+    failure = _hf_auth_failure()
+    if failure is None:
+        ctx.stats["hf_auth_checked"] = True
+    return failure
+
+
+def _download_stage_dir(dest: Path, repo_id: str, annex: bool) -> Path:
+    """Stable private same-filesystem staging so retries resume without touching worktree links."""
+    token = hashlib.sha256(repo_id.encode("utf-8")).hexdigest()[:24]
+    root = (dest / ".git" / "annex" / "tmp" / "modelark-downloads" if annex
+            else dest / ".modelark-downloads")
+    return root / token
+
+
+def _annex_key_for_path(dest: Path, target: Path) -> str | None:
+    try:
+        rel = target.relative_to(dest).as_posix()
+    except ValueError:
+        return None
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(dest), "ls-files", "--error-unmatch", "--", rel],
+            capture_output=True, text=True, timeout=_GIT_PROBE_TIMEOUT,
+        )
+        if tracked.returncode != 0:
+            return None
+        result = subprocess.run(
+            ["git", "-C", str(dest), "annex", "lookupkey", "--", rel],
+            capture_output=True, text=True, timeout=_GIT_PROBE_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise DownloadLocalError(
+            f"git-annex placeholder proof exceeded {_GIT_PROBE_TIMEOUT}s"
+        ) from exc
+    key = result.stdout.strip()
+    return key if result.returncode == 0 and key else None
+
+
+def _publish_staged(dest: Path, staged: Path, target: Path, digest: str,
+                    rfilename: str, annex: bool) -> Path:
+    """Atomically publish verified bytes, preserving every unproven conflicting worktree path."""
+    try:
+        if staged.is_symlink() or not staged.is_file():
+            raise DownloadLocalError("download worker did not produce a regular staged file")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lexists = os.path.lexists(target)
+        if lexists:
+            if target.is_symlink() and not target.exists():
+                if not annex or _annex_key_for_path(dest, target) is None:
+                    raise TargetPathConflictError(
+                        rfilename, "broken symlink is not a proven git-annex placeholder"
+                    )
+            elif target.is_file():
+                if compress.sha256_file(target) == digest:
+                    staged.unlink()
+                    return target
+                raise TargetPathConflictError(rfilename, "existing file has different verified bytes")
+            else:
+                raise TargetPathConflictError(rfilename, "existing path is not a regular file")
+        if staged.stat().st_dev != target.parent.stat().st_dev:
+            raise DownloadLocalError("staging and archive target are on different filesystems")
+        os.replace(staged, target)
+    except FetchTerminalError:
+        raise
+    except OSError as exc:
+        raise DownloadLocalError(str(exc), exc.errno) from exc
+    return target
 
 
 class _HttpResp:
@@ -302,15 +466,20 @@ def _annex_metadata(dest: Path, key: str | None, repo_id: str, params, fmt: str,
                    capture_output=True)
 
 
-def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, model_dir: Path, base: dict) -> Path:
+def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, download_dir: Path, base: dict) -> Path:
     """Download one file in a KILLABLE child process (DEC-023 stage-2 watchdog + INC-004). The parent
     kills the child if its `.incomplete` stops growing for _DL_STALL_SECS — the hang the socket timeout
     can't catch (the 2026-07-09 Falcon-H1 stall, blocked in poll() for hours) — then retries. Classic
     HTTP may resume the on-disk `.incomplete`; hf_xet restarts that file (INC-010). Terminal errors
     (gated / not-found / 4xx
     incl 429), reconstructed from the child's result, propagate unretried so run() classifies them as
-    before. A stop mid-download kills the child and raises _StopRequested."""
-    dl_cache = model_dir / ".cache" / "huggingface" / "download"
+    before. Local filesystem failures propagate immediately and never enter the network-stall circuit
+    breaker. A stop mid-download kills the child and raises _StopRequested."""
+    try:
+        download_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DownloadLocalError(str(exc), exc.errno) from exc
+    dl_cache = download_dir / ".cache" / "huggingface" / "download"
 
     def progress() -> int:                              # the growing .incomplete = download liveness
         try:
@@ -322,10 +491,15 @@ def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, model_dir: Path, 
     for attempt in range(1, _DL_RETRIES + 1):
         if ctx.should_stop():
             raise _StopRequested()
-        res_fd, res_path = tempfile.mkstemp(dir=str(model_dir), prefix=".dl-", suffix=".result")
+        try:
+            res_fd, res_path = tempfile.mkstemp(
+                dir=str(download_dir), prefix=".dl-", suffix=".result"
+            )
+        except OSError as exc:
+            raise DownloadLocalError(str(exc), exc.errno) from exc
         os.close(res_fd)
         request = json.dumps({"repo_id": repo_id, "rfilename": rfilename,
-                              "local_dir": str(model_dir), "result": res_path})
+                              "local_dir": str(download_dir), "result": res_path})
         try:
             mon = _run_monitored([sys.executable, "-m", "modelark.download_worker", request],
                                  progress, _DL_STALL_SECS, ctx.should_stop)
@@ -334,7 +508,12 @@ def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, model_dir: Path, 
             if mon["outcome"] == "exited" and mon["rc"] == 0:
                 result = json.loads(Path(res_path).read_text())
                 if result["ok"]:
-                    return Path(result["path"])
+                    downloaded = Path(result["path"])
+                    try:
+                        downloaded.relative_to(download_dir)
+                    except ValueError as exc:
+                        raise DownloadLocalError("download worker returned a path outside staging") from exc
+                    return downloaded
                 et, code, ra, detail = (result["error_type"], result["status_code"],
                                         result["retry_after"], result["detail"])
                 if et == "gated":
@@ -343,6 +522,8 @@ def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, model_dir: Path, 
                     raise RepositoryNotFoundError(detail, response=_HttpResp(404))
                 if et == "http" and code is not None and 400 <= code < 500:
                     raise HfHubHTTPError(detail, response=_HttpResp(code, ra))    # incl 429 → run() stops the run
+                if et == "local_io":
+                    raise DownloadLocalError(detail, result.get("errno"))
                 last_detail = detail                    # http 5xx / transient → retry
             elif mon["outcome"] == "stalled":
                 last_detail = f"no download progress for {_DL_STALL_SECS}s — killed the hung child"
@@ -362,7 +543,9 @@ def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, model_dir: Path, 
                else f"retry {attempt}/{_DL_RETRIES} in {wait}s")
         print(f"    [dl-retry] {repo_id}/{rfilename}: {last_detail[:80]} — {why}")
         ctx.on_progress({**base, "file_phase": "download-retry", "stall_cooldown": clustered,
-                         "say": f"    download stalled; {why}"})
+                         "retry_attempt": attempt, "retry_limit": _DL_RETRIES,
+                         "retry_reason": "transient_network",
+                         "say": f"    transient download retry {attempt}/{_DL_RETRIES}; {why}"})
         for _ in range(wait):                           # interruptible backoff
             if ctx.should_stop():
                 raise _StopRequested()
@@ -400,7 +583,12 @@ def fetch_model(
                               [repo_id]).fetchone() or [None])[0]
     todo = [f for f in files if f["rfilename"] not in have]      # file-level resume after a crash
     model_dir = dest / repo_id
-    model_dir.mkdir(parents=True, exist_ok=True)
+    stage_dir = _download_stage_dir(dest, repo_id, annex)
+    try:
+        model_dir.mkdir(parents=True, exist_ok=True)
+        stage_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise DownloadLocalError(str(exc), exc.errno) from exc
     done = dl_bytes = 0
     st = ctx.stats
     st.setdefault("t0", time.monotonic())
@@ -424,7 +612,7 @@ def fetch_model(
             if before_file(item) is False:               # another durable writer satisfied stale work
                 continue
         ctx.on_progress({**base, "file_phase": "download"})
-        local = _download_shard(ctx, repo_id, f["rfilename"], model_dir, base)
+        local = _download_shard(ctx, repo_id, f["rfilename"], stage_dir, base)
         # Every archived original needs durable restore evidence. Hugging Face does not publish a
         # sha256 for ordinary Git-tracked files such as .gitattributes, so checking only when the
         # catalog supplied one stranded those files at restore time (INC-017). Always hash the
@@ -481,6 +669,13 @@ def fetch_model(
                     ctx.on_progress({**base, "file_phase": "canary-ok", "codec": codec, "ratio_pct": round(ratio, 1)})
         else:
             stored, znn_sha, compressed = local, None, False
+        stored_digest = znn_sha if compressed else got
+        final_relpath = f["rfilename"] + (compress.ZNN_SUFFIX if compressed else "")
+        ctx.on_progress({**base, "file_phase": "publish"})
+        stored = _publish_staged(
+            dest, stored, model_dir / final_relpath, stored_digest,
+            f["rfilename"], annex,
+        )
         if annex:
             ctx.on_progress({**base, "file_phase": "annex"})
             key = _annex_add(dest, stored)
@@ -507,7 +702,9 @@ def fetch_model(
                          "session_bytes": st["bytes"], "rate_bps": st["bytes"] / elapsed,
                          "ratio": (st["comp_stored"] / st["comp_orig"]) if st["comp_orig"] else None,
                          "done_by_drive": dict(st["by_drive"])})
-        freed = _sweep_incomplete(model_dir)    # INC-010: reclaim orphaned .incomplete from a stalled retry
+        # Reclaim current staging leftovers plus the legacy final-directory cache used before
+        # DEC-046. The age guard keeps this safe even if an unexpected second writer exists.
+        freed = _sweep_incomplete(stage_dir) + _sweep_incomplete(model_dir)
         if freed:
             print(f"    [swept] {freed/1e9:.1f} GB orphaned .incomplete reclaimed")
             ctx.on_progress({**base, "file_phase": "swept", "reclaimed": freed})
@@ -522,6 +719,8 @@ def fetch_model(
         ).fetchall()}
         if {item.rfilename for item in canonical} <= present:
             con.execute("UPDATE models SET status='archived' WHERE repo_id=?", [repo_id])
+    if done == len(todo) and stage_dir.exists():
+        shutil.rmtree(stage_dir, ignore_errors=True)
     return {"repo_id": repo_id, "files": done, "skipped": len(files) - len(todo), "bytes": dl_bytes}
 
 
@@ -553,11 +752,12 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
     mode?'. On a non-fit, break the batch (emit `plan-capacity`) so fill re-plans instead of
     ENOSPC-ing mid-shard. None (the CLI/plain-fetch path) → no capacity gating, as before."""
     result = {"stored_repos": [], "failed_repos": [], "capacity_failure": None,
+              "terminal_failure": None, "terminal_repo": None,
               "throttled": False, "stopped": False, "drive_unwritable": False}
     own = ctx is None                               # CLI/plain-fetch path owns its connection
     con = db.connect() if own else ctx.con
     if own:
-        ctx = RunCtx(con=con)
+        ctx = RunCtx(con=con, check_hf_auth=True)
     try:
         # Resolve the on-drive archive dir (DEC-006): an explicit --dest wins; otherwise a
         # registered --drive label resolves to <mount>/modelark via the drives table.
@@ -601,6 +801,18 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
         if not drive_label:
             print("give --drive LABEL so the archive is recorded against a fleet drive.")
             return result
+
+        if ctx.check_hf_auth:
+            auth_failure = hf_auth_preflight(ctx)
+            if auth_failure is not None:
+                result["terminal_failure"] = auth_failure
+                print(f"  [auth    ] {auth_failure['message']}")
+                ctx.on_progress({
+                    "phase": "auth-invalid", "code": auth_failure["code"],
+                    "evidence": auth_failure["evidence"], "actions": auth_failure["actions"],
+                    "say": f"🔴 {auth_failure['message']}",
+                })
+                return result
 
         annex = _is_annex(dest)
         if not annex:
@@ -652,6 +864,18 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                                  "code": exc.failure.code.value,
                                  "say": f"  {drive_label} lacks safe workspace for {rid} — re-planning."})
                 break
+            except FetchTerminalError as exc:
+                result["terminal_failure"] = exc.as_dict()
+                result["terminal_repo"] = rid
+                print(f"  [{exc.code.lower():8}] {rid}: {exc}")
+                event_detail = f"{exc.code}: {str(exc)[:150]}"
+                ctx.write(lambda c: _event(c, rid, "terminal", detail=event_detail))
+                ctx.on_progress({
+                    "phase": "fetch-blocked", "repo": rid, "code": exc.code,
+                    "evidence": exc.evidence, "actions": list(exc.actions),
+                    "say": f"🔴 {exc}",
+                })
+                break
             except ArchivePolicyError as e:
                 print(f"  [policy  ] {rid}: {e}")
                 detail = str(e)[:200]
@@ -663,6 +887,17 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                 result["failed_repos"].append(rid)
             except HfHubHTTPError as e:
                 code = getattr(getattr(e, "response", None), "status_code", None)
+                if code == 401:
+                    failure = _hf_auth_invalid_failure()
+                    result["terminal_failure"] = failure
+                    result["terminal_repo"] = rid
+                    ctx.write(lambda c: _event(c, rid, "auth", detail="configured HF credential rejected"))
+                    ctx.on_progress({
+                        "phase": "auth-invalid", "repo": rid, "code": failure["code"],
+                        "evidence": failure["evidence"], "actions": failure["actions"],
+                        "say": f"🔴 {failure['message']}",
+                    })
+                    break
                 if code == 429:
                     ra = _retry_after(e)
                     print(f"  [429     ] {rid} — HF rate limit"

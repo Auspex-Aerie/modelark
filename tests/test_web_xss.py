@@ -99,6 +99,9 @@ def test_fill_poll_uses_shared_terminal_classifier_and_modal() -> None:
     assert "MA.isFillTerminal(s.status)" in fill
     call_sites = [line.strip() for line in fill.splitlines() if line.strip() == "announceTerminal(s);"]
     assert len(call_sites) == 2, "both poll and refresh/load must announce terminals"
+    assert "transient network retry" in fill
+    assert "retry_attempt" in fill and "retry_limit" in fill
+    assert "publish:" in fill
 
 
 if __name__ == "__main__":

@@ -315,6 +315,7 @@ def cmd_library_plan(args):
                 con=con,
                 on_progress=lambda ev: print(ev["say"]) if "say" in ev else None,
                 read_connection_factory=lambda: db.connect(read_only=True),
+                check_hf_auth=True,
             )
             res = fill.execute(ctx, plan_id=pid, max_24h_gb=args.max_24h_gb, repo_scope=args.repo, guided=False)
             if not res["ok"]:
