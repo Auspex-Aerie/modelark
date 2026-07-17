@@ -1,5 +1,12 @@
 # ModelArk
 
+[![CI](https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml/badge.svg)](https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml)
+[![Release: v0.1.0 Public Alpha](https://img.shields.io/badge/release-v0.1.0%20Public%20Alpha-orange)](CHANGELOG.md#010---2026-07-16)
+[![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%E2%80%933.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![Linux](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)](docs/deployment.md)
+[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-support_AuspexLabs-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/auspexlabs?new=1)
+
 > 🚧 **ModelArk 0.1.0 — Public Alpha.** The archive pipeline, reconciled capacity engine, and
 > verified restore command are implemented and extensively tested, and StreamZNN's write-time restore
 > proof has been validated on real archive data. "Alpha" reflects pre-1.0 interface stability and the
@@ -413,6 +420,12 @@ Pending more real-world usage data:
 - UI-driven initial drive registration and setup — a guided terminal flow first, eventually a full UI setup and drive registration.
 
 Contributions to any of these are welcome — see [contributing/](contributing/contributions.md).
+
+## Support the project
+
+If ModelArk helps you preserve the models you care about, you can
+[support AuspexLabs on Buy Me a Coffee](https://buymeacoffee.com/auspexlabs?new=1). Contributions,
+testing, bug reports, and thoughtful feedback are equally welcome.
 
 ## Licensing
 
