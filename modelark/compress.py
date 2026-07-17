@@ -1,8 +1,9 @@
 """Compressed-at-rest archive layer (DEC-003) + the compression gate (DEC-022).
 
 Weights are stored compressed and decompressed on use. Every compression is gated by a mandatory
-round-trip *canary*: decompress, hash the result, require it equal HF's canonical sha256 — before
-the uncompressed original is ever deleted.
+round-trip *canary*: decompress, hash the result, and require it equal the downloaded original's
+sha256 before the uncompressed original is ever deleted. Ingestion separately requires an
+HF-provided sha256 to match when one is available.
 
 Codec is chosen PER SHARD by `plan_codec` from the `compression` config (wishlist.compression()):
   • whole-file ZipNN  — shard fits the RAM budget: fastest, best ratio, in-memory (ZipNN blob, "ZN").
@@ -203,10 +204,10 @@ def _head(path: StrPath, n: int = 8) -> bytes:
 
 
 def canary_ok(znn_path: StrPath, expected_sha256: str, dtype: str = "bfloat16") -> bool:
-    """Decompress + hash; must equal HF's canonical sha256. Routes by the stored file's magic:
+    """Decompress + hash; must equal the expected original-byte sha256. Routes by stored magic:
     StreamZNN + zstd stream (O(chunk) memory); whole/legacy ZipNN load the blob in RAM."""
     if not expected_sha256:
-        return False        # no canonical hash to certify against → canary cannot pass (keep the original)
+        return False        # no expected hash to certify against → canary cannot pass (keep the original)
     head = _head(znn_path)
     if head.startswith(streamznn.MAGIC):
         return streamznn.verify_sha256(znn_path, expected_sha256)

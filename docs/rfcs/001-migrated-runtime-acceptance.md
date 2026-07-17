@@ -1,10 +1,10 @@
 # RFC-001: Operator-attended migrated-runtime acceptance
 
-- **Status:** in execution — Phases A–F passed; stopped before verified restore
+- **Status:** in execution — Phases A–F passed; Phase G stopped on INC-017 before restore
 - **Date:** 2026-07-15
 - **Owners:** Auspex-Aerie + operator
 - **Related:** DEC-035, DEC-037, DEC-038, DEC-040, DEC-042, DEC-044, DEC-045,
-  DEF-011, DEF-027, DEF-028, DEF-031, INC-014, INC-015, INC-016
+  DEF-011, DEF-027, DEF-028, DEF-031, INC-014, INC-015, INC-016, INC-017
 - **Execution record:** check boxes are completed only from observed evidence; an unchecked item is
   not implied by a later successful item.
 
@@ -183,9 +183,14 @@ fixture disguised as production storage.
 
 - [ ] Operator chooses a small archived repository and disposable destination.
 - [ ] Every required archived file has at least one currently readable recorded copy.
+- [ ] A read-only `repair-hashes --repo ...` audit reports every legacy hash gap and proves each
+      proposed digest against the archive's committed Git blob.
+- [ ] If repair is needed, operator separately approves `--apply`, confirms the consistent catalog
+      backup, and re-runs the read-only audit before restore.
 - [ ] Prefer already-present content; do not rely on annex retrieval onto read-only media.
 - [ ] Restore stages atomically beneath `rehearsal/` and never overwrites an existing destination.
-- [ ] Every restored file matches its canonical SHA-256.
+- [ ] Every restored file matches its recorded original-byte SHA-256, and every Hub-provided
+      canonical SHA-256 remains identical to that evidence.
 - [ ] Nested Hugging Face paths are reconstructed correctly.
 - [ ] Missing/offline copies are reported without false success.
 - [ ] Operator reviews evidence before disposable output cleanup.
@@ -367,5 +372,25 @@ Sanitized Phase-E/F evidence:
   mutation access. DEF-031 tracks replacing that raw error with explicit refresh guidance without
   replaying the rejected action.
 
-Phase F is complete. Phase G now requires the operator to choose a small archived repository and
-disposable restore destination. Phase H and any real Fill remain separate explicit approvals.
+Phase F is complete. Phase H and any real Fill remain separate explicit approvals.
+
+## Execution continuation — 2026-07-16 Phase G preflight
+
+Disposition: **stopped before restore; INC-017 requires a reviewed repair build.**
+
+The read-only candidate audit found seven otherwise complete repositories with every recorded file
+physically present on a readable drive. Their ordinary Git-tracked metadata lacked restore-hash
+evidence: `.gitattributes` in all seven, plus three nested evaluation YAML files in one repository.
+The smallest candidate had ten files and approximately 2.37 GB of original bytes, but restore would
+correctly fail closed on its hashless `.gitattributes` before publishing any output.
+
+The cause is the legacy fetch contract: it computed and persisted `orig_sha256` only when Hugging
+Face supplied `files.sha256`. Git-tracked files commonly have no Hub sha256, and unlike annexed raw
+content they have no SHA256 annex key fallback. Physical presence therefore could not establish the
+expected digest required by DEC-037 restore verification.
+
+No restore, annex retrieval, fill, catalog update, archive write, or disposable-output cleanup ran.
+Phase G resumes only after ingestion hashes every original file and a reviewed dry-run-by-default
+repair validates legacy bytes against the blob committed at the same Git path, creates a consistent
+catalog backup before explicit apply, and passes an end-to-end repair-plus-restore regression. The
+real migrated catalog repair and restore remain separate operator approvals.

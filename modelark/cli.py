@@ -183,6 +183,41 @@ def cmd_restore(args):
         con.close()
 
 
+def cmd_repair_hashes(args):
+    from modelark import hash_repair
+    con = db.connect(read_only=not args.apply)
+    try:
+        try:
+            result = hash_repair.repair_hashes(con, args.repo, apply=args.apply)
+        except hash_repair.HashRepairError as exc:
+            raise SystemExit(f"hash repair failed: {exc}") from exc
+    finally:
+        con.close()
+
+    action = "applied" if args.apply else "would repair"
+    for item in result["repairs"]:
+        print(
+            f"  {action}: {item['repo_id']}/{item['rfilename']} on {item['drive_label']} "
+            f"sha256={item['sha256']} ({item['bytes']} bytes; {item['evidence']})"
+        )
+    for item in result["errors"]:
+        subject = item["repo_id"]
+        if item["rfilename"]:
+            subject += "/" + item["rfilename"]
+        if item["drive_label"]:
+            subject += " on " + item["drive_label"]
+        print(f"  blocked: {subject}: {item['code']}: {item['detail']}", file=sys.stderr)
+    print(
+        f"legacy hash evidence: {result['already_verifiable']} already verifiable, "
+        f"{result['missing_evidence']} missing, {len(result['repairs'])} provable, "
+        f"{len(result['errors'])} blocked"
+    )
+    if result["backup"]:
+        print(f"catalog backup: {result['backup']}")
+    if result["errors"]:
+        raise SystemExit(1)
+
+
 def cmd_library_init(args):
     from modelark import register
     path = register.ensure_library(Path(args.path).expanduser() if args.path else None)
@@ -519,6 +554,17 @@ def main(argv=None):
     rs.add_argument("--dest", type=Path, required=True,
                     help="output root; each model is restored below <dest>/<org>/<model>")
     rs.set_defaults(func=cmd_restore)
+
+    rh = sub.add_parser(
+        "repair-hashes",
+        help="audit legacy restore hashes; validate Git-tracked bytes before optional backfill",
+    )
+    rh.add_argument("--repo", action="append", help="limit to an archived repo (repeatable)")
+    rh.add_argument(
+        "--apply", action="store_true",
+        help="back up the catalog and apply every provable repair (default is read-only dry-run)",
+    )
+    rh.set_defaults(func=cmd_repair_hashes)
 
     lib = sub.add_parser("library", help="the central git-annex map repo")
     libsub = lib.add_subparsers(dest="library_cmd", required=True)

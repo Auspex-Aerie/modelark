@@ -1,22 +1,19 @@
 """Restore archived models to their original Hugging Face directory layout.
 
-Restore is deliberately catalog-driven: ``archived`` identifies the stored blob and its
-copies, while ``files`` supplies the canonical Hugging Face hash and dtype.  A model is
+Restore is deliberately catalog-driven: ``archived`` identifies the stored blob, its copies,
+and the ingested original-byte hash, while ``files`` supplies any Hugging Face hash and dtype. A model is
 materialized in a hidden sibling directory and published only after every planned file has
 been retrieved, decompressed when necessary, and hash-verified.
 """
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from modelark import archive_manifest, compress, register
-
-_ANNEX_SHA256 = re.compile(r"^SHA256E?-s\d+--([0-9a-f]{64})(?:\.|$)")
+from modelark import archive_hash, archive_manifest, compress, register
 
 
 class RestoreError(RuntimeError):
@@ -37,11 +34,6 @@ def _stored_relative(row: dict) -> PurePosixPath:
         PurePosixPath(row["rfilename"]).parent / (row["stored_name"] or "")
     )
     return _safe_relative(value, description="stored path")
-
-
-def _annex_hash(key: str | None) -> str | None:
-    match = _ANNEX_SHA256.match(key or "")
-    return match.group(1) if match else None
 
 
 def _run_annex(archive: Path, *args: str) -> subprocess.CompletedProcess:
@@ -92,12 +84,12 @@ def _annex_content(archive: Path, row: dict, stored: Path) -> tuple[Path | None,
 
 
 def _expected_hash(row: dict) -> str | None:
-    canonical = row["catalog_sha"] or row["orig_sha256"]
-    if canonical:
-        return canonical.lower()
-    if not row["compressed"]:
-        return _annex_hash(row["annex_key"])
-    return None
+    return archive_hash.expected_sha256(
+        catalog_sha=row["catalog_sha"],
+        orig_sha256=row["orig_sha256"],
+        compressed=bool(row["compressed"]),
+        annex_key=row["annex_key"],
+    )
 
 
 def _materialize(source: Path, destination: Path, row: dict, expected: str) -> None:
@@ -222,7 +214,7 @@ def restore_repo(con, repo_id: str, output_root: str | Path) -> dict:
                 retrievals += int(retrieved)
                 expected = _expected_hash(row)
                 if expected is None:
-                    attempts.append(f"{drive}: no canonical sha256 available")
+                    attempts.append(f"{drive}: no original-byte sha256 available")
                     continue
                 try:
                     _materialize(source, stage / Path(*output_rel.parts), row, expected)

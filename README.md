@@ -29,8 +29,9 @@ Not even close. Weights are stored **ZipNN-compressed** (lossless, float-aware) 
 savings, and it **streams** — a giant shard compresses and restores in O(chunk) memory
 (hundreds of MB), never fully materialized in RAM. On top of that:
 
-- **Integrity you can trust** — every compression passes a round-trip *canary* (decompress →
-  hash → match HF's sha256) *before* the original is dropped, so compression never replaces an
+- **Integrity you can trust** — every downloaded original is hashed; an HF-provided sha256 must
+  match when available, and every compression passes a round-trip *canary* against the ingested
+  original's sha256 *before* that original is dropped. Compression therefore never replaces an
   original with a blob that failed its restore proof.
 - **Drive-health monitoring** — SMART vetting before a volume ever holds archives.
 - **Plans** — explicit storage/fill contexts, each with its own drive fleet and capacity mode.
@@ -88,7 +89,8 @@ Tiered drive fleet (git-annex remotes)      ← the actual TBs of weights
 2. **Curate** in the portal — build a set within a size budget; mark keepers *must-have*.
 3. **Plan** — the librarian bin-packs the set across the tiered fleet (must-have copy #1 on
    the RAID, bulk consolidated onto the big primaries, must-have copy #2 on a replica drive).
-4. **Fill** — per shard: HF download → sha256 vs HF's canonical hash → compress → **canary**
+4. **Fill** — per file: HF download → compute sha256 (and match HF's digest when supplied) →
+   compress → **canary**
    → drop the original → git-annex add → record. Throttled by a rolling 24 h cap (1 TB/day by default;
    `0` disables it), resumable at the file level (completed files are skipped; the interrupted
    shard is retried). Classic HTTP may reuse its partial download, while `hf_xet` currently starts
@@ -96,15 +98,17 @@ Tiered drive fleet (git-annex remotes)      ← the actual TBs of weights
 5. **Replicate** — must-have copy #2 is a *local* clone→clone transfer from copy #1 (no second
    HF download).
 6. **Restore** — retrieve a readable annex copy, reconstruct the original Hugging Face paths,
-   decompress into a hidden staging tree, verify every canonical sha256, then publish atomically.
+   decompress into a hidden staging tree, verify every recorded original-byte sha256, then publish
+   atomically.
 
 ## Compression & integrity
 
 Weights are stored **ZipNN**-compressed (`.znn`, lossless, float-aware) and decompressed on
 use. Every compression is gated by a mandatory **round-trip canary**: decompress the `.znn`,
-hash the result, and require it equal HF's canonical sha256 **before** the uncompressed
-original is ever deleted. This proves the compressed blob at write time; later media health is
-covered separately by physical re-verification and restore hashes.
+hash the result, and require it equal the downloaded original's sha256 **before** the uncompressed
+original is ever deleted. When Hugging Face supplies a canonical sha256, ingestion first requires
+the downloaded bytes to match it. This proves the compressed blob at write time; later media health
+is covered separately by physical re-verification and restore hashes.
 
 **StreamZNN** (`modelark/streamznn.py`, MIT, standalone) wraps ZipNN so a shard of *any* size
 compresses and restores in **O(chunk) memory** — a 10 GB shard peaks ~800 MB instead of the
@@ -129,7 +133,13 @@ Restore/canary route by the stored file's magic, so every codec (and legacy `.zn
 `modelark restore --repo org/model --dest ./recovered` is the first-class recovery path. It tries
 recorded copies in order, asks git-annex to retrieve dropped content, falls back to another replica
 when a copy is offline or corrupt, and creates `./recovered/org/model` only after every planned file
-passes its canonical hash. It refuses to overwrite an existing model tree.
+passes its recorded original-byte hash. It refuses to overwrite an existing model tree.
+
+Archives written by older builds can lack restore-hash evidence for small, ordinary Git-tracked
+files whose Hub metadata had no sha256. `modelark repair-hashes --repo org/model` audits those rows
+read-only by default. `--apply` is deliberately explicit: every candidate must match the blob at the
+same path in the archive's `HEAD` commit, and ModelArk creates a consistent, non-overwriting catalog
+backup before backfilling any digest. Stop fill writers before using the apply mode.
 
 ## The portal
 
@@ -282,6 +292,7 @@ modelark serve                               # portal → :8077 (curate, then Fi
 modelark library plan                        # review the placement plan
 modelark library plan --apply                # run the fill from the CLI (stop the portal worker first)
 modelark restore --repo org/model --dest ./recovered  # verified restore to ./recovered/org/model
+modelark repair-hashes --repo org/model      # dry-run legacy restore-evidence audit
 modelark export                              # dump JSONL for git
 ```
 The fill runs either from the **Fill tab's Start button** (worker inside the running portal) or
