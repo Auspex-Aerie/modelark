@@ -368,11 +368,13 @@ operator-attended migrated-runtime checklist has passed Phases A–F. Phase G st
 the reviewed hash-repair build, auditing and (if approved) repairing legacy Git-tracked hash evidence,
 and completing one real verified restore. Service installation and the first reconciled Fill are the
 separate Phase-H approval. See [`RFC-001`](docs/rfcs/001-migrated-runtime-acceptance.md) and the
-[`release closeout`](docs/roadmap.md#public-release-closeout--active).
+[`public-alpha checklist`](docs/roadmap.md#public-alpha--live-runtime-acceptance-active).
 
-Repository visibility is a separate release operation. Before making a private canonical remote
-public, inspect every reachable ref—not only the working tree—for credentials, local paths, hardware
-identifiers, catalog runtime state, and unintended author identity linkage.
+The canonical GitHub repository became public on 2026-07-16 after a reachable-ref content scan;
+historical author attribution was reviewed and accepted. Its public settings use an integrity-only
+description, disable the unused Wiki, and enable dependency alerts/security updates, secret scanning
+with push protection, and private vulnerability reporting. Publication does **not** authorize the
+remaining operator-attended RFC-001 Phase G/H runtime actions.
 
 For now: use it to archive, and use it carefully. We've built in tools to help you spot where problems
 may have occurred and to give you options to fix them. Bad drives can and will fail after an extended

@@ -6,18 +6,19 @@ Canonical build order and parked work. **Design rationale** lives in the append-
 
 > Task numbers (`#NN`) are stable cross-reference labels; a live task board may assign its own IDs.
 
-## Public-release closeout — active
+## Public alpha — live; runtime acceptance active
 
-The external audit's numbered code blockers are fixed. Public visibility and the operator's archive
-activation are deliberately separate gates: publishing an alpha does not authorize a catalog write,
-restore output, service installation, or Fill.
+The external audit's numbered code blockers are fixed, the canonical repository is public, and its
+public-project settings are hardened. Repository publication and archive activation remain separate
+gates: publishing the alpha does not authorize a catalog write, restore output, service installation,
+or Fill.
 
 | ID | Work | Done when | Execution gate |
 |---|---|---|---|
-| **RC-0** | Sanitize and approve release history before visibility | Current tree and every reachable ref are free of credentials, local/runtime data, hardware identifiers, and unintended identity linkage; the canonical remote is rescanned immediately before visibility changes | **Operator owns history/identity acceptance and the visibility switch** |
+| **RC-0** | ✅ Sanitize and approve release history before visibility | Reachable-ref content scan passed; historical author attribution was reviewed and accepted; the canonical repository became public on 2026-07-16 | Complete |
 | **RC-1** | ✅ Harden destructive `drive register --format` | Complete block-device topology checks protect every active/system-backed device; unmount/wipe failures stop; destructive intent is explicit; command construction is covered without touching real disks | Canonical checkout + mocked/synthetic devices only |
 | **RC-2** | Resolve roadmap task #30 (“resume re-fetch durability”) | ✅ Reconciled: durable per-(repo,file,drive) completion is covered by DEC-019 and regression tests; interrupted `hf_xet` file restart is the known INC-010 residual, explicitly deferred as DEF-026 | Canonical checkout only |
-| **RC-3** | Documentation/governance reconciled; repository settings pending | README, changelog, governance, examples, roadmap, and RFC status match the reviewed implementation; local links and commands validate. Remaining: remove the GitHub description's loadability claim, disable the empty Wiki, and enable dependency alerts plus secret-scanning/push-protection/private-reporting where available | Merge the docs change, then perform an explicit repository-settings review before visibility |
+| **RC-3** | ✅ Reconcile documentation, governance, and repository settings | README, changelog, governance, examples, roadmap, and RFC status match the reviewed implementation; the GitHub description makes no loadability claim; the unused Wiki is disabled; dependency security updates, secret scanning with push protection, and private vulnerability reporting are enabled | Complete |
 | **RC-4** | ✅ Build the legacy-checkout migration/cutover tool + runbook | Dry-run-first inspection, non-overwriting database backup/manifest, copied-data migration, git-remote plan, validation, and rollback paths are tested without accessing the running checkout | Tooling and fixtures only; **do not touch the live legacy checkout** |
 | **RC-5** | ✅ Deployable code release candidate | Minimal user-service deploy, reconciled capacity engine, schema-v2 migration, normal/dev and wheel installs, standalone/browser suites, packaging, and reviewed security/correctness fixes are green through PR #23 | Canonical checkout only; no live archive |
 | **RC-6** | Complete operator-attended migrated-runtime acceptance | RFC-001 Phases A–F are complete. Refresh the isolated install from reviewed main; run the read-only legacy-hash audit; separately approve any repair and one real restore; then install the user service and approve the first reconciled Fill | **Phases G/H remain operator-attended; never run autonomously** (DEC-042 / RFC-001) |

@@ -14,6 +14,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ### Changed
 
+- Published the canonical repository on 2026-07-16 after a reachable-history content scan and
+  hardened its public settings: accurate archive-integrity metadata, no unused Wiki, dependency and
+  secret scanning with push protection, and private vulnerability reporting.
 - Reconciled work-graph execution and exact capacity accounting: completed copies reserve no bytes,
   partial copies reserve only missing files, and replica completion requires target-UUID evidence.
 - Schema-v2 capacity terminology: `guaranteed` and `compression_aware` replace the ambiguous
