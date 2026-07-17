@@ -1,6 +1,7 @@
 """Fetch pipeline (DEC-003) — download the finalized wishlist onto a drive.
 
-Per shard: hf download → verify sha256 vs HF canonical → ZipNN-compress (float
+Per file: hf download → compute sha256 (and verify it against HF when supplied) →
+ZipNN-compress (float
 weights) + mandatory round-trip canary → drop the original → git-annex add →
 record in `archived`. Peak transient footprint is ~one shard, so a 1.4TB model
 streams through without needing 1.4TB of scratch.
@@ -238,7 +239,7 @@ def _compress_isolated(local: Path, dtype: str, codec: str, threads: int,
     native compressor abort (ZipNN's double-free, INC-005) kills the child, not the portal; a HUNG
     compress is killed by the no-progress watchdog. Returns a dict whose `status` is one of:
         "ok"      — canary certified; keys znn_path/znn_sha256/stored_bytes are set
-        "canary"  — round-trip did NOT match the canonical sha256 (keep the original, drop nothing)
+        "canary"  — round-trip did NOT match the original-byte sha256 (keep original, drop nothing)
         "crash"   — child died from a signal (e.g. SIGABRT double-free) → caller stores the shard RAW
         "stalled" — child made no progress for the (size-scaled) stall window, killed → caller stores RAW
         "over-cap"— compressed output would exceed the guaranteed disk ceiling → caller stores RAW
@@ -424,10 +425,15 @@ def fetch_model(
                 continue
         ctx.on_progress({**base, "file_phase": "download"})
         local = _download_shard(ctx, repo_id, f["rfilename"], model_dir, base)
+        # Every archived original needs durable restore evidence. Hugging Face does not publish a
+        # sha256 for ordinary Git-tracked files such as .gitattributes, so checking only when the
+        # catalog supplied one stranded those files at restore time (INC-017). Always hash the
+        # downloaded original; when HF did supply a canonical digest, require it to agree.
+        ctx.on_progress({**base, "file_phase": "verify"})
+        got = compress.sha256_file(local)
         if f["sha256"]:
-            ctx.on_progress({**base, "file_phase": "verify"})
-            got = compress.sha256_file(local)
-            if got != f["sha256"]:
+            canonical = f["sha256"].lower()
+            if got != canonical:
                 raise RuntimeError(f"{repo_id}/{f['rfilename']}: sha256 mismatch (download corrupt)")
         if f["mode"] == "compress" and compress.should_compress(f["rfilename"]):
             # DEC-022 gate: pick the codec from the shard size + config; log the decision + canary loudly.
@@ -441,7 +447,7 @@ def fetch_model(
             else:
                 ctx.on_progress({**base, "file_phase": "compress", "codec": codec})
                 dtype = compress.zipnn_dtype(f["quant"])
-                res = _compress_isolated(local, dtype, codec, compress_cfg["threads"], f["sha256"], ctx.should_stop)
+                res = _compress_isolated(local, dtype, codec, compress_cfg["threads"], got, ctx.should_stop)
                 if res["status"] in ("crash", "stalled", "over-cap"):
                     # INC-005: the compressor died natively (ZipNN double-free) or hung on this shard. The
                     # child absorbed it — store the shard RAW so the fill routes around it instead of
@@ -486,7 +492,7 @@ def fetch_model(
         ctx.write(lambda c: db.upsert(c, "archived", {
             "repo_id": repo_id, "rfilename": f["rfilename"], "stored_name": stored.name,
             "stored_relpath": stored_relpath,
-            "drive_label": drive_label, "orig_sha256": f["sha256"], "znn_sha256": znn_sha,
+            "drive_label": drive_label, "orig_sha256": got, "znn_sha256": znn_sha,
             "orig_bytes": f["size"], "stored_bytes": stored_sz,
             "compressed": compressed, "annex_key": key,
         }, pk=["repo_id", "rfilename", "drive_label"], touch=["verified_at"]))

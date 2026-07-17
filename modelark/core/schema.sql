@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS archived (
     stored_name  VARCHAR,          -- legacy basename (kept for migration/backward compatibility)
     stored_relpath VARCHAR,        -- POSIX path below <archive>/<repo_id>, including nested HF dirs
     drive_label  VARCHAR NOT NULL,
-    orig_sha256  VARCHAR,          -- HF canonical (= decompressed) hash
+    orig_sha256  VARCHAR,          -- original-byte hash: HF-confirmed when supplied, else ingested sha256
     znn_sha256   VARCHAR,          -- compressed-blob hash (NULL when stored raw)
     orig_bytes   BIGINT CHECK (orig_bytes IS NULL OR orig_bytes >= 0),
     stored_bytes BIGINT CHECK (stored_bytes IS NULL OR stored_bytes >= 0),

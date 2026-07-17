@@ -6,8 +6,8 @@ ON THE DRIVE:
                              re-verify candidates: a compressor raw-fallback (INC-005), an interrupted
                              partial copy, or an archive that landed within a window of a recorded
                              disruption event (fetch_events: awaiting-drive / compress-fallback / error).
-  • reverify(con, repo)    — RECORD consistency always (offline-safe: all planned files archived, each
-                             stored orig_sha256 matches the catalog) + a decompress-CANARY spot-check of
+  • reverify(con, repo)    — RECORD consistency always (offline-safe: all planned files archived and
+                             Hub hashes agree when supplied) + a decompress-CANARY spot-check of
                              each stored blob when its drive is mounted (the DIS-002 proof, on demand).
 
 The write-time canary (DEC-003/019) proves each shard at store time; this is the cheaper, on-demand
@@ -15,15 +15,13 @@ re-check for exactly the shards a disruption (restart / crash / RO flip / raw-fa
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path, PurePosixPath
 
-from modelark import archive_manifest, compress, register
+from modelark import archive_hash, archive_manifest, compress, register
 
 _DISRUPTION_OUTCOMES = ("awaiting-drive", "compress-fallback", "error")
 _WINDOW_MIN = 15                    # an archive within ±this many minutes of a disruption is a suspect
 _FLOAT_SQL = ("bf16", "bfloat16", "fp16", "f16", "float16", "fp32", "f32", "float32")
-_ANNEX_SHA256 = re.compile(r"^SHA256E?-s\d+--([0-9a-f]{64})(?:\.|$)")
 
 
 def _stored_relpath(rfilename: str, stored_name: str | None, stored_relpath: str | None) -> PurePosixPath:
@@ -38,11 +36,6 @@ def _stored_relpath(rfilename: str, stored_name: str | None, stored_relpath: str
     if not rel.parts or value != rel.as_posix() or rel.is_absolute() or ".." in rel.parts:
         raise ValueError(f"unsafe stored path {value!r}")
     return rel
-
-
-def _annex_hash(key: str | None) -> str | None:
-    m = _ANNEX_SHA256.match(key or "")
-    return m.group(1) if m else None
 
 
 def suspects(con) -> list[dict]:
@@ -159,10 +152,13 @@ def reverify(con, repo_id: str, deep: bool = True) -> dict:
                                         "err": "recorded blob is missing on mounted drive"})
                     continue
                 try:
-                    expected = c["orig"] if c["compressed"] else (c["orig"] or _annex_hash(c["annex_key"]))
+                    expected = archive_hash.expected_sha256(
+                        catalog_sha=catalog_sha.get(rf), orig_sha256=c["orig"],
+                        compressed=c["compressed"], annex_key=c["annex_key"],
+                    )
                     if expected is None:
                         deep_checks.append({"file": rf, "drive": c["drive"], "ok": None,
-                                            "err": "no canonical or annex sha256 available"})
+                                            "err": "no original-byte or annex sha256 available"})
                     else:
                         ok = (compress.canary_ok(stored, expected) if c["compressed"]
                               else compress.sha256_file(stored) == expected)
