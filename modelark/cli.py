@@ -6,10 +6,8 @@ import json
 import sys
 from pathlib import Path
 
-from modelark import __version__
-
+from modelark import __version__, discover, verify, wishlist
 from modelark.core import db
-from modelark import discover, verify, wishlist
 
 EXPORT_TABLES = ["models", "files", "verifications", "drives", "replicas"]
 
