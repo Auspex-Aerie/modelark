@@ -507,8 +507,6 @@ def execute(
                 continue
             for item in outcome.get("gated_repos", []):
                 deferred_gated.add(item["repo"])
-            if outcome.get("gated_retry"):
-                continue
             for repo_id in outcome["failed_repos"]:
                 attempts[repo_id] = attempts.get(repo_id, 0) + 1
                 if attempts[repo_id] >= _MAX_TASK_ATTEMPTS:
@@ -519,6 +517,8 @@ def execute(
                         actions=["inspect_fetch_events", "retry_repo", "trim_selection"],
                         failed=[{"repo": repo_id, "attempts": attempts[repo_id]}],
                     )
+            if outcome.get("gated_retry"):
+                continue
             if outcome["drive_unwritable"]:
                 pinned_drive = None
                 continue

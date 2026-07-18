@@ -283,6 +283,41 @@ def test_gated_retry_after_access_reconciles_and_completes():
     assert sum("b" in repos for kind, _, repos in calls if kind == "fetch") == 3
 
 
+def test_gated_retry_does_not_reset_another_failed_repos_attempt_budget():
+    blocked = {"a", "b"}
+    con, calls, fake_run, fake_replica = _executor_harness(failed=blocked)
+    con.execute(
+        "UPDATE drives SET capacity_bytes=2000,free_bytes=2000 WHERE drive_label='drive-00'"
+    )
+
+    def decide(_prompt, _timeout):
+        blocked.remove("b")
+        return "retry"
+
+    def gated_run(**kwargs):
+        outcome = fake_run(**kwargs)
+        outcome.update({"gated_repos": [], "gated_retry": None})
+        if "b" not in kwargs["repos"] or "b" not in outcome["failed_repos"]:
+            return outcome
+        outcome["failed_repos"].remove("b")
+        if kwargs["on_gated"]("b") == "retry":
+            outcome["gated_retry"] = "b"
+        return outcome
+
+    ctx = fetch.RunCtx(con=con, request_action=decide)
+    with mock.patch.object(fill.fetch, "run", side_effect=gated_run), \
+         mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=fake_replica), \
+         mock.patch.object(fill, "_await_drive", return_value=True):
+        result = fill.execute(ctx, guided=True, max_24h_gb=0)
+
+    assert result["state"] == "error" and result["code"] == "FETCH_TASK_FAILED", result
+    assert result["evidence"] == {"repo": "a", "attempts": fill._MAX_TASK_ATTEMPTS}
+    assert sum("a" in repos for kind, _, repos in calls if kind == "fetch") == 2
+    assert any(
+        {"a", "b"}.issubset(repos) for kind, _, repos in calls if kind == "fetch"
+    ), "the regression requires an ordinary failure and gated retry in the same batch"
+
+
 def test_executor_blocks_before_reconciliation_when_configured_hf_token_is_invalid():
     con, calls, _, _ = _executor_harness()
     failure = {

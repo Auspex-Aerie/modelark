@@ -1,12 +1,10 @@
 // Verify view (DEF-021): auto-surfaced disruption suspects + on-demand re-verify of archived copies.
 // Record consistency is checked offline; the decompress-canary runs server-side when a drive is mounted.
 (function () {
-  const { api, post, toast, esc } = window.MA;
+  const { api, post, toast, esc, hfRepoURL } = window.MA;
   const $ = id => document.getElementById(id);
   let suspects = [];
 
-  const hfRepoURL = repo => "https://huggingface.co/" + String(repo || "")
-    .split("/").map(encodeURIComponent).join("/");
   const suspectRow = s => {
     const types = s.types || ["integrity"];
     const integrity = types.includes("integrity"), access = types.includes("access-gated");

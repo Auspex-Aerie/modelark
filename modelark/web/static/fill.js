@@ -248,9 +248,6 @@
     MA.toast(n.message || "Fill needs attention");
   }
 
-  const hfRepoURL = repo => "https://huggingface.co/" + String(repo || "")
-    .split("/").map(encodeURIComponent).join("/");
-
   function renderGatedPrompt(s) {
     const overlay = document.getElementById("gatedModal");
     if (!overlay) return;
@@ -266,7 +263,7 @@
     document.getElementById("gatedHead").textContent = p.title || "Hugging Face access required";
     document.getElementById("gatedMsg").textContent = p.message || "Obtain access, then retry.";
     document.getElementById("gatedRepo").textContent = p.repo || "";
-    document.getElementById("gatedLink").href = hfRepoURL(p.repo);
+    document.getElementById("gatedLink").href = MA.hfRepoURL(p.repo);
     const retry = document.getElementById("gatedRetry"), skip = document.getElementById("gatedSkip");
     const respond = action => {
       retry.disabled = true; skip.disabled = true;
