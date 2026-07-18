@@ -7,6 +7,7 @@ next graph.  Both CLI and portal call :func:`execute`.
 """
 from __future__ import annotations
 
+import secrets
 import shutil
 import time
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from modelark import capacity, fetch, plan, reconcile, register
 
 _PROBE_NAME = ".modelark-write-probe"
 _MAX_TASK_ATTEMPTS = 2
+_GATED_DECISION_TIMEOUT = 5 * 60
 
 
 @dataclass(frozen=True)
@@ -263,12 +265,36 @@ def _file_guard(ctx, plan_id: str, capacity_mode: str, task: capacity.AssignedTa
     return before_file
 
 
-def _ready_tasks(snapshot: _Snapshot) -> list[capacity.AssignedTask]:
+def _ready_tasks(
+    snapshot: _Snapshot,
+    deferred_gated: set[str] | None = None,
+) -> list[capacity.AssignedTask]:
     satisfied = snapshot.graph.satisfied
+    deferred_gated = deferred_gated or set()
     return [
         task for task in snapshot.ledger.tasks
         if task.depends_on_requirement is None or task.depends_on_requirement in satisfied
+        if not (task.kind == reconcile.TaskKind.FETCH and task.repo_id in deferred_gated)
     ]
+
+
+def _scope_without_deferred(ctx, repo_scope: list[str] | None, deferred_gated: set[str]):
+    """Remove session-parked access work before graph derivation and capacity admission.
+
+    Selection remains durable and unchanged. A later Fill starts with an empty deferred set and the
+    repository naturally re-enters the graph; this scope exists only to prevent parked bytes from
+    causing a false capacity failure during the current run.
+    """
+    if not deferred_gated:
+        return repo_scope
+    if repo_scope is None:
+        with ctx.lock:
+            candidates = [row[0] for row in ctx.con.execute(
+                "SELECT repo_id FROM selection WHERE finalized_at IS NOT NULL ORDER BY repo_id"
+            ).fetchall()]
+    else:
+        candidates = repo_scope
+    return [repo for repo in candidates if repo not in deferred_gated]
 
 
 def execute(
@@ -308,11 +334,14 @@ def execute(
             )
 
     attempts: dict[str, int] = {}
+    gated_hits: dict[str, int] = {}
+    deferred_gated: set[str] = set()
     made_progress = False
     first = True
     pinned_drive: str | None = None
     while not ctx.should_stop():
-        snapshot = _reconcile(ctx, pid, capacity_mode, repo_scope)
+        active_scope = _scope_without_deferred(ctx, repo_scope, deferred_gated)
+        snapshot = _reconcile(ctx, pid, capacity_mode, active_scope)
         if not snapshot.ledger.feasible:
             terminal = _admission_terminal(snapshot, pid, made_progress)
             ctx.on_progress({
@@ -322,8 +351,24 @@ def execute(
             })
             return terminal
 
-        ready = _ready_tasks(snapshot)
+        ready = _ready_tasks(snapshot, deferred_gated)
         if not ready:
+            remaining_repos = {task.repo_id for task in snapshot.ledger.tasks}
+            if deferred_gated and (not remaining_repos or remaining_repos <= deferred_gated):
+                repos = sorted(deferred_gated)
+                message = (
+                    f"fill complete with {len(repos)} gated-access follow-up(s); "
+                    "all other feasible work is safe"
+                )
+                ctx.on_progress({
+                    "phase": "done", "code": "PLAN_COMPLETE_WITH_FOLLOWUPS",
+                    "followups": [{"repo": repo, "type": "access-gated"} for repo in repos],
+                    "say": "⚠ " + message,
+                })
+                return _terminal(
+                    "done", message, code="PLAN_COMPLETE_WITH_FOLLOWUPS",
+                    evidence={"access_gated": repos}, actions=["review_followups", "start_fill"],
+                )
             if snapshot.ledger.tasks:
                 return _terminal(
                     "error", "work graph has tasks but none have a satisfied dependency",
@@ -389,6 +434,44 @@ def execute(
             guards = {
                 task.repo_id: _file_guard(ctx, pid, capacity_mode, task) for task in fetch_tasks
             }
+
+            def on_gated(repo_id: str) -> str:
+                hit = gated_hits.get(repo_id, 0) + 1
+                gated_hits[repo_id] = hit
+                url = f"https://huggingface.co/{repo_id}"
+                if hit == 1:
+                    ctx.on_progress({
+                        "notice": {
+                            "id": f"access-gated:{repo_id}:1", "type": "access-gated",
+                            "repo": repo_id, "url": url,
+                            "message": f"Access is required for {repo_id}; continuing other work.",
+                        },
+                        "say": f"⚠ {repo_id} needs Hugging Face access; continuing other work.",
+                    })
+                    return "continue"
+                prompt = {
+                    "id": f"access-gated:{secrets.token_urlsafe(12)}", "type": "access-gated",
+                    "repo": repo_id, "url": url,
+                    "title": "Hugging Face access required",
+                    "message": (
+                        f"{repo_id} is still gated. Obtain access in Hugging Face, then retry, "
+                        "or skip it for this run."
+                    ),
+                    "timeout_seconds": _GATED_DECISION_TIMEOUT,
+                }
+                action = ctx.request_action(prompt, _GATED_DECISION_TIMEOUT)
+                if action in {"skip", "timeout"}:
+                    word = "skipped" if action == "skip" else "timed out"
+                    ctx.on_progress({
+                        "notice": {
+                            "id": f"access-gated:{repo_id}:{action}", "type": "access-gated",
+                            "repo": repo_id, "url": url,
+                            "message": f"{repo_id} {word}; added to Verify follow-ups.",
+                        },
+                        "say": f"⚠ {repo_id} {word}; parked as an access follow-up.",
+                    })
+                return action
+
             outcome = fetch.run(
                 drive_label=pinned_drive,
                 repos=[task.repo_id for task in fetch_tasks],
@@ -396,6 +479,7 @@ def execute(
                 ctx=ctx,
                 task_manifests=manifests,
                 before_file=lambda repo_id, item: guards[repo_id](repo_id, item),
+                on_gated=on_gated,
             )
             if outcome["stored_repos"]:
                 made_progress = True
@@ -421,6 +505,8 @@ def execute(
                 # plan-capacity-stop; otherwise deterministic placement re-homes the stale task.
                 pinned_drive = None
                 continue
+            for item in outcome.get("gated_repos", []):
+                deferred_gated.add(item["repo"])
             for repo_id in outcome["failed_repos"]:
                 attempts[repo_id] = attempts.get(repo_id, 0) + 1
                 if attempts[repo_id] >= _MAX_TASK_ATTEMPTS:
@@ -431,6 +517,8 @@ def execute(
                         actions=["inspect_fetch_events", "retry_repo", "trim_selection"],
                         failed=[{"repo": repo_id, "attempts": attempts[repo_id]}],
                     )
+            if outcome.get("gated_retry"):
+                continue
             if outcome["drive_unwritable"]:
                 pinned_drive = None
                 continue

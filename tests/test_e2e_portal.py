@@ -240,6 +240,50 @@ def _browser_flow() -> None:
             assert "shortfall_bytes" in pg.inner_text("#oopsieEvidence")
             assert "add_capacity" in pg.inner_text("#oopsieActions")
             print("  live typed fill terminal shown")
+
+            # 9. A gated repository is first-class interactive state: the retained notice toasts,
+            # the second encounter displays the bounded prompt and a fixed-origin HF link, and the
+            # operator decision is posted with the prompt id (stale tabs cannot answer a later one).
+            pg.evaluate("document.getElementById('oopsieModal').hidden = true")
+            gated_status = {
+                "status": "running", "running": True, "phase": "primary",
+                "notice": {
+                    "id": "access-gated:org/model:1", "type": "access-gated",
+                    "repo": "org/model", "message": "Access is required; continuing other work.",
+                },
+                "operator_prompt": {
+                    "id": "access-gated:org/model:2", "type": "access-gated",
+                    "repo": "org/model", "title": "Hugging Face access required",
+                    "message": "Obtain access, then retry, or skip for this run.",
+                    "deadline": time.time() + 300,
+                },
+            }
+            decisions = []
+            pg.route(
+                "**/api/fill/status",
+                lambda route: route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(gated_status)
+                ),
+            )
+            def gated_decision(route):
+                decisions.append(route.request.post_data_json)
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"ok": True, "action": "retry"}))
+            pg.route("**/api/fill/gated-decision", gated_decision)
+            pg.evaluate("window.loadFill()")
+            pg.wait_for_selector("#gatedModal", state="visible")
+            assert "Access is required" in pg.inner_text("#toast")
+            assert pg.get_attribute("#gatedLink", "href") == "https://huggingface.co/org/model"
+            assert "continuing in" in pg.inner_text("#gatedCountdown")
+            pg.click("#gatedRetry")
+            for _ in range(40):
+                if decisions:
+                    break
+                time.sleep(0.05)
+            assert decisions == [{"id": "access-gated:org/model:2", "action": "retry"}]
+            pg.unroute("**/api/fill/gated-decision")
+            pg.unroute("**/api/fill/status")
+            print("  gated toast + retry/skip prompt rendered and resolved")
         except Exception:
             pg.screenshot(path="/tmp/e2e-fail.png")
             print("  (screenshot saved to /tmp/e2e-fail.png)")

@@ -158,8 +158,8 @@ td.cb{width:34px;text-align:center}input[type=checkbox]{width:15px;height:15px;a
 .vfrepo{font-family:ui-monospace,Menlo,monospace;font-size:.85rem;color:var(--ink);word-break:break-all}
 .vfreasons{font-size:.78rem;color:var(--warn)}
 .vfsusmeta{display:flex;align-items:center;gap:10px;color:var(--mut);font-size:.76rem;font-variant-numeric:tabular-nums;white-space:nowrap}
-.vfone,.vfmanual button{background:var(--panel2);border:1px solid var(--line2);color:var(--steel);border-radius:7px;padding:5px 12px;font-size:.8rem}
-.vfone:hover,.vfmanual button:hover{border-color:var(--steel)}
+.vfone,.vfaccess,.vfmanual button{background:var(--panel2);border:1px solid var(--line2);color:var(--steel);border-radius:7px;padding:5px 12px;font-size:.8rem;text-decoration:none}
+.vfone:hover,.vfaccess:hover,.vfmanual button:hover{border-color:var(--steel)}
 .vfmanual{display:flex;gap:8px;margin:6px 0}
 .vfmanual input{flex:1;max-width:560px;background:var(--panel);border:1px solid var(--line2);color:var(--ink);border-radius:8px;padding:8px 11px;font:inherit;font-family:ui-monospace,Menlo,monospace;font-size:.82rem}
 .vfmanual input:focus{outline:none;border-color:var(--brass)}
@@ -185,6 +185,7 @@ td.cb{width:34px;text-align:center}input[type=checkbox]{width:15px;height:15px;a
 .oopsie-failed:empty{display:none}
 .oopsie-when{color:var(--mut);font-size:.78rem;margin-bottom:18px}
 .oopsie-acts{display:flex;gap:10px;justify-content:flex-end}
-.oopsie-acts button{background:var(--panel2);border:1px solid var(--line2);color:var(--ink);border-radius:8px;padding:9px 16px;font-weight:600}
+.oopsie-acts button,.oopsie-acts .modal-link{background:var(--panel2);border:1px solid var(--line2);color:var(--ink);border-radius:8px;padding:9px 16px;font-weight:600;text-decoration:none;font-size:.84rem}
 .oopsie-acts .primary{background:var(--brass);border-color:var(--brass);color:#1a1206}
-.oopsie-acts button:hover{filter:brightness(1.08)}
+.oopsie-acts button:hover,.oopsie-acts .modal-link:hover{filter:brightness(1.08)}
+.gated-card{border-top-color:var(--brass);max-width:680px}

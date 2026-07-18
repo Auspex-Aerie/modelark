@@ -14,6 +14,8 @@ window.MA = {
   // Any API/operator value interpolated into an HTML template must pass through this helper.
   // Prefer textContent for plain text; esc() exists for the structured views below.
   esc: escapeHTML,
+  hfRepoURL: repo => "https://huggingface.co/" + String(repo || "")
+    .split("/").map(encodeURIComponent).join("/"),
   gb: b => b >= 1e12 ? (b / 1e12).toFixed(2) + "TB" : (b / 1e9).toFixed(0) + "GB",
   dl: n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : n,
   toast(m) {
