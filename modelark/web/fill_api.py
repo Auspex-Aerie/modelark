@@ -137,14 +137,17 @@ def start(body: dict) -> dict:
                 should_stop=should_stop,
                 read_connection_factory=lambda: db.connect(read_only=True),
                 check_hf_auth=True,
+                request_action=fill_worker.WORKER.await_action,
             )
             res = fill.execute(ctx, max_24h_gb=max_24h_gb, guided=True)
             logged_emit({"result": res})
             log.info("fill finished", ok=res["ok"], stopped=res["stopped"],
                      state=res.get("state"), detail=res["message"])
             # Classify the terminal, PERSIST a non-DONE one for the loud on-open surface (DEF-023),
-            # then translate to the worker's return (None = user Stop; a status dict = paused/blocked/
-            # plan-capacity-stop/done; raise = a real error).
+            # then translate to the worker's return (None = user Stop; a typed status dict covers
+            # paused/blocked/plan-capacity-stop/done/error). Expected executor errors are returned,
+            # not raised: raising would make the outer crash guard overwrite their evidence and
+            # actions as UNHANDLED_FILL_ERROR.
             if res["ok"]:
                 terminal = {"status": "done", "message": res["message"], "code": res.get("code")}
             elif res["stopped"] and should_stop():
@@ -156,8 +159,6 @@ def start(body: dict) -> dict:
                             "code": res.get("code"), "evidence": res.get("evidence"),
                             "actions": res.get("actions")}
             _persist_terminal(terminal)
-            if terminal["status"] == "error":
-                raise RuntimeError(res["message"])              # GATE-A/C — a real failure → 'error'
             return None if terminal["status"] == "stopped" else terminal
         except Exception as e:
             _persist_terminal({"status": "error", "message": str(e)[:300],
@@ -172,6 +173,15 @@ def start(body: dict) -> dict:
 def stop(body: dict | None = None) -> dict:
     """Request a clean stop at the next file boundary (idempotent)."""
     return fill_worker.WORKER.request_stop()
+
+
+def gated_decision(body: dict) -> dict:
+    """Resolve the currently displayed gated-access prompt; stale tabs cannot answer a new one."""
+    decision_id = str(body.get("id") or "")
+    action = str(body.get("action") or "")
+    if not decision_id:
+        return {"ok": False, "error": "prompt id is required"}
+    return fill_worker.WORKER.resolve_action(decision_id, action)
 
 
 def status() -> dict:

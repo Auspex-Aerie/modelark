@@ -229,6 +229,9 @@
   const shortFile = f => (f && f.length > 34) ? "…" + f.slice(-33) : (f || "");
   const TERMINAL = MA.fillTerminals;
   let announcedTerminal = null;
+  let announcedNotice = null;
+  let activeGatedPrompt = null;
+  let gatedClock = null;
 
   function announceTerminal(s) {
     if (!s || !MA.isFillTerminal(s.status) || ["done", "stopped"].includes(s.status)) return;
@@ -236,6 +239,61 @@
     if (signature === announcedTerminal) return;
     announcedTerminal = signature;
     if (MA.showFillTerminal) MA.showFillTerminal(s);
+  }
+
+  function announceNotice(s) {
+    const n = s && s.notice;
+    if (!n || !n.id || n.id === announcedNotice) return;
+    announcedNotice = n.id;
+    MA.toast(n.message || "Fill needs attention");
+  }
+
+  const hfRepoURL = repo => "https://huggingface.co/" + String(repo || "")
+    .split("/").map(encodeURIComponent).join("/");
+
+  function renderGatedPrompt(s) {
+    const overlay = document.getElementById("gatedModal");
+    if (!overlay) return;
+    const p = s && s.operator_prompt;
+    if (!p || p.type !== "access-gated") {
+      overlay.hidden = true;
+      activeGatedPrompt = null;
+      if (gatedClock) { clearInterval(gatedClock); gatedClock = null; }
+      return;
+    }
+    if (p.id === activeGatedPrompt) return;
+    activeGatedPrompt = p.id;
+    document.getElementById("gatedHead").textContent = p.title || "Hugging Face access required";
+    document.getElementById("gatedMsg").textContent = p.message || "Obtain access, then retry.";
+    document.getElementById("gatedRepo").textContent = p.repo || "";
+    document.getElementById("gatedLink").href = hfRepoURL(p.repo);
+    const retry = document.getElementById("gatedRetry"), skip = document.getElementById("gatedSkip");
+    const respond = action => {
+      retry.disabled = true; skip.disabled = true;
+      MA.post("/api/fill/gated-decision", { id: p.id, action }).then(r => {
+        if (!r || !r.ok) {
+          retry.disabled = false; skip.disabled = false;
+          MA.toast((r && r.error) || "that prompt is no longer active");
+        } else {
+          overlay.hidden = true;
+          MA.toast(action === "retry" ? "retrying gated repository" : "saved as an access follow-up");
+        }
+      }).catch(e => {
+        retry.disabled = false; skip.disabled = false; MA.toast(String(e));
+      });
+    };
+    retry.disabled = false; skip.disabled = false;
+    retry.onclick = () => respond("retry");
+    skip.onclick = () => respond("skip");
+    const tick = () => {
+      const left = Math.max(0, Math.ceil((Number(p.deadline || 0) * 1000 - Date.now()) / 1000));
+      const m = Math.floor(left / 60), sec = String(left % 60).padStart(2, "0");
+      document.getElementById("gatedCountdown").textContent =
+        `No response: continuing in ${m}:${sec} and saving this in Verify follow-ups.`;
+    };
+    if (gatedClock) clearInterval(gatedClock);
+    tick(); gatedClock = setInterval(tick, 1000);
+    overlay.hidden = false;
   }
 
   function statusLine(s) {
@@ -263,7 +321,11 @@
     if (st) st.textContent = statusLine(s);
   }
 
-  function renderRun(s) { lastStatus = s; setRunUI(s); renderTelemetry(s); renderQueue(s); maybeRefreshQueueState(s); renderCards(s); renderPrompt(s); }
+  function renderRun(s) {
+    lastStatus = s;
+    announceNotice(s); renderGatedPrompt(s); setRunUI(s); renderTelemetry(s);
+    renderQueue(s); maybeRefreshQueueState(s); renderCards(s); renderPrompt(s);
+  }
 
   // Build the queue as ONE row per model, from queue_view (structure: size, numcopies, copy#1/#2
   // drives) + live placed counts (queue_state). Per model: state = done (all copies placed) |

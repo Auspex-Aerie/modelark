@@ -140,6 +140,11 @@ def _never() -> bool:                   # default stop check — a bare `run`/`f
     return False
 
 
+def _timeout_action(prompt: dict, timeout_seconds: float) -> str:
+    """Non-portal callers cannot answer an operator prompt; park it without sleeping."""
+    return "timeout"
+
+
 @dataclass
 class RunCtx:
     """Injected execution strategy (task #22). `con` is the DB connection every DB touch uses;
@@ -154,6 +159,7 @@ class RunCtx:
     stats: dict = field(default_factory=dict)
     read_connection_factory: Callable[[], Any] | None = None
     check_hf_auth: bool = False
+    request_action: Callable[[dict, float], str] = _timeout_action
 
     def q1(self, sql: str, params: list | None = None):
         with self.lock:
@@ -746,14 +752,16 @@ def _bytes_last_24h(con) -> int:
 def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_24h_gb=1000,
         ctx: RunCtx | None = None, fits: Callable[[str], bool] | None = None,
         task_manifests: Mapping[str, Sequence[archive_manifest.ManifestFile]] | None = None,
-        before_file: Callable[[str, archive_manifest.ManifestFile], None] | None = None) -> dict:
+        before_file: Callable[[str, archive_manifest.ManifestFile], None] | None = None,
+        on_gated: Callable[[str], str] | None = None) -> dict:
     """`fits(repo_id) -> bool` (optional, #37): a per-model boundary check the caller (fill.execute)
     supplies — 'does this repo still fit the target drive's LIVE free under the plan's capacity
     mode?'. On a non-fit, break the batch (emit `plan-capacity`) so fill re-plans instead of
     ENOSPC-ing mid-shard. None (the CLI/plain-fetch path) → no capacity gating, as before."""
     result = {"stored_repos": [], "failed_repos": [], "capacity_failure": None,
               "terminal_failure": None, "terminal_repo": None,
-              "throttled": False, "stopped": False, "drive_unwritable": False}
+              "throttled": False, "stopped": False, "drive_unwritable": False,
+              "gated_repos": [], "gated_retry": None}
     own = ctx is None                               # CLI/plain-fetch path owns its connection
     con = db.connect() if own else ctx.con
     if own:
@@ -882,9 +890,22 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                 ctx.write(lambda c: _event(c, rid, "policy", detail=detail))
                 result["failed_repos"].append(rid)
             except GatedRepoError:
-                print(f"  [gated   ] {rid}  — needs `hf auth login` + accepted license")
-                ctx.write(lambda c: _event(c, rid, "auth", detail="gated / needs accepted license"))
-                result["failed_repos"].append(rid)
+                print(f"  [gated   ] {rid}  — needs accepted Hugging Face repository access")
+                ctx.write(lambda c: _event(c, rid, "auth", detail="gated / needs accepted access"))
+                if on_gated is None:                    # plain fetch/CLI compatibility: no prompt broker
+                    result["failed_repos"].append(rid)
+                    continue
+                action = on_gated(rid)
+                if action == "retry":
+                    result["gated_retry"] = rid
+                    break                               # reconcile and retry this repo immediately
+                if action in {"skip", "timeout"}:
+                    detail = json.dumps({
+                        "type": "access-gated", "resolution": action,
+                        "url": f"https://huggingface.co/{rid}",
+                    }, sort_keys=True)
+                    ctx.write(lambda c: _event(c, rid, "auth", detail=detail))
+                    result["gated_repos"].append({"repo": rid, "resolution": action})
             except HfHubHTTPError as e:
                 code = getattr(getattr(e, "response", None), "status_code", None)
                 if code == 401:

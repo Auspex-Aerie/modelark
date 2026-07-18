@@ -82,6 +82,10 @@ have different costs without changing the definition of completion.
   `git annex whereis --key` must show the registered target UUID before the catalog records that file.
 - Reconciliation uses one bulk manifest query and, in installed CLI/portal runs, a dedicated read-only
   SQLite connection. File writes retain the existing short shared-connection lock.
+- A repository-specific gated response is not a network retry. The first response raises a retained
+  notice while other tasks continue. The second raises a five-minute retry/skip prompt with the fixed
+  Hugging Face repository link. Retry reconciles immediately; skip or timeout parks that repository
+  for this session and records a typed Verify follow-up without changing selection.
 
 ## Capacity and transient workspace
 
@@ -103,7 +107,7 @@ entry gates are recorded in `docs/capacity-evidence.md`.
 | `paused` | Useful work is durable but a typed acquisition conflict, download window, or offline source/target prevents continued copy #2 work (DEF-022) | Follow typed recovery actions, then explicitly resume |
 | `error` | A bounded transient fetch retry, annex-key proof, or graph invariant failed | Inspect the typed evidence and logs; correct the fault before retrying |
 | `stopped` | Operator requested Stop | Start again; reconciliation resumes missing files |
-| `done` | Every committed requirement is satisfied by complete copies | None |
+| `done` | Every committed requirement is satisfied, or all remaining tasks are explicitly parked gated-access follow-ups (`PLAN_COMPLETE_WITH_FOLLOWUPS`) | Resolve any access follow-ups and Start again |
 
 Gate B remains whole-plan for this release: a structurally undersized replica tier blocks otherwise
 feasible primary work before the run begins. That conservative admission choice is distinct from an
@@ -127,3 +131,5 @@ the same terminal classifier and show the prominent modal immediately; acknowled
 - DEC-046 / INC-018 / INC-019: validate configured credentials before work; stage and verify on the
   target filesystem before proof-driven atomic publication; never retry local namespace/I/O failures
   as transient network stalls.
+- DEC-047 / INC-020 / DEF-010: gated repository access is a bounded operator decision and typed
+  follow-up, not a generic fetch failure or an archive-integrity claim.

@@ -3,6 +3,7 @@ open (survives reload/restart) until acknowledged. A clean 'done' / user 'stoppe
 from __future__ import annotations
 
 from pathlib import Path
+from unittest import mock
 
 from modelark.web import fill_api
 
@@ -38,6 +39,34 @@ def test_persist_last_ack(tmp_path):
     fill_api._persist_terminal({"status": "error", "message": "boom"})
     fill_api._persist_terminal({"status": "stopped", "message": "by request"})
     assert fill_api.last_terminal() == {}, "a user Stop is not an oopsie — must clear"
+
+
+def test_expected_fill_error_keeps_typed_terminal_instead_of_unhandled(tmp_path):
+    import time
+    from modelark.web import fill_worker
+
+    fill_api._TERMINAL_PATH = tmp_path / "last_fill.json"
+    worker = fill_worker.FillWorker()
+    typed = {
+        "ok": False, "stopped": False, "state": "error",
+        "message": "repository access is still gated", "code": "HF_REPO_GATED",
+        "gate": "C", "evidence": {"repo": "org/gated"},
+        "actions": ["open_huggingface", "retry_fill"],
+        "failed": [{"repo": "org/gated"}],
+    }
+    with mock.patch.object(fill_api.fill_worker, "WORKER", worker), \
+         mock.patch.object(fill_api.data, "conn", return_value=object()), \
+         mock.patch.object(fill_api.fill, "execute", return_value=typed):
+        assert fill_api.start({"max_24h_gb": 0})["ok"]
+        for _ in range(100):
+            if not worker.running():
+                break
+            time.sleep(0.01)
+    status = worker.status()
+    persisted = fill_api.last_terminal()
+    assert status["status"] == "error" and status["code"] == "HF_REPO_GATED", status
+    assert persisted["code"] == "HF_REPO_GATED" and persisted["evidence"] == {"repo": "org/gated"}
+    assert persisted["actions"] == ["open_huggingface", "retry_fill"]
 
 
 if __name__ == "__main__":

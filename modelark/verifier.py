@@ -15,6 +15,7 @@ re-check for exactly the shards a disruption (restart / crash / RO flip / raw-fa
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path, PurePosixPath
 
 from modelark import archive_hash, archive_manifest, compress, register
@@ -39,16 +40,27 @@ def _stored_relpath(rfilename: str, stored_name: str | None, stored_relpath: str
 
 
 def suspects(con) -> list[dict]:
-    """Re-verify candidates, newest archive first. Each: {repo, drives, reasons, verified_at}."""
+    """Typed operator follow-ups: archive-integrity suspects and unresolved gated access."""
     acc: dict[str, dict] = {}
 
-    def add(repo, drive, reason, va=None):
-        r = acc.setdefault(repo, {"drives": set(), "reasons": set(), "verified_at": None})
+    def add(repo, drive, reason, va=None, *, kind="integrity", url=None, followup_at=None):
+        r = acc.setdefault(repo, {
+            "drives": set(), "reasons": set(), "types": set(), "verified_at": None,
+            "followup_at": None, "access_url": None, "sort_at": None,
+        })
         if drive:
             r["drives"].add(drive)
         r["reasons"].add(reason)
+        r["types"].add(kind)
         if va and (r["verified_at"] is None or va > r["verified_at"]):
             r["verified_at"] = va
+        if followup_at and (r["followup_at"] is None or followup_at > r["followup_at"]):
+            r["followup_at"] = followup_at
+        if url:
+            r["access_url"] = url
+        stamp = followup_at or va
+        if stamp and (r["sort_at"] is None or stamp > r["sort_at"]):
+            r["sort_at"] = stamp
 
     floats = ",".join(f"'{q}'" for q in _FLOAT_SQL)
     # 1. a float safetensors stored UNCOMPRESSED — a compressor crash/hang (INC-005) OR the DEC-022
@@ -92,9 +104,42 @@ def suspects(con) -> list[dict]:
     ).fetchall():
         add(repo, drive, "archived near a disruption event", va)
 
-    out = [{"repo": r, "drives": sorted(v["drives"]), "reasons": sorted(v["reasons"]),
-            "verified_at": v["verified_at"]} for r, v in acc.items()]
-    out.sort(key=lambda x: (x["verified_at"] or ""), reverse=True)
+    # 4. A gated repository explicitly skipped (or left unanswered for five minutes) is not an
+    # archive-integrity concern: no bytes landed. It still belongs in the operator follow-up queue,
+    # typed separately, until a later successful archive event proves access was resolved.
+    latest_access: dict[str, tuple[int, str, dict]] = {}
+    for rowid, repo, event_at, detail in con.execute(
+        "SELECT rowid,repo_id,event_at,detail FROM fetch_events "
+        "WHERE outcome='auth' AND repo_id IS NOT NULL ORDER BY rowid"
+    ).fetchall():
+        try:
+            payload = json.loads(detail or "")
+        except (TypeError, ValueError):
+            continue
+        if isinstance(payload, dict) and payload.get("type") == "access-gated":
+            latest_access[repo] = (rowid, event_at, payload)
+    for repo, (rowid, event_at, payload) in latest_access.items():
+        resolved = con.execute(
+            "SELECT 1 FROM fetch_events WHERE repo_id=? AND outcome='archived' AND rowid>? LIMIT 1",
+            [repo, rowid],
+        ).fetchone()
+        if resolved:
+            continue
+        resolution = payload.get("resolution") or "deferred"
+        add(
+            repo, None, f"Hugging Face access required ({resolution})",
+            kind="access-gated", url=payload.get("url"), followup_at=event_at,
+        )
+
+    out = [{
+        "repo": r, "drives": sorted(v["drives"]), "reasons": sorted(v["reasons"]),
+        "types": sorted(v["types"]), "verified_at": v["verified_at"],
+        "followup_at": v["followup_at"], "access_url": v["access_url"],
+        "_sort_at": v["sort_at"],
+    } for r, v in acc.items()]
+    out.sort(key=lambda x: (x["_sort_at"] or ""), reverse=True)
+    for item in out:
+        item.pop("_sort_at", None)
     return out
 
 

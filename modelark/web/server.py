@@ -264,6 +264,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(fill_api.stop(body))
             elif u.path == "/api/fill/confirm-drive":
                 self._json(fill_api.confirm_drive(body))
+            elif u.path == "/api/fill/gated-decision":
+                self._json(fill_api.gated_decision(body))
             elif u.path == "/api/fill/ack-terminal":
                 self._json(fill_api.ack_terminal(body))
             elif u.path == "/api/plan/select":

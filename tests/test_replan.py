@@ -232,6 +232,57 @@ def test_reconciled_executor_bounds_failed_task_retries():
     assert sum("b" in repos for kind, _, repos in calls if kind == "fetch") == fill._MAX_TASK_ATTEMPTS
 
 
+def _gated_executor(action):
+    blocked = {"b"}
+    con, calls, fake_run, fake_replica = _executor_harness(failed=blocked)
+    prompts, progress = [], []
+
+    def decide(prompt, timeout):
+        prompts.append((prompt, timeout))
+        if action == "retry":
+            blocked.clear()                         # access became effective before the retry click
+        return action
+
+    def gated_run(**kwargs):
+        outcome = fake_run(**kwargs)
+        outcome.update({"gated_repos": [], "gated_retry": None})
+        if "b" not in kwargs["repos"] or "b" not in outcome["failed_repos"]:
+            return outcome
+        outcome["failed_repos"].remove("b")
+        response = kwargs["on_gated"]("b")
+        if response == "retry":
+            outcome["gated_retry"] = "b"
+        elif response in {"skip", "timeout"}:
+            outcome["gated_repos"].append({"repo": "b", "resolution": response})
+        return outcome
+
+    ctx = fetch.RunCtx(con=con, on_progress=progress.append, request_action=decide)
+    with mock.patch.object(fill.fetch, "run", side_effect=gated_run), \
+         mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=fake_replica), \
+         mock.patch.object(fill, "_await_drive", return_value=True):
+        result = fill.execute(ctx, guided=True, max_24h_gb=0)
+    return result, calls, prompts, progress
+
+
+def test_gated_first_toasts_second_skip_becomes_followup_without_generic_failure():
+    result, calls, prompts, progress = _gated_executor("skip")
+    assert result["state"] == "done" and result["code"] == "PLAN_COMPLETE_WITH_FOLLOWUPS", result
+    assert result["evidence"] == {"access_gated": ["b"]}
+    assert len(prompts) == 1 and prompts[0][0]["repo"] == "b"
+    assert prompts[0][1] == fill._GATED_DECISION_TIMEOUT
+    notices = [e["notice"] for e in progress if e.get("notice")]
+    assert notices[0]["type"] == "access-gated" and "continuing other work" in notices[0]["message"]
+    assert any("added to Verify follow-ups" in n["message"] for n in notices)
+    assert sum("b" in repos for kind, _, repos in calls if kind == "fetch") == 2
+
+
+def test_gated_retry_after_access_reconciles_and_completes():
+    result, calls, prompts, _ = _gated_executor("retry")
+    assert result["state"] == "done" and result["code"] == "PLAN_SATISFIED", result
+    assert len(prompts) == 1
+    assert sum("b" in repos for kind, _, repos in calls if kind == "fetch") == 3
+
+
 def test_executor_blocks_before_reconciliation_when_configured_hf_token_is_invalid():
     con, calls, _, _ = _executor_harness()
     failure = {
@@ -303,6 +354,44 @@ def test_worker_terminal_labels(tmp_path):
         assert w.status()["status"] == expect, (outcome, w.status())
 
 
+def test_worker_gated_prompt_accepts_only_matching_decision_and_times_out():
+    import time as _t
+    from modelark.web import fill_worker
+
+    prompt = {"id": "gated:a:2", "type": "access-gated", "repo": "a"}
+    w = fill_worker.FillWorker()
+
+    def wait_for_retry(stop, emit):
+        action = w.await_action(prompt, 2)
+        return {"status": "done", "message": action, "action": action}
+
+    assert w.start(wait_for_retry)["ok"]
+    for _ in range(100):
+        if w.status().get("operator_prompt"):
+            break
+        _t.sleep(0.01)
+    assert w.status()["operator_prompt"]["repo"] == "a"
+    assert not w.resolve_action("stale", "retry")["ok"]
+    assert w.resolve_action("gated:a:2", "retry")["ok"]
+    assert not w.resolve_action("gated:a:2", "skip")["ok"], "one prompt accepts one decision"
+    for _ in range(100):
+        if not w.running():
+            break
+        _t.sleep(0.01)
+    assert w.status()["status"] == "done" and w.status()["action"] == "retry"
+    assert w.status().get("operator_prompt") is None
+
+    timed = fill_worker.FillWorker()
+    timed.start(lambda stop, emit: {
+        "status": "done", "message": timed.await_action(prompt, 0.02)
+    })
+    for _ in range(100):
+        if not timed.running():
+            break
+        _t.sleep(0.01)
+    assert timed.status()["message"] == "timeout"
+
+
 def test_dest_writable(tmp_path):
     from modelark import fetch
     assert fetch._dest_writable(tmp_path) is True
@@ -358,6 +447,35 @@ def test_fetch_run_stops_on_midrun_unauthorized_without_repo_churn(tmp_path):
     assert result["terminal_failure"] == fetch._hf_auth_invalid_failure()
     assert result["terminal_repo"] == "first"
     assert result["failed_repos"] == []
+
+
+def test_fetch_run_records_typed_gated_followup_without_generic_retry(tmp_path):
+    import httpx
+    import json
+    from huggingface_hub.errors import GatedRepoError
+
+    con = _mem()
+    response = httpx.Response(403, request=httpx.Request("GET", "https://huggingface.co/org/gated"))
+    gated = GatedRepoError("access required", response=response)
+    ctx = fetch.RunCtx(con=con)
+    with mock.patch.object(fetch.register, "archive_path", return_value=tmp_path), \
+         mock.patch.object(fetch, "_is_annex", return_value=False), \
+         mock.patch.object(fetch, "fetch_model", side_effect=gated), \
+         mock.patch.object(fetch.wishlist, "compression", return_value={}):
+        result = fetch.run(
+            drive_label="drive-00", repos=["org/gated"], max_24h_gb=0, ctx=ctx,
+            on_gated=lambda repo: "timeout",
+        )
+    assert result["failed_repos"] == []
+    assert result["gated_repos"] == [{"repo": "org/gated", "resolution": "timeout"}]
+    details = [row[0] for row in con.execute(
+        "SELECT detail FROM fetch_events WHERE repo_id='org/gated' AND outcome='auth' ORDER BY rowid"
+    ).fetchall()]
+    typed = json.loads(details[-1])
+    assert typed == {
+        "resolution": "timeout", "type": "access-gated",
+        "url": "https://huggingface.co/org/gated",
+    }
 
 
 # ---- per-file capacity failsafe (real reconciler + ledger) ----------------------------------

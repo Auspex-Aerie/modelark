@@ -51,6 +51,27 @@ def test_suspects():
     assert "archived near a disruption event" in reps["C"]["reasons"]
 
 
+def test_gated_access_is_typed_followup_until_a_later_archive_succeeds():
+    con = _mem()
+    con.execute(
+        "INSERT INTO fetch_events(repo_id,event_at,outcome,detail) VALUES(?,?,?,?)",
+        ["org/gated", "2026-07-17 21:00:00", "auth",
+         '{"resolution":"timeout","type":"access-gated",'
+         '"url":"https://huggingface.co/org/gated"}'],
+    )
+    one = verifier.suspects(con)
+    assert len(one) == 1 and one[0]["repo"] == "org/gated", one
+    assert one[0]["types"] == ["access-gated"] and one[0]["drives"] == []
+    assert one[0]["access_url"] == "https://huggingface.co/org/gated"
+    assert "timeout" in one[0]["reasons"][0]
+
+    con.execute(
+        "INSERT INTO fetch_events(repo_id,event_at,outcome,detail) VALUES(?,?,?,?)",
+        ["org/gated", "2026-07-18 09:00:00", "archived", "access resolved"],
+    )
+    assert verifier.suspects(con) == [], "a later successful archive resolves the access follow-up"
+
+
 def test_reverify_record_consistency():
     con = _mem()
     con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) VALUES('A','m.safetensors',100,'safetensors','bf16','sA')")

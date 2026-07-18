@@ -173,11 +173,26 @@
   </div>
 </div>
 
+<!-- DEF-010: a second gated response pauses briefly for an explicit operator decision -->
+<div class="oopsie-overlay" id="gatedModal" hidden>
+  <div class="oopsie-card gated-card">
+    <div class="oopsie-head" id="gatedHead">Hugging Face access required</div>
+    <div class="oopsie-msg" id="gatedMsg"></div>
+    <div class="oopsie-failed" id="gatedRepo"></div>
+    <div class="oopsie-when" id="gatedCountdown"></div>
+    <div class="oopsie-acts">
+      <a id="gatedLink" class="modal-link" target="_blank" rel="noopener noreferrer">Open Hugging Face</a>
+      <button id="gatedSkip">Skip for this run</button>
+      <button id="gatedRetry" class="primary">Retry after getting access</button>
+    </div>
+  </div>
+</div>
+
 <!-- ===== Verify view (DEF-021) ===== -->
 <section id="view-verify" class="view" hidden>
   <div class="page">
     <h1 class="ph">Verify</h1>
-    <p class="psub">Re-verify archived copies. <b>Suspects</b> — models whose archiving overlapped a disruption (a compressor raw-fallback, an interrupted copy, or a crash / read-only-flip window) — are surfaced automatically. Record consistency (all files archived, stored hashes match the catalog) is checked offline; the decompress-canary runs when the drive is mounted.</p>
+    <p class="psub">Review typed follow-ups. <b>Integrity suspects</b> are archived copies that may need re-verification after a fallback, interruption, or disruption. <b>Access follow-ups</b> are gated repositories skipped without storing bytes. Record consistency is checked offline; the decompress-canary runs when a drive is mounted.</p>
     <div class="vfacts">
       <button id="vfReverifyAll" class="primary">Re-verify all suspects</button>
       <span class="vfnote" id="vfNote"></span>
