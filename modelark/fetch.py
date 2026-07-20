@@ -205,7 +205,9 @@ def _sweep_incomplete(model_dir: Path) -> int:
     if not dl_cache.exists():
         return 0
     now, freed = time.time(), 0
-    for f in dl_cache.glob("*.incomplete"):
+    # rglob, not glob: a nested rfilename's partial lands in download/<subdir>/<hash>.incomplete, so a
+    # top-level glob would leave nested orphans (e.g. transformer/…) unreclaimed on the archive drive.
+    for f in dl_cache.rglob("*.incomplete"):
         try:
             st = f.stat()
             if now - st.st_mtime >= _INCOMPLETE_MIN_AGE:
@@ -489,7 +491,9 @@ def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, download_dir: Pat
 
     def progress() -> int:                              # the growing .incomplete = download liveness
         try:
-            return sum(p.stat().st_size for p in dl_cache.glob("*.incomplete")) if dl_cache.exists() else 0
+            # rglob, not glob: hf writes a nested rfilename's partial to download/<subdir>/<hash>.incomplete
+            # (e.g. transformer/…). A top-level glob would miss it and false-kill a healthy nested download.
+            return sum(p.stat().st_size for p in dl_cache.rglob("*.incomplete")) if dl_cache.exists() else 0
         except OSError:
             return 0
 

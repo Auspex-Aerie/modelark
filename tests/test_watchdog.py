@@ -7,6 +7,7 @@ exceptions from the child's result so run() still classifies gated/429/not-found
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -178,6 +179,48 @@ def test_hf_auth_preflight_types_only_rejected_credentials(tmp_path):
          mock.patch("modelark.fetch.HfApi") as hf_api:
         assert fetch.hf_auth_preflight(fetch.RunCtx(con=None)) is None
     hf_api.assert_not_called()
+
+
+# ---- issue #32: the .incomplete probes must recurse into per-rfilename subdirs -----------------
+
+def test_download_progress_probe_measures_nested_incomplete(tmp_path):
+    # A nested rfilename's partial lands in download/<subdir>/<hash>.incomplete. The no-progress
+    # watchdog must count it, or a healthy nested download (e.g. transformer/…) is false-killed at the
+    # stall window. Capture the progress() the shard hands _run_monitored and prove it sees nested bytes.
+    rfilename = "transformer/model-00001-of-00007.safetensors"
+    nested_dir = tmp_path / ".cache" / "huggingface" / "download" / "transformer"
+    nested_dir.mkdir(parents=True)
+    (nested_dir / "abc.incomplete").write_bytes(b"x" * 4096)
+    seen = {}
+
+    def side_effect(cmd, progress, stall_secs, should_stop):
+        seen["bytes"] = progress()
+        req = json.loads(cmd[-1])
+        out = tmp_path / "out.bin"
+        out.write_bytes(b"ok")
+        Path(req["result"]).write_text(json.dumps({"ok": True, "path": str(out)}))
+        return {"outcome": "exited", "rc": 0, "stderr": ""}
+
+    with mock.patch("modelark.fetch._run_monitored", side_effect=side_effect):
+        fetch._download_shard(fetch.RunCtx(con=None), "repo", rfilename, tmp_path, {})
+    assert seen["bytes"] == 4096, "watchdog progress must count a nested .incomplete, not read 0"
+
+
+def test_sweep_reclaims_nested_and_toplevel_incomplete(tmp_path):
+    # Orphan reclaim must recurse too, or nested partials (transformer/…) leak on the archive drive.
+    dl_cache = tmp_path / ".cache" / "huggingface" / "download"
+    (dl_cache / "transformer").mkdir(parents=True)
+    nested = dl_cache / "transformer" / "a.incomplete"
+    nested.write_bytes(b"y" * 2048)
+    top = dl_cache / "b.incomplete"
+    top.write_bytes(b"z" * 1024)
+    old = time.time() - (fetch._INCOMPLETE_MIN_AGE + 5)
+    for f in (nested, top):
+        os.utime(f, (old, old))
+
+    freed = fetch._sweep_incomplete(tmp_path)
+    assert freed == 2048 + 1024, "sweep must reclaim nested and top-level partials"
+    assert not nested.exists() and not top.exists()
 
 
 class _Resp:                       # minimal response so an hf error constructs in a test
