@@ -6,6 +6,8 @@ from functools import wraps
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 from modelark import seed
 from modelark.core import db
 
@@ -100,7 +102,7 @@ def test_packaged_seed_matches_committed_export():
     checkout = db.REPO_ROOT / "catalog" / "export" / "models.jsonl"
     packaged = db.REPO_ROOT / "modelark" / "data" / "catalog_seed.jsonl"
     if not (checkout.is_file() and packaged.is_file()):
-        return
+        pytest.skip("not a source checkout — drift guard only meaningful when both files are present")
     assert packaged.read_bytes() == checkout.read_bytes(), (
         "modelark/data/catalog_seed.jsonl is stale — regenerate it: "
         "cp catalog/export/models.jsonl modelark/data/catalog_seed.jsonl"

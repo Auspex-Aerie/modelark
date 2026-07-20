@@ -46,13 +46,18 @@ def import_catalog(con, source: str | Path | None = None, *, overwrite: bool = F
     Returns {imported, skipped, source, total_models}.
     """
     src = seed_source(source)
+    text = src.read_text(encoding="utf-8")
     columns = {r[1] for r in con.execute("PRAGMA table_info(models)").fetchall()}
-    existing = {r[0] for r in con.execute("SELECT repo_id FROM models").fetchall()}
 
     imported = skipped = 0
-    con.execute("BEGIN")
+    # BEGIN IMMEDIATE takes the write lock up front, so the existing-rows snapshot and every insert are
+    # one atomic unit: a concurrent writer (e.g. the portal fill worker) cannot slip a row in after the
+    # snapshot and have insert-only mode silently overwrite it, preserving the "never downgrade a
+    # locally discovered row" guarantee. A plain (deferred) BEGIN would not lock until the first write.
+    con.execute("BEGIN IMMEDIATE")
     try:
-        for line in src.read_text(encoding="utf-8").splitlines():
+        existing = {r[0] for r in con.execute("SELECT repo_id FROM models").fetchall()}
+        for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
