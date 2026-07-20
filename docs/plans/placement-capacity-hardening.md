@@ -3,6 +3,8 @@
 Working plan for the fix effort opened after the 2026-07-20 placement/capacity audit, revised across
 review rounds toward an implementation-ready spec. The binding invariants go into the decision log, and
 the GitHub issues are rewritten/split to agree with it, **before any implementation begins**.
+RFC-002 (`docs/rfcs/002-first-class-placement-approval.md`) is the architecture and migration authority;
+this file remains the issue-level working plan.
 
 ## Origin
 
@@ -19,7 +21,7 @@ underlying classes so they stop recurring.
 | [#36](https://github.com/Auspex-Aerie/modelark/issues/36) | Durable-partial pinning is disproportionate | → 36a emits alternatives+costs (reuse ranking owned by #38) |
 | [#37](https://github.com/Auspex-Aerie/modelark/issues/37) | No retire / un-archive / drive-loss recovery | → 37a–37d over orthogonal axes |
 | [#38](https://github.com/Auspex-Aerie/modelark/issues/38) | Placement strands small drives / wedges large blocks | shared feasibility+placement engine, `tiered_v2` |
-| [#39](https://github.com/Auspex-Aerie/modelark/issues/39) | Mid-fill add has no pre-commit preview | guard + → 39a artifact identity, 39b approval/execution control |
+| [#39](https://github.com/Auspex-Aerie/modelark/issues/39) | Mid-fill add has no pre-commit preview | guard + normalized proposal/approval/session control |
 
 Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID copy-#1 home.
 
@@ -49,11 +51,11 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    **Dedicated/exclusive-volume assumption is explicit and fail-closed:** if another host, process, or
    non-ModelArk workflow may write while ModelArk cannot observe/fence it (especially a NAS/special
    remote), an offline anchor is not admission evidence. The exclusivity policy is persisted,
-   identity/epoch-scoped, and part of the planner revision. Cross-host NAS writes are unsupported unless
-   a real distributed writer lock/fence is configured. For a shared remote, the **same distributed
-   fence is acquired before the authoritative `df` and held continuously through allocation, publish,
-   catalog commit, and clean-anchor publication**; a fence used only for the observation does not close
-   the TOCTOU window and is not admission authority.
+   identity/epoch-scoped, and part of the planner revision. Cross-host NAS writers remain unsupported;
+   this effort does not introduce a distributed-fence framework. For a mounted remote to be authority,
+   exclusive write control must be enforceable from this host and held continuously from before the
+   authoritative `df` through allocation, publish, catalog commit, and clean-anchor publication.
+   Observation-only exclusion does not close the TOCTOU window and is not admission authority.
 3. **Dirty protocol (generation-based, single-writer, crash-safe).** Dirtied **durably before any
    filesystem allocation**, held through staging → publish → annex → catalog commit, cleared only after
    all participating writes finish and reconciliation appends a new clean anchor; a crash at every
@@ -115,7 +117,7 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    preview shows and fingerprints the resulting exact assignment plus derivation mode (`optimized` /
    `state_truncated` / `canonical_fallback`). **Optimization runs only to produce the preview; commit,
    Fill start, and resume never rerun it.** They validate the exact approved assignment against the
-   approval envelope, monotonic progress, and current **admission-authoritative evidence** (live `df` or
+   approved proposal, monotonic progress, and current **admission-authoritative evidence** (live `df` or
    a valid clean anchor—not “live capacity” only). This preserves the reviewed placement without load-
    dependent reproduction/retry behavior. `PACKING_INCONCLUSIVE` remains reserved for the feasibility
    search.
@@ -138,29 +140,31 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    all do. The early portal guard is explicitly portal-scoped.
 9. **Preview CAS, durable approval, and execution projection are three distinct contracts.**
    **(a) Preview→commit:** the preview is bound to one `planner_revision`; commit requires strict CAS and
-   atomically persists the mutation plus an immutable **approval envelope**. **(b) Approval envelope:**
-   contains the desired requirements, exact approved target/source map, baseline missing/present-work
-   identity, drive identities+capacity epochs, artifact revisions/manifests, and every graph-affecting
-   policy/config version. It remains durable while the operator is idle and is not invalidated merely
-   because the catalog revision advances. **(c) Execution projection:** Fill start/resume acquires the
+   atomically applies the mutation and approves one immutable, normalized **PlacementProposal**; there is
+   no separately writable approval blob/task copy. **(b) Approved proposal:** contains desired
+   requirements, exact target/source map, baseline missing/present-work identity, drive identities+
+   capacity epochs, manifest hashes/task-relevant file evidence, and every graph-affecting policy/config
+   version. It remains durable while the operator is idle and is not invalidated merely because the
+   catalog revision advances. **(c) Execution projection:** Fill start/resume acquires the
    execution lease and derives current remaining work constrained to that envelope; it never reruns
    placement optimization. The projection may differ only by an allowlisted monotonic rebase: satisfied
    requirements disappear, present-file sets grow, missing-work sets shrink on the same approved targets,
-   or capacity evidence refreshes while identity, epoch, exclusivity policy, artifact revision, and task
+   or capacity evidence refreshes while identity, epoch, exclusivity policy, manifest/policy hashes, and task
    mapping stay fixed. It must remain `FEASIBLE` using current admission-authoritative evidence. On
    success, the execution lease binds to the current `planner_revision` and fencing token; new/expanded
-   work, changed identity/epoch/target/source/policy/artifact revision, or infeasibility requires a fresh
+   work, changed identity/epoch/target/source/policy/manifest, or infeasibility requires a fresh
    preview. Thus dirty→clean reconciliation and a clean offline target's later remount do not themselves
    erase approval when the constrained task map still fits; an offline approved target follows GATE-A's
-   await path. A legacy/migrated selection with no approval envelope is never grandfathered.
-10. **Upstream artifacts are revision-pinned execution inputs.** Preview resolves every remote repository
-   to an immutable provider revision (for Hugging Face, a commit SHA) and binds that revision plus its
-   exact manifest to the approval envelope. Every download passes the pinned revision; no retry may
-   silently fall forward to repository head. Archived provenance records the artifact revision, and a
-   partial is reusable only when its recorded revision and file identity match the approved manifest
-   (or content hashes independently prove equivalence). Legacy rows with unprovable revision provenance
-   are durable truth but not automatically reusable for a revision-bound requirement. A missing revision,
-   changed manifest, or hash mismatch is a typed pre-publish failure and never broadens the task.
+   await path. A legacy/migrated selection with no approved proposal is never grandfathered.
+10. **Approval integrity is manifest-bound without expanding into provider versioning.** Each proposal
+   stores a hash of the full canonical manifest and normalized rows only for missing files plus reused
+   content that affected its tasks/costs. Existing upstream LFS SHA-256 and archived original hashes are
+   bound when available; structural manifest change requires a fresh preview. Normalized rows are the
+   sole source of truth, canonical serialization is computed in stable order, and only its hash is
+   stored. Explicit tasks cannot broaden to upstream additions; missing/renamed paths fail lookup; every
+   download must match its approved byte length before publish. Accepted residual: a same-path, same-size
+   content change to an upstream-hashless Git-tracked file may move with provider HEAD; provider commit
+   pinning is a separately reviewed follow-up.
 
 ## Revised approach per issue
 
@@ -195,9 +199,9 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   even when the remainder can't fit (capacity.py:714).
 - 36a exposes, for each required copy, all partial candidates **and eligible fresh targets** with
   deterministic costs (reusable present files, missing-work identity, supported finish-in-place vs
-  fresh-target re-download cost). A file is reusable only when its artifact revision + identity match
-  the required pinned manifest, or an exact content hash proves equivalence; unknown legacy provenance
-  is not treated as free reuse. It makes **no**
+  fresh-target re-download cost). Reuse binds available upstream LFS SHA-256 or archived original-hash
+  evidence and the proposal's baseline present/missing identity; unknown legacy provenance is not
+  treated as proven free reuse. It makes **no**
   feasibility judgment and sets **no** pin. Reuse *ranking* is owned entirely by #38 (objective 4),
   which consumes these costs — there is no separate 36b implementation phase; "reuse preference" becomes
   #38 acceptance/policy validation, not its own PR.
@@ -247,7 +251,7 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   changes `lifecycle=lost→active` but preserves `eligibility` (an excluded drive never silently becomes
   enabled). **Complements** (not subsumes) DEF-029.
 
-### #39 — portal guard (early) + 39a artifact identity + 39b approval/execution control
+### #39 — portal guard (early) + normalized proposal/approval/execution control
 - **Early guard (portal-only, explicitly scoped):** refuse `finalize` and every removal path
   (`toggle(...,false)`, `bulk(...,false)`, `clear()` — selection_api.py:33) through a **single shared
   guarded-mutation primitive**, keyed on the fill controller **lease being live** — not the status
@@ -256,15 +260,14 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   external CLI controller is not detected here. Ships to **`main`** on its own branch.
 - **Final atomic contract:** lease + `planner_revision` per invariants 8–10. Preview binds to a **versioned
   canonical serialization built from the immutable planner-input object** (finalized selection,
-  provider commit SHA + exact manifests/files + archive-policy version, `numcopies`, plan membership,
+  full-manifest hashes + task-relevant files/evidence + archive-policy version, `numcopies`, plan membership,
   drive roles/RAID/lifecycle/eligibility, capacity/anchor facts + epoch, `dirty`/exclusivity evidence,
   **graph-affecting compression
   config copied into the snapshot**, margins/headroom policy, capacity mode, `tiered_v2`/solver-bound
   version, archived facts/provenance, and the mutation) — excluding only display-only volatiles. The
   preview fingerprint binds the resulting exact **execution-authority task set** and the solver's
   placement-derivation mode (the latter is audit evidence, not an instruction to rerun the optimizer).
-  **Fill uses
-  the immutable approval envelope plus its constrained execution projection and never rereads the config
+  **Fill uses the immutable approved proposal plus its constrained execution projection and never rereads the config
   file**; a raw mid-lease edit is unsupported and only observed at the next boundary. Commit runs the
   invariant-8 protocol (short write txn after the solve) requiring **all three**: (a)
   `planner_revision` unchanged; (b) the exact approved
@@ -275,9 +278,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   work identity}. Commit validates the approved assignment against current evidence without rerunning
   placement optimization. If it no longer fits even though another assignment might, reject + fresh
   preview; never substitute the new assignment silently. Preview covers add/remove/clear; no candidate
-  bytes are written before accepted admission. The mutation and immutable approval envelope are
-  persisted atomically; an accepted selection can never exist without its approval provenance.
-- **Approval→start handoff:** commit persists the approval envelope but holds no long-lived lease.
+  bytes are written before accepted admission. The mutation and proposal approval are persisted
+  atomically; an accepted selection can never exist without its approval provenance. Proposal header,
+  task, and task-file rows are authoritative; API/canonical JSON is derived and only its hash is stored.
+- **Approval→start handoff:** commit approves the immutable proposal but holds no long-lived lease.
   `/api/fill/start` (and CLI start) acquires the execution lease, derives the execution projection
   **constrained to the approved target/source map**, applies only invariant 9's allowlisted monotonic
   rebase, and validates current admission-authoritative evidence before the first write; it does not
@@ -287,24 +291,25 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   `optimization_resource_exhausted` can occur while producing a preview; that preview may instead show
   the canonical fallback for approval. It is not a commit/start reproduction outcome because those
   boundaries validate the already-approved assignment rather than replaying its derivation.
-- **Crash/auto-resume equivalence uses the approval envelope, not strict revision equality:** completed
+- **Crash/auto-resume equivalence uses the approved proposal, not strict revision equality:** completed
   requirements may disappear, present-file sets may grow, missing-work sets may shrink on the same
   approved targets, and dirty/anchor evidence may be refreshed. New/expanded work, changed identity/
-  epoch/target/source/policy/artifact revision, lost approval provenance, or non-feasible admission under
+  epoch/target/source/policy/manifest hash, lost approval provenance, or non-feasible admission under
   current authoritative evidence requires a fresh preview. Pre-feature/migrated selections without an
-  approval envelope fail closed; migration never fabricates operator approval. A same approved target
+  approved proposal fail closed; migration never fabricates operator approval. A same approved target
   that is merely offline retains approval and follows GATE-A's await-drive path when its clean anchor is
   sufficient. If it is dirty/unknown, request mount+reconciliation first; require re-preview only if the
-  resulting constrained projection violates the envelope or no longer fits.
+  resulting constrained projection violates the approved proposal or no longer fits.
 - **Physical fencing:** the DB token is checked on every catalog write and at filesystem safe boundaries,
   while same-host controller/per-drive locks exclude a stale process from allocation/publish/annex.
   Lease expiry alone never authorizes takeover past a still-held physical lock. Forced takeover leaves
-  affected drives dirty and blocks new writes until identity-proven reconciliation; cross-host NAS
-  writers remain unsupported without distributed fencing. On a supported shared remote, the distributed
-  fence is held from the authoritative free-space observation through clean-anchor publication.
-- **39a pinned fetch contract:** the planner resolves and persists a provider revision before preview;
-  downloader requests always carry it, archived rows retain it, and retries cannot substitute provider
-  head. Revision-unavailable, manifest-mismatch, and content-mismatch are typed failures before publish.
+  affected drives dirty and blocks new writes until identity-proven reconciliation. Cross-host NAS
+  writers remain unsupported; supported same-host exclusion is held from authoritative free-space
+  observation through clean-anchor publication.
+- **Manifest approval boundary:** full-manifest hash catches added/removed/renamed/resized work;
+  task-relevant rows bind exact executable files and reusable hashes, and downloaded length must match
+  the approved size before publish. Provider commit pinning is out of scope; document the same-path/
+  same-size/hashless-file residual and track it separately.
 
 ## Sequencing (revised)
 
@@ -312,14 +317,16 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
 0b. **Rewrite/split the GitHub issues** to agree with the DEC + this plan.
 1. **Portal mutation guard** → **`main`** (independent; explicitly portal-only).
 2. **#35** — append-only clean-anchor evidence + mount-identity + dirty protocol + registration-prep +
-   migration/recovery (fix branch).
-3. **#39a artifact-identity foundation** — provider-revision-pinned manifests/downloads, archived
-   provenance, legacy fail-closed migration (fix branch; lands before reuse decisions consume it).
-4. **#36a** — reconciler emits provenance-aware partial alternatives + deterministic costs (fix branch).
-5. **#38** — shared feasibility+placement engine, graded outcomes, reuse ranking, `tiered_v2` (fix branch).
-6. **#37** — 37a → 37b(+reinstate) → 37c → 37d (fix branch, multiple PRs).
-7. **#39b** — approval envelope + catalog-backed lease/CAS commit + execution projection/lease (fix
+   migration/recovery plus only the fact/evidence/write-mutation seams it needs (fix branch).
+3. **#36a** — reconciler emits hash/provenance-aware partial alternatives + deterministic costs while
+   requirement/candidate construction becomes pure (fix branch).
+4. **#38** — pure shared feasibility+placement engine, graded outcomes, reuse ranking, `tiered_v2` (fix
    branch).
+5. **#37 schema/gating** — minimal lifecycle+eligibility columns with safe active/enabled migration
+   defaults (fix branch; operator operations remain later).
+6. **#39** — normalized proposal rows/hash + catalog-backed revision CAS + pure execution projection +
+   minimal session/lease and evidence-divergence UX (fix branch).
+7. **#37 operations** — exclude → lost/re-home(+reinstate) → retire → drop-copy, multiple PRs.
 
 ## Workflow
 
@@ -334,15 +341,15 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
 ## Source of truth (pre-code blocker — accepted staging)
 
 Issue bodies #35–#39 still hold original text and contradict this plan; that's expected while drafting.
-Before any implementation PR: author the DEC; rewrite #35/#38 and split #39 → 39a artifact identity +
-39b approval/execution control, #36 → 36a (reuse ranking to #38), and #37 → 37a–37d; add invariants,
-failure codes, migration behavior, and test matrices.
+Before any implementation PR: approve RFC-002; author the binding DEC; rewrite #35/#38/#39, split #36
+→ 36a (reuse ranking to #38), and #37 → schema/gating then 37a–37d operations; add invariants, failure
+codes, migration behavior, and test matrices.
 
 ## Acceptance material (per issue, before its PR)
 
 - **#35** — evidence precedence (identity-proven live `df` still authoritative while dirty; dirty only
-  invalidates offline anchor), fenced vs unfenced live shared remote, distributed fence held continuously
-  from authoritative `df` through clean-anchor publication, exclusive local volume vs
+  invalidates offline anchor), exclusively controlled vs unfenced remote, same-host exclusion held
+  continuously from authoritative `df` through clean-anchor publication, exclusive local volume vs
   externally-writable/NAS volume, offline latest-clean-anchor behavior, dirty⇒offline-unknown, mount-
   identity failures (wrong volume, missing NAS mount, replaced fs, stale path) ⇒ `unknown`, out-of-range
   anchor rejected (not clamped), generation-CAS race against a writer starting, drift below/above the
@@ -355,7 +362,7 @@ failure codes, migration behavior, and test matrices.
   CLI/API/UI consumer.
 - **#36a/#38** — alternatives emitted without pinning; global feasibility (a partial fitting itself but
   breaking the fleet is not chosen); insufficient partial with a feasible fresh target; relocation is
-  never selected while unsupported; revision-matched/hash-proven partial reuse vs unknown legacy
+  never selected while unsupported; LFS/original-hash-proven partial reuse vs unknown legacy
   provenance; candidate-specific reuse/workspace budgets; protected/bulk/replica;
   stop/crash durability; graded Gate-B outcomes; feasibility-existence vs optimization separation;
   **mixed known/unknown fleet precedence** (known-only feasible wins; known-only inconclusive remains
@@ -377,15 +384,17 @@ failure codes, migration behavior, and test matrices.
   IMMEDIATE` held across the solve, cross-writer atomicity (portal + CLI writers), config-in-snapshot /
   no file reread mid-lease, concurrent previews, approval→later-start state drift, changed current
   admission-authoritative evidence, strict preview→commit `planner_revision` CAS, atomic mutation+
-  approval-envelope persistence, exact-
+  proposal approval, rows-authoritative canonical hash with no writable blob, draft→approved→superseded
+  lifecycle, exact-
   approved-assignment capacity validation without optimizer rerun, alternate-feasible placement still
-  requiring fresh approval, progress/evidence-compatible projection rebase after one/many completed
+  requiring fresh approval through an explicit evidence-divergence terminal/UX, progress/evidence-
+  compatible pure projection after one/many completed
   files and dirty→clean reconciliation, rejection of expanded/remapped work, execution lease binding to
   the rebased revision+fencing token, systemd auto-resume, missing legacy approval→fresh preview, same
   approved target offline→GATE-A await without re-preview, dirty offline target→mount/reconcile then
-  compare, provider revision pin carried through every retry, ordinary Git-file change at provider head
-  cannot enter the approved snapshot, unavailable revision/manifest/hash mismatch typed before publish,
-  archived artifact-revision provenance, execution-authority-task equivalence, live-lease predicate, all
+  compare, full-manifest structural drift and task-file/hash mismatch typed before execution, documented
+  same-path/same-size/hashless-file provider-HEAD residual, execution-authority-task equivalence,
+  one-time migrated-selection reapproval at a Fill-idle boundary, live-lease predicate, all
   removal paths, no candidate bytes before accepted admission.
 
 ## Out of scope (tracked separately)
