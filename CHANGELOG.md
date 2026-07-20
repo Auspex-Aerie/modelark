@@ -4,6 +4,35 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-20
+
+### Added
+
+- `modelark import` seeds the catalog from a bundled starter export (~4,100 pre-classified models),
+  offline and with no Hugging Face token — a fresh install no longer has to re-walk the whole Hub
+  before there is anything to curate. Insert-only by default (`--refresh` to overwrite; `--from` to
+  point at another export). The sanitized `models.jsonl` is now packaged into the wheel.
+- A "Getting started" walkthrough in the README that orders install → seed → drive registration →
+  plan → curate/fill, with drive registration surfaced early.
+
+### Changed
+
+- Gated repositories are handled as interactive per-session operator follow-ups (retained notice,
+  then one prompt with a fixed-origin Hub link and retry/skip) rather than generic fetch-task
+  failures; a plan whose only remaining work is parked gated repos completes as
+  `PLAN_COMPLETE_WITH_FOLLOWUPS` (DEC-047 / INC-020).
+- Fetch publication now stages every download in verified, same-filesystem staging before it crosses
+  into the archive worktree; dangling annex placeholders are recovered by proof, and a systemic
+  credential rejection stops the batch immediately instead of churning repositories
+  (DEC-046 / INC-018 / INC-019).
+
+### Fixed
+
+- The download no-progress watchdog and the orphaned-partial sweep now recurse into per-file
+  subdirectories (`rglob`), so a healthy nested-path shard (e.g. `transformer/…`) larger than the
+  stall window is no longer repeatedly false-killed as a transient stall, and its partials no longer
+  leak on the archive drive (INC-021).
+
 ## 0.1.0 - 2026-07-16
 
 ### Added

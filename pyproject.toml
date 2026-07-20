@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "modelark"
-version = "0.1.0"
+version = "0.2.0"
 description = "Catalog, fetch, and verify open model weights across an offline drive library."
 readme = "README.md"
 license = "Apache-2.0"
@@ -66,7 +66,7 @@ include = ["modelark*", "scripts"]
 namespaces = true
 
 [tool.setuptools.package-data]
-"modelark" = ["default_wishlist.yaml"]
+"modelark" = ["default_wishlist.yaml", "data/catalog_seed.jsonl"]
 "modelark.core" = ["*.sql"]
 "modelark.web" = ["static/*"]
 "scripts" = ["*.service"]

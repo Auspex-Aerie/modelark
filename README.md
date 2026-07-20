@@ -1,13 +1,13 @@
 # ModelArk
 
 [![CI](https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml/badge.svg)](https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml)
-[![Release: v0.1.0 Public Alpha](https://img.shields.io/badge/release-v0.1.0%20Public%20Alpha-orange)](CHANGELOG.md#010---2026-07-16)
+[![Release: v0.2.0 Public Alpha](https://img.shields.io/badge/release-v0.2.0%20Public%20Alpha-orange)](CHANGELOG.md#020---2026-07-20)
 [![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%E2%80%933.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![Linux](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)](docs/deployment.md)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-support_AuspexLabs-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/auspexlabs?new=1)
 
-> 🚧 **ModelArk 0.1.0 — Public Alpha.** The archive pipeline, reconciled capacity engine, and
+> 🚧 **ModelArk 0.2.0 — Public Alpha.** The archive pipeline, reconciled capacity engine, and
 > verified restore command are implemented and extensively tested, and StreamZNN's write-time restore
 > proof has been validated on real archive data. "Alpha" reflects pre-1.0 interface stability and the
 > remaining operator-attended migrated-archive acceptance—not a prototype implementation. See
@@ -300,10 +300,48 @@ automated.)*
 
 **Hugging Face auth** (optional — gated repos, higher rate limits): `.venv/bin/hf auth login`.
 
+## Getting started
+
+From a fresh install to your first archive. Steps 1–2 are one-time host setup; the rest is ModelArk.
+
+1. **Install ModelArk and the system tools** (see [Manual setup](#manual-setup)):
+   ```bash
+   python3 -m venv .venv && .venv/bin/pip install .
+   sudo apt-get install -y git-annex smartmontools     # git-annex is required; smartmontools powers Disk Health
+   ```
+2. **(Optional) Hugging Face login** — only for gated repos or higher rate limits; public models need none:
+   ```bash
+   .venv/bin/hf auth login
+   ```
+3. **Seed the catalog.** A fresh install starts empty. Import the bundled starter catalog
+   (~4,100 pre-classified models) — instant, offline, no token — instead of re-walking the whole Hub:
+   ```bash
+   modelark import                            # seed from the bundled export
+   # or build your own from the wishlist orgs (slower, hits the HF API):
+   modelark discover --walk
+   ```
+4. **Register at least one drive** (Linux). Point it at an existing empty, mounted volume, or format
+   one with the deliberate two-step flow shown under [Usage](#usage):
+   ```bash
+   modelark drive register --dev /dev/sdX --label drive-01
+   ```
+5. **Create and select a plan** (its drive fleet + capacity mode):
+   ```bash
+   modelark plan create --id ark && modelark plan select --id ark
+   ```
+6. **Curate and fill.** Open the portal, build a set within your budget, then Start the Fill:
+   ```bash
+   modelark serve                             # → http://127.0.0.1:8077
+   ```
+
+An operator-guided setup surface (a `doctor`/`setup` walkthrough shared by the CLI and portal) is the
+next milestone; for now the steps above are the path.
+
 ## Usage
 
 ```bash
-modelark discover --walk                     # catalog the wishlist orgs
+modelark import                              # seed the catalog from the bundled starter export
+modelark discover --walk                     # or catalog the wishlist orgs from the Hub
 modelark verify --all                        # Tier A remote-header evidence (no full download)
 modelark protect --repo org/model            # mark must-have (numcopies=2 → a 2nd copy)
 modelark serve                               # portal → :8077 (curate, then Fill)
@@ -370,7 +408,7 @@ restore; file-level crash recovery; first-class Plans; on-demand physical re-ver
 portal's six operator views. `DIS-002` is production evidence for StreamZNN blobs, not a claim that
 the complete restore workflow has already passed the migrated-runtime acceptance.
 
-The current 0.1.0 public-alpha build has passed clean-install, installed-wheel, schema migration,
+The current 0.2.0 public-alpha build has passed clean-install, installed-wheel, schema migration,
 standalone, Playwright, hostile-web, read-only migrated-catalog, and capacity-ledger checks. The
 operator-attended migrated-runtime checklist has passed Phases A–F. Phase G still requires installing
 the reviewed hash-repair build, auditing and (if approved) repairing legacy Git-tracked hash evidence,

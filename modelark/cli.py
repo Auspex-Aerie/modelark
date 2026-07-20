@@ -124,6 +124,21 @@ def cmd_export(args):
         con.close()
 
 
+def cmd_import(args):
+    """Seed the catalog from a sanitized JSONL export (the bundled starter catalog)."""
+    from modelark import seed
+    con = db.connect()
+    try:
+        result = seed.import_catalog(con, source=args.source, overwrite=args.refresh)
+    finally:
+        con.close()
+    verb = "refreshed" if args.refresh else "imported"
+    print(f"{verb} {result['imported']} model(s) from {result['source']}"
+          + (f"; skipped {result['skipped']} already present" if result["skipped"] else ""))
+    print(f"catalog now holds {result['total_models']} model(s). "
+          "Browse/curate with `modelark serve`, or add more with `modelark discover --walk`.")
+
+
 def cmd_recompute(args):
     """Re-derive variant + fix no-weight categories from stored metadata (no re-walk)."""
     from modelark import formats
@@ -490,6 +505,14 @@ def main(argv=None):
 
     e = sub.add_parser("export", help="export catalog to JSONL for git")
     e.set_defaults(func=cmd_export)
+
+    im = sub.add_parser("import",
+                        help="seed the catalog from the bundled starter export (~4k models, offline)")
+    im.add_argument("--from", dest="source",
+                    help="path to a models.jsonl export (default: source checkout, else bundled seed)")
+    im.add_argument("--refresh", action="store_true",
+                    help="overwrite existing rows from the seed instead of only adding missing ones")
+    im.set_defaults(func=cmd_import)
 
     rc = sub.add_parser("recompute", help="re-derive variant/category from stored metadata (no re-walk)")
     rc.set_defaults(func=cmd_recompute)
