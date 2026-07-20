@@ -68,22 +68,29 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    false the moment the device/process disappears). A drive can be offline *and* excluded; re-plugging
    an excluded drive must not re-enable it. `found/reinstate` returns a `lost` drive to counting only
    after identity proof + reconcile/fsck. `retire` tombstones and **permanently reserves** the identity/
-   label (never deletes). Offline ≠ lost.
+   label (never deletes). Reinstate applies only to `lost→active`: a retired identity that reappears
+   remains retired and is rejected as a registration target; resurrecting it would require a separately
+   designed explicit operation outside this effort. Offline ≠ lost.
 6. **Gate B is a *safety* verdict about feasibility existence** (not optimality), with explicit
    mixed-evidence precedence. Unknown-evidence drives contribute **zero admissible free** to an
    executable assignment—they never poison a plan that fits on known evidence and never make a plan
-   `FEASIBLE`. The ladder is: **(1)** report a structural/policy failure immediately when it is
-   independent of current free (for example, one requirement exceeds every eligible drive's epoch
-   maximum); **(2)** search using known-evidence drives plus zero for unknown drives—an assignment found
-   here is `FEASIBLE`, proven infeasibility advances to step 3, and bound exhaustion is immediately
-   `PACKING_INCONCLUSIVE` (do not blame unknown evidence while a known-only packing may exist);
-   **(3)** only after known-only infeasibility is proven, run a non-executable optimistic sensitivity
-   search that gives unknown drives their epoch maximum; an assignment relying on unknown capacity is
-   `CAPACITY_EVIDENCE_UNKNOWN` (name the drives to resolve); **(4)** if the optimistic space is
-   exhaustively impossible, return `INFEASIBLE_UNDER_ADMISSION_BUDGET`; **(5)** if the optimistic search
-   exhausts its deterministic bound, return `PACKING_INCONCLUSIVE` with the unknown-drive diagnostics.
-   Never assert physical impossibility beyond the admitted/optimistic policy bounds. Gate B refuses
-   start/commit on anything but `FEASIBLE`, naming the outcome.
+   `FEASIBLE`. Every maximum in this ladder is **usable capacity for the epoch after the same safety-
+   floor/headroom policy used by execution—never raw device capacity**. The ladder is: **(1)** report a
+   structural/policy failure immediately when it is independent of current free (for example, one
+   requirement exceeds every policy-permitted candidate drive's maximum usable capacity); **(2)**
+   search using known-evidence drives plus zero for unknown drives—an assignment found here is
+   `FEASIBLE`, bound exhaustion
+   is immediately `PACKING_INCONCLUSIVE` (do not blame unknown evidence while a known-only packing may
+   exist), and proven infeasibility with no relevant unknown drive is
+   `INFEASIBLE_UNDER_ADMISSION_BUDGET`; **(3)** only after known-only infeasibility is proven and a
+   relevant unknown drive exists, run a non-executable optimistic sensitivity search that gives each
+   unknown drive its maximum **usable** capacity; an assignment relying on that capacity is
+   `CAPACITY_EVIDENCE_UNKNOWN` (name the drives to resolve); **(4)** if even the optimistic usable space
+   is exhaustively impossible, return `INFEASIBLE_EVEN_AT_OPTIMISTIC_USABLE_CAPACITY` with action
+   add-capacity/trim-selection/change-hard-constraints—not “resolve evidence”; **(5)** if the optimistic
+   search exhausts its deterministic bound, return `PACKING_INCONCLUSIVE` with the unknown-drive
+   diagnostics. Never assert physical impossibility beyond the admitted/optimistic policy bounds. Gate B
+   refuses start/commit on anything but `FEASIBLE`, naming the outcome.
 7. **Placement optimization is separate from safety, and is one concrete deterministic rule.** After a
    feasible assignment exists, a **deterministic best-effort improvement pass** ranks it
    **lexicographically** over the ordered objectives — it is *not* required to prove optimality (that
@@ -94,9 +101,12 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    best-so-far assignment with `optimization_truncated`. Time/memory limits are emergency caps, not
    semantic truncation; hitting one discards nondeterministic best-so-far state, surfaces
    `optimization_resource_exhausted`, and falls back to the canonical first-feasible assignment. The
-   placement derivation mode (`optimized` / `state_truncated` / `canonical_fallback`) is part of the
-   preview fingerprint so commit must reproduce it rather than silently choose another placement.
-   `PACKING_INCONCLUSIVE` remains reserved for the feasibility search.
+   preview shows and fingerprints the resulting exact assignment plus derivation mode (`optimized` /
+   `state_truncated` / `canonical_fallback`). **Optimization runs only to produce the preview; commit,
+   Fill start, and resume never rerun it.** They validate the exact approved assignment against unchanged
+   discrete inputs, monotonic progress, and current live capacity. This preserves the reviewed placement
+   without load-dependent reproduction/retry behavior. `PACKING_INCONCLUSIVE` remains reserved for the
+   feasibility search.
 8. **Serialized control is catalog-backed with a real lease and physical writer exclusion.** A
    monotonic `graph_revision` plus a durable lease defining owner/session id, acquire/renew,
    heartbeat/expiry, crash recovery, safe operator takeover, and a **monotonically increasing fencing
@@ -113,8 +123,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    all do. The early portal guard is explicitly portal-scoped.
 9. **Approval and execution are distinct, revision-bound stages.** Preview/commit stores an approved
    execution fingerprint plus target/source constraints; it does not hold an execution lease while the
-   operator is idle. Fill start acquires the execution lease, re-derives Gate B/tasks, and requires the
-   current work to be equivalent to that approval before writing. Crash/auto-resume allows only
+   operator is idle. Fill start acquires the execution lease, re-derives remaining tasks constrained to
+   the approved assignment, validates that assignment against live Gate B capacity, and requires the
+   current work to be equivalent to that approval before writing; it never reruns placement optimization.
+   Crash/auto-resume allows only
    **monotonic progress**: satisfied tasks may disappear, present-file sets may grow, and missing-work
    sets may shrink on the same approved targets; new requirements, expanded missing work, changed
    targets/sources/policy, or a non-`FEASIBLE` Gate B require a fresh preview. A legacy/migrated selection
@@ -143,8 +155,11 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   crash before that leaves the drive `unknown`, never a half-trusted baseline.
 - **Drift remains a diagnostic integrity signal:** when an identity-proven clean volume is remounted,
   compare live free with the latest anchor under the same epoch and surface unexplained disagreement;
-  never silently rewrite/promote the anchor from that observation. A synchronous reconciliation may
-  append a new anchor only after explaining or explicitly acknowledging the drift.
+  never silently rewrite/promote the anchor from that observation. Alert only when the absolute delta
+  exceeds a versioned, filesystem-aware `drift_tolerance_bytes` (allocation-unit rounding plus a bounded
+  metadata/journal allowance); record sub-threshold deltas as diagnostics so benign filesystem metadata
+  fluctuation is not presented as corruption. The tolerance is not admission headroom. A synchronous
+  reconciliation may append a new anchor only after explaining or explicitly acknowledging the drift.
 - Consolidate every consumer onto one evidence path (`library_api.py:23` currently reports raw
   `free_bytes`). Migration fail-closed: unprovable provenance ⇒ `unknown`, recover via the anchor path.
 
@@ -179,9 +194,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   improvement-bound exhaustion returns the deterministic best-so-far assignment with
   `optimization_truncated`. Wall-clock/memory caps are emergency aborts: discard nondeterministic
   best-so-far state, surface `optimization_resource_exhausted`, and use the canonical first-feasible
-  assignment under a fingerprinted fallback mode. Correction from review: canonical path already has
-  the label tiebreak (capacity.py:753); only the legacy comparison path lacks it, and that is not
-  execution authority.
+  assignment in the preview under a fingerprinted fallback mode. Once the operator accepts the preview,
+  its exact execution-authority assignment—not a later optimizer run—is validated and executed.
+  Correction from review: canonical path already has the label tiebreak (capacity.py:753); only the
+  legacy comparison path lacks it, and that is not execution authority.
 - `tiered_v2` named policy + decision entry + operator acknowledgement (small-drive idleness was
   intentional consolidation). Protected homes, primaries, replica grouping each specified.
 
@@ -209,22 +225,27 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   eligibility, capacity/anchor facts + epoch, `dirty`/exclusivity evidence, **graph-affecting compression
   config copied into the snapshot**, margins/headroom policy, capacity mode, `tiered_v2`/solver-bound
   version, archived facts, and the mutation) — excluding only display-only volatiles. The preview
-  fingerprint additionally binds the solver's placement-derivation mode. **Fill executes
-  against this immutable snapshot and never rereads the config file**; a raw mid-lease edit is
+  fingerprint binds the resulting exact **execution-authority task set** and the solver's placement-
+  derivation mode (the latter is audit evidence, not an instruction to rerun the optimizer). **Fill
+  executes against this immutable snapshot and never rereads the config file**; a raw mid-lease edit is
   unsupported and only observed at the next boundary. Commit runs the invariant-8 protocol (short write
-  txn after the solve) requiring **all three**: (a) `graph_revision` unchanged; (b) live Gate B
-  `FEASIBLE`; (c) the committed **execution-authority task set** materially equivalent to the preview —
-  compared over {requirement/copy id, task kind, target drive, source drive where applicable,
-  reused-present/missing-work identity}. Any divergence → reject + fresh preview. Preview covers
-  add/remove/clear; no candidate bytes written before accepted admission.
+  txn after the solve) requiring **all three**: (a) `graph_revision` unchanged; (b) the exact approved
+  assignment itself—not merely some newly-found alternative—remains live-Gate-B `FEASIBLE`; (c) the
+  committed **execution-authority task set** is materially equivalent to the preview, compared over
+  {requirement/copy id, task kind, target drive, source drive where applicable, reused-present/missing-
+  work identity}. Commit validates the approved assignment against current evidence without rerunning
+  placement optimization. If it no longer fits even though another assignment might, reject + fresh
+  preview; never substitute the new assignment silently. Preview covers add/remove/clear; no candidate
+  bytes are written before accepted admission.
 - **Approval→start handoff:** preview/commit persists the approved fingerprint/constraints but holds no
-  long-lived lease. `/api/fill/start` (and CLI start) acquires the execution lease, recomputes against
-  current live evidence, and accepts only exact approval equivalence before the first write. The lease
-  is then held through the terminal worker boundary. A state change while the operator waits therefore
-  causes start to reject rather than silently execute a different plan. If preview bound a canonical
-  optimization fallback, commit/start deliberately replay that mode; if an emergency cap prevents an
-  optimized commit from reproducing its preview, return `optimization_resource_exhausted` and retry—do
-  not silently fall back to a different target map.
+  long-lived lease. `/api/fill/start` (and CLI start) acquires the execution lease, derives current
+  remaining requirements **constrained to the approved target/source map**, and validates live capacity
+  plus exact/progress-compatible approval equivalence before the first write; it does not invoke the
+  optimizer. The lease is then held through the terminal worker boundary. A state change while the
+  operator waits therefore causes start to reject rather than silently execute a different plan.
+  `optimization_resource_exhausted` can occur while producing a preview; that preview may instead show
+  the canonical fallback for approval. It is not a commit/start reproduction outcome because those
+  boundaries validate the already-approved assignment rather than replaying its derivation.
 - **Crash/auto-resume equivalence is progress-aware, not strict task equality:** completed requirements
   may disappear, present-file sets may grow, and missing-work sets may shrink on the same approved
   targets. New/expanded work, changed target/source/policy, lost approval provenance, or non-feasible
@@ -273,7 +294,8 @@ Before any implementation PR: author the DEC; rewrite #35/#38/#39, split #36 →
   invalidates offline anchor), fenced vs unfenced live shared remote, exclusive local volume vs
   externally-writable/NAS volume, offline latest-clean-anchor behavior, dirty⇒offline-unknown, mount-
   identity failures (wrong volume, missing NAS mount, replaced fs, stale path) ⇒ `unknown`, out-of-range
-  anchor rejected (not clamped), generation-CAS race against a writer starting, drift detection, anchor
+  anchor rejected (not clamped), generation-CAS race against a writer starting, drift below/above the
+  versioned filesystem-aware tolerance (and proof the tolerance grants no admission headroom), anchor
   recovery on a populated drive, capacity-epoch resize, same-drive re-registration,
   **registration crashes** (before row creation, during clone, during annex-init, before first anchor),
   NULL vs proven-zero `stored_bytes`, unprovable-provenance⇒`unknown`, migrated-catalog replay, every
@@ -284,18 +306,23 @@ Before any implementation PR: author the DEC; rewrite #35/#38/#39, split #36 →
   stop/crash durability; graded Gate-B outcomes; feasibility-existence vs optimization separation;
   **mixed known/unknown fleet precedence** (known-only feasible wins; known-only inconclusive remains
   packing-inconclusive; proven-known-infeasible then unknown may-help; optimistic still-impossible;
-  optimistic inconclusive), shuffled input/query order; deterministic large-block metric;
+  optimistic inconclusive; a requirement below raw capacity but above every drive's usable capacity is
+  structural, never evidence-unknown), shuffled input/query order; deterministic large-block metric;
   adversarial packing; feasibility-bound exhaustion vs deterministic post-feasibility
   `optimization_truncated`; emergency time/memory `optimization_resource_exhausted` canonical fallback;
-  preview/commit replay of fallback mode; 10k-candidate performance.
+  preview fingerprints optimized/state-truncated/canonical-fallback output; commit/start validate the
+  exact approved assignment without an optimizer rerun; approved assignment no longer fitting while an
+  alternative might fit requires a fresh preview; 10k-candidate performance.
 - **#37** — offline/excluded/lost/retired orthogonality, found/reinstate, last/unique-copy refusal,
   two-copy policy, bootstrap eligibility, annex-success/DB-failure recovery, dry-run, idempotent reruns,
-  tombstone reservation.
+  tombstone reservation, retired identity reappearance stays retired and reinstate refuses it.
 - **#39** — lease acquire/renew/expiry/**crash recovery/operator takeover/fencing-token validation**,
   physical-lock exclusion of an expired-but-live writer, forced-takeover→dirty/reconcile, no `BEGIN
   IMMEDIATE` held across the solve, cross-writer atomicity (portal + CLI writers), config-in-snapshot /
   no file reread mid-lease, concurrent previews, approval→later-start state drift, changed live free,
-  progress-compatible restart after one/many completed files, systemd auto-resume, missing legacy
+  exact-approved-assignment capacity validation without optimizer rerun, alternate-feasible placement
+  still requiring fresh approval, progress-compatible restart after one/many completed files, systemd
+  auto-resume, missing legacy
   approval→fresh preview, same approved target offline→GATE-A await without re-preview, dirty offline
   target→mount/reconcile then compare, execution-authority-task equivalence, live-lease predicate, all
   removal paths, no candidate bytes before accepted admission.
