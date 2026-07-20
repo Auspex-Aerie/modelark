@@ -1,8 +1,9 @@
 # Placement & capacity hardening
 
-Working plan for the fix effort opened after the 2026-07-20 placement/capacity audit, revised after
-review. This document is for local review; the authoritative problem statements live in the GitHub
-issues, and the binding invariants will be recorded in the decision log **before any implementation**.
+Working plan for the fix effort opened after the 2026-07-20 placement/capacity audit, revised across
+review rounds. This document is for local review; the authoritative problem statements live in the
+GitHub issues, and the binding invariants will be recorded in the decision log **before any
+implementation**.
 
 ## Origin
 
@@ -27,23 +28,28 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
 
 A `DEC-###` entry is authored and merged **before** the first implementation PR, capturing:
 
-1. **Free-space evidence model** — `capacity_bytes` (nominal) and identity-scoped `baseline_free_bytes`
-   are the only immutable facts; current free is always *derived* with a labelled `free_evidence`
-   (`live` / `baseline_estimate` / `stale` / `unknown`). No writable current-free field.
+1. **Free-space evidence model** — `baseline_free_bytes` is identity-scoped and immutable. Fixed-device
+   `capacity_bytes` is identity-scoped; dynamic/special-remote (NAS) capacity changes only through an
+   explicit observation/update path. Current free is always *derived* with a labelled `free_evidence`
+   (`live` / `baseline_estimate` / `stale` / `unknown`); there is no writable current-free field. Drift
+   detection correlates the observation against a catalog write-watermark (or a synchronous live
+   observation) so archive writes *after* an observation are not mistaken for drift.
 2. **Durable truth is never auto-deleted** — a verified `archived` row (complete, published file) is
    removed only by an explicit, scoped, confirmed operation. No threshold-triggered deletion.
 3. **Offline ≠ lost** — a shelved/unmounted drive remains a valid archive copy (decision_log.md:813).
 4. **Gate B never reports a false infeasible** — a heuristic that cannot find a packing must say so
-   distinctly from a proven-infeasible one.
+   distinctly (`PACKING_INCONCLUSIVE`) from a proven-infeasible one.
 5. **Placement policy changes are versioned** — the new distribution policy ships as a named
    `tiered_v2`, not a silent change to `tiered_v1`, with operator-facing acknowledgement.
 
 ## Revised approach per issue
 
 ### #35 — unified, derived, *conservative* free-space evidence
-- Fields: `capacity_bytes` (nominal); `baseline_free_bytes` (identity-scoped, immutable — free on the
-  empty drive identity before ModelArk consumption); `observed_free_bytes` + `observed_at` (diagnostic
-  only, **never** silently promoted to baseline); `free_evidence` enum.
+- Fields: `capacity_bytes` — identity-scoped; fixed for a fixed device, but dynamic/special-remote
+  (NAS) capacity changes only via an explicit observation/update path. `baseline_free_bytes`
+  (identity-scoped, immutable — free on the empty drive identity before ModelArk consumption).
+  `observed_free_bytes` + `observed_at` (diagnostic only, **never** silently promoted to baseline).
+  `free_evidence` enum.
 - **Conservative offline estimate** — `baseline_free − conservative_consumption`, where
   `conservative_consumption ≥ Σ stored_bytes`: per-object round-up to filesystem block size plus an
   overhead margin (fs metadata, annex object/dir overhead). `Σ stored_bytes` is logical length and is
@@ -52,12 +58,15 @@ A `DEC-###` entry is authored and merged **before** the first implementation PR,
   on a drive, offline free is `unknown`, not estimated.
 - Live `df` remains the authority when mounted; the offline estimate is a labelled fallback.
 - **Drift is a diagnostic signal** — `observed` vs derived disagreement is surfaced for integrity, even
-  though it is not admission authority (retracting the earlier "nothing to reconcile").
+  though it is not admission authority (retracting the earlier "nothing to reconcile"). Comparison
+  requires a catalog write-watermark or a synchronous live observation: `observed_free_bytes`/
+  `observed_at` alone cannot distinguish real drift from archive writes made *after* the observation.
 - **Consolidate every consumer** onto one evidence path — capacity/reconciler, librarian projections,
   Fill, CLI drive listings, and Library (`library_api.py:23` currently reports raw `free_bytes`).
-- Migration: prove per existing row whether its value is a baseline or a stale observation; identity-
-  scoped facts immutable, but mount path / health / observations / NAS capacity may change on same-
-  identity re-registration.
+- Migration: prove per existing row whether its value is a baseline or a stale observation. **If
+  provenance cannot be proven, migrate that drive to `unknown` — never guess a baseline** (fail-closed).
+  Identity-scoped facts are immutable; mount path / health / observations, and dynamic NAS capacity via
+  the explicit update path, may change on same-identity re-registration.
 
 ### #36 — feasibility-aware partial affinity (no deletion)
 - Root cause: `_choose_partial` (reconcile.py:353) sets a hard `pinned_target` before placement, which
@@ -65,8 +74,11 @@ A `DEC-###` entry is authored and merged **before** the first implementation PR,
 - Replace hard pinning: expose all partial candidates + reusable bytes to placement; **prefer** a
   feasible partial target (greatest reuse / least missing); if it can't hold the remainder, allow a
   feasible fresh target; **preserve the old verified files as policy-drifted extra bytes** until an
-  explicit #37 cleanup; prefer annex-to-annex relocation over re-download where practical. Any
-  threshold is a *preference*, never permission to delete or override feasibility.
+  explicit #37 cleanup. Any threshold is a *preference*, never permission to delete or override
+  feasibility.
+- **Annex-to-annex relocation is a later optimization, not required in this phase** — the first
+  implementation may select a feasible fresh target, preserve the old verified rows as policy-drift,
+  and re-download; relocation is tracked as a follow-up.
 - Enumerate behavior: metadata-only stub, meaningful shard partial, insufficient partial target w/
   feasible fresh target, multiple partial drives, GGUF / PyTorch / aux-only / zero-byte, one enormous
   completed shard, protected copy #2, and target stability across replans.
@@ -89,8 +101,11 @@ A `DEC-###` entry is authored and merged **before** the first implementation PR,
   contiguous blocks; (6) minimize idle-drive count *as a low-priority objective*; (7) deterministic
   label tiebreak.
 - Likely heuristic: largest-item-first onto the smallest remaining drive that fits — but a heuristic
-  can emit a **false Gate-B failure**, so add a bounded exact/fallback search for the small drive count
-  and distinguish "no single drive can fit" / "proven-infeasible packing" / "heuristic could not pack."
+  can emit a **false Gate-B failure**. Add a bounded exact/fallback search with explicit runtime/memory
+  limits and three deterministic outcomes: **FEASIBLE** (placement found), **PROVEN_INFEASIBLE** (only
+  after the exhaustive search completes within bounds), and **PACKING_INCONCLUSIVE** (bound exhausted).
+  Gate B treats `PACKING_INCONCLUSIVE` distinctly — never as a false infeasible; "proven infeasible" is
+  valid only once exhaustive search completes.
 - Correction from review: the canonical path already has an explicit label tiebreak (capacity.py:753);
   only the legacy comparison path lacks it, and that is not execution authority.
 - Small-drive idleness was intentional consolidation → the change needs a decision entry + operator
@@ -99,15 +114,24 @@ A `DEC-###` entry is authored and merged **before** the first implementation PR,
 
 ### #39 — mutation guard + revision-bound preview
 - **Mutation guard (independent early protection):** refuse `finalize` / `remove` / `clear` of the
-  finalized set while a Fill is actively writing (selection_api.py:33 mutations are currently
-  immediate). This is a self-contained safety fix and **ships on its own branch directly to `main`**,
-  not on the long-lived fix branch — so it is a genuinely shipped protection, not deferred.
-- **Revision-bound preview→commit:** the preview binds to a **revision hash of discrete graph-affecting
-  state** (finalized selection, plan membership, capacity mode, drive lifecycle/identity, archived
-  facts) — explicitly **not** live `df`, so ordinary free-space jitter does not invalidate a preview.
-  On commit: if the discrete revision is unchanged, **re-run Gate B live** (reading current `df`) and
-  proceed only if feasible; if the revision changed, reject and show a fresh preview. Preview covers
-  add / remove / clear, and proves no candidate bytes are written before accepted admission.
+  finalized set whenever the worker is **not idle** — starting/auth/planning, downloading/compressing/
+  publishing, awaiting a drive or operator decision, or stopping-but-not-yet-terminal — so an already-
+  derived snapshot cannot resume after the selection changed (selection_api.py:33 mutations are
+  currently immediate). **Scope:** this hotfix guards the portal's in-process worker state machine;
+  detecting an *external CLI* fill controller is **deferred and documented as a limitation** (operators
+  are already told not to run two controllers), not presented as universal. Ships on its own branch
+  directly to **`main`**, not the long-lived fix branch — a genuinely shipped protection.
+- **Revision-bound preview→commit:** the preview binds to a **versioned canonical serialization of
+  every discrete reconciler and placement input** — finalized selection, canonical manifests/files +
+  archive-policy version, `numcopies`, plan membership, drive roles + RAID flags, drive
+  lifecycle/identity, capacity/baseline facts, capacity mode, placement-policy version, archived facts,
+  and the proposed mutation itself — **explicitly excluding only volatile live `df`**, so free-space
+  jitter never invalidates a preview. On commit, require **all three**: (a) the discrete revision is
+  unchanged; (b) live Gate B is feasible (reading current `df`); and (c) the committed model-to-drive
+  assignment is **materially equivalent** to the preview's (exact free-byte margins need not match; the
+  reviewed model→drive assignment must). If the revision changed *or* the target map differs, reject
+  and show a fresh preview. Preview covers add / remove / clear, and proves no candidate bytes are
+  written before accepted admission.
 
 ## Sequencing (revised)
 
@@ -136,15 +160,18 @@ A `DEC-###` entry is authored and merged **before** the first implementation PR,
 
 Explicit invariants, failure codes, migration behavior, and a test matrix:
 - **#35** — mounted/unmounted equivalence, fs overhead, external content, NULL/zero stored sizes, NAS,
-  same-drive re-registration, migrated-catalog replay, every CLI/API/UI consumer.
+  same-drive re-registration, unprovable-provenance→`unknown`, migrated-catalog replay, every
+  CLI/API/UI consumer.
 - **#36** — metadata-only stub, meaningful shard partial, insufficient partial target w/ feasible fresh,
   multiple partials, stop/crash durability, protected/bulk/replica, target stability across replans.
 - **#37** — offline vs lost, last/unique-copy refusal, two-copy policy, bootstrap behavior, annex-
   success/DB-failure recovery, dry-run, idempotent reruns.
 - **#38** — the exact incident fleet, adversarial packing, shuffled query order, candidate-specific
-  partial budgets, safety/workspace constraints, deterministic output, 10k-candidate performance.
-- **#39** — stale preview after every mutable input, concurrent sessions, running-worker boundary,
-  add/remove/clear, proof no candidate bytes are written before accepted admission.
+  partial budgets, safety/workspace constraints, deterministic output, `PACKING_INCONCLUSIVE` on bound
+  exhaustion, 10k-candidate performance.
+- **#39** — stale preview after every mutable input, target-map divergence under changed live free,
+  concurrent sessions, full non-idle worker boundary, add/remove/clear, proof no candidate bytes are
+  written before accepted admission.
 
 ## Out of scope (tracked separately)
 
