@@ -1,9 +1,9 @@
 # RFC-002: First-class placement approval and execution control
 
-- **Status:** draft — architecture scope endorsed; implementation not started
+- **Status:** accepted — implementation not started; binding DEC and issue rewrites next
 - **Date:** 2026-07-20
 - **Owners:** Auspex-Aerie + operator
-- **Related:** DEC-019, DEC-023, DEC-026, DEC-030, DEC-031, DEC-034, DEC-036, DEC-037,
+- **Related:** DEC-019, DEC-022, DEC-023, DEC-026, DEC-030, DEC-031, DEC-034, DEC-036, DEC-037,
   DEC-040, DEC-042, DEC-045, DEC-046, DEC-047, DEF-022, DEF-028, DEF-029, INC-014,
   INC-018, INC-019, INC-020, INC-021, RFC-001, issues #35–#39
 - **Working plan:** `docs/plans/placement-capacity-hardening.md`
@@ -60,6 +60,25 @@ The following dynamic events are not placement drift:
 An identity/epoch/policy change, expanded work, new task, changed source/target, or known capacity
 shortfall is approval drift and requires a fresh preview.
 
+### A live execution session makes planner mutations exclusive
+
+This is an intentional new operator restriction. While a session is `starting`, `running`, or
+`stopping`, read-only catalog/plan inspection remains available, but operator graph mutations are
+refused: selection finalization/removal/clear, discovery or manifest recompute, protect/`numcopies`, plan
+selection/membership/capacity mode, drive identity/role/lifecycle/eligibility, and anchor/dirty repair
+outside the owning worker. An external CLI writer is subject to the same rule.
+
+The recovery path is explicit: allow the worker to reach a safe boundary, then Stop or let it enter a
+typed `paused`/`blocked` terminal; the live lease and all process/per-drive locks are released; perform
+the mutation; Preview Again and approve if the authoritative projection changed. The operator cannot
+continue catalog mutation concurrently merely because SQLite WAL would permit the SQL writes.
+
+Recovery reconciliation is not deadlocked by this rule. A dirty/unknown target that needs operator
+reconciliation first transitions to non-live `paused`/`blocked`, releases its lease/locks, and then allows
+identity-proven reconciliation. If that operation only refreshes evidence and the same approved map still
+fits, projection permits resume without new placement approval. Arbitrary graph edits are also possible
+once non-live, but authoritative recomputation makes them require a fresh proposal when relevant.
+
 ### Cutover requires one fresh approval
 
 Migration never fabricates approval for a legacy/finalized selection. Existing `archived` rows remain
@@ -103,7 +122,8 @@ the attended cutover must reconcile any remaining required drive before the firs
 
 - `files` + `archived` + verified physical facts determine completion; proposals never do.
 - Gate B remains whole-plan and mode-labelled per DEC-045.
-- `guaranteed` is raw-bounded; `compression_aware` is estimate-backed and may stop safely.
+- `guaranteed` is raw-bounded; `compression_aware` is estimate-backed and an actual-ratio overrun stops
+  as `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE` without remapping.
 - A file operation performs a fresh target preflight and never crosses the safety floor.
 - Staging and retry state are ephemeral and never imply completion.
 - Guided hot-swap awaits the approved drive; offline does not mean lost.
@@ -292,6 +312,20 @@ affected drive dirty until reconciliation.
 Cross-host writers and a distributed NAS fence remain unsupported. A shared remote that another host or
 unfenced workflow may write is not admission-authoritative.
 
+Session state defines mutation authority:
+
+| Session state | Lease/lock status | Allowed graph mutation |
+|---|---|---|
+| `starting` | Live session lease; no task bytes until projection/token checks pass | Worker-owned setup only; operator mutations refused |
+| `running` | Live session lease; per-drive `flock` held around each mutation boundary | Worker-owned archived progress and dirty/anchor transitions only |
+| `stopping` | Still live until the worker reaches a safe boundary and releases every lock | No operator mutation; UI says to wait for stopped terminal |
+| `paused` / `blocked` | Non-live historical row; heartbeat/lease cleared; every `flock` released | Reconciliation and arbitrary operator mutation allowed; resume must pass authoritative projection |
+| `stopped` / `done` / `failed` | Non-live terminal row; no lock retained | Mutations allowed; any later start revalidates approval |
+
+An expired `starting`/`running`/`stopping` lease is not immediately equivalent to non-live: recovery first
+proves no physical lock/process remains or performs the forced-dirty recovery, then records a non-live
+terminal. This prevents both stale-writer takeover and pause/reconciliation deadlock.
+
 ## Schema
 
 This RFC adds five planning/control tables. #35 clean anchors/dirty generations and #37 drive lifecycle
@@ -318,6 +352,12 @@ persisted policy versions. Repair/migration tools use the same primitive. Extern
 so its canonical hash is rechecked at preview, approval, and execution boundaries rather than pretending
 that a catalog counter observed an out-of-band edit. Direct SQL mutation outside these supported paths is
 unsupported and must be caught by canonical-hash/replay integrity checks.
+
+An actual active-plan switch is allowed only with no live execution session. In one transaction it
+supersedes the current active approved proposal, clears `active_approved_proposal_id`, changes the active
+plan, and increments `planner_revision`. The newly active plan always requires a fresh preview/approval;
+switching back never silently reactivates its prior proposal. A no-op selection of the already-active plan
+does not manufacture a revision or approval change.
 
 ### `placement_proposals`
 
@@ -374,7 +414,7 @@ resized files. This bounds proposal growth while retaining exact executable work
 
 - session id, plan id, approved proposal id;
 - owner/controller identity;
-- state `starting | running | stopping | paused | blocked | done | failed`;
+- state `starting | running | stopping | paused | blocked | stopped | done | failed`;
 - bound planner revision and fencing token;
 - acquired, heartbeat, expiry, terminal timestamps;
 - typed terminal code and bounded evidence reference/summary.
@@ -396,6 +436,13 @@ rows, and no API accepts a client-supplied serialized proposal as authority.
 Golden vectors cover Python versions and shuffled insertion/query order. Changing canonical form requires
 a new serializer version; existing approved proposals retain their recorded version.
 
+`planner_revision` is a fast invalidation/CAS pre-check, not semantic authority. Approval and every start/
+resume reconstruct current `PlannerInput`, recompute the desired requirement set, selection and full-
+manifest hashes, drive identity/epoch, and policy/config hashes, then compare them with the normalized
+proposal before capacity validation. These recomputed facts are authoritative even when the integer
+revision happens to match. A missed revision increment remains a defect and loses the cheap early reject,
+but cannot authorize stale or expanded execution.
+
 ## Proposal lifecycle and CAS
 
 ### Draft creation
@@ -415,6 +462,8 @@ Approval uses a short `BEGIN IMMEDIATE` transaction and requires:
 
 - proposal remains `draft` and hash-valid;
 - current global revision equals `based_on_revision`;
+- a freshly reconstructed requirement set and all semantic hashes equal the proposal, independent of the
+  revision pre-check;
 - the requested mutation matches the stored mutation descriptor;
 - current selection-before hash matches;
 - current authoritative evidence still admits the exact proposal assignment;
@@ -434,8 +483,8 @@ projection. If valid, it atomically acquires `execution_sessions`, binds the cur
 invokes existing exact-task scheduling. It does not call the solver.
 
 At safe batch/file boundaries, durable progress may trigger another projection against the same approval.
-That projection can shrink tasks only. A terminal session releases the live-session constraint; paused/
-blocked approval remains available for a valid later resume.
+That projection can shrink tasks only. Every non-live terminal releases the live-session constraint;
+`paused`/`blocked` approval remains available for a valid later resume.
 
 ## Runtime drift and typed terminals
 
@@ -448,6 +497,7 @@ blocked approval remains available for a valid later resume.
 | Manifest/selection/policy/config changed | `APPROVED_INPUT_CHANGED` | Fresh preview/approval |
 | Projection attempts new/expanded/remapped work | `APPROVAL_PROJECTION_VIOLATION` | Fail closed; inspect/report defect |
 | Per-file preflight discovers known target shortfall | `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE` at safe boundary | Fresh preview; never re-place automatically |
+| `compression_aware` actual durable ratio overruns the approved remaining budget | `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE` after preserving completed bytes | Fresh preview under current facts; never silently remap |
 | Gated repo skipped/timed out | Session-local park + typed follow-up | Continue other approved work; later Start retries |
 | Operator stop/throttle/transient typed pause | Preserve approval | Resume same proposal if projection remains valid |
 
@@ -597,10 +647,14 @@ No destructive cleanup of backups occurs during RFC acceptance.
 8. Run copied-catalog migration/shadow evidence, protected-transport fault matrix, installed-wheel tests,
    and operator-attended cutover/rollback acceptance before final integration.
 
-Steps 2–6 live on the isolated fix branch. Until step 6 lands, concurrency protection is the shipped
-portal guard plus explicit single-operator discipline; external CLI concurrency remains unsupported and
-must be stated in operator docs/tests. Merge `main` into the fix branch regularly. Public `main` receives
-no partial migration set beyond the independent guard.
+Steps 2–6 live on the isolated fix branch. Until step 6 lands, the end-state guarantee does **not** exist:
+the independent portal guard covers only portal selection finalize/removal/clear, not discover/manifest
+refresh, protect/`numcopies`, plan selection/membership/capacity mode, drive edits, or external CLI
+writers; the old executor also continues re-planning at drive-batch boundaries. Interim operation
+therefore requires explicit single-operator discipline forbidding those mutations while Fill runs. This
+is risk containment, not proof against the silent-drift class. State the residual in operator docs/tests,
+merge `main` into the fix branch regularly, and publish no partial migration set to public `main` beyond
+the independent guard.
 
 ## Compatibility and façade removal
 
@@ -623,6 +677,9 @@ projections agree, copied-catalog replay passes, and the replacement has direct 
 - Synthetic `PlannerInput` tests require no SQLite, config file, mount, clock, or network.
 - Shuffled input/query order yields identical requirements, candidates, verdict, assignment, and hash.
 - Adversarial packing distinguishes proven infeasible, evidence unknown, and bounded inconclusive.
+- A requirement no larger than raw capacity but larger than every policy-permitted drive's **usable
+  post-safety-floor capacity** is structural infeasibility, never `CAPACITY_EVIDENCE_UNKNOWN`; optimistic
+  unknown-drive search uses that same usable maximum.
 - 10k-candidate planning remains within the reviewed performance/memory bound.
 - Candidate reuse never becomes a pin and infeasible reuse loses to a feasible fresh target.
 - Optimizer truncation/fallback is deterministic and approval stores the exact chosen assignment.
@@ -631,10 +688,16 @@ projections agree, copied-catalog replay passes, and the replacement has direct 
 
 - Draft rows/tasks/files publish atomically and hash deterministically.
 - Revision, selection, mutation, hash, or evidence drift makes approval fail without selection change.
+- Simulated graph-fact drift without a revision bump is rejected by authoritative requirement/hash
+  recomputation at approval and start.
 - Selection mutation + approval + active pointer + revision publish atomically.
 - At most one approved-active proposal exists per plan; old approval becomes superseded.
 - Approved proposal planning rows reject update/delete; draft GC cannot touch referenced/approved rows.
 - Portal, CLI, second portal, and systemd resume share the same session exclusion.
+- Starting/running/stopping sessions reject every listed operator graph writer; paused/blocked sessions
+  release lease/locks so reconciliation can clear evidence without deadlock.
+- Active-plan switch is rejected while live, then supersedes/clears approval and requires fresh approval
+  when performed non-live.
 - Expired session cannot bypass a held `flock`; forced recovery leaves dirty evidence.
 
 ### Projection/runtime acceptance
@@ -643,6 +706,7 @@ projections agree, copied-catalog replay passes, and the replacement has direct 
 - Gated session parking, hot-swap await, stop, and throttle do not remap or invalidate approval.
 - Dirty→clean evidence refresh continues the same target only if it fits.
 - Known target shortfall returns `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE`, even when another drive fits.
+- Compression-aware actual-ratio overrun reaches that same terminal and never invokes placement.
 - Changed identity/epoch/manifest/policy or expanded task returns fresh-preview failure.
 - Executor has no import/call path to placement optimization.
 
@@ -664,6 +728,9 @@ Stop implementation/integration on any of:
 - a projection expands or remaps approved work;
 - commit/start invokes optimization;
 - an unapproved/migrated selection starts Fill;
+- an operator graph mutation succeeds while a live session owns authority, or a non-live paused session
+  cannot run the reconciliation needed for recovery;
+- active-plan switch retains/reactivates an approval from either plan;
 - a capacity/identity drift silently changes target;
 - old transport behavior loses a typed terminal, safe boundary, hash/canary, watchdog, gated follow-up,
   or atomic publication guarantee;
@@ -680,9 +747,11 @@ Stop implementation/integration on any of:
 - Persisted partial-continuation approvals (DEF-028).
 - Multi-plan concurrent execution.
 
-## Approval requested
+## Approval record
 
-Reviewers should approve or reject:
+Architecture review approved all seven decisions below after the session-state mutation matrix,
+active-plan switching, authoritative semantic recomputation, interim residual, compression-overrun
+terminal, and usable-capacity precedence were made explicit:
 
 1. the operator-visible stop-and-repreview behavior;
 2. one-time post-migration reapproval at a Fill-idle boundary;
