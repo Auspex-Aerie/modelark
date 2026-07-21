@@ -143,7 +143,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    all do. A live `starting`/`running`/`stopping` session refuses operator graph mutations. `paused` and
    `blocked` are non-live historical states: the lease/heartbeat and every process/per-drive lock are
    released so identity-proven reconciliation and other mutations cannot deadlock; resume performs the
-   full authoritative validation. The early portal guard is explicitly portal-scoped.
+   full authoritative validation and creates a new `starting` session with a fresh fencing token and an
+   audit link to the immutable terminal predecessor. Terminal rows are never reactivated; multiple
+   historical rows may reference one approval, but at most one session may be live. The early portal
+   guard is explicitly portal-scoped.
 9. **Preview CAS, durable approval, and execution projection are three distinct contracts.**
    **(a) Preview→commit:** the preview is bound to one `planner_revision`; commit requires strict CAS and
    atomically applies the mutation and approves one immutable, normalized **PlacementProposal**; there is
@@ -312,7 +315,8 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   evidence-blocked target or make other graph edits. Resume then runs the authoritative proposal/
   projection checks; evidence-only repair may preserve an unchanged feasible map, while relevant graph
   edits require a fresh preview. An expired live session is not made non-live until process/lock audit or
-  forced-dirty recovery proves stale-writer exclusion.
+  forced-dirty recovery proves stale-writer exclusion. Resume creates a new `starting` row and fresh
+  fencing token linked to the immutable terminal predecessor; it never reactivates that row.
 - **Crash/auto-resume equivalence uses the approved proposal, not strict revision equality:** completed
   requirements may disappear, present-file sets may grow, missing-work sets may shrink on the same
   approved targets, and dirty/anchor evidence may be refreshed. New/expanded work, changed identity/
@@ -429,7 +433,8 @@ codes, migration behavior, and test matrices.
   same-path/same-size/hashless-file provider-HEAD residual, execution-authority-task equivalence,
   one-time migrated-selection reapproval at a Fill-idle boundary, live-lease predicate, all removal
   paths, `starting`/`running`/`stopping` mutation refusal, `paused`/`blocked` lease+lock release and
-  reconciliation without deadlock, plan-switch supersede/clear/fresh-approval semantics,
+  reconciliation without deadlock, resume-as-new-session lineage with a fresh fencing token and no
+  concurrent live successor, plan-switch supersede/clear/fresh-approval semantics,
   compression-aware actual-ratio overrun typed as `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE`, no candidate
   bytes before accepted admission.
 
