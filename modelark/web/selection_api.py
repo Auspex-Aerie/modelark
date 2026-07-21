@@ -8,9 +8,28 @@ from __future__ import annotations
 
 from modelark import wishlist
 from modelark.core import telemetry
-from modelark.web import data
+from modelark.web import data, fill_worker
 
 log = telemetry.get_logger("modelark.selection")
+
+# RFC-002/DEC-049 (#39 slice 1): a live process-local Fill controller owns the finalized selection,
+# so portal finalize + every removal path are refused until it stops; additions and reads stay
+# allowed. The guard is portal-scoped — external CLI writers remain a documented residual until #39.
+_FILL_ACTIVE_REFUSAL = {
+    "ok": False,
+    "refused": True,
+    "code": "FILL_SESSION_ACTIVE",
+    "error": "Selection finalization and removal are blocked while Fill is running.",
+    "actions": ["wait_for_fill", "stop_fill"],
+}
+
+
+def _guarded(mutate) -> dict:
+    """Run a selection graph-mutation unless a Fill controller is live, in which case return the
+    typed refusal without changing any selection row. The worker primitive is dependency-free and
+    signals refusal with ``None``; the typed refusal contract lives here."""
+    result = fill_worker.WORKER.guarded_mutation(mutate)
+    return _FILL_ACTIVE_REFUSAL if result is None else result
 
 
 def summary() -> dict:
@@ -31,33 +50,40 @@ def summary() -> dict:
 
 
 def toggle(repo_id: str, on: bool) -> dict:
-    if on:
+    if on:                                          # addition: never guarded
         data.q("INSERT INTO selection(repo_id) VALUES (?) ON CONFLICT DO NOTHING", [repo_id])
-    else:
+        return summary()
+
+    def mutate():                                   # deselect: guarded while Fill is live
         data.q("DELETE FROM selection WHERE repo_id=?", [repo_id])
-    return summary()
+        return summary()
+    return _guarded(mutate)
 
 
 def bulk(ids: list[str], on: bool) -> dict:
-    with data._lock:
-        c = data.conn()
-        if on:
-            c.executemany("INSERT INTO selection(repo_id) VALUES (?) ON CONFLICT DO NOTHING",
-                          [[i] for i in ids])
-        else:
-            c.executemany("DELETE FROM selection WHERE repo_id=?", [[i] for i in ids])
-    return summary()
+    if on:                                          # bulk addition: never guarded
+        with data._lock:
+            data.conn().executemany(
+                "INSERT INTO selection(repo_id) VALUES (?) ON CONFLICT DO NOTHING", [[i] for i in ids])
+        return summary()
+
+    def mutate():                                   # bulk removal: guarded while Fill is live
+        with data._lock:
+            data.conn().executemany("DELETE FROM selection WHERE repo_id=?", [[i] for i in ids])
+        return summary()
+    return _guarded(mutate)
 
 
 def clear() -> dict:
-    data.q("DELETE FROM selection")
-    return summary()
+    return _guarded(lambda: (data.q("DELETE FROM selection"), summary())[1])
 
 
 def finalize() -> dict:
     """Commit the current cart: stamp the whole un-finalized set as the wishlist."""
-    data.q("UPDATE selection SET finalized_at = CURRENT_TIMESTAMP WHERE finalized_at IS NULL")
-    return summary()
+    def mutate():
+        data.q("UPDATE selection SET finalized_at = CURRENT_TIMESTAMP WHERE finalized_at IS NULL")
+        return summary()
+    return _guarded(mutate)
 
 
 def oversize(body: dict) -> dict:

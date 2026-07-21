@@ -113,6 +113,12 @@ class Handler(BaseHTTPRequestHandler):
         self._send(json.dumps(obj, default=str), "application/json", code,
                    {"Cache-Control": "no-store"})
 
+    def _selection_result(self, result):
+        """Selection mutations may return a typed refusal while a Fill is live (#39 slice 1);
+        surface it as 409 Conflict. Ordinary summaries and allowed additions stay 200."""
+        refused = isinstance(result, dict) and result.get("refused")
+        self._json(result, 409 if refused else 200)
+
     def _request_authority(self) -> tuple[str, int] | None:
         authority = _authority(self.headers.get("Host"))
         if authority is None or authority[1] != self.server.server_port:
@@ -249,13 +255,13 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         try:
             if u.path == "/api/selection":
-                self._json(selection_api.toggle(body["id"], bool(body["on"])))
+                self._selection_result(selection_api.toggle(body["id"], bool(body["on"])))
             elif u.path == "/api/selection/bulk":
-                self._json(selection_api.bulk(body["ids"], bool(body["on"])))
+                self._selection_result(selection_api.bulk(body["ids"], bool(body["on"])))
             elif u.path == "/api/selection/clear":
-                self._json(selection_api.clear())
+                self._selection_result(selection_api.clear())
             elif u.path == "/api/selection/finalize":
-                self._json(selection_api.finalize())
+                self._selection_result(selection_api.finalize())
             elif u.path == "/api/selection/oversize":
                 self._json(selection_api.oversize(body))
             elif u.path == "/api/fill/start":
