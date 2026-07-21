@@ -16,13 +16,13 @@ underlying classes so they stop recurring.
 
 ## Issues (GitHub — original bodies are preserved; append-only comments bind implementation scope)
 
-| # | Title | Split |
-|---|---|---|
-| [#35](https://github.com/Auspex-Aerie/modelark/issues/35) | Free-space is a mutable field, recompute never persisted | append-only clean-anchor model |
-| [#36](https://github.com/Auspex-Aerie/modelark/issues/36) | Durable-partial pinning is disproportionate | → 36a emits alternatives+costs (reuse ranking owned by #38) |
-| [#37](https://github.com/Auspex-Aerie/modelark/issues/37) | No retire / un-archive / drive-loss recovery | → 37a–37d over orthogonal axes |
-| [#38](https://github.com/Auspex-Aerie/modelark/issues/38) | Placement strands small drives / wedges large blocks | shared feasibility+placement engine, `tiered_v2` |
-| [#39](https://github.com/Auspex-Aerie/modelark/issues/39) | Mid-fill add has no pre-commit preview | guard + normalized proposal/approval/session control |
+| # | Title | Delivery | Binding comment |
+|---|---|---|---|
+| [#35](https://github.com/Auspex-Aerie/modelark/issues/35) | Free-space is a mutable field, recompute never persisted | append-only clean-anchor model | [schema + contract](https://github.com/Auspex-Aerie/modelark/issues/35#issuecomment-5037967073) |
+| [#36](https://github.com/Auspex-Aerie/modelark/issues/36) | Durable-partial pinning is disproportionate | logical 36a emits alternatives+costs (reuse ranking owned by #38) | [contract](https://github.com/Auspex-Aerie/modelark/issues/36#issuecomment-5037967195) |
+| [#37](https://github.com/Auspex-Aerie/modelark/issues/37) | No retire / un-archive / drive-loss recovery | logical schema/gating + operation slices | [contract](https://github.com/Auspex-Aerie/modelark/issues/37#issuecomment-5037967307) |
+| [#38](https://github.com/Auspex-Aerie/modelark/issues/38) | Placement strands small drives / wedges large blocks | shared feasibility+placement engine, `tiered_v2` | [contract](https://github.com/Auspex-Aerie/modelark/issues/38#issuecomment-5037967462) |
+| [#39](https://github.com/Auspex-Aerie/modelark/issues/39) | Mid-fill add has no pre-commit preview | guard + normalized proposal/approval/session control | [contract + p95 gate](https://github.com/Auspex-Aerie/modelark/issues/39#issuecomment-5037967599) |
 
 Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID copy-#1 home.
 
@@ -426,6 +426,10 @@ implementation slice, failure codes, migration behavior, and tests. Later scope 
 superseding comment rather than editing prior history. Once an implementation PR exists, append its link
 to the issue; never put a speculative PR URL into the original contract comment.
 
+Phase-0 prerequisites completed 2026-07-21: DEC-049 is accepted and the binding comments above are
+published. Production work may begin with the tests-first portal guard/#35 slices; each future PR link is
+added as another issue comment.
+
 ## Acceptance material (per issue, before its PR)
 
 - **#35** — evidence precedence (identity-proven live `df` still authoritative while dirty; dirty only
@@ -485,7 +489,8 @@ to the issue; never put a speculative PR URL into the original contract comment.
   requiring fresh approval through an explicit evidence-divergence terminal/UX, progress/evidence-
   compatible pure projection after one/many completed files and dirty→clean reconciliation, rejection
   of expanded/remapped work, batch/event projection cadence with no per-file/full-catalog O(tasks²)
-  behavior plus a copied-catalog numerical p95 fixed before the #39 PR, DEC-047 first-hit defer/continue,
+  behavior plus the copied-catalog p95 gate (≤2.0 s full capture/recompute/projection; ≤500 ms pure
+  projection after 5 warm-ups over 30 measured runs), DEC-047 first-hit defer/continue,
   same-task retry priority with no generic failure-budget consumption, prompt-stop handling, frozen
   hash-validated execution config with no transport global read, cumulative-actual-plus-remaining
   compression-envelope accounting preserved across session resume, execution lease binding to

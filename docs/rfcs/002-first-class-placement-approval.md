@@ -1,7 +1,7 @@
 # RFC-002: First-class placement approval and execution control
 
-- **Status:** accepted and bound by DEC-049 — implementation not started; append-only issue scope
-  contracts and tests-first phase PRs next
+- **Status:** accepted and bound by DEC-049 — append-only issue scope contracts published;
+  tests-first phase implementation may begin
 - **Date:** 2026-07-20
 - **Owners:** Auspex-Aerie + operator
 - **Related:** DEC-019, DEC-022, DEC-023, DEC-026, DEC-030, DEC-031, DEC-034, DEC-036, DEC-037,
@@ -1932,9 +1932,11 @@ projections agree, copied-catalog replay passes, and the replacement has direct 
 
 - Progress removes work only; repeated projection is deterministic.
 - Full projection occurs at start/resume, drive-batch boundaries, and typed state-changing events—not
-  after each file/task. Before its implementation PR, #39 pins a numerical p95 budget from the copied
-  catalog baseline; a 390-model/thousands-file run must meet it and prove the call count is bounded by
-  initial start + completed maximal batches + typed refresh events.
+  after each file/task. On the reviewed 390-model/thousands-file copied fixture with synthetic frozen
+  capacity evidence, after 5 warm-ups and across 30 measured runs on the acceptance host, full catalog
+  capture + semantic recomputation + projection has p95 ≤ 2.0 seconds and pure projection has p95 ≤
+  500 ms. The evidence records fixture counts/hash plus host/runtime versions and proves the call count
+  is bounded by initial start + completed maximal batches + typed refresh events.
 - Gated session parking, hot-swap await, stop, and throttle do not remap or invalidate approval.
 - DEC-047 first-hit `continue` emits a notice and defers the repo for the rest of the current batch so
   other ready work runs before a second encounter; prompt-stop exits through the normal stop terminal.
