@@ -22,7 +22,7 @@ underlying classes so they stop recurring.
 | [#36](https://github.com/Auspex-Aerie/modelark/issues/36) | Durable-partial pinning is disproportionate | logical 36a emits alternatives+costs (reuse ranking owned by #38) | [contract](https://github.com/Auspex-Aerie/modelark/issues/36#issuecomment-5037967195) |
 | [#37](https://github.com/Auspex-Aerie/modelark/issues/37) | No retire / un-archive / drive-loss recovery | logical schema/gating + operation slices | [contract](https://github.com/Auspex-Aerie/modelark/issues/37#issuecomment-5037967307) |
 | [#38](https://github.com/Auspex-Aerie/modelark/issues/38) | Placement strands small drives / wedges large blocks | shared feasibility+placement engine, `tiered_v2` | [contract](https://github.com/Auspex-Aerie/modelark/issues/38#issuecomment-5037967462) |
-| [#39](https://github.com/Auspex-Aerie/modelark/issues/39) | Mid-fill add has no pre-commit preview | guard + normalized proposal/approval/session control | [contract + p95 gate](https://github.com/Auspex-Aerie/modelark/issues/39#issuecomment-5037967599) |
+| [#39](https://github.com/Auspex-Aerie/modelark/issues/39) | Mid-fill add has no pre-commit preview | guard + normalized proposal/approval/session control | [contract + p95 gate](https://github.com/Auspex-Aerie/modelark/issues/39#issuecomment-5037967599), [workflow override](https://github.com/Auspex-Aerie/modelark/issues/39#issuecomment-5038287607) |
 
 Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID copy-#1 home.
 

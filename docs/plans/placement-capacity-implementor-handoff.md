@@ -42,7 +42,9 @@ Read these sources **in order and in full**:
    [#37](https://github.com/Auspex-Aerie/modelark/issues/37#issuecomment-5037967307),
    [#38](https://github.com/Auspex-Aerie/modelark/issues/38#issuecomment-5037967462), and
    [#39](https://github.com/Auspex-Aerie/modelark/issues/39#issuecomment-5037967599). For PR-01, #39 is
-   the active issue contract.
+   the active behavior contract and its later
+   [workflow correction](https://github.com/Auspex-Aerie/modelark/issues/39#issuecomment-5038287607)
+   controls the PR target/branch policy.
 6. `.github/workflows/ci.yml`, `pyproject.toml`, and the current tests relevant to the slice.
 7. For PR-01 specifically: `modelark/web/selection_api.py`, `modelark/web/fill_worker.py`,
    `modelark/web/fill_api.py`, their server wiring, and the focused unit/E2E tests. Trace every portal
