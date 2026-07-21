@@ -2,7 +2,8 @@
 
 Working plan for the fix effort opened after the 2026-07-20 placement/capacity audit, revised across
 review rounds toward an implementation-ready spec. The binding invariants go into the decision log, and
-the GitHub issues are rewritten/split to agree with it, **before any implementation begins**.
+authoritative scope-contract comments are appended to the unchanged GitHub issues **before any
+implementation begins**.
 RFC-002 (`docs/rfcs/002-first-class-placement-approval.md`) is the architecture and migration authority;
 this file remains the issue-level working plan.
 
@@ -13,7 +14,7 @@ reality problems. The immediate incident was resolved operationally (un-pinned G
 aborted-start stub files; restored `free_bytes` to its baseline contract). This effort addresses the
 underlying classes so they stop recurring.
 
-## Issues (GitHub — to be rewritten/split to match this plan + the DEC before implementation)
+## Issues (GitHub — original bodies are preserved; append-only comments bind implementation scope)
 
 | # | Title | Split |
 |---|---|---|
@@ -383,8 +384,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
 
 ## Sequencing (revised)
 
-0. **Record the DEC** (invariants above).
-0b. **Rewrite/split the GitHub issues** to agree with the DEC + this plan.
+0. **Record DEC-049** (invariants above).
+0b. **Append scope-contract comments to the GitHub issues** that agree with DEC-049 + this plan. Never
+    rewrite an original issue body. Treat #36a and the #37 phases as logical PR slices under their
+    existing parent issue unless a separately approved follow-up issue is needed.
 1. **Portal mutation guard** → **`main`** (independent; explicitly portal-only).
 2. **#35** — append-only clean-anchor evidence + mount-identity + dirty protocol + registration-prep +
    migration/recovery plus only the fact/evidence/write-mutation seams it needs (fix branch).
@@ -400,7 +403,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
 
 ## Workflow
 
-- **Decision log first**, then issue restructuring, then code.
+- **Decision log first**, then append-only issue contracts, then code.
+- **Tests first in every phase PR:** freeze current behavior and add the scoped failing contract,
+  migration, and fault tests before accepting production changes. Tests and implementation may share a
+  PR, but their commits and review evidence remain separable.
 - **Portal guard ships independently to `main`.**
 - All migration work on the isolated long-lived branch `fix/placement-capacity-hardening`; **one
   reviewable phase per PR**, targeting the fix branch; merge commits (no squash), branches retained.
@@ -412,12 +418,13 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   old executor's batch-boundary re-planning. Interim safety therefore depends on explicit
   single-operator discipline; the guard is containment, not the final no-drift guarantee.
 
-## Source of truth (pre-code blocker — accepted staging)
+## Source of truth (pre-code blocker — append-only issue history)
 
-Issue bodies #35–#39 still hold original text and contradict this plan; that's expected while drafting.
-Before any implementation PR: approve RFC-002; author the binding DEC; rewrite #35/#38/#39, split #36
-→ 36a (reuse ranking to #38), and #37 → schema/gating then 37a–37d operations; add invariants, failure
-codes, migration behavior, and test matrices.
+Issue bodies #35–#39 remain their original incident/problem statements permanently. DEC-049 and RFC-002
+are binding architecture; the latest authoritative maintainer comment on each issue binds its current
+implementation slice, failure codes, migration behavior, and tests. Later scope changes append a new
+superseding comment rather than editing prior history. Once an implementation PR exists, append its link
+to the issue; never put a speculative PR URL into the original contract comment.
 
 ## Acceptance material (per issue, before its PR)
 

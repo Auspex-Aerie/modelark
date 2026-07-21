@@ -1,6 +1,7 @@
 # RFC-002: First-class placement approval and execution control
 
-- **Status:** accepted — implementation not started; binding DEC and issue rewrites next
+- **Status:** accepted and bound by DEC-049 — implementation not started; append-only issue scope
+  contracts and tests-first phase PRs next
 - **Date:** 2026-07-20
 - **Owners:** Auspex-Aerie + operator
 - **Related:** DEC-019, DEC-022, DEC-023, DEC-026, DEC-030, DEC-031, DEC-034, DEC-036, DEC-037,
@@ -1780,7 +1781,8 @@ This is the largest catalog/control change since the DuckDB→SQLite migration a
 
 ### Preconditions
 
-- Complete review of this RFC, the binding DEC, issue rewrites, schema migration, rollback procedure,
+- Complete review of this RFC, the binding DEC, append-only issue scope comments, schema migration,
+  rollback procedure,
   compatibility matrix, and fault-preservation tests.
 - Prefer that the current GLM-5.2/BF16 Fill drain under the old executor.
 - Stop systemd portal/Fill and every CLI writer at a safe boundary; confirm no worker/lock remains.
@@ -1818,8 +1820,9 @@ No destructive cleanup of backups occurs during RFC acceptance.
 
 ## Delivery sequence
 
-0. Approve RFC-002; record the binding DEC/invariants; rewrite/split issues with failure codes,
-   migrations, and test matrices.
+0. Approve RFC-002; record the binding DEC/invariants; append authoritative scope-contract comments to
+   the existing issues with failure codes, migrations, and test matrices. Preserve original issue bodies;
+   logical phase splits remain inside their parent issue unless a separately approved follow-up is needed.
 1. Ship the independently reviewable portal mutation guard to `main`.
 2. Deliver #35 immediately, introducing the evidence/fact-reader/write-mutation seams it needs rather
    than preceding it with architecture-only scaffolding.
@@ -1842,6 +1845,11 @@ therefore requires explicit single-operator discipline forbidding those mutation
 is risk containment, not proof against the silent-drift class. State the residual in operator docs/tests,
 merge `main` into the fix branch regularly, and publish no partial migration set to public `main` beyond
 the independent guard.
+
+Every implementation phase is tests-first: its first reviewable commit freezes current incident behavior
+and adds failing contract/migration/fault tests for the scoped change before production code is accepted.
+The tests may land with the implementation in one phase PR, but reviewers must be able to inspect the
+test contract independently and map each behavior back to the issue's append-only acceptance comment.
 
 ## Compatibility and façade removal
 
