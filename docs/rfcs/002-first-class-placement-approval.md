@@ -326,6 +326,12 @@ An expired `starting`/`running`/`stopping` lease is not immediately equivalent t
 proves no physical lock/process remains or performs the forced-dirty recovery, then records a non-live
 terminal. This prevents both stale-writer takeover and pause/reconciliation deadlock.
 
+Terminal session rows are never reactivated. "Resume" means atomically creating a new `starting` row
+with a new session id and fencing token, referencing the same still-valid approved proposal and, for
+audit, the prior row through `resumed_from_session_id`. The transaction requires that no live session
+exists. Multiple historical sessions may therefore reference one proposal sequentially, but at most one
+may be live; the prior `paused`/`blocked` row remains immutable evidence of why execution stopped.
+
 ## Schema
 
 This RFC adds five planning/control tables. #35 clean anchors/dirty generations and #37 drive lifecycle
@@ -413,6 +419,7 @@ resized files. This bounds proposal growth while retaining exact executable work
 ### `execution_sessions`
 
 - session id, plan id, approved proposal id;
+- nullable `resumed_from_session_id` self-reference for audit lineage;
 - owner/controller identity;
 - state `starting | running | stopping | paused | blocked | stopped | done | failed`;
 - bound planner revision and fencing token;
@@ -479,8 +486,9 @@ It never reruns optimization inside commit.
 ### Start and resume
 
 Start/resume loads the active approved proposal, collects current facts/evidence, and computes the pure
-projection. If valid, it atomically acquires `execution_sessions`, binds the current revision/token, then
-invokes existing exact-task scheduling. It does not call the solver.
+projection. If valid, it atomically creates a new `starting` session row, allocates a new fencing token,
+and binds the current revision; resume links that row to its terminal predecessor rather than reactivating
+the predecessor. It then invokes existing exact-task scheduling. It does not call the solver.
 
 At safe batch/file boundaries, durable progress may trigger another projection against the same approval.
 That projection can shrink tasks only. Every non-live terminal releases the live-session constraint;
@@ -696,6 +704,8 @@ projections agree, copied-catalog replay passes, and the replacement has direct 
 - Portal, CLI, second portal, and systemd resume share the same session exclusion.
 - Starting/running/stopping sessions reject every listed operator graph writer; paused/blocked sessions
   release lease/locks so reconciliation can clear evidence without deadlock.
+- Resume never reactivates a terminal row: it creates one successor with a fresh fencing token, preserves
+  the predecessor, and rejects a second live successor for the same or any other approval.
 - Active-plan switch is rejected while live, then supersedes/clears approval and requires fresh approval
   when performed non-live.
 - Expired session cannot bypass a held `flock`; forced recovery leaves dirty evidence.
@@ -730,6 +740,7 @@ Stop implementation/integration on any of:
 - an unapproved/migrated selection starts Fill;
 - an operator graph mutation succeeds while a live session owns authority, or a non-live paused session
   cannot run the reconciliation needed for recovery;
+- a terminal session row is reactivated or two live sessions reference one approval;
 - active-plan switch retains/reactivates an approval from either plan;
 - a capacity/identity drift silently changes target;
 - old transport behavior loses a typed terminal, safe boundary, hash/canary, watchdog, gated follow-up,
