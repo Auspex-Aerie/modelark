@@ -401,18 +401,34 @@ def _post(httpd, path, body):
 
 
 def test_http_refusal_is_409_with_contract_body():
-    """The server maps a guarded refusal to HTTP 409 Conflict carrying the approved contract body,
-    and no selection row changes."""
+    """The server maps a guarded refusal to HTTP 409 Conflict with the approved contract body on
+    ALL FOUR guarded routes — finalize, clear, and the distinct toggle-off (`/api/selection`) and
+    bulk-off (`/api/selection/bulk`) dispatch branches — and no selection row changes. Additions on
+    the shared toggle/bulk routes must NOT be refused (the 409 mapping is keyed on the removal, not the
+    route). Covers the shared-route gap Greptile flagged on the first review."""
     assert not fill_worker.WORKER.running()
-    with _catalog(finalized=("a/one",), cart=("b/two",)) as con:
+    with _catalog(finalized=("a/one",), cart=("b/two",), extra_models=("g/add",)) as con:
         before = _rows(con)
         with _portal() as httpd, _live(fill_worker.WORKER):
-            status, body = _post(httpd, "/api/selection/finalize", {})
-            assert status == 409, f"expected 409 Conflict, got {status}"
-            assert body == REFUSAL
-            status, _ = _post(httpd, "/api/selection/clear", {})
-            assert status == 409
-        assert _rows(con) == before
+            for path, body in (
+                ("/api/selection/finalize", {}),
+                ("/api/selection/clear", {}),
+                ("/api/selection", {"id": "b/two", "on": False}),       # toggle-off: its own branch
+                ("/api/selection/bulk", {"ids": ["b/two"], "on": False}),  # bulk-off: its own branch
+            ):
+                status, resp = _post(httpd, path, body)
+                assert status == 409, f"{path}: expected 409 Conflict, got {status}"
+                assert resp == REFUSAL, f"{path}: unexpected body {resp}"
+            assert _rows(con) == before, "refused removals must change no selection rows"
+            # Additions on the shared routes stay allowed while live (guard is not route-broad).
+            for path, body in (
+                ("/api/selection", {"id": "g/add", "on": True}),
+                ("/api/selection/bulk", {"ids": ["g/add"], "on": True}),
+            ):
+                status, resp = _post(httpd, path, body)
+                assert status != 409, f"{path}: addition must not be refused, got {status}"
+                assert resp.get("refused") is not True, f"{path}: addition wrongly refused"
+        assert data.q("SELECT 1 FROM selection WHERE repo_id='g/add'"), "allowed addition did not persist"
 
 
 # --------------------------------------------------------------------------- script runner
