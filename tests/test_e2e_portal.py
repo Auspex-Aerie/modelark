@@ -284,6 +284,39 @@ def _browser_flow() -> None:
             pg.unroute("**/api/fill/gated-decision")
             pg.unroute("**/api/fill/status")
             print("  gated toast + retry/skip prompt rendered and resolved")
+
+            # 10. PR-01 portal mutation guard (RFC-002/DEC-049 #39 slice 1), tests-first: a selection
+            # removal the server refuses with a typed HTTP 409 must roll back the optimistic checkbox,
+            # surface the refusal, and never feed the refusal object to renderTally() or claim success.
+            # The 409 is faked at the client boundary, so the server catalog is never changed.
+            refusal = {
+                "ok": False, "refused": True, "code": "FILL_SESSION_ACTIVE",
+                "error": "Selection finalization and removal are blocked while Fill is running.",
+                "actions": ["wait_for_fill", "stop_fill"],
+            }
+
+            def refuse_removal(route):
+                if route.request.method == "POST":
+                    route.fulfill(status=409, content_type="application/json", body=json.dumps(refusal))
+                else:
+                    route.continue_()
+
+            pg.click("button[data-view='catalog']")
+            pg.wait_for_selector("#tbody tr")
+            row = "tr[data-id='demo/tiny-llm']"                # seeded finalized -> rendered selected
+            pg.wait_for_selector(f"{row} input[type=checkbox]:checked")
+            before_n = pg.inner_text("#selN")
+            pg.route("**/api/selection", refuse_removal)
+            pg.click(f"{row} input[type=checkbox]")            # optimistic uncheck -> refused removal
+            # the frontend must restore the checked box + selected row and surface the refusal
+            pg.wait_for_selector(f"{row} input[type=checkbox]:checked", timeout=5000)
+            assert "sel" in (pg.get_attribute(row, "class") or ""), "refused row must stay selected"
+            toast = pg.inner_text("#toast")
+            assert "blocked while Fill is running" in toast, f"refusal toast missing: {toast!r}"
+            assert "deselected" not in toast and "finalized" not in toast, f"unexpected success toast: {toast!r}"
+            assert pg.inner_text("#selN") == before_n, "refusal object must not reach renderTally()"
+            pg.unroute("**/api/selection")
+            print("  selection-removal 409 refusal rolled back optimistic UI without a re-plan")
         except Exception:
             pg.screenshot(path="/tmp/e2e-fail.png")
             print("  (screenshot saved to /tmp/e2e-fail.png)")
