@@ -1823,7 +1823,9 @@ No destructive cleanup of backups occurs during RFC acceptance.
 0. Approve RFC-002; record the binding DEC/invariants; append authoritative scope-contract comments to
    the existing issues with failure codes, migrations, and test matrices. Preserve original issue bodies;
    logical phase splits remain inside their parent issue unless a separately approved follow-up is needed.
-1. Ship the independently reviewable portal mutation guard to `main`.
+1. Ship the independently reviewable portal mutation guard as the first PR onto the isolated integration
+   branch. It remains a self-contained safety slice, but is not published separately to `main` under the
+   operator's current integration policy.
 2. Deliver #35 immediately, introducing the evidence/fact-reader/write-mutation seams it needs rather
    than preceding it with architecture-only scaffolding.
 3. Implement #36a while extracting pure requirement and candidate construction; retain compatibility
@@ -1837,19 +1839,23 @@ No destructive cleanup of backups occurs during RFC acceptance.
 8. Run copied-catalog migration/shadow evidence, protected-transport fault matrix, installed-wheel tests,
    and operator-attended cutover/rollback acceptance before final integration.
 
-Steps 2–6 live on the isolated fix branch. Until step 6 lands, the end-state guarantee does **not** exist:
+Steps 1–7 live on the isolated fix branch. Until step 6 lands, the end-state guarantee does **not** exist:
 the independent portal guard covers only portal selection finalize/removal/clear, not discover/manifest
 refresh, protect/`numcopies`, plan selection/membership/capacity mode, drive edits, or external CLI
 writers; the old executor also continues re-planning at drive-batch boundaries. Interim operation
 therefore requires explicit single-operator discipline forbidding those mutations while Fill runs. This
 is risk containment, not proof against the silent-drift class. State the residual in operator docs/tests,
-merge `main` into the fix branch regularly, and publish no partial migration set to public `main` beyond
-the independent guard.
+do not run the integration branch against the live archive. The operator has chosen a frozen-lineage
+review series: phase branches target `fix/placement-capacity-hardening`, and neither merge nor rebase
+`main` into that branch during the series unless the operator explicitly reopens the decision. Publish
+only the final evidence-backed integration PR to public `main`.
 
 Every implementation phase is tests-first: its first reviewable commit freezes current incident behavior
 and adds failing contract/migration/fault tests for the scoped change before production code is accepted.
 The tests may land with the implementation in one phase PR, but reviewers must be able to inspect the
 test contract independently and map each behavior back to the issue's append-only acceptance comment.
+The implementor workflow, PR boundaries, Greptile cadence, and mandatory human stop gates are pinned in
+`docs/plans/placement-capacity-implementor-handoff.md`.
 
 ## Compatibility and façade removal
 

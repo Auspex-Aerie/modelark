@@ -301,7 +301,8 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   guarded-mutation primitive**, keyed on the fill controller **lease being live** — not the status
   string, which retains terminal states (`fill_worker.py:24`) and never resets to `idle` — including
   stopping-but-not-terminal, sharing the lock with `FillWorker.start()`. **Documented limitation:** an
-  external CLI controller is not detected here. Ships to **`main`** on its own branch.
+  external CLI controller is not detected here. It remains its own reviewable PR, now targeting the
+  isolated integration branch under the operator's frozen-lineage workflow.
 - **Final atomic contract:** lease + `planner_revision` per invariants 8–10. Preview binds to a **versioned
   canonical serialization built from the immutable planner-input object** (finalized selection,
   full-manifest hashes + task-relevant files/evidence + archive-policy version, `numcopies`, plan membership,
@@ -388,7 +389,8 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
 0b. **Append scope-contract comments to the GitHub issues** that agree with DEC-049 + this plan. Never
     rewrite an original issue body. Treat #36a and the #37 phases as logical PR slices under their
     existing parent issue unless a separately approved follow-up issue is needed.
-1. **Portal mutation guard** → **`main`** (independent; explicitly portal-only).
+1. **Portal mutation guard** → first independent PR onto **`fix/placement-capacity-hardening`**
+   (explicitly portal-only; no separate `main` publication under the current workflow).
 2. **#35** — append-only clean-anchor evidence + mount-identity + dirty protocol + registration-prep +
    migration/recovery plus only the fact/evidence/write-mutation seams it needs (fix branch).
 3. **#36a** — reconciler emits hash/provenance-aware partial alternatives + deterministic costs while
@@ -407,12 +409,16 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
 - **Tests first in every phase PR:** freeze current behavior and add the scoped failing contract,
   migration, and fault tests before accepting production changes. Tests and implementation may share a
   PR, but their commits and review evidence remain separable.
-- **Portal guard ships independently to `main`.**
-- All migration work on the isolated long-lived branch `fix/placement-capacity-hardening`; **one
-  reviewable phase per PR**, targeting the fix branch; merge commits (no squash), branches retained.
-- **Sync `main` → fix branch** regularly; **never fix branch → `main` mid-effort** (public repo).
+- **Portal guard remains an independent first PR, but targets the integration branch.**
+- All work uses the isolated long-lived integration branch `fix/placement-capacity-hardening`; each
+  implementation branch targets it via a bounded PR, merge commits (no squash), branches retained.
+- **Do not merge, rebase, or cherry-pick `main` into the integration branch during this review series.**
+  If a mainline security/correctness change becomes relevant, stop and ask the operator rather than
+  syncing opportunistically.
 - **Final integration PR** (fix branch → `main`) with copied-catalog shadow evidence + explicit rollback
   instructions.
+- The implementor follows `docs/plans/placement-capacity-implementor-handoff.md`, including tests-first
+  commits, Greptile polling, and mandatory human stop gates before production code, merge, and next slice.
 - Until step 6 lands, the portal guard covers only portal selection finalize/removal/clear. It does not
   fence discover/manifest refresh, protect/`numcopies`, plan or drive edits, external CLI writers, or the
   old executor's batch-boundary re-planning. Interim safety therefore depends on explicit
