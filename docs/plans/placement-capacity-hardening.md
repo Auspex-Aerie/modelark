@@ -39,8 +39,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    admission authority. Dirty invalidates the *offline anchor*, not a fresh fenced live read. A release
    or allocation is reflected by the next clean anchor after reconciliation — never by
    crediting a vanished catalog row or differencing a scalar watermark over mutable/tombstoned rows.
-   An anchor outside `[0, usable_capacity_for_epoch]` fails validation and yields `unknown`—it is never
-   silently clamped. Empty registration is the trivial first clean anchor; a full mounted inventory/
+   `anchor_free_bytes` is the raw identity-proven filesystem `available` observation; admission applies
+   the versioned safety floor exactly once when deriving usable free. An anchor outside
+   `[0, filesystem_capacity_for_epoch]` fails validation and yields `unknown`—it is never silently
+   clamped. Empty registration is the trivial first clean anchor; a full mounted inventory/
    reconciliation appends a fresh clean anchor for an already-populated drive — the supported recovery
    from `unknown`. Each anchor row is immutable; a resize is an explicit, audited `identity+capacity`
    epoch transition that appends a new anchor.
