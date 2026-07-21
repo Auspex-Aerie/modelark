@@ -99,14 +99,14 @@
   const refreshTally = async () => renderTally(await api("/api/selection"));
 
   // A guarded selection mutation can be refused server-side while a Fill is running (HTTP 409).
-  // MA.post resolves with the response body regardless of status, so detect the typed refusal here:
-  // surface its message, restore canonical selection state (never feed the refusal to renderTally),
-  // and skip any success message. Returns true when the caller should stop.
-  async function guardRefused(res) {
+  // MA.post resolves with the response body regardless of status, so detect the typed refusal here
+  // and surface its message. A refused mutation never changed the database or tally, so there is
+  // nothing canonical to refetch: callers defer their optimistic UI change until success, so a
+  // refusal issues no rollback request (which could otherwise overwrite a concurrent allowed
+  // addition). Returns true when the caller should stop.
+  function guardRefused(res) {
     if (!res || !res.refused) return false;
     toast(res.error || "Selection is locked while a fill is running.");
-    await load();                                     // canonical rows + checkboxes from the server
-    await refreshTally();                             // canonical tally + plan gate
     return true;
   }
 
@@ -143,14 +143,24 @@
   $("tbody").addEventListener("change", async e => {
     if (e.target.type !== "checkbox") return;
     const tr = e.target.closest("tr");
-    if (e.target.checked && gatePrevent) {              // #38 prevent: over compressed capacity → block ADDS (un-checking always allowed)
-      e.target.checked = false;
-      toast("Over plan capacity — remove models or add a drive before adding more.");
+    const id = tr.dataset.id;
+    if (e.target.checked) {                             // ADD (server never refuses): optimistic is safe
+      if (gatePrevent) {                                // #38 prevent: over compressed capacity → block ADDS
+        e.target.checked = false;
+        toast("Over plan capacity — remove models or add a drive before adding more.");
+        return;
+      }
+      tr.classList.add("sel");
+      renderTally(await post("/api/selection", {id, on: true}));
       return;
     }
-    tr.classList.toggle("sel", e.target.checked);
-    const res = await post("/api/selection", {id: tr.dataset.id, on: e.target.checked});
-    if (await guardRefused(res)) return;
+    // REMOVE (guarded): hold the prior checked/selected appearance until the server agrees, so a
+    // refusal needs no rollback fetch — apply the removal only on success.
+    e.target.checked = true;
+    const res = await post("/api/selection", {id, on: false});
+    if (guardRefused(res)) return;                      // refused → row stays checked; no GET issued
+    e.target.checked = false;
+    tr.classList.remove("sel");
     renderTally(res);
   });
   function visibleIds() { return [...document.querySelectorAll("#tbody tr")].map(tr => tr.dataset.id); }
@@ -162,16 +172,16 @@
     if (gatePrevent) { toast("Over plan capacity — can't add more. Remove models or add a drive to the plan."); return; }
     const ids = visibleIds(); markVisible(true);
     renderTally(await post("/api/selection/bulk", {ids, on: true})); toast(ids.length + " added"); };
-  $("deselAll").onclick = async () => { const ids = visibleIds(); markVisible(false);
+  $("deselAll").onclick = async () => { const ids = visibleIds();
     const res = await post("/api/selection/bulk", {ids, on: false});
-    if (await guardRefused(res)) return;
-    renderTally(res); toast("deselected shown"); };
+    if (guardRefused(res)) return;                      // refused → visible rows stay as-is; no rollback
+    markVisible(false); renderTally(res); toast("deselected shown"); };
   $("clear").onclick = async () => { if (!confirm("Clear the entire set (cart + finalized)?")) return;
-    markVisible(false); const res = await post("/api/selection/clear", {});
-    if (await guardRefused(res)) return;
-    renderTally(res); };
+    const res = await post("/api/selection/clear", {});
+    if (guardRefused(res)) return;                      // refused → rows stay as-is; no rollback
+    markVisible(false); renderTally(res); };
   $("finish").onclick = async () => { const s = await post("/api/selection/finalize", {});
-    if (await guardRefused(s)) return;
+    if (guardRefused(s)) return;                        // finalize has no optimistic state to undo
     renderTally(s); toast(s.finalized + " models finalized → wishlist"); };
   $("export").onclick = () => { location = "/api/export"; toast("selection downloaded"); };
   $("capWarnDismiss").onclick = () => { capDismissed = true; $("capWarn").hidden = true; };

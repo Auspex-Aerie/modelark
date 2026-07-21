@@ -286,37 +286,52 @@ def _browser_flow() -> None:
             print("  gated toast + retry/skip prompt rendered and resolved")
 
             # 10. PR-01 portal mutation guard (RFC-002/DEC-049 #39 slice 1), tests-first: a selection
-            # removal the server refuses with a typed HTTP 409 must roll back the optimistic checkbox,
-            # surface the refusal, and never feed the refusal object to renderTally() or claim success.
-            # The 409 is faked at the client boundary, so the server catalog is never changed.
+            # removal the server refuses with a typed HTTP 409 must hold the prior checked/selected
+            # appearance and surface the refusal — WITHOUT issuing any rollback GET (no /api/models
+            # reload, no selection-summary refetch), since a refused mutation changed nothing canonical
+            # and a rollback fetch could clobber a concurrent allowed addition. The 409 is faked at the
+            # client boundary, so the server catalog is never changed.
             refusal = {
                 "ok": False, "refused": True, "code": "FILL_SESSION_ACTIVE",
                 "error": "Selection finalization and removal are blocked while Fill is running.",
                 "actions": ["wait_for_fill", "stop_fill"],
             }
+            rollback = {"models": 0, "selection": 0}
 
-            def refuse_removal(route):
+            def selection_route(route):
                 if route.request.method == "POST":
                     route.fulfill(status=409, content_type="application/json", body=json.dumps(refusal))
-                else:
+                else:                                          # GET summary during a refusal = forbidden rollback
+                    rollback["selection"] += 1
                     route.continue_()
+
+            def models_route(route):
+                rollback["models"] += 1                        # GET rows during a refusal = forbidden rollback
+                route.continue_()
 
             pg.click("button[data-view='catalog']")
             pg.wait_for_selector("#tbody tr")
             row = "tr[data-id='demo/tiny-llm']"                # seeded finalized -> rendered selected
             pg.wait_for_selector(f"{row} input[type=checkbox]:checked")
             before_n = pg.inner_text("#selN")
-            pg.route("**/api/selection", refuse_removal)
+            pg.route("**/api/selection", selection_route)
+            pg.route("**/api/models**", models_route)
+            rollback["models"] = rollback["selection"] = 0     # count only the refused interaction
             pg.click(f"{row} input[type=checkbox]")            # optimistic uncheck -> refused removal
-            # the frontend must restore the checked box + selected row and surface the refusal
-            pg.wait_for_selector(f"{row} input[type=checkbox]:checked", timeout=5000)
-            assert "sel" in (pg.get_attribute(row, "class") or ""), "refused row must stay selected"
+            for _ in range(40):
+                if "blocked while Fill is running" in pg.inner_text("#toast"):
+                    break
+                time.sleep(0.05)
             toast = pg.inner_text("#toast")
             assert "blocked while Fill is running" in toast, f"refusal toast missing: {toast!r}"
+            assert pg.is_checked(f"{row} input[type=checkbox]"), "refused row must stay checked"
+            assert "sel" in (pg.get_attribute(row, "class") or ""), "refused row must stay selected"
             assert "deselected" not in toast and "finalized" not in toast, f"unexpected success toast: {toast!r}"
-            assert pg.inner_text("#selN") == before_n, "refusal object must not reach renderTally()"
+            assert pg.inner_text("#selN") == before_n, "tally must be preserved (no refusal render)"
+            assert rollback == {"models": 0, "selection": 0}, f"refusal issued rollback GET(s): {rollback}"
+            pg.unroute("**/api/models**")
             pg.unroute("**/api/selection")
-            print("  selection-removal 409 refusal rolled back optimistic UI without a re-plan")
+            print("  selection-removal 409 refusal held the row + tally with no rollback GET")
         except Exception:
             pg.screenshot(path="/tmp/e2e-fail.png")
             print("  (screenshot saved to /tmp/e2e-fail.png)")
