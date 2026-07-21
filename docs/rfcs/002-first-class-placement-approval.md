@@ -54,8 +54,9 @@ The following dynamic events are not placement drift:
 - an approved, identity-matching shelved drive follows the existing guided hot-swap await path;
 - dirty or unknown capacity evidence requests mount/reconciliation and retries the same approved map if
   the refreshed evidence is sufficient;
-- DEC-047 gated retry/skip/timeout parks work only for the current session and does not satisfy, remove,
-  or remap its approved requirement;
+- DEC-047's first gated notice defers that repository once while other work continues; retry preserves
+  exact placement and budget, while skip/timeout parks work only for the current session. None satisfy,
+  remove, or remap the approved requirement;
 - stop, throttle, transport retry, and typed acquisition failures preserve the same approval.
 
 An identity/epoch/policy change, expanded work, new task, changed source/target, or known capacity
@@ -125,7 +126,7 @@ the attended cutover must reconcile any remaining required drive before the firs
 - Gate B remains whole-plan and mode-labelled per DEC-045.
 - Gate B distinguishes `FEASIBLE`, `PACKING_INCONCLUSIVE`, `CAPACITY_EVIDENCE_UNKNOWN`,
   `INFEASIBLE_UNDER_ADMISSION_BUDGET`, and
-  `INFEASIBLE_EVEN_AT_OPTIMISTIC_USABLE_CAPACITY`, with structural/policy failures taking precedence;
+  `INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX`, with structural/policy failures taking precedence;
   only `FEASIBLE` is approvable.
 - `guaranteed` is raw-bounded; `compression_aware` is estimate-backed and an actual-ratio overrun stops
   as `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE` without remapping.
@@ -311,14 +312,18 @@ remove work. Property tests enforce both determinism and monotonicity.
 ### `ExecutionSession` (minimal durable control)
 
 One durable row records session id, approved proposal, owner, status, acquired/heartbeat/expiry times,
-bound `planner_revision`, and a monotonically increasing fencing token. Exactly one session may be live
-for the active plan.
+bound `planner_revision`, and a monotonically increasing fencing token. At most one session may be live
+globally; multi-plan concurrent execution remains out of scope.
 
 The row coordinates controllers; same-host process/per-drive `flock` is the physical mutual-exclusion
 primitive. Every catalog write from the worker validates the current token, and every filesystem mutation
 holds the appropriate `flock`, marks the drive dirty before allocation, and revalidates at safe
 boundaries. Lease expiry alone does not override a still-held physical lock. Forced recovery leaves the
 affected drive dirty until reconciliation.
+
+The actual worker execution claim is distinct from the hosting controller/portal identity. Any monitored
+child that can write the drive inherits the relevant physical fence, so parent death cannot make the lock
+appear free while a child is still mutating staging or compression output.
 
 Cross-host writers and a distributed NAS fence remain unsupported. A shared remote that another host or
 unfenced workflow may write is not admission-authoritative.
@@ -400,11 +405,15 @@ when no session/reference exists; GC is not required for the first release and m
 
 ### `proposal_tasks`
 
-Normalized execution-authority assignments:
+Normalized rows cover **every desired requirement**, including work that was already satisfied when the
+proposal was created:
 
 - proposal id + stable requirement/task id;
+- row kind `executable | baseline_satisfied`;
 - repository, requirement/task kind and dependency;
 - exact target and source where applicable;
+- for `baseline_satisfied`, the exact satisfying drive/source identity and a canonical satisfaction
+  certificate over the required files' durable content/location evidence;
 - full-manifest hash;
 - guaranteed/expected durable and workspace budgets;
 - approved drive identity/capacity epoch and admission-evidence reference/class;
@@ -413,6 +422,9 @@ Normalized execution-authority assignments:
 
 Foreign keys bind referenced plan/drive identities where schema evolution permits. Application validation
 also binds the recorded drive capacity epoch so label reuse cannot transfer approval.
+`baseline_satisfied` rows have no executable missing-file rows. They let projection prove that a
+previously complete requirement has not become missing without adding a sixth table or duplicating the
+full manifest.
 
 ### `proposal_files`
 
@@ -433,13 +445,15 @@ resized files. This bounds proposal growth while retaining exact executable work
 
 - session id, plan id, approved proposal id;
 - nullable `resumed_from_session_id` self-reference for audit lineage;
-- owner/controller identity;
+- controller identity plus nullable actual worker execution identity/claim (`NULL` only while
+  unclaimed `starting`; required for `running`/`stopping`);
 - state `starting | running | stopping | paused | blocked | stopped | done | failed`;
 - bound planner revision and fencing token;
 - acquired, heartbeat, expiry, terminal timestamps;
 - typed terminal code and bounded evidence reference/summary.
 
-A partial unique constraint prevents multiple live sessions for the active plan. Existing versioned
+A global partial unique constraint over live states prevents more than one live session under any plan
+or approval. Existing versioned
 `last_fill.json` remains the operator-facing terminal artifact during compatibility; its payload derives
 from the same typed session result.
 
@@ -491,9 +505,10 @@ Approval uses a short `BEGIN IMMEDIATE` transaction and requires:
 - current authoritative evidence still admits the exact proposal assignment;
 - no live execution session conflicts.
 
-The transaction applies the selection mutation, marks this proposal approved, supersedes the prior active
-proposal, updates `planner_state.active_approved_proposal_id`, and increments `planner_revision`. All or
-nothing: no finalized selection may be published without its approved proposal.
+The transaction applies the selection mutation—or proves the `adopt_current` no-op—marks this proposal
+approved, supersedes the prior active proposal, updates `planner_state.active_approved_proposal_id`, and
+increments `planner_revision`. All or nothing: no finalized selection may be published without its
+approved proposal.
 
 A CAS failure leaves the draft as non-authoritative diagnostic evidence and returns a fresh-preview action.
 It never reruns optimization inside commit.
@@ -521,7 +536,8 @@ approval remains available for a valid later resume.
 | Manifest/selection/policy/config changed | `APPROVED_INPUT_CHANGED` | Fresh preview/approval |
 | Projection attempts new/expanded/remapped work | `APPROVAL_PROJECTION_VIOLATION` | Fail closed; inspect/report defect |
 | Per-file preflight discovers known target shortfall | `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE` at safe boundary | Fresh preview; never re-place automatically |
-| `compression_aware` actual durable ratio overruns the approved remaining budget | `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE` after preserving completed bytes | Fresh preview under current facts; never silently remap |
+| `compression_aware` cumulative actual bytes plus remaining forecast overrun the approved envelope | `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE` after preserving completed bytes | Fresh preview under current facts; never silently remap |
+| First gated response for a repository | Retained notice + defer for the rest of the current batch | Continue other approved work; encounter again before prompting |
 | Gated repo skipped/timed out | Session-local park + typed follow-up | Continue other approved work; later Start retries |
 | Operator stop/throttle/transient typed pause | Preserve approval | Resume same proposal if projection remains valid |
 
@@ -612,6 +628,11 @@ class CapturedInput:
     semantic_hashes: SemanticHashes
     evidence_by_drive: CanonicalMap[DriveId, CapacityEvidence]
 
+@frozen
+class ExecutionConfig:
+    values: CanonicalMap
+    canonical_hash: str
+
 def immediate_transaction(con, body):
     con.execute("BEGIN IMMEDIATE")
     try:
@@ -631,12 +652,19 @@ safety outcome and raises only for an integrity defect or unclassified implement
 `SemanticHashes` is a bundle with two scopes. `approval_input` includes the desired selection,
 requirements, manifests, baseline archived present/missing identity, plan/drive identity+epoch,
 lifecycle/eligibility, exclusivity policy, capacity mode, solver/policy versions, and graph-affecting
-config. `execution_invariants` excludes only the allowlisted archived progress that projection may shrink.
+config. `execution_invariants` excludes only the allowlisted archived progress that projection may shrink
+and the compression-ratio evidence derived from that progress.
 Neither scope includes live/anchor free-byte values, observation timestamps, dirty/clean evidence state,
 `planner_revision`, proposal lifecycle, or active-pointer/session metadata: those are validated by their
 own contracts. Capacity evidence is recorded with the proposal and revalidated against the exact
 assignment, never compared for byte-for-byte equality. Thus ordinary `df` jitter cannot invalidate
 approval by hash, and approval's own revision increment cannot invalidate execution.
+
+Observed compression ratio is derived from archived progress. It is part of `approval_input` while a
+preview is being approved, but is excluded from `execution_invariants` after approval. Projection and a
+cheap per-file budget ledger recompute its effect and permit it only inside the approved cumulative
+budget envelope; ratio movement can therefore shrink work or produce the typed capacity terminal, but
+cannot cause a generic semantic-hash failure or silently expand the approved budget.
 
 There are two catalog write primitives:
 
@@ -889,7 +917,7 @@ def gate_b_pure(inp, graph, candidates, feasibility_state_limit) -> GateBResult:
                            drives=relevant_unknown,
                            diagnostics=optimistic.diagnostics,
                            capacity_mode=inp.capacity_mode)
-    return GateBResult("INFEASIBLE_EVEN_AT_OPTIMISTIC_USABLE_CAPACITY",
+    return GateBResult("INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX",
                        diagnostics=optimistic.proof, capacity_mode=inp.capacity_mode)
 ```
 
@@ -901,13 +929,15 @@ Preview presents Gate B as an operator decision, not an undifferentiated failure
 | `PACKING_INCONCLUSIVE` | The deterministic feasibility state bound ended before proof | Retry with the reviewed higher bound or reduce the plan; do not infer capacity failure |
 | `CAPACITY_EVIDENCE_UNKNOWN` | Known evidence cannot fit, but named unknown drives could change the answer | Mount/fence/reconcile the named drives, then preview again |
 | `INFEASIBLE_UNDER_ADMISSION_BUDGET` | Exhaustive known-budget search fails and no relevant unknown drive can help | Add admissible capacity, trim selection, or change an applicable admission policy |
-| `INFEASIBLE_EVEN_AT_OPTIMISTIC_USABLE_CAPACITY` | The plan fails even when relevant unknown drives receive their post-safety-floor usable maximum | Add suitable capacity, trim selection, or change hard placement constraints; evidence refresh alone cannot help |
+| `INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX` | Current known budgets still cannot fit even when relevant unknown drives receive their post-safety-floor usable maximum | Free known capacity, add suitable capacity, trim selection, or change hard placement constraints; resolving only the unknown drives cannot help |
 | Structural/policy code | A requirement or hard constraint is impossible independently of current free space | Add a policy-permitted drive or explicitly change the hard requirement/constraint |
 
 The two infeasibility codes are intentionally distinct: `INFEASIBLE_UNDER_ADMISSION_BUDGET` is about
-currently admissible budgets; `INFEASIBLE_EVEN_AT_OPTIMISTIC_USABLE_CAPACITY` proves that resolving the
-named evidence cannot make the current fleet/policy fit. Neither is reported as raw physical
-impossibility beyond the versioned admission and placement constraints.
+currently admissible budgets with no relevant unknown drive;
+`INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX` proves only that resolving the named unknown evidence cannot
+make the current known budgets fit. It does **not** claim that freeing space on a known drive could not
+help. Neither is reported as raw physical impossibility beyond the versioned admission and placement
+constraints.
 
 `search_feasible` orders requirements by constrainedness, then candidate-specific peak,
 then stable requirement id; it orders candidates by canonical drive/source/task keys. Its semantic limit
@@ -1004,7 +1034,7 @@ def approve_proposal(con, proposal_id, request, services):
         )
         # SQLite cannot freeze an external config file. Read it immediately before
         # the short transaction; start/resume repeats the check before any bytes.
-        current_config = services.config.read_graph_affecting_config()
+        current_config = freeze(services.config.read_graph_affecting_config())
 
         def approve_tx(con):
             proposal = load_proposal_rows(con, proposal_id)
@@ -1075,8 +1105,25 @@ def project_pure(proposal, current_input, current_graph, session_overlay):
         return Refusal("APPROVED_INPUT_CHANGED", semantic_diff(...),
                        ("preview_again",))
 
+    if set(proposal.requirement_ids) != set(current_graph.requirement_ids):
+        return Refusal("APPROVAL_PROJECTION_VIOLATION",
+                       requirement_row_diff(...), ("inspect_integrity",))
+
+    for row in proposal.baseline_satisfied_rows_in_canonical_order:
+        current_certificate = satisfaction_certificate_pure(
+            row.requirement_id,
+            exact_target=row.target_drive,
+            exact_source=row.source_drive,
+            manifests=current_input.manifests,
+            archived=current_input.archived,
+            drives=current_input.drives,
+        )
+        if current_certificate != row.satisfaction_certificate:
+            return Refusal("APPROVAL_PROJECTION_VIOLATION",
+                           lost_baseline_satisfaction(row), ("inspect_integrity",))
+
     remaining = []
-    for task in proposal.tasks_in_canonical_execution_order:
+    for task in proposal.executable_tasks_in_canonical_order:
         baseline_missing = set(proposal.files_missing_for(task))
         baseline_reused = set(proposal.files_reused_for(task))
         now_satisfied = satisfied_files(
@@ -1098,11 +1145,22 @@ def project_pure(proposal, current_input, current_graph, session_overlay):
             return Refusal("APPROVAL_PROJECTION_VIOLATION",
                            lost_approved_source(task), ("inspect_integrity",))
 
-        budget = remaining_budget_pure(task, missing_now, current_input)
-        if budget.exceeds(task.approved_budget):
+        envelope = progress_envelope_pure(
+            task,
+            missing_now,
+            proposal_baseline=proposal.files_for(task),
+            archived=current_input.archived,
+            ratio_evidence=current_input.observed_ratio,
+        )
+        if envelope.exceeds(task.approved_budget):
             return Refusal("APPROVED_PLACEMENT_NO_LONGER_FEASIBLE",
-                           budget_overrun(task, budget), ("preview_again",))
-        remaining.append(task.with_missing_and_budget(missing_now, budget))
+                           budget_overrun(task, envelope), ("preview_again",))
+        remaining.append(task.with_progress_budget(
+            missing=missing_now,
+            actual_since_approval=envelope.actual_since_approval,
+            remaining_forecast=envelope.remaining,
+            approved_envelope=task.approved_budget,
+        ))
 
     exact = validate_remaining_pure(
         remaining,
@@ -1138,11 +1196,16 @@ def project_pure(proposal, current_input, current_graph, session_overlay):
 
 `SemanticHashes.execution_invariants` still covers selection, full manifests, `numcopies`, plan/drive
 identity and epoch, lifecycle/eligibility, policy, solver, capacity mode, and compression config. Only
-allowlisted archived progress and current capacity evidence vary. Session parking/dependency readiness
-changes only `schedule_state`, not the approved task set or completion truth.
+allowlisted archived progress, its derived ratio evidence, and current capacity evidence vary.
+`progress_envelope_pure` adds actual durable bytes written since approval to the recomputed forecast for
+the files still missing; comparing only the remaining forecast is insufficient. Session parking/
+dependency readiness changes only `schedule_state`, not the approved task set or completion truth.
 `source_ready_pure` accepts a future source only while the exact approved
 home task that produces it remains in the same projection and names that source drive. Once the home task
 disappears as satisfied, the matching durable source fact must exist; no alternate copy is substituted.
+Every desired requirement has exactly one normalized row. A `baseline_satisfied` certificate is computed
+only over the exact approved satisfying location and required-file content evidence, so unrelated new
+copies do not change it and an alternate copy cannot silently replace a lost approved satisfaction.
 
 ### Start, resume, and terminal session lineage
 
@@ -1156,7 +1219,7 @@ def start_session(con, proposal_id, predecessor_id, services):
 
     with services.controller_flock.hold(), services.drive_fences.hold_all_sorted(relevant) as fences:
         evidence = observe_exact_capacity(proposal, fences, services.clock.now())
-        current_config = services.config.read_graph_affecting_config()
+        current_config = freeze(services.config.read_graph_affecting_config())
 
         def acquire_tx(con):
             if live_session_exists(con):
@@ -1193,16 +1256,25 @@ def start_session(con, proposal_id, predecessor_id, services):
                 bound_planner_revision=planner_revision(con),
                 lease_expiry=services.clock.now() + services.lease_ttl,
             )
-            return SessionStart(session, projected)
+            execution_config = ExecutionConfig(
+                values=current_config,
+                canonical_hash=hash_config(current_config),
+            )
+            require(execution_config.canonical_hash == proposal.config_hash,
+                    "APPROVED_INPUT_CHANGED")
+            return SessionStart(session, projected, execution_config)
 
         acquired = immediate_transaction(con, acquire_tx)
 
     if isinstance(acquired, Refusal):
         return acquired
     try:
-        transition_session_token_cas(acquired.session, "starting", "running")
-        require(services.worker.start(acquired.session, acquired.projection).ok,
-                "PROCESS_LOCAL_WORKER_REFUSED")
+        handle = services.worker.start(
+            acquired.session, acquired.projection, acquired.execution_config
+        )
+        # The worker entrypoint records its actual process/thread execution identity
+        # and CASes starting→running before it may dirty a drive or launch a child.
+        require(handle.await_claim().ok, "PROCESS_LOCAL_WORKER_REFUSED")
         return acquired.session
     except BaseException as exc:
         terminalize_session_token_cas(
@@ -1213,16 +1285,18 @@ def start_session(con, proposal_id, predecessor_id, services):
 
 The partial unique live-session constraint is the final defense against two starters. A predecessor row
 is never updated back to live. A new session always gets a strictly greater fencing token, including
-systemd auto-resume.
+systemd auto-resume. The controller owns `starting`; the worker's first action is a token-CAS claim that
+records its actual execution identity and enters `running`. Process recovery probes that worker claim,
+not merely whether the hosting portal process still exists.
 
 ```python
 def renew_lease(con, session, now, ttl):
-    # owner_identity includes host boot id + pid + process start identity so PID
-    # reuse cannot impersonate the controller. This is control state, not graph state.
+    # worker_identity includes host boot id + pid/process-start + native thread/task
+    # identity so PID/TID reuse cannot impersonate the worker. This is control state.
     return immediate_transaction(con, lambda con: heartbeat_token_cas(
         con, session.id, session.fencing_token,
-        expected_state={"starting", "running", "stopping"},
-        owner_identity=session.owner_identity,
+        expected_state={"running", "stopping"},
+        worker_identity=session.worker_identity,
         heartbeat=now,
         lease_expiry=now + ttl,
     ))
@@ -1259,6 +1333,9 @@ fact. Any preceding archive/dirty/anchor change already advanced the revision th
 def execute_session(ctx, session, initial_projection):
     overlay = SessionOverlay()
     projection = initial_projection
+    # Projection reconstructs spend from durable progress, so a new session does
+    # not forget bytes written under an earlier session for the same approval.
+    budget_ledger = ApprovedBudgetLedger.from_projection(initial_projection)
     retry_task_id = None
     while True:
         if stop_requested(session):
@@ -1282,7 +1359,10 @@ def execute_session(ctx, session, initial_projection):
         batch = next_drive_batch(runnable, retry_first=retry_task_id)
         retry_task_id = None
         refresh_now = False
+        deferred_this_batch = set()
         for task in batch.tasks:
+            if task.repo_id in deferred_this_batch:
+                continue
             required_drives = canonical_drive_ids(
                 [task.target_drive] + ([task.source_drive] if task.source_drive else [])
             )
@@ -1298,7 +1378,7 @@ def execute_session(ctx, session, initial_projection):
 
             for file in tuple(task.missing_files_in_order):
                 mutated_drives = transport_mutated_drives(task)
-                with drive_mutation(session, mutated_drives) as mutation:
+                with drive_mutation(ctx, session, mutated_drives) as mutation:
                     # The same sorted physical fence remains held from this df through
                     # staging, publish, annex/catalog writes, reconciliation, and anchor.
                     preflight = preflight_file_pure(
@@ -1313,20 +1393,36 @@ def execute_session(ctx, session, initial_projection):
                             target=task.target_drive,
                             source=task.source_drive,
                             mutation_writer=mutation,
+                            execution_config=ctx.execution_config,
                         )
                 if outcome.is_repo_gated:
                     action = gated_decision(outcome.repo_id)
-                    require(action in {"retry", "skip", "timeout"}, "GATED_ACTION_INVALID")
+                    require(action in {"continue", "retry", "skip", "timeout", "stopped"},
+                            "GATED_ACTION_INVALID")
+                    if action == "stopped":
+                        transition_to_stopping(session)
+                        return end_at_boundary(ctx, session, "stopped", "STOPPED_BY_REQUEST")
                     if action == "retry":
                         # DEC-047 owns prompt retry order and budget exemption.
                         # Retry this exact approved task before normal ordering advances.
                         retry_task_id = task.id
-                    else:  # skip or timeout
+                        refresh_now = True
+                    else:
+                        # First-hit continue and terminal park both let the rest of
+                        # this ready batch run before the repository is encountered again.
+                        deferred_this_batch.add(outcome.repo_id)
+                    if action in {"skip", "timeout"}:
                         overlay.parked_gated_repos.add(outcome.repo_id)
-                    refresh_now = True
                     break
                 if outcome.is_typed_pause_or_failure:
                     return end_from_transport(ctx, session, outcome)
+                budget = budget_ledger.record_success(task, file, outcome)
+                if budget.exceeds_approved_envelope:
+                    return end_session(
+                        ctx.con, session, "paused",
+                        "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE",
+                        budget.evidence,
+                    )
                 task = task.with_file_satisfied(file)  # cheap local monotonic progress
             if refresh_now:
                 break
@@ -1341,12 +1437,26 @@ def execute_session(ctx, session, initial_projection):
 `transport_file` retains DEC-046/047 and INC-018–021 behavior. Its arguments contain no
 candidate set, solver, or alternate target. Per-file ENOSPC, compression-ratio overrun, raw-fallback
 shortfall, or changed evidence stops at the approved target even when another drive could fit.
-`gated_decision` remains the sole owner of DEC-047 matching retry/skip/timeout policy: retry consumes no
-generic network/task-failure budget and re-attempts the same exact approved task before canonical
-scheduling advances; skip/timeout parks the repository and allows other approved work.
+It receives the start-validated frozen `ExecutionConfig`; the protected fetch/compression path no longer
+loads graph-affecting global configuration internally.
+`gated_decision` remains the sole owner of DEC-047 encounter counting and matching prompt policy. Its
+first-hit `continue` emits the retained notice, defers that repository for the rest of the current batch,
+and lets other ready work run. On the second encounter, `retry` consumes no generic network/task-failure
+budget and re-attempts the same exact approved task before canonical scheduling advances; `skip`/
+`timeout` parks the repository and allows other approved work. `stopped` is the ordinary operator-stop
+escape from a pending prompt, not a gated failure.
 
-`refresh_projection` performs the full fact read, semantic-hash recomputation, current-evidence capture,
-and `project_pure` call. Start/resume already performs one before worker launch. During execution it runs
+`ApprovedBudgetLedger` is local deterministic arithmetic initialized from projection's proposal-relative
+cumulative spend and then advanced by successful transport results (`orig_bytes`, actual `stored_bytes`,
+codec, and workspace disposition). A later session for the same approval therefore resumes the ledger
+from durable archived progress rather than zero. After every file it charges cumulative actual durable
+bytes since approval and recomputes the affected remaining forecast. An approved-envelope overrun stops
+before the next file without a full catalog projection. Fresh fenced free space remains the physical
+safety authority; the ledger enforces the operator-approved estimate.
+
+`refresh_projection` performs the full fact read, current config-hash comparison, semantic-hash
+recomputation, current-evidence capture, and `project_pure` call. It never replaces
+`ctx.execution_config`. Start/resume already performs one before worker launch. During execution it runs
 at completed drive-batch boundaries and typed state-changing events, while every file retains the cheap
 identity/token/live-free preflight under its physical fence. Durable success updates the batch-local
 missing set immediately, so coarser refresh never repeats a completed file. This cadence is a specified
@@ -1357,66 +1467,99 @@ plus one per completed maximal drive batch and one per typed refresh event—not
 
 ```python
 @contextmanager
-def drive_mutation(session, drive_ids):
-    with exclusive_drive_flocks_sorted(drive_ids):
-        generations = session_write(
-            con, session.id, session.token,
-            lambda con: advance_dirty_generations(
-                con, drive_ids,
-                owner_session_id=session.id,
-                owner_fencing_token=session.token,
-            ),
-        )
+def drive_mutation(ctx, session, drive_ids):
+    locks = ctx.drive_fences.for_ids_sorted(drive_ids)
+
+    # Serialize "begin another generation" against recovery. Recovery that wins
+    # this controller fence terminalizes the token before a stale worker can dirty.
+    with ctx.controller_flock.hold():
+        locks.acquire()
         try:
-            writer = MutationWriter(
-                # Every archived/annex/catalog mutation validates token and rolls
-                # planner_revision + session.bound_planner_revision atomically.
-                catalog_write=lambda op: session_write(
-                    con, session.id, session.token, op
-                ),
-                fresh_capacity_evidence=read_fenced_live_evidence,
-            )
-            yield writer
-            reconciled = {
-                d: reconcile_drive(d) for d in drive_ids
-            }
-            candidate_anchors = {
-                d: read_reconciled_free(d) for d in drive_ids
-            }
-            session_write(
-                con, session.id, session.token,
-                lambda con: publish_anchors_cas(
-                    con, drive_ids, generations, reconciled, candidate_anchors,
+            generations = session_write(
+                ctx.con, session.id, session.token,
+                lambda con: advance_dirty_generations(
+                    con, drive_ids,
+                    owner_session_id=session.id,
+                    owner_fencing_token=session.token,
                 ),
             )
         except BaseException:
-            # No finally-clear: crash/error evidence must stay dirty.
+            locks.release()
             raise
+
+    # The controller fence may now be released; physical drive fences remain held.
+    try:
+        writer = MutationWriter(
+            # Every archived/annex/catalog mutation validates token and rolls
+            # planner_revision + session.bound_planner_revision atomically.
+            catalog_write=lambda op: session_write(
+                ctx.con, session.id, session.token, op
+            ),
+            fresh_capacity_evidence=read_fenced_live_evidence,
+            child_fence_fds=locks.inheritable_fds(),
+        )
+        yield writer
+        reconciled = {
+            d: reconcile_generation(d, generations[d], writer.touched_for(d))
+            for d in drive_ids
+        }
+        candidate_anchors = {
+            d: read_reconciled_free(d) for d in drive_ids
+        }
+        session_write(
+            ctx.con, session.id, session.token,
+            lambda con: publish_anchors_cas(
+                con, drive_ids, generations, reconciled, candidate_anchors,
+            ),
+        )
+    except BaseException:
+        # No finally-clear: crash/error evidence must stay dirty.
+        raise
+    finally:
+        locks.release()
 ```
 
-The sorted drive locks span dirty publication through filesystem work, catalog/annex reconciliation, and
-clean-anchor publication for every filesystem the transport may mutate. If token/revision/generation CAS
-fails, the candidate anchors are discarded and affected drives stay dirty. Download staging,
-publication, annex repair, and archived-row writes remain in their existing transport order inside this
-boundary.
+The controller lock serializes generation start against recovery, then the sorted drive locks span dirty
+publication through filesystem work, catalog/annex reconciliation, and clean-anchor publication for
+every filesystem the transport may mutate. If token/revision/generation CAS fails, the candidate anchors
+are discarded and affected drives stay dirty. Normal close uses the generation's recorded touched paths
+and annex keys; full-drive inventory is reserved for registration, crash recovery, unexplained drift, and
+explicit repair. Download staging, publication, annex repair, and archived-row writes remain in their
+existing transport order inside this boundary.
+
+Every monitored download/compression child receives the relevant lock FDs through an explicit inherited-
+FD contract (for example `pass_fds` on POSIX), so abrupt parent death cannot release the physical fence
+while a child keeps writing. Parent-death termination may additionally shorten recovery, but it does not
+replace inherited lock ownership. Recovery and fault tests cover portal-thread failure, parent SIGKILL,
+an orphaned live child, and eventual operator termination of a stuck child.
 
 Non-Fill filesystem operations use the same machinery under operator authority:
 
 ```python
 @contextmanager
-def operator_drive_mutation(drive_ids):
-    with same_host_controller_flock.hold(), exclusive_drive_flocks_sorted(drive_ids):
+def operator_drive_mutation(drive_ids, full_inventory=False):
+    with (same_host_controller_flock.hold(),
+          exclusive_drive_flocks_sorted(drive_ids) as locks):
         generations = graph_write(
             con, lambda con: advance_dirty_generations(
                 con, drive_ids, owner_session_id=None, owner_fencing_token=None
             )
         )
         try:
-            yield MutationWriter(
+            writer = MutationWriter(
                 catalog_write=lambda op: graph_write(con, op),
                 fresh_capacity_evidence=read_fenced_live_evidence,
+                child_fence_fds=locks.inheritable_fds(),
             )
-            reconciled, anchors = reconcile_and_observe_all(drive_ids)
+            yield writer
+            if full_inventory:
+                reconciled = {d: reconcile_inventory(d) for d in drive_ids}
+            else:
+                reconciled = {
+                    d: reconcile_generation(d, generations[d], writer.touched_for(d))
+                    for d in drive_ids
+                }
+            anchors = {d: read_reconciled_free(d) for d in drive_ids}
             graph_write(
                 con,
                 lambda con: publish_anchors_cas(
@@ -1429,7 +1572,9 @@ def operator_drive_mutation(drive_ids):
 ```
 
 Registration, restore, cleanup, explicit copy removal, lifecycle repair, and mutating probes enter this
-scope. Catalog-only operator mutations need only `graph_write`.
+scope. Ordinary operations use generation-scoped reconciliation. Registration, expired-generation
+recovery, unexplained drift, and explicit repair request `full_inventory=True`; that opt-in is never the
+default for a per-file operation. Catalog-only operator mutations need only `graph_write`.
 
 ### Plan switching and expired-session recovery
 
@@ -1454,27 +1599,32 @@ def switch_active_plan(con, requested_plan_id):
         return immediate_transaction(con, tx)
 
 def recover_session(con, session_id, services):
-    session = load_session(con, session_id)
-    if session.state not in LIVE_STATES or not session.lease_expired:
-        return Refusal("SESSION_NOT_EXPIRED", session_lease_evidence(session),
-                       ("wait", "inspect_session"))
-
-    # Dirty ownership records session id/token with the generation. If no dirty
-    # generation belongs to this session, the dirty-before-allocation invariant
-    # proves it published no filesystem mutation requiring recovery.
-    touched = owned_dirty_drives(session.id, session.fencing_token)
     with services.controller_flock.hold():
-        locks = services.drive_fences.try_hold_all_sorted(touched)
-        if not locks.all_held or services.process_probe.owner_still_alive(session.owner):
+        # Re-read only after generation start has been excluded by the controller fence.
+        session = load_session(con, session_id)
+        if session.state not in LIVE_STATES or not session.lease_expired:
+            return Refusal("SESSION_NOT_EXPIRED", session_lease_evidence(session),
+                           ("wait", "inspect_session"))
+
+        touched = owned_dirty_drives(session.id, session.fencing_token)
+        possible = proposal_mutated_drive_ids(session.approved_proposal_id)
+        locks = services.drive_fences.try_hold_all_sorted(possible | touched)
+        if (not locks.all_held
+                or services.worker_probe.execution_still_alive(session.worker_identity)):
             return Refusal("STALE_WRITER_NOT_EXCLUDED", lock_and_process_evidence(...),
-                           ("wait", "operator_recovery"))
+                           ("wait", "stop_worker_or_child", "operator_recovery"))
 
         with locks:
             def terminate_tx(con):
                 current = require_expired_session(
                     con, session.id, session.fencing_token
                 )
-                for drive_id in touched:
+                current_touched = owned_dirty_drives(
+                    current.id, current.fencing_token, con=con
+                )
+                require(current_touched <= (possible | touched),
+                        "RECOVERY_DRIVE_SET_CHANGED")
+                for drive_id in current_touched:
                     preserve_dirty_generation(con, drive_id,
                                               reason="expired_session_recovery")
                 bump = bump_planner_revision(con)
@@ -1482,7 +1632,8 @@ def recover_session(con, session_id, services):
                     con, current, state="failed", code="SESSION_LEASE_EXPIRED",
                     bound_planner_revision=bump,
                 )
-            immediate_transaction(con, terminate_tx)
+                return current_touched
+            touched = immediate_transaction(con, terminate_tx)
 
     return RecoveryRequired(
         drives=touched,
@@ -1490,9 +1641,12 @@ def recover_session(con, session_id, services):
     )
 ```
 
-Recovery never steals past a held physical lock and never reuses the expired token or row. Reconciliation
-occurs after the old session is non-live, so it uses the normal operator graph-write path and cannot
-deadlock on the execution lease.
+Recovery never steals past a held physical lock and never reuses the expired token or row. Controller-
+first exclusion prevents a between-files worker from beginning another generation; locking every drive
+the approved session could mutate also closes the race even when the initial dirty set is empty. An
+inherited child fence blocks recovery after parent death until that child exits or is explicitly killed.
+Reconciliation occurs after the old session is non-live, so it uses the normal operator graph-write path
+and cannot deadlock on the execution lease.
 
 ### Canonical proposal serialization
 
@@ -1524,8 +1678,9 @@ def proposal_hash(con, proposal_id):
 ```
 
 Golden vectors include nulls, empty file sets, Unicode repository paths, large byte integers, shuffled
-insertion order, every task kind, and all three derivation modes. A serializer-version change adds a new
-reader; it never rewrites an already approved proposal.
+insertion order, executable and `baseline_satisfied` requirement rows, every task kind, and all three
+derivation modes. A serializer-version change adds a new reader; it never rewrites an already approved
+proposal.
 
 ### Control-layer failure taxonomy
 
@@ -1554,11 +1709,11 @@ transport/auth/gated/watchdog codes retain their DEC-defined meanings and are no
 
 | Delivery phase | Pseudocode introduced there |
 |---|---|
-| #35 | catalog fact/evidence split; `graph_write`; drive fences, dirty generations, clean anchors; nullable session/token ownership fields reserved for #39 |
+| #35 | catalog fact/evidence split; `graph_write`; drive fences including monitored-child inheritance, dirty generations, generation-scoped clean close/anchors; nullable session/token ownership fields reserved for #39 |
 | #36a | pure requirements, complete satisfaction, partial/fresh candidates, dependency source references |
 | #38 | Gate-B ladder, bounded feasibility, deterministic `tiered_v2`, normalized assignment output |
 | #37 schema/gating | lifecycle/eligibility facts and their writer guards; no lifecycle operations yet |
-| #39 | proposal persistence/hash, approval CAS, `adopt_current`, batch/event projection, sessions, fixed-map executor entry; populate #35's reserved dirty-owner fields |
+| #39 | proposal persistence/hash including satisfied certificates, approval CAS, `adopt_current`, frozen execution config, batch/event projection plus per-file budget ledger, globally unique sessions/recovery, fixed-map executor entry; populate #35's reserved dirty-owner fields |
 | #37 operations | reuse `graph_write` and the approved lifecycle invariants; no solver/executor changes |
 
 Each phase may introduce compatibility façades around these functions, but it must not implement a later
@@ -1570,6 +1725,9 @@ choose placement, #38 does not alter the transport, and #39 does not redesign fe
 This RFC changes planning/control around the executor, not the transport implementation. Initial work
 keeps `fetch.py`, download/compression workers, replica operations, and gated broker in place. Moving code
 between files is not a goal and receives no credit unless required by a tested ownership boundary.
+Two surgical boundary changes are required rather than treated as a transport rewrite: transport accepts
+the frozen `ExecutionConfig`, and monitored children inherit the already-held physical drive-fence FDs.
+Neither change may alter retry, codec, publication, canary, annex, or watchdog policy.
 
 The following behavior is release-blocking preservation:
 
@@ -1588,9 +1746,12 @@ The following behavior is release-blocking preservation:
 Before control-flow conversion, characterization tests freeze:
 
 - stop/process death during download and compression;
+- parent SIGKILL while a monitored child is writing: the child retains the drive fence (or dies by a
+  proven parent-death mechanism), recovery cannot overlap it, and the generation remains dirty;
 - nested-path long download watchdog progress and orphan cleanup;
 - invalid global credential versus repository-specific gate;
 - gated retry, skip, timeout, and later successful resolution;
+- first gated notice defers once and runs other ready work before the matching retry/skip prompt;
 - hash mismatch, canary failure, compressor crash/hang/output-cap raw fallback;
 - upstream-hashless downloaded file with an approved-size mismatch fails before publish;
 - target ENOSPC/read-only/I/O error with no network cooldown;
@@ -1599,6 +1760,8 @@ Before control-flow conversion, characterization tests freeze:
 - replica source unavailable and target-UUID proof failure;
 - hot-swap await, operator stop, throttle, and terminal persistence;
 - per-file admission divergence returning reapproval rather than invoking placement.
+- graph-affecting config edited after start is detected at a projection boundary but never changes the
+  frozen transport config; transport contains no global config read.
 
 Copied-catalog shadow replay proves graph/proposal/projection and migration behavior; it does not prove
 transport/stall/crash behavior. The latter requires focused fault injection plus RFC-001-style attended
@@ -1694,6 +1857,8 @@ projections agree, copied-catalog replay passes, and the replacement has direct 
 - Synthetic `PlannerInput` tests require no SQLite, config file, mount, clock, or network.
 - Shuffled input/query order yields identical requirements, candidates, verdict, assignment, and hash.
 - Adversarial packing distinguishes proven infeasible, evidence unknown, and bounded inconclusive.
+- `INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX` uses current budgets for known drives and usable maxima only
+  for relevant unknown drives; its message says freeing known capacity may still help.
 - A requirement no larger than raw capacity but larger than every policy-permitted drive's **usable
   post-safety-floor capacity** is structural infeasibility, never `CAPACITY_EVIDENCE_UNKNOWN`; optimistic
   unknown-drive search uses that same usable maximum.
@@ -1706,6 +1871,8 @@ projections agree, copied-catalog replay passes, and the replacement has direct 
 ### Proposal/control acceptance
 
 - Draft rows/tasks/files publish atomically and hash deterministically.
+- Proposal rows cover every desired requirement exactly once; losing a `baseline_satisfied` certificate
+  is rejected even when the requirement-set and full-manifest hashes are unchanged.
 - The immutable planning hash is unchanged by draft→approved→superseded lifecycle/timestamp updates.
 - Revision, selection, mutation, hash, or evidence drift makes approval fail without selection change.
 - `adopt_current` produces and approves an unchanged-selection proposal without a spurious selection
@@ -1720,10 +1887,18 @@ projections agree, copied-catalog replay passes, and the replacement has direct 
 - At most one approved-active proposal exists per plan; old approval becomes superseded.
 - Approved proposal planning rows reject update/delete; draft GC cannot touch referenced/approved rows.
 - Portal, CLI, second portal, and systemd resume share the same session exclusion.
+- The live-session uniqueness constraint is global across every plan and approval.
 - Start, approval, recovery, and operator drive mutation obey controller-flock → sorted-drive-flocks →
   short-transaction order; no path waits on a physical lock while holding a SQLite write transaction.
 - A long operator filesystem mutation prevents session start without holding a SQLite transaction across
   filesystem work; a crash releases flocks and leaves its generation dirty.
+- Worker generation start takes controller then sorted drive fences before dirty publication. Recovery
+  takes controller first, revalidates expiry, snapshots owned dirtiness, and locks every proposal drive
+  the session could mutate before terminalizing its token.
+- The worker claim records actual process/thread execution identity separately from the controller;
+  recovery of a dead worker in a live portal does not mistake portal-PID liveness for worker liveness.
+- Monitored children inherit physical drive fences. Parent SIGKILL cannot let recovery acquire a drive
+  while a download/compression child still writes it.
 - #35 migration creates the paired nullable dirty-owner fields before sessions exist; #39 session writes
   populate both, and expired-session recovery selects only the matching id/token generations.
 - Portal/CLI processes using the same catalog but different state directories still contend on one
@@ -1746,6 +1921,8 @@ projections agree, copied-catalog replay passes, and the replacement has direct 
   catalog baseline; a 390-model/thousands-file run must meet it and prove the call count is bounded by
   initial start + completed maximal batches + typed refresh events.
 - Gated session parking, hot-swap await, stop, and throttle do not remap or invalidate approval.
+- DEC-047 first-hit `continue` emits a notice and defers the repo for the rest of the current batch so
+  other ready work runs before a second encounter; prompt-stop exits through the normal stop terminal.
 - DEC-047 retry re-attempts the same approved task before normal scheduling advances and consumes no
   generic failure budget; skip/timeout parks it and permits other approved work.
 - Replica dependency readiness never substitutes a source: the exact approved source is either produced
@@ -1753,10 +1930,18 @@ projections agree, copied-catalog replay passes, and the replacement has direct 
 - Dirty→clean evidence refresh continues the same target only if it fits.
 - Known target shortfall returns `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE`, even when another drive fits.
 - Compression-aware actual-ratio overrun reaches that same terminal and never invokes placement.
+- Observed ratio is progress-derived evidence, not an execution semantic hash. Per-file deterministic
+  accounting compares cumulative actual bytes since approval plus recomputed remaining forecast against
+  the approved envelope and stops before the next file on overrun. Resume reconstructs cumulative spend
+  from durable proposal-relative progress rather than resetting the ledger.
+- Start freezes the hash-matching `ExecutionConfig`; transport never reads global graph-affecting config,
+  and boundary rereads compare hashes without replacing the frozen values.
 - Per-file authoritative free observation shares one sorted physical-fence scope with dirtying,
   transport mutation, reconciliation, and clean-anchor publication for every mutated drive.
 - Changed identity/epoch/manifest/policy or expanded task returns fresh-preview failure.
 - Executor has no import/call path to placement optimization.
+- Normal clean close reconciles only generation-touched paths/annex keys. A thousands-file run proves no
+  full-drive inventory occurs per file; full inventory remains a recovery/registration/repair operation.
 
 ### Migration/attended acceptance
 
@@ -1779,9 +1964,15 @@ Stop implementation/integration on any of:
 - an unapproved/migrated selection starts Fill;
 - an operator graph mutation succeeds while a live session owns authority, or a non-live paused session
   cannot run the reconciliation needed for recovery;
-- a terminal session row is reactivated or two live sessions reference one approval;
+- a terminal session row is reactivated or more than one live session exists globally, including across
+  different plans or approvals;
 - active-plan switch retains/reactivates an approval from either plan;
 - a capacity/identity drift silently changes target;
+- a previously satisfied requirement disappears without an approval-projection violation;
+- recovery can overlap a worker or monitored child that may still write, or identifies only the hosting
+  controller instead of the actual worker;
+- transport rereads global graph-affecting config after start or a boundary check replaces the frozen
+  execution config;
 - old transport behavior loses a typed terminal, safe boundary, hash/canary, watchdog, gated follow-up,
   or atomic publication guarantee;
 - migration fabricates evidence, loses archived truth, cannot roll back, or requires opening a newer
