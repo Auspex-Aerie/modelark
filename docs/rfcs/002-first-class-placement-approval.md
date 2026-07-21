@@ -199,6 +199,13 @@ fact reader + current admission evidence
        archived rows + later projection shrink
 ```
 
+![RFC-002 placement approval and fixed-map execution operations](rfc-002-operations.svg)
+
+The diagram separates the five operator/runtime stages and shows which edges are pure computation,
+short catalog transactions, durable state, or physically fenced I/O. The lower recovery path is not an
+alternate execution route: it exists only to prove an expired writer is excluded, preserve dirty
+evidence, and return control to ordinary reconciliation and a newly fenced session.
+
 ### Functional core
 
 The pure core owns four transformations:
