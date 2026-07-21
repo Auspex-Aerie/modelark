@@ -199,7 +199,7 @@ fact reader + current admission evidence
        archived rows + later projection shrink
 ```
 
-![RFC-002 placement approval and fixed-map execution operations](rfc-002-operations.svg)
+[![RFC-002 placement approval and fixed-map execution operations](rfc-002-operations.png)](rfc-002-operations.svg)
 
 The diagram separates the five operator/runtime stages and shows which edges are pure computation,
 short catalog transactions, durable state, or physically fenced I/O. The lower recovery path is not an
