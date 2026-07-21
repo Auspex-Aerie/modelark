@@ -69,7 +69,9 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    is held and the dirty generation is durable. Anchor publication is a generation CAS: snapshot the
    generation, prove no active writer, reconcile, then append+clear only if the generation is unchanged
    and the writer lock is still idle; otherwise discard the candidate anchor and remain dirty. NULL
-   `stored_bytes` is missing evidence, never a proven zero.
+   `stored_bytes` is missing evidence, never a proven zero. #35 reserves nullable owner-session-id and
+   fencing-token fields on each dirty generation (both null or both present); they remain null until #39
+   begins attributing Fill mutations, avoiding a second dirty-state migration for session recovery.
 4. **Durable truth is never auto-deleted** — a verified `archived` row is removed only by an explicit,
    scoped, confirmed operation.
 5. **Drive properties are orthogonal:** durable `lifecycle` ∈ {active, lost, retired} and durable
@@ -148,7 +150,9 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    full authoritative validation and creates a new `starting` session with a fresh fencing token and an
    audit link to the immutable terminal predecessor. Terminal rows are never reactivated; multiple
    historical rows may reference one approval, but at most one session may be live. The early portal
-   guard is explicitly portal-scoped.
+   guard is explicitly portal-scoped. Graph writers conservatively advance `planner_revision` unless
+   they prove canonical before/after equality; a false-positive bump is safe over-invalidation, while a
+   false-negative is an implementation defect caught by authoritative semantic recomputation.
 9. **Preview CAS, durable approval, and execution projection are three distinct contracts.**
    **(a) Preview→commit:** the preview is bound to one `planner_revision`; commit requires strict CAS and
    atomically applies the mutation and approves one immutable, normalized **PlacementProposal**; there is
@@ -207,6 +211,9 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   reconciliation may append a new anchor only after explaining or explicitly acknowledging the drift.
 - Consolidate every consumer onto one evidence path (`library_api.py:23` currently reports raw
   `free_bytes`). Migration fail-closed: unprovable provenance ⇒ `unknown`, recover via the anchor path.
+- Reserve nullable `owner_session_id` + `owner_fencing_token` as a paired dirty-generation field in #35.
+  Operator/pre-#39 writes leave both null; #39 populates and validates them without requiring #35 to
+  create an early FK to the later session table.
 
 ### #36a — reconciler emits partial *alternatives* + deterministic costs (no choosing/pinning)
 - Root cause: `_choose_partial` (reconcile.py:353) sets a hard `pinned_target` before placement, honored
@@ -246,8 +253,9 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   Correction from review: canonical path already has the label tiebreak (capacity.py:753); only the
   legacy comparison path lacks it, and that is not execution authority.
 - Every verdict and task budget carries its capacity mode. `guaranteed` remains raw-bounded;
-  `compression_aware` exposes estimate risk and revalidates the remaining approved assignment after
-  each durable file/batch. Codec choice is part of the snapshotted config: a codec planned as raw uses a
+  `compression_aware` exposes estimate risk through fenced per-file admission and full remaining-map
+  revalidation at drive-batch/event boundaries. Codec choice is part of the snapshotted config: a codec
+  planned as raw uses a
   raw durable budget, and crash/canary/output-cap fallback may publish raw only after a current-evidence
   guard proves the raw result and workspace preserve the safety floor. An estimate overrun pauses the
   approved plan as `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE`; completed bytes remain durable, and it never
@@ -301,6 +309,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   current `PlannerInput`, recompute the desired requirements and all semantic hashes, and compare those
   facts with normalized proposal rows. Revision equality permits the detailed check; it never replaces
   it. A missed bump is a writer defect but cannot authorize stale or expanded work.
+- **Unchanged-selection approval is explicit:** `adopt_current` previews and approves the already
+  finalized selection with equal before/after hashes and no selection-row mutation. It retains every
+  normal semantic check, CAS, exact assignment, approval lifecycle, pointer, and revision rule; this is
+  the required migration/reapproval path, not a bypass.
 - **Approval→start handoff:** commit approves the immutable proposal but holds no long-lived lease.
   `/api/fill/start` (and CLI start) acquires the execution lease, derives the execution projection
   **constrained to the approved target/source map**, applies only invariant 9's allowlisted monotonic
@@ -311,6 +323,11 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   `optimization_resource_exhausted` can occur while producing a preview; that preview may instead show
   the canonical fallback for approval. It is not a commit/start reproduction outcome because those
   boundaries validate the already-approved assignment rather than replaying its derivation.
+- **Projection cadence is bounded:** perform full authoritative projection at start/resume, completed
+  drive-batch boundaries, and typed state-changing events (gated park/retry, hot-swap return, evidence
+  repair/recovery)—not after every file/task. Every file still performs cheap token/identity/live-free
+  admission while holding its drive fence, and successful durable files shrink the batch-local missing
+  set immediately. Full projection count scales with batches/events, not total tasks/files.
 - **Session-state mutation authority:** `starting`, `running`, and `stopping` retain the live lease and
   refuse every operator graph writer. `paused`/`blocked` are non-live historical terminals with the
   heartbeat/lease cleared and every physical lock released, so the operator can mount/reconcile an
@@ -393,6 +410,8 @@ codes, migration behavior, and test matrices.
   **registration crashes** (before row creation, during clone, during annex-init, before first anchor),
   mutating writability probe/staging-directory/temp/annex bookkeeping dirties before allocation and
   remains dirty across a crash (or the await probe is non-mutating),
+  paired nullable dirty-owner fields migrate in #35 with both-null/both-present enforcement, pre-#39
+  writes remain null, and #39 matching session/token attribution drives expired-session recovery,
   NULL vs proven-zero `stored_bytes`, unprovable-provenance⇒`unknown`, migrated-catalog replay, every
   CLI/API/UI consumer.
 - **#36a/#38** — alternatives emitted without pinning; global feasibility (a partial fitting itself but
@@ -423,12 +442,16 @@ codes, migration behavior, and test matrices.
   no file reread mid-lease, concurrent previews, approval→later-start state drift, changed current
   admission-authoritative evidence, strict preview→commit `planner_revision` CAS plus authoritative
   requirement/hash recomputation when the revision matches (including a simulated missed-bump writer),
+  conservative graph-write change detection (bump unless a canonical no-op is proven),
   atomic mutation+
   proposal approval, rows-authoritative canonical hash with no writable blob, draft→approved→superseded
-  lifecycle, exact-approved-assignment capacity validation without optimizer rerun, alternate-feasible placement still
+  lifecycle, explicit `adopt_current` unchanged-selection preview/approval,
+  exact-approved-assignment capacity validation without optimizer rerun, alternate-feasible placement still
   requiring fresh approval through an explicit evidence-divergence terminal/UX, progress/evidence-
   compatible pure projection after one/many completed files and dirty→clean reconciliation, rejection
-  of expanded/remapped work, execution lease binding to
+  of expanded/remapped work, batch/event projection cadence with no per-file/full-catalog O(tasks²)
+  behavior plus a copied-catalog numerical p95 fixed before the #39 PR, DEC-047 same-task retry priority
+  with no generic failure-budget consumption, execution lease binding to
   the rebased revision+fencing token, systemd auto-resume, missing legacy approval→fresh preview, same
   approved target offline→GATE-A await without re-preview, dirty offline target→mount/reconcile then
   compare, full-manifest structural drift and task-file/hash mismatch typed before execution, documented
