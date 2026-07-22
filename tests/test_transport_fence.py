@@ -28,10 +28,14 @@ Second-round reviewer seams pinned here:
   5. the fetch_events "terminal" defect is fixed in scope (allowed outcome + code in detail), no mock.
 
 Proposed production API surfaced by these tests (for Gate-1 review; names are the contract to confirm):
-  * fetch._observe_drive(con, label) -> dm.Observation, deriving identity from
-    fetch._live_drive_evidence(con, label) (live fs_uuid/annex_uuid/serial/statvfs)
+  * fetch._observe_drive(con, label) -> dm.Observation, deriving identity via
+    fetch._live_drive_evidence(con, label), which reads only low-level probes:
+    register.probe_fs_uuid / probe_annex_uuid / probe_serial(mount) + os.statvfs(mount)
   * dm mutation writer exposes .child_fence_fds (the actual held drive-lock FDs)
-  * fetch.fetch_model(..., mutation_writer=...) uses writer.child_fence_fds + writer.record_touched
+  * fetch.fetch_model(..., mutation_writer=...) uses writer.child_fence_fds for its mutating children
+    and calls writer.record_touched(paths, keys) AFTER physical publication + the durable archived row
+  * fetch._reconcile_touched validates recorded annex KEYS (via _annex_key_on_uuid / _annex_key_for_path),
+    not only paths; run() converts a clean-close reconciliation refusal into a typed terminal
   * fetch._run_monitored/_download_shard/_compress_isolated(..., inherit_fds=()) -> Popen(pass_fds=...)
   * fetch._annex_add(dest, path, inherit_fds=())  / fetch._annex_metadata(..., inherit_fds=())
   * fetch._reconcile_touched(con, label, dest, annex, paths, keys) -> None | raise DriveMutationRefused
@@ -58,6 +62,7 @@ from pathlib import Path
 from unittest import mock
 
 from modelark.core import db
+from modelark import archive_manifest
 from modelark import capacity_evidence
 from modelark import drive_fence
 from modelark import drive_mutation as dm
@@ -168,15 +173,6 @@ def _run_kwargs(**over):
     base = {"dest": None, "drive_label": "drive-00", "repos": ["a"], "max_24h_gb": 0}
     base.update(over)
     return base
-
-
-# Synthetic LIVE identity evidence and the fingerprint it derives, so a test can prove the observer
-# computes identity from live UUID/annex/serial/statvfs rather than trusting the persisted fingerprint.
-_LIVE_EV = {"fs_uuid": "fs-uuid-A", "annex_uuid": "annex-A", "serial": "serial-A",
-            "filesystem_capacity_bytes": 1000, "free_bytes": 850}
-_FP_LIVE = capacity_evidence.identity_fingerprint_v1(
-    fs_uuid=_LIVE_EV["fs_uuid"], annex_uuid=_LIVE_EV["annex_uuid"], serial=_LIVE_EV["serial"],
-    filesystem_capacity_bytes=_LIVE_EV["filesystem_capacity_bytes"])
 
 
 def _observe_from_rows(con):
@@ -470,14 +466,18 @@ def test_replica_fences_source_and_target_and_passes_both_fds(tmp_path):
     source+target FDs."""
     with _catalog(tmp_path) as con:
         task, archive_path, library = _replica_setup(con, tmp_path)
-        held, captured = {}, []
+        held, captured, reconciled = {}, [], []
 
         def cap_run(cmd, *a, **k):
             captured.append((tuple(cmd), k.get("pass_fds")))
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
+        def cap_reconcile(_con, label, dest, annex, paths, keys):
+            reconciled.append((label, tuple(paths), tuple(keys)))
+
         with _capture_held_fence_fds(held), \
              mock.patch.object(fetch, "_observe_drive", side_effect=_observe_from_rows(con), create=True), \
+             mock.patch.object(fetch, "_reconcile_touched", side_effect=cap_reconcile, create=True), \
              mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
              mock.patch.object(fetch.register, "library_root", return_value=library), \
              mock.patch.object(fetch, "_dest_writable", return_value=True), \
@@ -492,6 +492,9 @@ def test_replica_fences_source_and_target_and_passes_both_fds(tmp_path):
         for cmd, fds in mutating:
             assert tuple(fds or ()) == held["fds"], \
                 f"replica child {cmd[:5]} must inherit BOTH actual held fence FDs; got {fds}"
+        # the copied target key must reach reconciliation (not just be written and forgotten)
+        assert any(label == "drive-04" and "key-must" in keys for label, _paths, keys in reconciled), \
+            f"the copied target path/key must reach reconciliation; saw {reconciled}"
 
 
 # ===================================================================== R7: narrow real reconciliation
@@ -526,18 +529,29 @@ def test_touched_reconciliation_validates_recorded_set_narrowly(tmp_path):
         fetch._reconcile_touched(con, "drive-00", tmp_path, False, ["must/model.safetensors"], [])
 
 
-def test_touched_reconciliation_fails_closed_on_missing_durable_fact(tmp_path):
-    """R7: a recorded touched path with no durable catalog fact is a typed reconciliation refusal — the
-    reconciler is not a no-op, so the mutation leaves the generation dirty instead of publishing clean."""
+def test_touched_reconciliation_fails_closed_on_unprovable_annex_key(tmp_path):
+    """R7: reconciliation validates annex KEYS, not just paths — a recorded key that cannot be proven on
+    the drive fails closed. An implementation that ignores keys entirely cannot pass this."""
     with _catalog(tmp_path) as con:
         _proven_drive(con, "drive-00")
-        assert hasattr(fetch, "_reconcile_touched"), \
-            "PR-03b must add a narrow touched-set reconciler (fetch._reconcile_touched)"
-        try:
-            fetch._reconcile_touched(con, "drive-00", tmp_path, False, ["must/missing.safetensors"], [])
-            raise AssertionError("reconciliation must fail closed on a touched path with no durable fact")
-        except dm.DriveMutationRefused as exc:
-            assert exc.code == "DRIVE_RECONCILIATION_REQUIRED", exc.code
+        con.execute("INSERT INTO models(repo_id) VALUES('must')")
+        con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
+                    "VALUES('must','model.gguf',5,'gguf')")
+        (tmp_path / "must").mkdir()
+        (tmp_path / "must" / "model.gguf").write_bytes(b"bytes")   # bytes present — the KEY is the problem
+        con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
+                    "orig_bytes,stored_bytes,compressed,annex_key) VALUES('must','model.gguf',"
+                    "'model.gguf','must/model.gguf','drive-00',5,5,0,'KEY-x')")
+        assert hasattr(fetch, "_reconcile_touched"), "PR-03b must add fetch._reconcile_touched"
+        # both annex-key proof helpers report the key unprovable on this drive
+        with mock.patch.object(fetch, "_annex_key_on_uuid", return_value=False), \
+             mock.patch.object(fetch, "_annex_key_for_path", return_value=None):
+            try:
+                fetch._reconcile_touched(con, "drive-00", tmp_path, True,
+                                         ["must/model.gguf"], ["KEY-x"])
+                raise AssertionError("reconciliation must fail closed on an unprovable annex key")
+            except dm.DriveMutationRefused as exc:
+                assert exc.code == "DRIVE_RECONCILIATION_REQUIRED", exc.code
 
 
 # ===================================================================== R (stop/error): typed + dirty
@@ -567,9 +581,8 @@ def test_typed_terminal_is_preserved_as_result_and_durable_event(tmp_path):
         rows = con.execute("SELECT outcome, detail FROM fetch_events WHERE repo_id='a'").fetchall()
         assert rows, "the typed terminal must be recorded as a durable fetch_events row"
         outcome, detail = rows[-1]
-        allowed = {"archived", "policy", "auth", "rate_limited", "waiting", "error", "throttled",
-                   "awaiting-drive", "compress-fallback"}
-        assert outcome in allowed, f"terminal event outcome {outcome!r} violates the fetch_events CHECK"
+        assert outcome == "error", \
+            f"the typed terminal must be recorded under the allowed 'error' outcome, not {outcome!r}"
         assert "TARGET_PATH_CONFLICT" in (detail or ""), \
             f"the typed terminal code must be preserved in the event detail; got {detail!r}"
 
@@ -605,31 +618,51 @@ def test_crash_during_batch_leaves_generation_dirty_without_anchor(tmp_path):
 # ===================================================================== seam 1: live identity proof
 
 def test_observe_drive_derives_identity_from_live_evidence(tmp_path):
-    """The production observer derives fingerprint/capacity/free from LIVE UUID/annex/serial/statvfs
-    evidence, not from the persisted fingerprint (so a stale row cannot vouch for a swapped volume)."""
+    """The REAL `_observe_drive`+`_live_drive_evidence` derive fingerprint/capacity/free from LIVE probes
+    (fs_uuid/annex_uuid/serial/statvfs), NOT the persisted row. Only the low-level probes are mocked; the
+    persisted row is set to deliberately CONFLICTING values, so trusting the catalog would fail the test."""
     with _catalog(tmp_path) as con:
-        _proven_drive(con, "drive-00", fp=_FP_LIVE,
-                      fscap=_LIVE_EV["filesystem_capacity_bytes"], free=0)
+        # persisted row deliberately conflicts with the live probes below (stale identity + free/cap)
+        stale_fp = capacity_evidence.identity_fingerprint_v1(
+            fs_uuid="STALE-uuid", annex_uuid="STALE-annex", serial="STALE-serial",
+            filesystem_capacity_bytes=222)
+        _proven_drive(con, "drive-00", fp=stale_fp, fscap=222, free=111)
         assert hasattr(fetch, "_observe_drive") and hasattr(fetch, "_live_drive_evidence"), \
             "PR-03b must add fetch._observe_drive + fetch._live_drive_evidence (live identity proof)"
-        with mock.patch.object(fetch, "_live_drive_evidence", return_value=dict(_LIVE_EV), create=True):
+        live_fp = capacity_evidence.identity_fingerprint_v1(
+            fs_uuid="LIVE-uuid", annex_uuid="LIVE-annex", serial="LIVE-serial",
+            filesystem_capacity_bytes=1000)
+        statvfs = types.SimpleNamespace(f_frsize=1, f_blocks=1000, f_bavail=850)
+        # mock ONLY the low-level probes; the real _live_drive_evidence + _observe_drive run
+        with mock.patch.object(fetch.register, "archive_path", return_value=tmp_path), \
+             mock.patch.object(fetch.register, "probe_fs_uuid", return_value="LIVE-uuid", create=True), \
+             mock.patch.object(fetch.register, "probe_annex_uuid", return_value="LIVE-annex", create=True), \
+             mock.patch.object(fetch.register, "probe_serial", return_value="LIVE-serial", create=True), \
+             mock.patch.object(fetch.os, "statvfs", return_value=statvfs):
             obs = fetch._observe_drive(con, "drive-00")
         assert obs.identity_proven is True
-        assert obs.fingerprint == _FP_LIVE, "fingerprint must be derived from live evidence"
-        assert obs.filesystem_capacity == _LIVE_EV["filesystem_capacity_bytes"]
-        assert obs.free_bytes == _LIVE_EV["free_bytes"], "free must be the live statvfs value, not the row"
+        assert obs.fingerprint == live_fp, "fingerprint must come from live probes, not the persisted row"
+        assert obs.filesystem_capacity == 1000, "capacity must be the live statvfs total, not persisted 222"
+        assert obs.free_bytes == 850, "free must be the live statvfs value, not persisted 111"
 
 
 def test_live_identity_mismatch_refuses(tmp_path):
-    """If live evidence yields a different identity than the proven row, the mutation refuses
-    DRIVE_IDENTITY_UNPROVEN and never dirties (a swapped/mismounted volume)."""
+    """If the LIVE probes yield a different identity than the proven row, the mutation refuses
+    DRIVE_IDENTITY_UNPROVEN and never dirties (a swapped/mismounted volume). Real derivation; only the
+    low-level probes are mocked, with a divergent live fs_uuid."""
     with _catalog(tmp_path) as con:
-        _proven_drive(con, "drive-00", fp=_FP_LIVE,
-                      fscap=_LIVE_EV["filesystem_capacity_bytes"], free=0)
+        proven_fp = capacity_evidence.identity_fingerprint_v1(
+            fs_uuid="PROVEN-uuid", annex_uuid="PROVEN-annex", serial="PROVEN-serial",
+            filesystem_capacity_bytes=1000)
+        _proven_drive(con, "drive-00", fp=proven_fp, fscap=1000, free=900)
         assert hasattr(fetch, "_observe_drive") and hasattr(fetch, "_live_drive_evidence"), \
             "PR-03b must add fetch._observe_drive + fetch._live_drive_evidence"
-        wrong = dict(_LIVE_EV, fs_uuid="fs-uuid-DIFFERENT")            # a different physical volume
-        with mock.patch.object(fetch, "_live_drive_evidence", return_value=wrong, create=True):
+        statvfs = types.SimpleNamespace(f_frsize=1, f_blocks=1000, f_bavail=900)
+        with mock.patch.object(fetch.register, "archive_path", return_value=tmp_path), \
+             mock.patch.object(fetch.register, "probe_fs_uuid", return_value="SWAPPED-uuid", create=True), \
+             mock.patch.object(fetch.register, "probe_annex_uuid", return_value="PROVEN-annex", create=True), \
+             mock.patch.object(fetch.register, "probe_serial", return_value="PROVEN-serial", create=True), \
+             mock.patch.object(fetch.os, "statvfs", return_value=statvfs):
             try:
                 with dm.drive_mutation(con, ["drive-00"], "op",
                                        observe=lambda label: fetch._observe_drive(con, label),
@@ -724,29 +757,73 @@ def test_download_and_compression_forward_inherit_fds_to_run_monitored(tmp_path)
 
 # ===================================================================== seam 3: reconciliation <-> transport
 
-def test_published_touched_set_reaches_reconciliation(tmp_path):
-    """A path/key the transport publishes is recorded on the mutation writer and reaches the reconciler
-    — transport cannot record nothing yet still publish a clean anchor."""
+def test_fetch_model_forwards_writer_fds_and_records_touch_after_publish(tmp_path):
+    """Seam 3/2 end-to-end through the REAL fetch_model (one file, minimally mocked): the writer's actual
+    FDs reach its mutating children (download + annex-add), and the touch (path + annex key) is recorded
+    only AFTER the physical publication and the durable archived row."""
+    assert "mutation_writer" in inspect.signature(fetch.fetch_model).parameters, \
+        "PR-03b must add `mutation_writer` to fetch_model (writer FDs + record_touched after publish)"
     with _catalog(tmp_path) as con:
-        _proven_drive(con, "drive-00", fp=_FP)
-        reconciled = []
+        _proven_drive(con, "drive-00")
+        con.execute("INSERT INTO models(repo_id) VALUES('org/repo')")
+        con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
+                    "VALUES('org/repo','config.json',2,'aux')")
+        fd = os.open(os.devnull, os.O_RDONLY)
+        order, seen = [], {}
 
-        def fake_model(ctx, rid, dest, label, annex, cfg, *, mutation_writer=None, **kw):
-            assert mutation_writer is not None, "run() must pass the mutation writer into fetch_model"
-            mutation_writer.record_touched(label, paths=["must/model.safetensors"], keys=["KEY-must"])
-            return {"repo_id": rid, "files": 1, "skipped": 0, "bytes": 1}
+        class _Writer:
+            child_fence_fds = (fd,)
 
-        def fake_reconcile(_con, label, dest, annex, paths, keys):
-            reconciled.append((label, tuple(paths), tuple(keys)))
+            def record_touched(self, label, *, paths=(), keys=()):
+                order.append("touch")
+                seen["touch"] = (label, tuple(paths), tuple(keys))
 
-        with mock.patch.object(fetch, "_observe_drive", side_effect=_observe_from_rows(con), create=True), \
-             mock.patch.object(fetch, "_reconcile_touched", side_effect=fake_reconcile, create=True), \
-             mock.patch.object(fetch, "fetch_model", side_effect=fake_model), \
-             mock.patch.object(fetch, "_is_annex", return_value=False), \
-             mock.patch.object(fetch.wishlist, "compression", return_value={"threads": 1}):
-            fetch.run(ctx=fetch.RunCtx(con=con), **_run_kwargs(dest=tmp_path))
-        assert ("drive-00", ("must/model.safetensors",), ("KEY-must",)) in reconciled, \
-            f"the published touched path/key must reach reconciliation; saw {reconciled}"
+        def fake_monitored(cmd, progress, stall, should_stop, *, inherit_fds=()):
+            seen["download_fds"] = tuple(inherit_fds)
+            req = json.loads(cmd[-1])
+            out = Path(req["local_dir"]) / "config.json"
+            out.write_text("{}")
+            Path(req["result"]).write_text(json.dumps({"ok": True, "path": str(out)}))
+            return {"outcome": "exited", "rc": 0, "stderr": ""}
+
+        def fake_annex_add(dest, path, *, inherit_fds=()):
+            seen["annex_add_fds"] = tuple(inherit_fds)
+            order.append("annex_add")
+            return "KEY-x"
+
+        real_publish, real_upsert = fetch._publish_staged, fetch.db.upsert
+
+        def wrapped_publish(*a, **k):
+            result = real_publish(*a, **k)
+            order.append("publish")
+            return result
+
+        def wrapped_upsert(c, table, row, **k):
+            real_upsert(c, table, row, **k)
+            if table == "archived":
+                order.append("archived")
+
+        manifest = [archive_manifest.ManifestFile("config.json", 2, None, "aux", None, "raw")]
+        try:
+            with mock.patch.object(fetch, "_run_monitored", side_effect=fake_monitored), \
+                 mock.patch.object(fetch, "_annex_add", side_effect=fake_annex_add), \
+                 mock.patch.object(fetch, "_annex_metadata"), \
+                 mock.patch.object(fetch, "_publish_staged", side_effect=wrapped_publish), \
+                 mock.patch.object(fetch.db, "upsert", side_effect=wrapped_upsert):
+                fetch.fetch_model(fetch.RunCtx(con=con), "org/repo", tmp_path, "drive-00", True,
+                                  {"threads": 1}, manifest=manifest, mutation_writer=_Writer())
+        finally:
+            os.close(fd)
+        assert seen.get("download_fds") == (fd,), \
+            f"the download child must inherit the writer's fence FDs; got {seen.get('download_fds')}"
+        assert seen.get("annex_add_fds") == (fd,), \
+            f"the annex-add child must inherit the writer's fence FDs; got {seen.get('annex_add_fds')}"
+        _label, paths, keys = seen.get("touch", (None, (), ()))
+        assert paths and "KEY-x" in keys, \
+            f"fetch_model must record the published path + annex key on the writer; got {seen.get('touch')}"
+        assert "publish" in order and "archived" in order and "touch" in order, order
+        assert order.index("touch") > order.index("publish"), "touch must be recorded after physical publication"
+        assert order.index("touch") > order.index("archived"), "touch must be recorded after the durable archived row"
 
 
 def test_touched_reconciliation_fails_closed_on_missing_physical_path(tmp_path):
@@ -767,6 +844,41 @@ def test_touched_reconciliation_fails_closed_on_missing_physical_path(tmp_path):
             raise AssertionError("reconciliation must fail closed when the published bytes are absent")
         except dm.DriveMutationRefused as exc:
             assert exc.code == "DRIVE_RECONCILIATION_REQUIRED", exc.code
+
+
+def test_run_returns_typed_terminal_when_clean_close_reconciliation_refuses(tmp_path):
+    """A clean-close reconciliation refusal must be surfaced by run() as the typed
+    DRIVE_RECONCILIATION_REQUIRED terminal, leaving the generation dirty with no anchor — not a leaked
+    exception and not a generic failure."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00")
+
+        def ok_model(ctx, rid, dest, label, annex, cfg, *, mutation_writer=None, **kw):
+            return {"repo_id": rid, "files": 1, "skipped": 0, "bytes": 1}
+
+        def refuse_reconcile(_con, label, dest, annex, paths, keys):
+            raise dm.DriveMutationRefused("DRIVE_RECONCILIATION_REQUIRED", drive=label)
+
+        with mock.patch.object(fetch, "_observe_drive", side_effect=_observe_from_rows(con), create=True), \
+             mock.patch.object(fetch, "_reconcile_touched", side_effect=refuse_reconcile, create=True), \
+             mock.patch.object(fetch, "fetch_model", side_effect=ok_model), \
+             mock.patch.object(fetch, "_is_annex", return_value=False), \
+             mock.patch.object(fetch, "_event"), \
+             mock.patch.object(fetch.wishlist, "compression", return_value={"threads": 1}):
+            try:
+                result = fetch.run(ctx=fetch.RunCtx(con=con), **_run_kwargs(dest=tmp_path))
+            except dm.DriveMutationRefused as exc:
+                raise AssertionError(
+                    "run() must convert a clean-close reconciliation refusal into a typed terminal, "
+                    f"not leak it: {exc}") from exc
+        terminal = result.get("terminal_failure") or {}
+        assert terminal.get("code") == "DRIVE_RECONCILIATION_REQUIRED", \
+            f"run() must surface the typed reconciliation terminal; got {terminal}"
+        dirty = con.execute("SELECT count(*) FROM drive_dirty_generations "
+                            "WHERE drive_label='drive-00'").fetchone()[0]
+        anchors = con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0]
+        assert (dirty, anchors) == (1, 0), \
+            f"a reconciliation refusal must leave the generation dirty with no anchor; dirty={dirty} anchors={anchors}"
 
 
 # ===================================================================== seam 4: writability-probe ordering
