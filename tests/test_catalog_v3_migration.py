@@ -154,7 +154,7 @@ def test_injected_failure_rolls_back_to_v2(tmp_path):
     try:
         db._migrate_capacity_evidence_v3(proxy, backup_existing=True)
         raise AssertionError("migration should have raised")
-    except sqlite3.OperationalError:
+    except RuntimeError:                                # migration wraps a mid-DDL failure, like v1->v2
         pass
     con.close()
 

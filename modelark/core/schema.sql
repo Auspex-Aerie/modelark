@@ -67,7 +67,22 @@ CREATE TABLE IF NOT EXISTS drives (
     raid_backed        BOOLEAN NOT NULL DEFAULT false CHECK (raid_backed IN (0, 1)),
     health             VARCHAR,
     last_seen          TIMESTAMP,
-    notes              VARCHAR
+    notes              VARCHAR,
+    -- Catalog v3 (#35-A) capacity-evidence identity. `capacity_bytes` stays nominal device capacity;
+    -- `filesystem_capacity_bytes` is the identity-proven filesystem total for the current epoch and
+    -- the only epoch maximum Gate B may use. `free_bytes` is compatibility/diagnostic, never authority.
+    identity_epoch            INTEGER NOT NULL DEFAULT 1
+                              CHECK (identity_epoch >= 1),
+    write_generation          INTEGER NOT NULL DEFAULT 0
+                              CHECK (write_generation >= 0),
+    filesystem_capacity_bytes BIGINT
+                              CHECK (filesystem_capacity_bytes IS NULL
+                                     OR filesystem_capacity_bytes >= 0),
+    identity_fingerprint      VARCHAR
+                              CHECK (identity_fingerprint IS NULL
+                                     OR length(identity_fingerprint) = 64),
+    write_authority           VARCHAR NOT NULL DEFAULT 'unknown'
+                              CHECK (write_authority IN ('unknown','dedicated_local'))
 );
 
 -- Which file lives on which drive (mirror of `git annex whereis`).
@@ -177,6 +192,62 @@ CREATE TABLE IF NOT EXISTS plan_drives (
     FOREIGN KEY (plan_id) REFERENCES plans(plan_id) ON UPDATE CASCADE ON DELETE CASCADE,
     FOREIGN KEY (drive_label) REFERENCES drives(drive_label) ON UPDATE CASCADE ON DELETE CASCADE
 );
+
+-- Catalog v3 (#35-A) append-only capacity evidence. A repair never edits an old row; it opens a new
+-- generation and publishes a new anchor. #35 callers leave both owner fields null; #39 populates them.
+CREATE TABLE IF NOT EXISTS drive_dirty_generations (
+    drive_label         VARCHAR NOT NULL,
+    identity_epoch      INTEGER NOT NULL CHECK (identity_epoch >= 1),
+    generation          INTEGER NOT NULL CHECK (generation >= 1),
+    operation_code      VARCHAR NOT NULL CHECK (length(trim(operation_code)) > 0),
+    owner_session_id    VARCHAR,
+    owner_fencing_token INTEGER CHECK (owner_fencing_token IS NULL
+                                       OR owner_fencing_token >= 1),
+    started_at          TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (drive_label, identity_epoch, generation),
+    FOREIGN KEY (drive_label) REFERENCES drives(drive_label)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CHECK ((owner_session_id IS NULL) = (owner_fencing_token IS NULL))
+);
+
+CREATE TABLE IF NOT EXISTS drive_clean_anchors (
+    anchor_id                  INTEGER PRIMARY KEY,
+    drive_label               VARCHAR NOT NULL,
+    identity_epoch            INTEGER NOT NULL CHECK (identity_epoch >= 1),
+    generation                INTEGER NOT NULL CHECK (generation >= 1),
+    anchor_free_bytes         BIGINT NOT NULL CHECK (anchor_free_bytes >= 0),
+    filesystem_capacity_bytes BIGINT NOT NULL CHECK (filesystem_capacity_bytes >= 0),
+    identity_fingerprint      VARCHAR NOT NULL CHECK (length(identity_fingerprint) = 64),
+    write_authority           VARCHAR NOT NULL CHECK (write_authority = 'dedicated_local'),
+    identity_proof            TEXT NOT NULL CHECK (length(identity_proof) > 0),
+    fence_proof               TEXT NOT NULL CHECK (length(fence_proof) > 0),
+    observed_at               TIMESTAMP NOT NULL,
+    created_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (drive_label, identity_epoch, generation),
+    FOREIGN KEY (drive_label, identity_epoch, generation)
+        REFERENCES drive_dirty_generations(drive_label, identity_epoch, generation)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CHECK (anchor_free_bytes <= filesystem_capacity_bytes)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dirty_generation_owner
+    ON drive_dirty_generations(owner_session_id, owner_fencing_token)
+    WHERE owner_session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_clean_anchor_latest
+    ON drive_clean_anchors(drive_label, identity_epoch, generation DESC);
+
+CREATE TRIGGER IF NOT EXISTS drive_dirty_generations_no_update
+BEFORE UPDATE ON drive_dirty_generations
+BEGIN SELECT RAISE(ABORT, 'drive_dirty_generations is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS drive_dirty_generations_no_delete
+BEFORE DELETE ON drive_dirty_generations
+BEGIN SELECT RAISE(ABORT, 'drive_dirty_generations is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS drive_clean_anchors_no_update
+BEFORE UPDATE ON drive_clean_anchors
+BEGIN SELECT RAISE(ABORT, 'drive_clean_anchors is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS drive_clean_anchors_no_delete
+BEFORE DELETE ON drive_clean_anchors
+BEGIN SELECT RAISE(ABORT, 'drive_clean_anchors is append-only'); END;
 
 -- Foreign-key child indexes keep parent updates/deletes and integrity checks bounded.
 CREATE INDEX IF NOT EXISTS idx_files_repo ON files(repo_id);

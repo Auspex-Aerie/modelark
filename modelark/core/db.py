@@ -64,12 +64,31 @@ sqlite3.register_adapter(datetime, lambda d: d.isoformat(sep=" ", timespec="seco
 
 
 def _statements(sql: str) -> Iterable[str]:
-    """Yield executable statements, stripping `--` line comments first so a ';'
-    inside a comment is not mistaken for a statement boundary."""
+    """Yield executable statements, stripping `--` line comments first so a ';' inside a comment is
+    not mistaken for a statement boundary. A `CREATE TRIGGER … BEGIN … END;` body contains its own
+    `;` separators, so re-join split fragments while inside a BEGIN…END block (tracked by keyword
+    depth) and emit the whole compound statement as one."""
     no_comments = "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+    buffer: list[str] = []
+    depth = 0
     for chunk in no_comments.split(";"):
-        if chunk.strip():
-            yield chunk
+        buffer.append(chunk)
+        depth += len(re.findall(r"\bBEGIN\b", chunk, re.IGNORECASE))
+        depth -= len(re.findall(r"\bEND\b", chunk, re.IGNORECASE))
+        if depth <= 0:
+            statement = ";".join(buffer)         # restore the internal separators of a trigger body
+            if statement.strip():
+                yield statement
+            buffer = []
+            depth = 0
+    tail = ";".join(buffer)                       # a final statement with no trailing ';'
+    if tail.strip():
+        yield tail
+
+
+# Catalog-v3 (#35-A) append-only evidence tables. The v2->v3 migration creates these transactionally
+# after its backup, so the pre-migration tables-only pass must NOT create them first on a v2 catalog.
+_V3_EVIDENCE_TABLES = ("drive_dirty_generations", "drive_clean_anchors")
 
 
 def _apply_schema(con: sqlite3.Connection, tables_only: bool = False) -> None:
@@ -77,6 +96,10 @@ def _apply_schema(con: sqlite3.Connection, tables_only: bool = False) -> None:
     rebuilt before unique indexes and views are installed; the final pass installs everything."""
     for stmt in _statements(SCHEMA_PATH.read_text()):
         if tables_only and not stmt.lstrip().upper().startswith("CREATE TABLE"):
+            continue
+        # Never create a v3 evidence table before the v2->v3 migration takes its backup: the migration
+        # owns them transactionally, and the final (non-tables-only) pass creates them idempotently.
+        if tables_only and any(t in stmt for t in _V3_EVIDENCE_TABLES):
             continue
         con.execute(stmt)
 
@@ -160,7 +183,8 @@ _INTEGRITY_TABLES = (
 )
 _VIEW_NAMES = ("v_ui", "v_model_summary", "v_storage_by_drive")
 _INTEGRITY_SCHEMA_VERSION = 1
-_SCHEMA_VERSION = 2
+_CAPACITY_MODE_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 def _validate_catalog_version(version: int, *, read_only: bool = False) -> None:
@@ -311,13 +335,76 @@ def _migrate_capacity_mode_v2(con: sqlite3.Connection, *, backup_existing: bool)
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_one_active "
             "ON plans(is_active) WHERE is_active = 1"
         )
-        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        con.execute(f"PRAGMA user_version={_CAPACITY_MODE_SCHEMA_VERSION}")
         con.execute("COMMIT")
     except Exception as exc:
         con.execute("ROLLBACK")
         if isinstance(exc, RuntimeError):
             raise
         raise RuntimeError(f"Cannot migrate plans to schema v2 capacity modes ({exc})") from exc
+
+
+# Catalog-v3 (#35-A) drives-column additions. Introspected ALTER TABLE ADD COLUMN (no drives rebuild);
+# each column is defaulted/nullable so existing rows migrate without fabricated evidence.
+_V3_DRIVE_COLUMNS = (
+    ("identity_epoch",
+     "ALTER TABLE drives ADD COLUMN identity_epoch INTEGER NOT NULL DEFAULT 1 "
+     "CHECK (identity_epoch >= 1)"),
+    ("write_generation",
+     "ALTER TABLE drives ADD COLUMN write_generation INTEGER NOT NULL DEFAULT 0 "
+     "CHECK (write_generation >= 0)"),
+    ("filesystem_capacity_bytes",
+     "ALTER TABLE drives ADD COLUMN filesystem_capacity_bytes BIGINT "
+     "CHECK (filesystem_capacity_bytes IS NULL OR filesystem_capacity_bytes >= 0)"),
+    ("identity_fingerprint",
+     "ALTER TABLE drives ADD COLUMN identity_fingerprint VARCHAR "
+     "CHECK (identity_fingerprint IS NULL OR length(identity_fingerprint) = 64)"),
+    ("write_authority",
+     "ALTER TABLE drives ADD COLUMN write_authority VARCHAR NOT NULL DEFAULT 'unknown' "
+     "CHECK (write_authority IN ('unknown','dedicated_local'))"),
+)
+
+
+def _v3_object_ddl() -> list[str]:
+    """The catalog-v3 evidence tables, indexes, and triggers taken verbatim (single-sourced) from the
+    packaged schema, so the migration and a fresh bootstrap create identical objects in FK order."""
+    wanted = []
+    for stmt in _statements(SCHEMA_PATH.read_text()):
+        head = stmt.strip().upper()
+        if (head.startswith(("CREATE TABLE", "CREATE INDEX", "CREATE TRIGGER"))
+                and any(table in stmt for table in _V3_EVIDENCE_TABLES)):
+            wanted.append(stmt)
+    return wanted
+
+
+def _migrate_capacity_evidence_v3(con, *, backup_existing: bool) -> None:
+    """Backup-first, transactional, additive v2->v3 migration: add the capacity-evidence columns, the
+    two append-only evidence tables, their indexes, and triggers. Create no evidence rows and leave
+    every drive unknown (epoch 1 is only a namespace for migrated rows). No v3 object is created
+    before the backup, and all v3 DDL plus user_version commit in one transaction, so an injected
+    failure leaves a pristine v2 catalog."""
+    columns = {row[1] for row in con.execute('PRAGMA table_info("drives")').fetchall()}
+    if "identity_epoch" in columns:
+        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")   # fresh/canonical drives already v3-shaped
+        return
+    if con.execute("PRAGMA foreign_keys").fetchone()[0]:
+        raise RuntimeError("Capacity-evidence migration requires foreign_keys=OFF")
+    if backup_existing:
+        _backup_before_migration(con, "pre-evidence-v3")        # strictly before any v3 object
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        for name, ddl in _V3_DRIVE_COLUMNS:
+            if name not in columns:                             # introspected add
+                con.execute(ddl)
+        for stmt in _v3_object_ddl():
+            con.execute(stmt)
+        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        con.execute("COMMIT")
+    except Exception as exc:
+        con.execute("ROLLBACK")
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(f"Cannot migrate catalog to v3 capacity evidence ({exc})") from exc
 
 
 def _migrate(con, version: int, *, backup_existing: bool) -> None:
@@ -327,8 +414,11 @@ def _migrate(con, version: int, *, backup_existing: bool) -> None:
         _migrate_legacy_columns(con)
         _rebuild_integrity_tables(con)
         version = _INTEGRITY_SCHEMA_VERSION
-    if version < _SCHEMA_VERSION:
+    if version < _CAPACITY_MODE_SCHEMA_VERSION:
         _migrate_capacity_mode_v2(con, backup_existing=backup_existing)
+        version = _CAPACITY_MODE_SCHEMA_VERSION
+    if version < _SCHEMA_VERSION:
+        _migrate_capacity_evidence_v3(con, backup_existing=backup_existing)
         version = _SCHEMA_VERSION
     if version != _SCHEMA_VERSION:
         raise RuntimeError(f"Catalog migration stopped at v{version}, expected v{_SCHEMA_VERSION}")
