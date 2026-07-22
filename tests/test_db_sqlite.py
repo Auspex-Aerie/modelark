@@ -30,6 +30,15 @@ def _legacy_without_constraints(tmp_path):
         con.execute(f'DROP TABLE "{table}"')
     for table in db._INTEGRITY_TABLES:
         con.execute(f'ALTER TABLE "{table}__legacy" RENAME TO "{table}"')
+    # Represent a genuine pre-v3 catalog: strip the catalog-v3 evidence objects/columns a real legacy
+    # database never had, so the rebuild exercises the v0->v3 path from scratch (not a hybrid shape).
+    con.execute("DROP TABLE IF EXISTS drive_clean_anchors")
+    con.execute("DROP TABLE IF EXISTS drive_dirty_generations")
+    pre_v3 = ("drive_label,fs_uuid,annex_uuid,capacity_bytes,free_bytes,hw_model,serial,"
+              "physical_location,role,raid_backed,health,last_seen,notes")
+    con.execute(f"CREATE TABLE drives__pre3 AS SELECT {pre_v3} FROM drives")
+    con.execute("DROP TABLE drives")
+    con.execute("ALTER TABLE drives__pre3 RENAME TO drives")
     con.execute("PRAGMA user_version=0")
     con.close()
     return sqlite3.connect(str(db.DB_PATH), isolation_level=None)
@@ -72,7 +81,11 @@ def test_schema_and_views(tmp_path):
     assert con.execute("PRAGMA foreign_key_list(archived)").fetchall()
     plan_columns = {row[1] for row in con.execute("PRAGMA table_info(plans)").fetchall()}
     assert "capacity_mode" in plan_columns and "provisioning" not in plan_columns
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION
+    # v3 (#35-A) evidence objects are bootstrapped for a fresh catalog too
+    drive_columns = {row[1] for row in con.execute("PRAGMA table_info(drives)").fetchall()}
+    assert {"identity_epoch", "write_generation", "write_authority"} <= drive_columns
+    assert {"drive_dirty_generations", "drive_clean_anchors"} <= tables
     con.close()
 
 
@@ -216,6 +229,32 @@ def test_legacy_catalog_rebuild_preserves_rows_and_applies_migrations(tmp_path):
     v2_backup.close()
 
 
+def test_v0_to_v3_migration_backs_up_a_genuine_v2_before_evidence(tmp_path):
+    """A v0 catalog migrating all the way to v3 must still take the evidence backup, and that backup
+    must be a genuine v2 (no v3 columns/tables): the integrity rebuild must not pull the v3 drive
+    columns backward and let the v3 step short-circuit past its own backup."""
+    con = _legacy_without_constraints(tmp_path)
+    con.execute("INSERT INTO drives(drive_label,free_bytes,role,raid_backed) "
+                "VALUES('drive-01',500,'primary',0)")
+    con.close()
+
+    con = db.connect()
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION
+    drive_columns = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
+    assert {"identity_epoch", "write_authority"} <= drive_columns
+    assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0   # no fabricated evidence
+    con.close()
+
+    v3_backup = db.DB_PATH.with_name(f"{db.DB_PATH.name}.pre-evidence-v3.bak")
+    assert v3_backup.is_file(), "v0->v3 must still take the evidence backup"
+    backup = sqlite3.connect(str(v3_backup))
+    assert backup.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert "identity_epoch" not in {r[1] for r in backup.execute("PRAGMA table_info(drives)").fetchall()}
+    tables = {r[0] for r in backup.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "drive_clean_anchors" not in tables and "drive_dirty_generations" not in tables
+    backup.close()
+
+
 def test_legacy_orphans_abort_and_roll_back_integrity_rebuild(tmp_path):
     con = _legacy_without_constraints(tmp_path)
     con.execute("INSERT INTO selection(repo_id) VALUES('missing/model')")
@@ -250,7 +289,7 @@ def test_v1_capacity_modes_map_transactionally_and_idempotently(tmp_path):
     ).fetchall() == [("aware", "compression_aware"), ("safe", "guaranteed")]
     columns = {row[1] for row in con.execute("PRAGMA table_info(plans)").fetchall()}
     assert "capacity_mode" in columns and "provisioning" not in columns
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION
     assert con.execute("PRAGMA foreign_key_check").fetchall() == []
     assert con.execute("SELECT plan_id,drive_label FROM plan_drives").fetchone() == (
         "safe", "drive-01"
@@ -305,7 +344,7 @@ def test_v2_capacity_mode_migration_rolls_back_invalid_legacy_value(tmp_path):
 
 def test_newer_catalog_is_rejected_without_stamping_down(tmp_path):
     con = _fresh(tmp_path)
-    con.execute("PRAGMA user_version=3")
+    con.execute("PRAGMA user_version=4")             # a schema newer than this build (_SCHEMA_VERSION=3)
     con.close()
     before = db.DB_PATH.read_bytes()
     sidecars_before = {
@@ -318,7 +357,7 @@ def test_newer_catalog_is_rejected_without_stamping_down(tmp_path):
     except RuntimeError as exc:
         assert "newer than this ModelArk build" in str(exc), exc
     raw = sqlite3.connect(str(db.DB_PATH))
-    assert raw.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == 4
     raw.close()
     assert db.DB_PATH.read_bytes() == before
     assert {
