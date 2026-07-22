@@ -131,46 +131,57 @@ def test_v3_schema_constraint_matrix(tmp_path):
     assert con.execute("PRAGMA user_version").fetchone()[0] == 3, \
         "v3 schema not created (expected Gate-1 red)"
 
-    def rejects(sql, params=()):
+    def rejected(sql, exc_types, contains=None):
+        """A negative case: the statement must raise the SPECIFIC constraint error, so an unrelated
+        OperationalError (missing/misspelled column in a malformed schema) is NOT mistaken for a
+        working constraint (Greptile #1)."""
         try:
-            con.execute(sql, list(params))
-            return False
-        except sqlite3.Error:
-            return True
+            con.execute(sql)
+        except exc_types as exc:
+            return contains is None or contains.lower() in str(exc).lower()
+        return False
 
-    # A valid dirty generation (both owner fields null, pre-#39) is accepted...
-    assert not rejects(
-        "INSERT INTO drive_dirty_generations(drive_label,identity_epoch,generation,operation_code) "
-        "VALUES('drive-00',1,1,'test')")
-    # ...append-only triggers reject UPDATE and DELETE on both evidence tables
-    assert rejects("UPDATE drive_dirty_generations SET operation_code='x' WHERE generation=1")
-    assert rejects("DELETE FROM drive_dirty_generations WHERE generation=1")
-    # both-present owner pair is allowed; exactly-one is refused by the paired CHECK
-    assert not rejects(
-        "INSERT INTO drive_dirty_generations"
-        "(drive_label,identity_epoch,generation,operation_code,owner_session_id,owner_fencing_token) "
-        "VALUES('drive-00',1,2,'test','sess',7)")
-    assert rejects(
+    fp = "a" * 64
+    anchor = ("INSERT INTO drive_clean_anchors(drive_label,identity_epoch,generation,anchor_free_bytes,"
+              "filesystem_capacity_bytes,identity_fingerprint,write_authority,identity_proof,fence_proof,"
+              "observed_at) VALUES('drive-00',1,{gen},{free},1000,'{fp}','{auth}','p','p','now')")
+
+    # Positive controls: valid rows insert cleanly. If the schema is malformed these raise and the
+    # test fails here rather than letting negative cases pass by accident.
+    con.execute("INSERT INTO drive_dirty_generations"
+                "(drive_label,identity_epoch,generation,operation_code) VALUES('drive-00',1,1,'test')")
+    con.execute("INSERT INTO drive_dirty_generations"
+                "(drive_label,identity_epoch,generation,operation_code,owner_session_id,owner_fencing_token)"
+                " VALUES('drive-00',1,2,'test','sess',7)")
+    con.execute(anchor.format(gen=1, free=500, fp=fp, auth="dedicated_local"))   # valid clean anchor
+
+    # Paired dirty-owner CHECK: exactly one of the pair is refused.
+    assert rejected(
         "INSERT INTO drive_dirty_generations"
         "(drive_label,identity_epoch,generation,operation_code,owner_session_id) "
-        "VALUES('drive-00',1,3,'test','sess')")
-    # anchor free bytes must not exceed filesystem capacity, fingerprint must be 64 chars,
-    # write_authority is constrained, and the anchor references an existing dirty generation
-    fp = "a" * 64
-    assert rejects(
-        "INSERT INTO drive_clean_anchors(drive_label,identity_epoch,generation,anchor_free_bytes,"
-        "filesystem_capacity_bytes,identity_fingerprint,write_authority,identity_proof,fence_proof,"
-        f"observed_at) VALUES('drive-00',1,1,2000,1000,'{fp}','dedicated_local','p','p','now')")
-    assert rejects(
-        "INSERT INTO drive_clean_anchors(drive_label,identity_epoch,generation,anchor_free_bytes,"
-        "filesystem_capacity_bytes,identity_fingerprint,write_authority,identity_proof,fence_proof,"
-        "observed_at) VALUES('drive-00',1,1,500,1000,'short','dedicated_local','p','p','now')")
-    assert rejects(
-        "INSERT INTO drive_clean_anchors(drive_label,identity_epoch,generation,anchor_free_bytes,"
-        "filesystem_capacity_bytes,identity_fingerprint,write_authority,identity_proof,fence_proof,"
-        f"observed_at) VALUES('drive-00',1,1,500,1000,'{fp}','shared','p','p','now')")
-    # write_authority on drives is constrained to the two accepted values
-    assert rejects("UPDATE drives SET write_authority='bogus' WHERE drive_label='drive-00'")
+        "VALUES('drive-00',1,3,'test','sess')", sqlite3.IntegrityError)
+
+    # Append-only triggers reject UPDATE and DELETE on BOTH evidence tables (Greptile #2). Triggers
+    # RAISE(ABORT, '... append-only'), so assert the trigger error specifically, not any error.
+    for table in ("drive_dirty_generations", "drive_clean_anchors"):
+        assert rejected(f"UPDATE {table} SET identity_epoch=9 WHERE generation=1",
+                        sqlite3.OperationalError, "append-only"), table
+        assert rejected(f"DELETE FROM {table} WHERE generation=1",
+                        sqlite3.OperationalError, "append-only"), table
+
+    # Anchor free bytes must not exceed filesystem capacity; fingerprint must be 64 chars;
+    # write_authority is constrained — each on the existing, still-unanchored generation 2.
+    assert rejected(anchor.format(gen=2, free=2000, fp=fp, auth="dedicated_local"), sqlite3.IntegrityError)
+    assert rejected(anchor.format(gen=2, free=500, fp="short", auth="dedicated_local"), sqlite3.IntegrityError)
+    assert rejected(anchor.format(gen=2, free=500, fp=fp, auth="shared"), sqlite3.IntegrityError)
+
+    # Anchor -> dirty-generation FK is exercised independently (Greptile #3): a structurally valid
+    # anchor referencing a nonexistent generation must be rejected by the foreign key, not a CHECK.
+    assert rejected(anchor.format(gen=999, free=500, fp=fp, auth="dedicated_local"), sqlite3.IntegrityError)
+
+    # drives.write_authority is constrained to the two accepted values.
+    assert rejected("UPDATE drives SET write_authority='bogus' WHERE drive_label='drive-00'",
+                    sqlite3.IntegrityError)
     con.close()
 
 
