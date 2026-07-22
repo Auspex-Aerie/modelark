@@ -139,7 +139,7 @@ def test_stall_window_scales_with_shard_size(tmp_path):
     with open(local, "wb") as f:
         f.truncate(30_000_000_000)                             # 30 GB sparse — logical size only, no disk cost
     captured = {}
-    def capture(cmd, progress, stall_secs, should_stop):
+    def capture(cmd, progress, stall_secs, should_stop, **_kw):
         captured["stall"] = stall_secs
         return {"outcome": "stalled", "rc": None, "stderr": ""}  # short-circuit; we only want the passed window
     with mock.patch("modelark.fetch._run_monitored", side_effect=capture):
@@ -151,7 +151,7 @@ def test_stall_window_scales_with_shard_size(tmp_path):
 def test_stall_window_floor_for_small_shard(tmp_path):
     local, sha = _shard(tmp_path, "small.safetensors")         # ~2 MB → scaled term ≈ 0, so the floor wins
     captured = {}
-    def capture(cmd, progress, stall_secs, should_stop):
+    def capture(cmd, progress, stall_secs, should_stop, **_kw):
         captured["stall"] = stall_secs
         return {"outcome": "stalled", "rc": None, "stderr": ""}
     with mock.patch("modelark.fetch._run_monitored", side_effect=capture):

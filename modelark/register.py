@@ -452,6 +452,32 @@ def archive_path(con, label: str) -> Path | None:
     return Path(mp) / ARCHIVE_SUBDIR if mp else None
 
 
+# ---- live identity probes (read the mounted volume, never the catalog) ------
+# These back the fenced observation used by the physical-mutation envelope: identity is proven from the
+# CURRENT device, so a stale catalog row cannot vouch for a swapped/mismounted volume. Linux-only
+# (findmnt/lsblk); off-platform they degrade to None → identity unknown → the envelope refuses.
+
+def probe_fs_uuid(path) -> str | None:
+    """Live filesystem UUID of the volume containing `path`."""
+    out = _run("findmnt", "-fno", "UUID", "--target", str(path), check=False).stdout.strip()
+    return out.splitlines()[0] if out else None
+
+
+def probe_annex_uuid(path) -> str | None:
+    """Live git-annex UUID recorded in the archive repo at `path`, or None if absent."""
+    return _git(Path(path), "config", "annex.uuid", check=False) or None
+
+
+def probe_serial(path) -> str | None:
+    """Live hardware serial of the device backing `path` (supporting identity evidence), or None."""
+    src = _run("findmnt", "-fno", "SOURCE", "--target", str(path), check=False).stdout.strip()
+    src = src.splitlines()[0] if src else ""
+    if not src:
+        return None
+    out = _run("lsblk", "-dno", "SERIAL", src, check=False).stdout.strip()
+    return out.splitlines()[0] if out else None
+
+
 def list_drives(con) -> list[dict]:
     cols = ["drive_label", "hw_model", "serial", "health", "capacity_bytes",
             "free_bytes", "annex_uuid", "physical_location", "last_seen"]

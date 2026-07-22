@@ -212,7 +212,7 @@ def _replica_setup(con, tmp_path):
                 "VALUES('must','model.gguf',200,'gguf')")
     con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
                 "orig_sha256,znn_sha256,orig_bytes,stored_bytes,compressed,annex_key) "
-                "VALUES('must','model.gguf','model.gguf','must/model.gguf','drive-00',"
+                "VALUES('must','model.gguf','model.gguf','model.gguf','drive-00',"
                 "'orig','stored',200,200,0,'key-must')")
     source, target, library = tmp_path / "src", tmp_path / "tgt", tmp_path / "lib"
     for d in (source, target, library):
@@ -513,7 +513,7 @@ def test_touched_reconciliation_validates_recorded_set_narrowly(tmp_path):
         (tmp_path / "must" / "model.safetensors").write_bytes(b"bytes")
         con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
                     "orig_bytes,stored_bytes,compressed) VALUES('must','model.safetensors',"
-                    "'model.safetensors','must/model.safetensors','drive-00',5,5,0)")
+                    "'model.safetensors','model.safetensors','drive-00',5,5,0)")
         # a decoy unrelated durable row + file that a NARROW reconciler must never inspect
         con.execute("INSERT INTO models(repo_id) VALUES('decoy')")
         con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
@@ -541,7 +541,7 @@ def test_touched_reconciliation_fails_closed_on_unprovable_annex_key(tmp_path):
         (tmp_path / "must" / "model.gguf").write_bytes(b"bytes")   # bytes present — the KEY is the problem
         con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
                     "orig_bytes,stored_bytes,compressed,annex_key) VALUES('must','model.gguf',"
-                    "'model.gguf','must/model.gguf','drive-00',5,5,0,'KEY-x')")
+                    "'model.gguf','model.gguf','drive-00',5,5,0,'KEY-x')")
         assert hasattr(fetch, "_reconcile_touched"), "PR-03b must add fetch._reconcile_touched"
         # both annex-key proof helpers report the key unprovable on this drive
         with mock.patch.object(fetch, "_annex_key_on_uuid", return_value=False), \
@@ -768,6 +768,10 @@ def test_fetch_model_forwards_writer_fds_and_records_touch_after_publish(tmp_pat
         con.execute("INSERT INTO models(repo_id) VALUES('org/repo')")
         con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
                     "VALUES('org/repo','config.json',2,'aux')")
+        # a supported weight so the repo satisfies the acquisition policy (the end-of-fetch_model
+        # canonical check reads the files table); the passed one-file manifest still fetches only config
+        con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
+                    "VALUES('org/repo','model.safetensors',100,'safetensors')")
         fd = os.open(os.devnull, os.O_RDONLY)
         order, seen = [], {}
 
@@ -836,7 +840,7 @@ def test_touched_reconciliation_fails_closed_on_missing_physical_path(tmp_path):
                     "VALUES('must','model.safetensors',5,'safetensors')")
         con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
                     "orig_bytes,stored_bytes,compressed) VALUES('must','model.safetensors',"
-                    "'model.safetensors','must/model.safetensors','drive-00',5,5,0)")
+                    "'model.safetensors','model.safetensors','drive-00',5,5,0)")
         # durable row present, but the published bytes are absent at dest
         assert hasattr(fetch, "_reconcile_touched"), "PR-03b must add fetch._reconcile_touched"
         try:

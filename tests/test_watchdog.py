@@ -85,7 +85,7 @@ def test_worker_gated(tmp_path):
 
 def _monitored_writes(result: dict, outcome: str = "exited", rc: int = 0):
     """A _run_monitored stand-in that writes `result` to the child's result file, then returns `outcome`."""
-    def side_effect(cmd, progress, stall_secs, should_stop):
+    def side_effect(cmd, progress, stall_secs, should_stop, **_kw):
         req = json.loads(cmd[-1])
         Path(req["result"]).write_text(json.dumps(result))
         return {"outcome": outcome, "rc": rc, "stderr": ""}
@@ -193,7 +193,7 @@ def test_download_progress_probe_measures_nested_incomplete(tmp_path):
     (nested_dir / "abc.incomplete").write_bytes(b"x" * 4096)
     seen = {}
 
-    def side_effect(cmd, progress, stall_secs, should_stop):
+    def side_effect(cmd, progress, stall_secs, should_stop, **_kw):
         seen["bytes"] = progress()
         req = json.loads(cmd[-1])
         out = tmp_path / "out.bin"
