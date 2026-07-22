@@ -1,0 +1,540 @@
+"""PR-03b Gate-1 contract — wire the Fill/download/compression/annex/replica transport through the
+merged catalog-v3 mutation envelope with inherited child fence FDs (RFC-002 / DEC-049 issue #35-B slice 2).
+
+Tests-first, pinned BEFORE production. The change-contract tests are RED against the current transport
+(the envelope is dormant); the characterization/mechanism tests are GREEN now and must stay GREEN.
+
+Binding Gate-0 rulings encoded here:
+  R1  an unproven target FAILS CLOSED with DRIVE_IDENTITY_UNPROVEN and mutates nothing (no unfenced
+      fallback); everything is tested with synthetic proven drives.
+  R2  acquisition is controller -> sorted drive locks -> committed dirty advance, then the controller
+      is RELEASED while the drive locks are retained across body, reconciliation, and anchor publish.
+  R3  sessionless FD inheritance + the parent-death lock invariant (tokens/leases/recovery are #39).
+  R4  the envelope wraps ONE drive batch of fetch.run() (not per repository), so an isolated repo
+      failure cannot leave the whole drive dirty and DIRTY_GENERATION_CONFLICT every later repo.
+  R5  replica fences BOTH source and target and passes BOTH FDs to writing children.
+  R6  every mutating child (download/compress, git annex add/metadata/copy/sync, git remote config)
+      inherits the fence FDs; read-only lookups/version/whereis do NOT.
+  R7  touched reconciliation is narrow and real: it validates only the recorded published paths, annex
+      keys, and their durable catalog facts (no full-drive scan, no new cleanup policy).
+
+Proposed production API surfaced by these tests (for Gate-1 review; names are the contract to confirm):
+  * fetch._run_monitored(..., inherit_fds=())     -> Popen(pass_fds=inherit_fds)  [download + compress]
+  * fetch._annex_add(dest, path, inherit_fds=())  / fetch._annex_metadata(..., inherit_fds=())
+  * fetch._reconcile_touched(con, label, dest, annex, paths, keys) -> None | raise DriveMutationRefused
+  * run() wraps its drive-batch loop in drive_mutation and surfaces DRIVE_IDENTITY_UNPROVEN as a typed
+    terminal; replica enters a two-drive drive_mutation.
+
+Disposable temp trees / synthetic proven drives / real subprocesses only — never a live catalog/drive.
+"""
+from __future__ import annotations
+
+import fcntl
+import inspect
+import os
+import sqlite3
+import subprocess
+import sys
+import time
+import types
+from contextlib import contextmanager
+from pathlib import Path
+from unittest import mock
+
+from modelark.core import db
+from modelark import drive_fence
+from modelark import drive_mutation as dm
+from modelark import fetch
+
+_FP = "a" * 64
+_FP2 = "c" * 64
+
+
+# Restore the db module globals around EVERY test so a test that repoints CATALOG_DIR/DB_PATH/STATE_DIR
+# cannot leak a temp path into a later test (autouse under pytest; main() save/restores under the script
+# runner, matching tests/test_drive_mutation_envelope.py).
+try:
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def _isolate_db_globals():
+        saved = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)
+        try:
+            yield
+        finally:
+            db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = saved
+except ImportError:                              # the plain script runner does not need pytest
+    pass
+
+
+@contextmanager
+def _catalog(tmp_path):
+    saved = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)
+    db.CATALOG_DIR = tmp_path
+    db.DB_PATH = tmp_path / "catalog.sqlite"
+    db.STATE_DIR = tmp_path / "state"
+    con = db.connect()
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 3, "fixture must be a v3 catalog"
+    try:
+        yield con
+    finally:
+        con.close()
+        db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = saved
+
+
+def _proven_drive(con, label="drive-00", *, epoch=1, generation=0, fp=_FP,
+                  fscap=1000, free=900, annex_uuid=None):
+    """A drive with proven identity for the current epoch (PR-03c will establish this on real drives)."""
+    con.execute(
+        "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,identity_epoch,write_generation,"
+        "filesystem_capacity_bytes,identity_fingerprint,write_authority,annex_uuid) "
+        "VALUES(?,?,?,?,?,?,?, 'dedicated_local', ?)",
+        [label, fscap, free, epoch, generation, fscap, fp, annex_uuid])
+
+
+def _unproven_drive(con, label="drive-00"):
+    """A migrated row: epoch-1 namespace only, no fingerprint/authority (DEC-049 / #35 contract)."""
+    con.execute("INSERT INTO drives(drive_label,capacity_bytes,free_bytes) VALUES(?,?,?)",
+                [label, 1000, 900])
+
+
+def _obs(free=500, *, capacity=1000, fp=_FP, proven=True):
+    return dm.Observation(identity_proven=proven, free_bytes=free, filesystem_capacity=capacity,
+                          fingerprint=fp, identity_proof="proof", fence_proof="fence")
+
+
+def _observer(con, *frees):
+    """A fenced observer attesting the drive's CURRENT fingerprint/capacity, yielding successive frees."""
+    box = list(frees)
+
+    def observe(label):
+        assert not con.in_transaction, "no SQLite transaction may be open during a fenced observation"
+        fp, cap = con.execute(
+            "SELECT identity_fingerprint, filesystem_capacity_bytes FROM drives WHERE drive_label=?",
+            [label]).fetchone()
+        free = box.pop(0) if len(box) > 1 else (box[0] if box else 500)
+        return _obs(free, capacity=cap, fp=fp)
+    return observe
+
+
+def _reconciler(con):
+    def reconcile(label, paths, keys):
+        assert not con.in_transaction, "no SQLite transaction may be open during reconciliation"
+    return reconcile
+
+
+def _acquirable(path):
+    """True iff the advisory flock at `path` can be taken non-blocking right now (released immediately)."""
+    try:
+        fh = open(path, "w")                      # noqa: SIM115 — released below
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return False
+    fcntl.flock(fh, fcntl.LOCK_UN)
+    fh.close()
+    return True
+
+
+def _drive_acquirable(fp, epoch):
+    try:
+        with drive_fence.hold_drives_sorted([(fp, epoch)], blocking=False):
+            return True
+    except drive_fence.FenceUnavailable:
+        return False
+
+
+def _run_kwargs(**over):
+    base = {"dest": None, "drive_label": "drive-00", "repos": ["a"], "max_24h_gb": 0}
+    base.update(over)
+    return base
+
+
+# ===================================================================== R4/R1: dirty before mutation
+
+def test_dirty_generation_committed_before_first_batch_mutation(tmp_path):
+    """The drive's dirty generation must be committed (visible to an INDEPENDENT connection) before the
+    first batch mutation — the first staging/temp/probe/download the transport performs."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00")
+        probe = sqlite3.connect(str(db.DB_PATH))
+        seen = {}
+
+        def fake_model(ctx, rid, dest, label, annex, cfg, **kw):
+            seen[rid] = probe.execute(
+                "SELECT count(*) FROM drive_dirty_generations WHERE drive_label='drive-00'"
+            ).fetchone()[0]
+            return {"repo_id": rid, "files": 1, "skipped": 0, "bytes": 1}
+
+        try:
+            with mock.patch.object(fetch, "fetch_model", side_effect=fake_model), \
+                 mock.patch.object(fetch, "_is_annex", return_value=False), \
+                 mock.patch.object(fetch.wishlist, "compression", return_value={"threads": 1}):
+                fetch.run(ctx=fetch.RunCtx(con=con), **_run_kwargs(dest=tmp_path))
+        finally:
+            probe.close()
+        assert seen.get("a") == 1, (
+            "the dirty generation must be committed and visible to a second connection BEFORE the first "
+            f"batch mutation runs (saw {seen.get('a')})")
+
+
+def test_one_dirty_generation_and_anchor_per_drive_batch_not_per_repo(tmp_path):
+    """R4: the envelope wraps ONE drive batch, so N repositories share ONE dirty generation and publish
+    ONE clean anchor — not one generation per repo (which would DIRTY_GENERATION_CONFLICT repo 2)."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00")
+
+        def fake_model(ctx, rid, dest, label, annex, cfg, **kw):
+            return {"repo_id": rid, "files": 1, "skipped": 0, "bytes": 1}
+
+        with mock.patch.object(fetch, "fetch_model", side_effect=fake_model), \
+             mock.patch.object(fetch, "_is_annex", return_value=False), \
+             mock.patch.object(fetch.wishlist, "compression", return_value={"threads": 1}):
+            fetch.run(ctx=fetch.RunCtx(con=con), **_run_kwargs(dest=tmp_path, repos=["a", "b", "c"]))
+        dirty = con.execute("SELECT count(*) FROM drive_dirty_generations "
+                            "WHERE drive_label='drive-00'").fetchone()[0]
+        anchors = con.execute("SELECT count(*) FROM drive_clean_anchors "
+                              "WHERE drive_label='drive-00'").fetchone()[0]
+        assert (dirty, anchors) == (1, 1), (
+            f"a 3-repo drive batch must open exactly one generation and publish one anchor; "
+            f"got dirty={dirty} anchors={anchors}")
+
+
+# ===================================================================== R2: controller release
+
+def test_controller_released_but_drive_fence_retained_during_body(tmp_path):
+    """R2: once the dirty advance is committed the controller fence is released (so operator graph
+    writes / recovery are not blocked for the whole multi-day body) while the drive fence stays held."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", fp=_FP, epoch=1, generation=0)
+        probe = {}
+        with dm.drive_mutation(con, ["drive-00"], "op", observe=_observer(con, 900, 400),
+                               reconcile=_reconciler(con), now="2026-01-01"):
+            probe["controller_free"] = _acquirable(drive_fence.controller_lock_path(db.DB_PATH))
+            probe["drive_locked"] = not _acquirable(drive_fence.drive_lock_path(_FP, 1))
+        assert probe["drive_locked"], "the drive fence must remain HELD across the transport body"
+        assert probe["controller_free"], (
+            "the controller fence must be RELEASED after the committed dirty advance, not held across "
+            "the transport body")
+
+
+# ===================================================================== R1: unproven fails closed
+
+def test_unproven_target_fails_closed_without_filesystem_mutation(tmp_path):
+    """R1: a not-yet-proven drive must refuse with DRIVE_IDENTITY_UNPROVEN before any transport runs —
+    never the old unfenced transport. The integration branch is deliberately not live-ready until 03c."""
+    with _catalog(tmp_path) as con:
+        _unproven_drive(con, "drive-00")
+        called = {"n": 0}
+
+        def fake_model(ctx, rid, dest, label, annex, cfg, **kw):
+            called["n"] += 1
+            return {"repo_id": rid, "files": 0, "skipped": 0, "bytes": 0}
+
+        with mock.patch.object(fetch, "fetch_model", side_effect=fake_model), \
+             mock.patch.object(fetch, "_is_annex", return_value=False), \
+             mock.patch.object(fetch.wishlist, "compression", return_value={"threads": 1}):
+            result = fetch.run(ctx=fetch.RunCtx(con=con), **_run_kwargs(dest=tmp_path))
+        assert called["n"] == 0, "an unproven drive must fail closed BEFORE any transport mutation runs"
+        terminal = result.get("terminal_failure") or {}
+        assert terminal.get("code") == "DRIVE_IDENTITY_UNPROVEN", (
+            f"an unproven target must surface a typed DRIVE_IDENTITY_UNPROVEN terminal; got {terminal}")
+        assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
+
+
+# ===================================================================== R3: parent-death lock invariant
+
+def test_inherited_fd_survives_parent_death(tmp_path):
+    """R3 core crash-safety invariant (pure OS + drive_fence mechanism): a child that inherits the
+    drive-fence FD keeps the flock held after the parent dies, so nothing else can acquire the drive
+    lock while the child may still be writing. Releases only when the child exits."""
+    fpd, epoch = "e" * 64, 7
+    ready, release = tmp_path / "ready", tmp_path / "release"
+    child_script = (
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "rel = Path(sys.argv[2])\n"          # argv[1] is the fd number (kept open via pass_fds)
+        "while not rel.exists():\n"
+        "    time.sleep(0.02)\n"
+    )
+    parent_src = (
+        "import os, sys, time, subprocess\n"
+        "from pathlib import Path\n"
+        "from modelark import drive_fence\n"
+        # keep `cm` referenced: a temporary would be GC'd, closing the fence handle at once
+        f"cm = drive_fence.hold_drives_sorted([({fpd!r}, {epoch})])\n"
+        "handles = cm.__enter__()\n"
+        "fd = handles[0].fileno()\n"
+        "os.set_inheritable(fd, True)\n"
+        f"subprocess.Popen([sys.executable, '-c', {child_script!r}, str(fd), {str(release)!r}], "
+        "pass_fds=[fd])\n"
+        f"Path({str(ready)!r}).write_text('x')\n"
+        "time.sleep(600)\n"
+    )
+    parent = subprocess.Popen([sys.executable, "-c", parent_src])
+    try:
+        for _ in range(500):
+            if ready.exists():
+                break
+            time.sleep(0.01)
+        assert ready.exists(), "parent never acquired the fence and spawned the inheriting child"
+        parent.kill()
+        parent.wait(timeout=10)                       # reap so the parent's own fd is definitely closed
+        assert not _drive_acquirable(fpd, epoch), (
+            "the drive lock must NOT be acquirable while a surviving child still holds the inherited "
+            "fence FD after parent death")
+    finally:
+        release.write_text("go")
+        if parent.poll() is None:                 # only if an early assertion skipped the kill above
+            parent.kill()
+            parent.wait(timeout=10)
+    acquired = False
+    for _ in range(500):
+        if _drive_acquirable(fpd, epoch):
+            acquired = True
+            break
+        time.sleep(0.01)
+    assert acquired, "the drive lock must become acquirable once the inheriting child exits"
+
+
+# ===================================================================== R6: every mutating child gets FDs
+
+def test_run_monitored_forwards_inherit_fds_to_child(tmp_path):
+    """R6: the monitored-child spawner (download + compression) forwards the held fence FDs to the
+    child via pass_fds, so a killed/orphaned child keeps the drive fence."""
+    assert "inherit_fds" in inspect.signature(fetch._run_monitored).parameters, \
+        "PR-03b must add an `inherit_fds` parameter to _run_monitored (download + compression children)"
+    fd = os.open(os.devnull, os.O_RDONLY)
+    captured = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    def fake_popen(cmd, **kw):
+        captured["pass_fds"] = kw.get("pass_fds")
+        return _FakeProc()
+
+    try:
+        with mock.patch.object(fetch.subprocess, "Popen", side_effect=fake_popen):
+            fetch._run_monitored([sys.executable, "-c", "pass"], lambda: 0, 999,
+                                 lambda: False, inherit_fds=(fd,))
+    finally:
+        os.close(fd)
+    assert tuple(captured.get("pass_fds") or ()) == (fd,), (
+        f"the monitored child must inherit the held fence FD via pass_fds; got {captured.get('pass_fds')}")
+
+
+def test_annex_children_inherit_fence_fds_only_when_mutating(tmp_path):
+    """R6: git-annex add/metadata (mutating) inherit the fence FDs; the read-only lookupkey does not."""
+    assert "inherit_fds" in inspect.signature(fetch._annex_add).parameters, \
+        "PR-03b must add `inherit_fds` to _annex_add"
+    assert "inherit_fds" in inspect.signature(fetch._annex_metadata).parameters, \
+        "PR-03b must add `inherit_fds` to _annex_metadata"
+    dest = tmp_path
+    (dest / "must").mkdir()
+    target = dest / "must" / "model.gguf"
+    target.write_bytes(b"x")
+    fd = os.open(os.devnull, os.O_RDONLY)
+    calls = []
+
+    def cap_run(cmd, *a, **k):
+        calls.append((tuple(cmd), k.get("pass_fds")))
+        return subprocess.CompletedProcess(cmd, 0, "key123\n", "")
+
+    try:
+        with mock.patch.object(fetch.subprocess, "run", side_effect=cap_run):
+            fetch._annex_add(dest, target, inherit_fds=(fd,))
+            fetch._annex_metadata(dest, "key123", "org/repo", None, "gguf", None, inherit_fds=(fd,))
+    finally:
+        os.close(fd)
+    add = [fds for cmd, fds in calls if "annex" in cmd and "add" in cmd]
+    meta = [fds for cmd, fds in calls if "annex" in cmd and "metadata" in cmd]
+    lookup = [fds for cmd, fds in calls if "lookupkey" in cmd]
+    assert add and all(tuple(fds or ()) == (fd,) for fds in add), f"annex add must inherit the fence FD: {calls}"
+    assert meta and all(tuple(fds or ()) == (fd,) for fds in meta), f"annex metadata must inherit the FD: {calls}"
+    assert lookup and all(not fds for fds in lookup), \
+        f"read-only annex lookupkey must NOT inherit the fence FD: {calls}"
+
+
+def test_readonly_git_probes_do_not_inherit_fence_fds(tmp_path):
+    """R6 characterization: read-only probes (annex version, whereis) never carry a fence FD."""
+    (tmp_path / ".git").mkdir()
+    calls = []
+
+    def cap_run(cmd, *a, **k):
+        calls.append((tuple(cmd), k.get("pass_fds")))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with mock.patch.object(fetch.subprocess, "run", side_effect=cap_run):
+        fetch._is_annex(tmp_path)                                   # git annex version
+        fetch._annex_key_on_uuid(tmp_path, "key", "uuid")          # git annex whereis --key
+    assert calls, "expected the read-only git probes to run"
+    assert all(not fds for _cmd, fds in calls), \
+        f"read-only probes must not carry pass_fds: {calls}"
+
+
+# ===================================================================== R5: replica fences source+target
+
+def test_replica_fences_source_and_target_and_passes_both_fds(tmp_path):
+    """R5: a replica copy mutates the target (copy) and the source (remote config + bookkeeping), so the
+    envelope holds BOTH identity+epoch fences and the copy child inherits BOTH FDs."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", fp=_FP, annex_uuid="uuid-src")
+        _proven_drive(con, "drive-04", fp=_FP2, annex_uuid="uuid-tgt")
+        con.execute("INSERT INTO models(repo_id) VALUES('must')")   # archived FK -> files -> models
+        con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
+                    "VALUES('must','model.gguf',200,'gguf')")
+        con.execute(
+            "INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
+            "orig_sha256,znn_sha256,orig_bytes,stored_bytes,compressed,annex_key) "
+            "VALUES('must','model.gguf','model.gguf','must/model.gguf','drive-00',"
+            "'orig','stored',200,200,0,'key-must')")
+        source, target, library = tmp_path / "src", tmp_path / "tgt", tmp_path / "lib"
+        for d in (source, target, library):
+            d.mkdir()
+        task = types.SimpleNamespace(
+            source_drive="drive-00", target_drive="drive-04", requirement_id="r1",
+            repo_id="must", budget=types.SimpleNamespace(missing_files=["model.gguf"]))
+        captured = []
+
+        def cap_run(cmd, *a, **k):
+            captured.append((tuple(cmd), k.get("pass_fds")))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        def archive_path(_con, label):
+            return source if label == "drive-00" else target
+
+        with mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
+             mock.patch.object(fetch.register, "library_root", return_value=library), \
+             mock.patch.object(fetch, "_dest_writable", return_value=True), \
+             mock.patch.object(fetch, "_annex_key_on_uuid", return_value=True), \
+             mock.patch.object(fetch.subprocess, "run", side_effect=cap_run):
+            fetch.run_replica_tasks([task], ctx=fetch.RunCtx(con=con))
+        copies = [(cmd, fds) for cmd, fds in captured if "annex" in cmd and "copy" in cmd]
+        assert copies, f"expected an `annex copy` child; captured {[c for c, _ in captured]}"
+        for cmd, fds in copies:
+            assert fds is not None and len(tuple(fds)) == 2, (
+                f"the replica copy child must inherit BOTH source+target fence FDs; got pass_fds={fds}")
+
+
+# ===================================================================== R7: narrow real reconciliation
+
+def test_touched_reconciliation_validates_recorded_set_narrowly(tmp_path):
+    """R7: reconciliation validates only the recorded touched paths/keys against durable catalog facts;
+    an unrelated (untouched) durable row + file on the same drive is ignored (no full-drive scan)."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00")
+        assert hasattr(fetch, "_reconcile_touched"), \
+            "PR-03b must add a narrow touched-set reconciler (fetch._reconcile_touched)"
+        (tmp_path / "must").mkdir()
+        (tmp_path / "must" / "model.safetensors").write_bytes(b"bytes")
+        con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
+                    "orig_bytes,stored_bytes,compressed) VALUES('must','model.safetensors',"
+                    "'model.safetensors','must/model.safetensors','drive-00',5,5,0)")
+        (tmp_path / "other").mkdir()                       # decoy a NARROW reconciler must never inspect
+        (tmp_path / "other" / "x.bin").write_bytes(b"z")
+        con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
+                    "orig_bytes,stored_bytes,compressed) VALUES('decoy','x.bin','x.bin',"
+                    "'other/x.bin','drive-00',1,1,0)")
+        fetch._reconcile_touched(con, "drive-00", tmp_path, False, ["must/model.safetensors"], [])
+
+
+def test_touched_reconciliation_fails_closed_on_missing_durable_fact(tmp_path):
+    """R7: a recorded touched path with no durable catalog fact is a typed reconciliation refusal — the
+    reconciler is not a no-op, so the mutation leaves the generation dirty instead of publishing clean."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00")
+        assert hasattr(fetch, "_reconcile_touched"), \
+            "PR-03b must add a narrow touched-set reconciler (fetch._reconcile_touched)"
+        try:
+            fetch._reconcile_touched(con, "drive-00", tmp_path, False, ["must/missing.safetensors"], [])
+            raise AssertionError("reconciliation must fail closed on a touched path with no durable fact")
+        except dm.DriveMutationRefused as exc:
+            assert exc.code == "DRIVE_RECONCILIATION_REQUIRED", exc.code
+
+
+# ===================================================================== R (stop/error): typed + dirty
+
+def test_typed_terminal_result_is_preserved(tmp_path):
+    """Baseline the envelope must not corrupt: a per-repo typed terminal stops the batch and surfaces
+    the same typed result shape it does today (RFC-002 stop-condition: lose no typed terminal)."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00")
+
+        def terminal_model(ctx, rid, dest, label, annex, cfg, **kw):
+            raise fetch.TargetPathConflictError(rid, "existing file has different verified bytes")
+
+        # _event is mocked: the current run() records a terminal via _event(..., "terminal", ...), an
+        # outcome the fetch_events CHECK does not allow (a pre-existing defect unrelated to PR-03b,
+        # flagged separately). This test characterizes the RESULT contract the envelope must preserve.
+        with mock.patch.object(fetch, "fetch_model", side_effect=terminal_model), \
+             mock.patch.object(fetch, "_event"), \
+             mock.patch.object(fetch, "_is_annex", return_value=False), \
+             mock.patch.object(fetch.wishlist, "compression", return_value={"threads": 1}):
+            result = fetch.run(ctx=fetch.RunCtx(con=con), **_run_kwargs(dest=tmp_path))
+        assert result["terminal_failure"]["code"] == "TARGET_PATH_CONFLICT", result
+        assert result["terminal_repo"] == "a"
+
+
+def test_crash_during_batch_leaves_generation_dirty_without_anchor(tmp_path):
+    """An abrupt crash mid-batch (no clean close) must leave the generation durably dirty with no clean
+    anchor, so 03c recovery reconciles it rather than trusting stale free-space."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00")
+
+        class _Crash(BaseException):
+            pass
+
+        def crashing_model(ctx, rid, dest, label, annex, cfg, **kw):
+            raise _Crash("abrupt death mid-transport")
+
+        with mock.patch.object(fetch, "fetch_model", side_effect=crashing_model), \
+             mock.patch.object(fetch, "_is_annex", return_value=False), \
+             mock.patch.object(fetch.wishlist, "compression", return_value={"threads": 1}):
+            try:
+                fetch.run(ctx=fetch.RunCtx(con=con), **_run_kwargs(dest=tmp_path))
+            except _Crash:
+                pass
+        dirty = con.execute("SELECT count(*) FROM drive_dirty_generations "
+                            "WHERE drive_label='drive-00'").fetchone()[0]
+        anchors = con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0]
+        assert (dirty, anchors) == (1, 0), (
+            f"an abrupt crash must leave the generation dirty with no clean anchor; "
+            f"dirty={dirty} anchors={anchors}")
+
+
+def main():
+    import tempfile
+    tests = sorted((n, f) for n, f in globals().items()
+                   if n.startswith("test_") and callable(f))
+    passed, failed = [], []
+    for name, fn in tests:
+        db_globals = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)
+        try:
+            if "tmp_path" in inspect.signature(fn).parameters:
+                fn(Path(tempfile.mkdtemp(prefix="mark-03b-")))
+            else:
+                fn()
+            passed.append(name)
+            print(f"PASS  {name}")
+        except Exception as exc:                 # noqa: BLE001 — Gate-1 wants the full red/green map
+            failed.append(name)
+            print(f"FAIL  {name}  -> {type(exc).__name__}: {exc}")
+        finally:
+            db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = db_globals
+    print(f"\n{len(passed)} passed, {len(failed)} failed")
+    if failed:
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
