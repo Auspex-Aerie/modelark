@@ -2,7 +2,7 @@
 
 Gate 1: pins the contract for the same-host fence + dirty-generation/clean-anchor envelope BEFORE
 production. RED until modelark.drive_fence / modelark.drive_mutation exist; the lazy import + _require()
-guard makes each test fail cleanly for missing behavior, not a fixture cascade.
+guard makes each test fail cleanly for a MISSING module, not for a real error inside an existing one.
 
 Scope: the COMPLETE internal envelope, unconnected to any production call site.
   - canonical same-host controller + identity+epoch drive-lock keys;
@@ -21,21 +21,27 @@ Non-goals here: child-FD integration + transport conversion (03b); registration/
 from __future__ import annotations
 
 import ast
+import importlib.util
 import sqlite3
 import subprocess
 import sys
 import textwrap
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from modelark.core import db
 
-try:
+# Only the envelope module being ABSENT activates the Gate-1 guard. find_spec locates the file without
+# executing it, so if the module exists but its import fails (e.g. a missing dependency), the real
+# error surfaces from the import below rather than masquerading as "not implemented".
+_ENVELOPE_MODULES = ("modelark.drive_fence", "modelark.drive_mutation")
+if all(importlib.util.find_spec(m) is not None for m in _ENVELOPE_MODULES):
     from modelark import drive_fence
     from modelark import drive_mutation as dm
     _HAS = True
-except ImportError:                              # only a MISSING module activates the Gate-1 guard;
-    drive_fence = dm = None                       # a real import-time error in the module must surface
+else:
+    drive_fence = dm = None
     _HAS = False
 
 _FP = "a" * 64
@@ -46,13 +52,38 @@ def _require():
         raise AssertionError("drive_fence/drive_mutation envelope not implemented yet (Gate-1 red)")
 
 
+@contextmanager
 def _catalog(tmp_path):
+    """A v3 catalog wired into the db module for the block, restoring the module globals (and closing
+    the connection) on exit so no temporary path leaks between tests under any runner."""
+    saved = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)
     db.CATALOG_DIR = tmp_path
     db.DB_PATH = tmp_path / "catalog.sqlite"
     db.STATE_DIR = tmp_path / "state"
     con = db.connect()
     assert con.execute("PRAGMA user_version").fetchone()[0] == 3, "fixture must be a v3 catalog"
-    return con
+    try:
+        yield con
+    finally:
+        con.close()
+        db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = saved
+
+
+class _FailOn:
+    """A connection proxy that raises when a (case-insensitive) marker appears in a statement, to
+    inject a mid-transaction failure while delegating everything else to the real connection."""
+
+    def __init__(self, con, marker):
+        self._con = con
+        self._marker = marker.lower()
+
+    def execute(self, sql, *args):
+        if self._marker in sql.lower():
+            raise sqlite3.OperationalError(f"injected failure at: {self._marker}")
+        return self._con.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
 
 
 def _proven_drive(con, label="drive-00", *, epoch=1, generation=0, fp=_FP, fscap=1000, free=900):
@@ -89,23 +120,6 @@ def _has_anchor(con, label, epoch, generation):
                        [label, epoch, generation]).fetchone()[0] == 1
 
 
-class _FailOn:
-    """A connection proxy that raises when a (case-insensitive) marker appears in a statement, to
-    inject a mid-transaction failure while delegating everything else to the real connection."""
-
-    def __init__(self, con, marker):
-        self._con = con
-        self._marker = marker.lower()
-
-    def execute(self, sql, *args):
-        if self._marker in sql.lower():
-            raise sqlite3.OperationalError(f"injected failure at: {self._marker}")
-        return self._con.execute(sql, *args)
-
-    def __getattr__(self, name):
-        return getattr(self._con, name)
-
-
 # =========================================================================== lock keys
 
 def test_controller_lock_key_is_catalog_identity_not_state_dir():
@@ -137,57 +151,54 @@ def test_drive_lock_key_refuses_unproven_identity():
 
 def test_envelope_refuses_a_drive_with_unproven_identity(tmp_path):
     _require()
-    con = _catalog(tmp_path)
-    _proven_drive(con, "drive-00", fp=None)          # migrated shape: no fingerprint -> unproven
-    try:
-        with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(), now="2026-01-01"):
-            raise AssertionError("body should not run for an unproven drive")
-    except dm.DriveMutationRefused as exc:
-        assert exc.code == "DRIVE_IDENTITY_UNPROVEN", exc.code
-    assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
-    con.close()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", fp=None)          # migrated shape: no fingerprint -> unproven
+        try:
+            with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(), now="2026-01-01"):
+                raise AssertionError("body should not run for an unproven drive")
+        except dm.DriveMutationRefused as exc:
+            assert exc.code == "DRIVE_IDENTITY_UNPROVEN", exc.code
+        assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
 
 
 def test_dirty_generation_advances_before_body_with_null_owner(tmp_path):
     _require()
-    con = _catalog(tmp_path)
-    _proven_drive(con, "drive-00", generation=0)
-    seen = {}
-    with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(), now="2026-01-01"):
-        row = con.execute("SELECT identity_epoch,generation,owner_session_id,owner_fencing_token "
-                          "FROM drive_dirty_generations WHERE drive_label='drive-00'").fetchone()
-        seen["row"] = row
-        seen["write_generation"] = con.execute(
-            "SELECT write_generation FROM drives WHERE drive_label='drive-00'").fetchone()[0]
-    assert seen["row"] == (1, 1, None, None), seen           # gen 1, both owner fields null, before body
-    assert seen["write_generation"] == 1
-    con.close()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=0)
+        seen = {}
+        with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(), now="2026-01-01"):
+            seen["row"] = con.execute(
+                "SELECT identity_epoch,generation,owner_session_id,owner_fencing_token "
+                "FROM drive_dirty_generations WHERE drive_label='drive-00'").fetchone()
+            seen["write_generation"] = con.execute(
+                "SELECT write_generation FROM drives WHERE drive_label='drive-00'").fetchone()[0]
+        assert seen["row"] == (1, 1, None, None), seen      # gen 1, both owner fields null, before body
+        assert seen["write_generation"] == 1
 
 
 def test_generation_start_guard(tmp_path):
     _require()
-    con = _catalog(tmp_path)
-    # (a) generation zero -> allowed
-    _proven_drive(con, "zero", generation=0)
-    with dm.drive_mutation(con, ["zero"], "op", observe=_observe(), now="2026-01-01"):
-        pass
-    assert _has_anchor(con, "zero", 1, 1)
-    # (b) clean current generation -> allowed (advances to the next generation)
-    _proven_drive(con, "clean", generation=1)
-    _dirty(con, "clean", 1, 1)
-    _anchor(con, "clean", 1, 1)
-    with dm.drive_mutation(con, ["clean"], "op", observe=_observe(), now="2026-01-01"):
-        pass
-    assert _has_anchor(con, "clean", 1, 2)
-    # (c) dirty current generation (no matching anchor) -> refused
-    _proven_drive(con, "dirty", generation=1)
-    _dirty(con, "dirty", 1, 1)                               # dirty gen 1, no anchor
-    try:
-        with dm.drive_mutation(con, ["dirty"], "op", observe=_observe(), now="2026-01-01"):
-            raise AssertionError("must refuse starting over a dirty generation")
-    except dm.DriveMutationRefused as exc:
-        assert exc.code == "DIRTY_GENERATION_CONFLICT", exc.code
-    con.close()
+    with _catalog(tmp_path) as con:
+        # (a) generation zero -> allowed
+        _proven_drive(con, "zero", generation=0)
+        with dm.drive_mutation(con, ["zero"], "op", observe=_observe(), now="2026-01-01"):
+            pass
+        assert _has_anchor(con, "zero", 1, 1)
+        # (b) clean current generation -> allowed (advances to the next generation)
+        _proven_drive(con, "clean", generation=1)
+        _dirty(con, "clean", 1, 1)
+        _anchor(con, "clean", 1, 1)
+        with dm.drive_mutation(con, ["clean"], "op", observe=_observe(), now="2026-01-01"):
+            pass
+        assert _has_anchor(con, "clean", 1, 2)
+        # (c) dirty current generation (no matching anchor) -> refused
+        _proven_drive(con, "dirty", generation=1)
+        _dirty(con, "dirty", 1, 1)                          # dirty gen 1, no anchor
+        try:
+            with dm.drive_mutation(con, ["dirty"], "op", observe=_observe(), now="2026-01-01"):
+                raise AssertionError("must refuse starting over a dirty generation")
+        except dm.DriveMutationRefused as exc:
+            assert exc.code == "DIRTY_GENERATION_CONFLICT", exc.code
 
 
 def test_generation_advance_is_atomic(tmp_path):
@@ -195,165 +206,158 @@ def test_generation_advance_is_atomic(tmp_path):
     injected between them leaves neither, so a later mutation cannot reuse a generation or hit the
     dirty-row key."""
     _require()
-    con = _catalog(tmp_path)
-    _proven_drive(con, "drive-00", generation=0)
-    proxy = _FailOn(con, "update drives")            # fail the write_generation bump, mid-advance
-    raised = False
-    try:
-        dm.begin_generation(proxy, "drive-00", "op")
-    except Exception:                                # noqa: BLE001 — any raise is fine; atomicity is the point
-        raised = True
-    assert raised, "the advance must raise on the injected failure"
-    assert con.execute("SELECT count(*) FROM drive_dirty_generations "
-                       "WHERE drive_label='drive-00'").fetchone()[0] == 0, "dirty row must roll back"
-    assert con.execute("SELECT write_generation FROM drives "
-                       "WHERE drive_label='drive-00'").fetchone()[0] == 0, "write_generation must roll back"
-    con.close()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=0)
+        proxy = _FailOn(con, "update drives")            # fail the write_generation bump, mid-advance
+        raised = False
+        try:
+            dm.begin_generation(proxy, "drive-00", "op")
+        except Exception:                                # noqa: BLE001 — any raise is fine; atomicity is the point
+            raised = True
+        assert raised, "the advance must raise on the injected failure"
+        assert con.execute("SELECT count(*) FROM drive_dirty_generations "
+                           "WHERE drive_label='drive-00'").fetchone()[0] == 0, "dirty row must roll back"
+        assert con.execute("SELECT write_generation FROM drives "
+                           "WHERE drive_label='drive-00'").fetchone()[0] == 0, "write_generation must roll back"
 
 
 # =========================================================================== envelope: clean close vs dirty
 
 def test_clean_close_publishes_exactly_one_matching_anchor(tmp_path):
     _require()
-    con = _catalog(tmp_path)
-    _proven_drive(con, "drive-00", generation=0, fscap=1000)
-    with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(free=400),
-                           now="2026-01-01") as writer:
-        writer.record_touched("drive-00", paths=["a/b.safetensors"], keys=["KEY1"])
-    anchor = con.execute(
-        "SELECT identity_epoch,generation,anchor_free_bytes,filesystem_capacity_bytes,"
-        "identity_fingerprint,write_authority FROM drive_clean_anchors WHERE drive_label='drive-00'"
-    ).fetchall()
-    assert anchor == [(1, 1, 400, 1000, _FP, "dedicated_local")], anchor
-    con.close()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=0, fscap=1000)
+        with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(free=400),
+                               now="2026-01-01") as writer:
+            writer.record_touched("drive-00", paths=["a/b.safetensors"], keys=["KEY1"])
+        anchor = con.execute(
+            "SELECT identity_epoch,generation,anchor_free_bytes,filesystem_capacity_bytes,"
+            "identity_fingerprint,write_authority FROM drive_clean_anchors WHERE drive_label='drive-00'"
+        ).fetchall()
+        assert anchor == [(1, 1, 400, 1000, _FP, "dedicated_local")], anchor
 
 
 def test_failure_in_body_leaves_generation_durably_dirty(tmp_path):
     _require()
-    con = _catalog(tmp_path)
-    _proven_drive(con, "drive-00", generation=0)
-    try:
-        with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(), now="2026-01-01"):
-            raise RuntimeError("boom mid-write")
-    except RuntimeError:
-        pass
-    # dirty generation recorded, no clean anchor -> durably dirty
-    assert con.execute("SELECT generation FROM drive_dirty_generations "
-                       "WHERE drive_label='drive-00'").fetchall() == [(1,)]
-    assert con.execute("SELECT count(*) FROM drive_clean_anchors "
-                       "WHERE drive_label='drive-00'").fetchone()[0] == 0
-    assert con.execute("SELECT write_generation FROM drives "
-                       "WHERE drive_label='drive-00'").fetchone()[0] == 1   # advance persisted
-    con.close()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=0)
+        try:
+            with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(), now="2026-01-01"):
+                raise RuntimeError("boom mid-write")
+        except RuntimeError:
+            pass
+        # dirty generation recorded, no clean anchor -> durably dirty
+        assert con.execute("SELECT generation FROM drive_dirty_generations "
+                           "WHERE drive_label='drive-00'").fetchall() == [(1,)]
+        assert con.execute("SELECT count(*) FROM drive_clean_anchors "
+                           "WHERE drive_label='drive-00'").fetchone()[0] == 0
+        assert con.execute("SELECT write_generation FROM drives "
+                           "WHERE drive_label='drive-00'").fetchone()[0] == 1   # advance persisted
 
 
 def test_identity_mismatch_during_observation_leaves_generation_dirty(tmp_path):
     _require()
-    con = _catalog(tmp_path)
-    _proven_drive(con, "drive-00", generation=0)     # row identity proven; the LIVE observation fails
-    raised = None
-    try:
-        with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(proven=False),
-                               now="2026-01-01"):
-            pass
-    except dm.DriveMutationRefused as exc:
-        raised = exc.code
-    assert raised in ("DRIVE_IDENTITY_UNPROVEN", "DRIVE_FENCE_UNAVAILABLE"), raised
-    # the generation was advanced and durably dirtied; the clean anchor could not be published
-    assert con.execute("SELECT generation FROM drive_dirty_generations "
-                       "WHERE drive_label='drive-00'").fetchall() == [(1,)]
-    assert con.execute("SELECT write_generation FROM drives "
-                       "WHERE drive_label='drive-00'").fetchone()[0] == 1
-    assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
-    con.close()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=0)     # row identity proven; the LIVE observation fails
+        raised = None
+        try:
+            with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(proven=False),
+                                   now="2026-01-01"):
+                pass
+        except dm.DriveMutationRefused as exc:
+            raised = exc.code
+        assert raised in ("DRIVE_IDENTITY_UNPROVEN", "DRIVE_FENCE_UNAVAILABLE"), raised
+        # the generation was advanced and durably dirtied; the clean anchor could not be published
+        assert con.execute("SELECT generation FROM drive_dirty_generations "
+                           "WHERE drive_label='drive-00'").fetchall() == [(1,)]
+        assert con.execute("SELECT write_generation FROM drives "
+                           "WHERE drive_label='drive-00'").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
 
 
 # =========================================================================== clean-anchor CAS
 
 def test_clean_anchor_cas_refuses_a_stale_or_foreign_generation(tmp_path):
     _require()
-    con = _catalog(tmp_path)
-    _proven_drive(con, "drive-00", generation=2)             # current generation is 2
-    _dirty(con, "drive-00", 1, 2)
-    obs = _observe()("drive-00")
-    # publishing an anchor for a generation other than the current one is a CAS failure (no cross-clear)
-    try:
-        dm.publish_clean_anchor(con, "drive-00", 1, obs, now="2026-01-01")   # stale/foreign generation
-        raise AssertionError("stale-generation anchor publish must fail")
-    except dm.DriveMutationRefused as exc:
-        assert exc.code == "CLEAN_ANCHOR_CAS_FAILED", exc.code
-    assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
-    con.close()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=2)     # current generation is 2
+        _dirty(con, "drive-00", 1, 2)
+        obs = _observe()("drive-00")
+        # publishing an anchor for a generation other than the current one is a CAS failure (no cross-clear)
+        try:
+            dm.publish_clean_anchor(con, "drive-00", 1, obs, now="2026-01-01")   # stale/foreign generation
+            raise AssertionError("stale-generation anchor publish must fail")
+        except dm.DriveMutationRefused as exc:
+            assert exc.code == "CLEAN_ANCHOR_CAS_FAILED", exc.code
+        assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
 
 
 # =========================================================================== lock ordering + contention
 
 def test_controller_lock_is_acquired_before_drive_locks(tmp_path):
     _require()
-    con = _catalog(tmp_path)
-    _proven_drive(con, "drive-00", generation=0)
-    order = []
-    real_ctrl, real_drive = drive_fence.hold_controller, drive_fence.hold_drives_sorted
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=0)
+        order = []
+        real_ctrl, real_drive = drive_fence.hold_controller, drive_fence.hold_drives_sorted
 
-    def traced_ctrl(*a, **k):
-        order.append("controller")
-        return real_ctrl(*a, **k)
+        def traced_ctrl(*a, **k):
+            order.append("controller")
+            return real_ctrl(*a, **k)
 
-    def traced_drive(*a, **k):
-        order.append("drives")
-        return real_drive(*a, **k)
+        def traced_drive(*a, **k):
+            order.append("drives")
+            return real_drive(*a, **k)
 
-    drive_fence.hold_controller, drive_fence.hold_drives_sorted = traced_ctrl, traced_drive
-    try:
-        with dm.drive_mutation(con, ["drive-00"], "op", observe=_observe(), now="2026-01-01"):
-            pass
-    finally:
-        drive_fence.hold_controller, drive_fence.hold_drives_sorted = real_ctrl, real_drive
-    assert order[:2] == ["controller", "drives"], order
-    con.close()
+        drive_fence.hold_controller, drive_fence.hold_drives_sorted = traced_ctrl, traced_drive
+        try:
+            with dm.drive_mutation(con, ["drive-00"], "op", observe=_observe(), now="2026-01-01"):
+                pass
+        finally:
+            drive_fence.hold_controller, drive_fence.hold_drives_sorted = real_ctrl, real_drive
+        assert order[:2] == ["controller", "drives"], order
 
 
 def test_cross_process_drive_lock_is_mutually_exclusive(tmp_path):
     _require()
-    con = _catalog(tmp_path)
-    _proven_drive(con, "drive-00", epoch=1, generation=0)
-    held = tmp_path / "held.flag"
-    release = tmp_path / "release.flag"
-    # a separate PROCESS holds the exact drive flock, then waits for us to release it
-    holder = textwrap.dedent(f"""
-        import fcntl, time
-        from pathlib import Path
-        from modelark.core import db
-        from modelark import drive_fence
-        db.configure({str(tmp_path)!r}, {str(tmp_path / "state")!r})
-        path = drive_fence.drive_lock_path({_FP!r}, 1)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(path, "w")
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        Path({str(held)!r}).write_text("held")
-        while not Path({str(release)!r}).exists():
-            time.sleep(0.02)
-        fcntl.flock(fh, fcntl.LOCK_UN); fh.close()
-    """)
-    proc = subprocess.Popen([sys.executable, "-c", holder])
-    try:
-        for _ in range(500):                                 # wait (no fixed sleep) until the flock is held
-            if held.exists():
-                break
-            time.sleep(0.01)
-        assert held.exists(), "holder process never acquired the drive flock"
-        # with the drive flock held cross-process, a non-blocking envelope must refuse, not hang
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", epoch=1, generation=0)
+        held = tmp_path / "held.flag"
+        release = tmp_path / "release.flag"
+        # a separate PROCESS holds the exact drive flock, then waits for us to release it
+        holder = textwrap.dedent(f"""
+            import fcntl, time
+            from pathlib import Path
+            from modelark.core import db
+            from modelark import drive_fence
+            db.configure({str(tmp_path)!r}, {str(tmp_path / "state")!r})
+            path = drive_fence.drive_lock_path({_FP!r}, 1)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(path, "w")
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            Path({str(held)!r}).write_text("held")
+            while not Path({str(release)!r}).exists():
+                time.sleep(0.02)
+            fcntl.flock(fh, fcntl.LOCK_UN); fh.close()
+        """)
+        proc = subprocess.Popen([sys.executable, "-c", holder])
         try:
-            with dm.drive_mutation(con, ["drive-00"], "op", observe=_observe(), now="2026-01-01",
-                                   blocking=False):
-                raise AssertionError("envelope acquired a flock held by another process")
-        except dm.DriveMutationRefused as exc:
-            assert exc.code == "DRIVE_FENCE_UNAVAILABLE", exc.code
-        assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
-    finally:
-        release.write_text("go")
-        proc.wait(timeout=10)
-    con.close()
+            for _ in range(500):                             # wait (no fixed sleep) until the flock is held
+                if held.exists():
+                    break
+                time.sleep(0.01)
+            assert held.exists(), "holder process never acquired the drive flock"
+            # with the drive flock held cross-process, a non-blocking envelope must refuse, not hang
+            try:
+                with dm.drive_mutation(con, ["drive-00"], "op", observe=_observe(), now="2026-01-01",
+                                       blocking=False):
+                    raise AssertionError("envelope acquired a flock held by another process")
+            except dm.DriveMutationRefused as exc:
+                assert exc.code == "DRIVE_FENCE_UNAVAILABLE", exc.code
+            assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
+        finally:
+            release.write_text("go")
+            proc.wait(timeout=10)
 
 
 # =========================================================================== dormancy guard
@@ -388,7 +392,6 @@ def main():
                    if n.startswith("test_") and callable(f))
     passed, failed = [], []
     for name, fn in tests:
-        catalog_globals = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)   # isolate: restore after each test
         try:
             if "tmp_path" in inspect.signature(fn).parameters:
                 fn(Path(tempfile.mkdtemp(prefix="mark-03a-")))
@@ -399,8 +402,6 @@ def main():
         except Exception as exc:                 # noqa: BLE001 — Gate-1 wants the full red/green map
             failed.append(name)
             print(f"FAIL  {name}  -> {type(exc).__name__}: {exc}")
-        finally:
-            db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = catalog_globals
     print(f"\n{len(passed)} passed, {len(failed)} failed")
     if failed:
         raise SystemExit(1)
