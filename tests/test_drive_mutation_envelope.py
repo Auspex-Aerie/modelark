@@ -555,6 +555,59 @@ def test_controller_lock_is_acquired_before_drive_locks(tmp_path):
         assert order[:2] == ["controller", "drives"], order
 
 
+# =========================================================================== boundary races (review)
+
+def test_body_cannot_run_against_facts_changed_after_capture(tmp_path):
+    """Facts are captured under the controller fence and revalidated before dirtying: if the drive's
+    identity/epoch changes between capture and the advance, the mutation refuses and the body never
+    runs (no dirty generation)."""
+    _require()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", epoch=1, generation=0, fp=_FP)
+
+        def observe(label):
+            # simulate a lifecycle epoch bump racing in after facts were captured (fingerprint
+            # unchanged, so identity proof passes; the epoch moved out from under the operation)
+            con.execute("UPDATE drives SET identity_epoch=2, write_generation=0 WHERE drive_label=?",
+                        [label])
+            return _obs(900, capacity=1000, fp=_FP)
+
+        try:
+            with dm.drive_mutation(con, ["drive-00"], "op", observe=observe,
+                                   reconcile=_reconciler(con), now="2026-01-01"):
+                raise AssertionError("body must not run against changed facts")
+        except dm.DriveMutationRefused as exc:
+            assert exc.code == "DRIVE_IDENTITY_UNPROVEN", exc.code
+        assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
+
+
+def test_multi_drive_anchor_publish_is_all_or_nothing(tmp_path):
+    """Candidate anchors are collected for every drive, then published in ONE transaction: a failure
+    publishing the second drive's anchor leaves NO anchor and both generations dirty."""
+    _require()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "aaa", fp=_FP, generation=0)
+        _proven_drive(con, "ccc", fp=_FP2, generation=0)
+        proxy = _FailOn(con, "insert into drive_clean_anchors", nth=2)   # 2nd drive's anchor insert
+        raised = False
+        try:
+            with dm.drive_mutation(proxy, ["aaa", "ccc"], "op", observe=_observer(con),
+                                   reconcile=_reconciler(con), now="2026-01-01") as writer:
+                writer.record_touched("aaa", paths=["a"], keys=["K"])
+                writer.record_touched("ccc", paths=["c"], keys=["K"])
+        except Exception:                                # noqa: BLE001 — atomicity is the point
+            raised = True
+        assert raised
+        other = sqlite3.connect(str(db.DB_PATH))
+        try:
+            assert other.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0, \
+                "no anchor may be published when any drive's publish fails"
+            assert other.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 2, \
+                "both generations remain dirty"
+        finally:
+            other.close()
+
+
 # =========================================================================== dormancy guard
 
 def test_envelope_has_no_production_call_sites():
