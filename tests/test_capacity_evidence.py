@@ -25,11 +25,17 @@ def _require():
 
 
 def _derive(**over):
-    """Derive evidence from a synthetic per-drive observation; override only the relevant fields."""
+    """Derive evidence from a synthetic per-drive observation; override only the relevant fields.
+
+    `current_*` describe the drive's current identity/capacity; `anchor_*` describe what a latest
+    clean anchor recorded. An anchor is authoritative only when its epoch, fingerprint, and
+    filesystem capacity all equal the current drive's."""
     base = dict(
         mounted=False, identity_proven=False, fence_held=False, write_authority="unknown",
-        current_epoch=1, filesystem_capacity_bytes=1000, live_free_bytes=None, dirty=False,
-        anchor_free_bytes=None, anchor_epoch=None, safety_floor_bytes=100,
+        current_epoch=1, filesystem_capacity_bytes=1000, current_fingerprint="fp",
+        live_free_bytes=None, dirty=False,
+        anchor_free_bytes=None, anchor_epoch=None, anchor_fingerprint="fp",
+        anchor_filesystem_capacity=1000, safety_floor_bytes=100,
     )
     base.update(over)
     return ce.derive(**base)
@@ -70,33 +76,57 @@ def test_offline_clean_anchor_is_authoritative_for_the_matching_epoch():
     assert ev.kind == "anchor" and ev.executable and ev.admissible_free == 700
 
 
-def test_unknown_tiers_are_zero_executable():
+def test_unknown_tiers_preserve_binding_distinctions():
     _require()
+    # Each case is single-fault so its typed code is unambiguous; the binding distinctions are
+    # preserved rather than collapsed to a generic unknown.
     cases = {
-        "offline_dirty": dict(write_authority="dedicated_local", anchor_free_bytes=800,
-                              anchor_epoch=1, dirty=True),
-        "offline_anchorless": dict(write_authority="dedicated_local"),
-        "anchor_epoch_mismatch": dict(write_authority="dedicated_local", anchor_free_bytes=800,
-                                      anchor_epoch=2, current_epoch=1),
-        "mounted_unfenced": dict(mounted=True, identity_proven=True, fence_held=False,
-                                 write_authority="dedicated_local", live_free_bytes=1000),
-        "shared_authority": dict(mounted=True, identity_proven=True, fence_held=True,
-                                 write_authority="unknown", live_free_bytes=1000),
-        "identity_unproven": dict(mounted=True, identity_proven=False, fence_held=True,
-                                  write_authority="dedicated_local", live_free_bytes=1000),
+        "identity_unproven": (dict(mounted=True, identity_proven=False, fence_held=True,
+                                   write_authority="dedicated_local", live_free_bytes=1000),
+                              "DRIVE_IDENTITY_UNPROVEN"),
+        "fence_unavailable": (dict(mounted=True, identity_proven=True, fence_held=False,
+                                   write_authority="dedicated_local", live_free_bytes=1000),
+                              "DRIVE_FENCE_UNAVAILABLE"),
+        "shared_writer": (dict(mounted=True, identity_proven=True, fence_held=True,
+                               write_authority="unknown", live_free_bytes=1000),
+                          "UNSUPPORTED_SHARED_WRITER"),
+        "offline_dirty": (dict(write_authority="dedicated_local", anchor_free_bytes=800,
+                               anchor_epoch=1, dirty=True), "DRIVE_RECONCILIATION_REQUIRED"),
+        "anchor_epoch_mismatch": (dict(write_authority="dedicated_local", anchor_free_bytes=800,
+                                       anchor_epoch=2, current_epoch=1),
+                                  "DRIVE_RECONCILIATION_REQUIRED"),
+        "anchor_fingerprint_mismatch": (dict(write_authority="dedicated_local", anchor_free_bytes=800,
+                                             anchor_epoch=1, anchor_fingerprint="stale",
+                                             current_fingerprint="fp"),
+                                        "DRIVE_RECONCILIATION_REQUIRED"),
+        "anchor_capacity_mismatch": (dict(write_authority="dedicated_local", anchor_free_bytes=800,
+                                          anchor_epoch=1, anchor_filesystem_capacity=999,
+                                          filesystem_capacity_bytes=1000),
+                                     "DRIVE_RECONCILIATION_REQUIRED"),
+        "offline_anchorless": (dict(write_authority="dedicated_local"), "CAPACITY_EVIDENCE_UNKNOWN"),
     }
-    for name, over in cases.items():
+    for name, (over, code) in cases.items():
         ev = _derive(**over)
         assert ev.kind == "unknown" and not ev.executable and ev.admissible_free == 0, name
-        assert ev.code == "CAPACITY_EVIDENCE_UNKNOWN", name
+        assert ev.code == code, (name, ev.code)
 
 
 def test_out_of_range_anchor_is_typed_unknown():
     _require()
     ev = _derive(write_authority="dedicated_local", anchor_free_bytes=2000, anchor_epoch=1,
-                 current_epoch=1, filesystem_capacity_bytes=1000)
+                 current_epoch=1, filesystem_capacity_bytes=1000, anchor_filesystem_capacity=1000)
     assert ev.kind == "unknown" and not ev.executable and ev.admissible_free == 0
     assert ev.code == "ANCHOR_OUT_OF_RANGE"
+
+
+def test_unknown_optimistic_usable_max_is_post_floor_or_none():
+    _require()
+    known = _derive(write_authority="dedicated_local", filesystem_capacity_bytes=1000,
+                    safety_floor_bytes=100)
+    assert known.kind == "unknown" and known.optimistic_usable_max == 900   # post-floor, diagnostic only
+    assert not known.executable and known.admissible_free == 0              # never authorizes bytes
+    unknown_cap = _derive(write_authority="dedicated_local", filesystem_capacity_bytes=None)
+    assert unknown_cap.kind == "unknown" and unknown_cap.optimistic_usable_max is None
 
 
 def test_safety_floor_subtracted_once_and_clamped_at_zero():
@@ -113,20 +143,22 @@ def test_shadow_read_is_side_effect_free_and_all_unknown(tmp_path):
     _require()
     db.CATALOG_DIR = tmp_path
     db.DB_PATH = tmp_path / "catalog.sqlite"
-    con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+    con = db.connect()                                   # fresh catalog is v3 directly (no migration here)
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 3, \
+        "fresh catalog must be v3 (expected Gate-1 red)"
     con.execute("INSERT INTO drives(drive_label,capacity_bytes,free_bytes) VALUES('drive-00',1000,500)")
     con.execute("INSERT INTO drives(drive_label,capacity_bytes,free_bytes) VALUES('drive-01',1000,900)")
-    con.close()
-
-    con = db.connect()                                   # migrate to v3
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 3, "v3 not reached (expected Gate-1 red)"
     before_free = con.execute("SELECT drive_label, free_bytes FROM drives ORDER BY 1").fetchall()
 
     shadow = ce.shadow_by_drive(con)                     # internal diagnostic accessor only
     assert set(shadow) == {"drive-00", "drive-01"}
-    assert all(e.kind == "unknown" and not e.executable and e.admissible_free == 0
-               for e in shadow.values()), shadow
+    for e in shadow.values():
+        # a migrated/unproven drive: unknown, zero executable, no admission authority
+        assert e.kind == "unknown" and not e.executable and e.admissible_free == 0, shadow
+        # current-epoch filesystem capacity is unknown post-migration -> optimistic max is None
+        assert e.optimistic_usable_max is None
+    # legacy free_bytes is exposed ONLY as a diagnostic, never as executable/admissible free
+    assert shadow["drive-00"].legacy_free_bytes == 500 and shadow["drive-01"].legacy_free_bytes == 900
     # diagnostic read: no admission input mutated, no evidence fabricated
     assert con.execute("PRAGMA user_version").fetchone()[0] == 3
     assert con.execute("SELECT drive_label, free_bytes FROM drives ORDER BY 1").fetchall() == before_free

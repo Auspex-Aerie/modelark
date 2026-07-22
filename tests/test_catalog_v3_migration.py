@@ -34,12 +34,38 @@ class _FailOn:
         return getattr(self._con, name)
 
 
+# Frozen v2 `drives` definition — deliberately independent of the packaged schema so this fixture
+# keeps producing a genuine v2 catalog after Gate 2 adds the v3 columns/tables and bumps
+# _SCHEMA_VERSION to 3. Kept byte-for-byte equal to the schema-v2 drives shape.
+_V2_DRIVES_COLS = ("drive_label,fs_uuid,annex_uuid,capacity_bytes,free_bytes,hw_model,serial,"
+                   "physical_location,role,raid_backed,health,last_seen,notes")
+_V2_DRIVES_DDL = """
+CREATE TABLE {name} (
+    drive_label        VARCHAR PRIMARY KEY NOT NULL CHECK (length(trim(drive_label)) > 0),
+    fs_uuid            VARCHAR,
+    annex_uuid         VARCHAR,
+    capacity_bytes     BIGINT CHECK (capacity_bytes IS NULL OR capacity_bytes >= 0),
+    free_bytes         BIGINT CHECK (free_bytes IS NULL OR free_bytes >= 0),
+    hw_model           VARCHAR,
+    serial             VARCHAR,
+    physical_location  VARCHAR,
+    role               VARCHAR NOT NULL DEFAULT 'primary' CHECK (role IN ('primary','replica')),
+    raid_backed        BOOLEAN NOT NULL DEFAULT false CHECK (raid_backed IN (0, 1)),
+    health             VARCHAR,
+    last_seen          TIMESTAMP,
+    notes              VARCHAR
+)
+"""
+
+
 def _seed_v2(tmp_path):
-    """Build a real v2 catalog (current build) with a drive carrying identity + legacy scalars."""
+    """Build a genuine v2 catalog INDEPENDENT of the build's current _SCHEMA_VERSION: bootstrap the
+    packaged schema, seed data, then transactionally strip any v3-only objects/columns using the
+    frozen v2 drives definition and stamp user_version=2. This stays a real v2 fixture even after
+    Gate 2 raises the packaged schema to v3."""
     db.CATALOG_DIR = tmp_path
     db.DB_PATH = tmp_path / "catalog.sqlite"
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 2, "fixture must start at schema v2"
     con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/m',1)")
     con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
                 "VALUES('org/m','model.safetensors',100,'safetensors','bf16')")
@@ -47,7 +73,25 @@ def _seed_v2(tmp_path):
                 "VALUES('drive-00',1000,500,'fs-uuid-00','annex-uuid-00','serial-00')")
     con.execute("INSERT INTO archived(repo_id,rfilename,drive_label,compressed) "
                 "VALUES('org/m','model.safetensors','drive-00',0)")
+    con.execute("PRAGMA foreign_keys=OFF")
+    con.execute("PRAGMA legacy_alter_table=ON")         # renames must not rewrite archived's FK target
+    con.execute("BEGIN")
+    con.execute("DROP TABLE IF EXISTS drive_clean_anchors")     # also drops its indexes + triggers
+    con.execute("DROP TABLE IF EXISTS drive_dirty_generations")
+    con.execute(_V2_DRIVES_DDL.format(name="drives__v2"))       # frozen v2 shape under a temp name
+    con.execute(f"INSERT INTO drives__v2({_V2_DRIVES_COLS}) SELECT {_V2_DRIVES_COLS} FROM drives")
+    con.execute("DROP TABLE drives")
+    con.execute("ALTER TABLE drives__v2 RENAME TO drives")
+    con.execute("PRAGMA user_version=2")
+    con.execute("COMMIT")
     con.close()
+    # sanity: the fixture really is v2 regardless of the build's packaged schema version
+    check = _reopen_raw()
+    assert check.execute("PRAGMA user_version").fetchone()[0] == 2, "fixture must be a v2 catalog"
+    tables = {r[0] for r in check.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "drive_clean_anchors" not in tables and "drive_dirty_generations" not in tables
+    assert "identity_epoch" not in {r[1] for r in check.execute("PRAGMA table_info(drives)").fetchall()}
+    check.close()
 
 
 def _reopen_raw():
@@ -161,13 +205,14 @@ def test_v3_schema_constraint_matrix(tmp_path):
         "(drive_label,identity_epoch,generation,operation_code,owner_session_id) "
         "VALUES('drive-00',1,3,'test','sess')", sqlite3.IntegrityError)
 
-    # Append-only triggers reject UPDATE and DELETE on BOTH evidence tables (Greptile #2). Triggers
-    # RAISE(ABORT, '... append-only'), so assert the trigger error specifically, not any error.
+    # Append-only triggers reject UPDATE and DELETE on BOTH evidence tables (Greptile #2). SQLite
+    # RAISE(ABORT, '... append-only') surfaces as sqlite3.IntegrityError (verified), so assert that
+    # specific error + message, not a bare error.
     for table in ("drive_dirty_generations", "drive_clean_anchors"):
         assert rejected(f"UPDATE {table} SET identity_epoch=9 WHERE generation=1",
-                        sqlite3.OperationalError, "append-only"), table
+                        sqlite3.IntegrityError, "append-only"), table
         assert rejected(f"DELETE FROM {table} WHERE generation=1",
-                        sqlite3.OperationalError, "append-only"), table
+                        sqlite3.IntegrityError, "append-only"), table
 
     # Anchor free bytes must not exceed filesystem capacity; fingerprint must be 64 chars;
     # write_authority is constrained — each on the existing, still-unanchored generation 2.
