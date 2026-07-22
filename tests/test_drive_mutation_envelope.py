@@ -20,6 +20,8 @@ Non-goals here: child-FD integration + transport conversion (03b); registration/
 """
 from __future__ import annotations
 
+import ast
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -32,8 +34,8 @@ try:
     from modelark import drive_fence
     from modelark import drive_mutation as dm
     _HAS = True
-except Exception:                                # noqa: BLE001 — modules under construction
-    drive_fence = dm = None
+except ImportError:                              # only a MISSING module activates the Gate-1 guard;
+    drive_fence = dm = None                       # a real import-time error in the module must surface
     _HAS = False
 
 _FP = "a" * 64
@@ -85,6 +87,23 @@ def _has_anchor(con, label, epoch, generation):
     return con.execute("SELECT count(*) FROM drive_clean_anchors "
                        "WHERE drive_label=? AND identity_epoch=? AND generation=?",
                        [label, epoch, generation]).fetchone()[0] == 1
+
+
+class _FailOn:
+    """A connection proxy that raises when a (case-insensitive) marker appears in a statement, to
+    inject a mid-transaction failure while delegating everything else to the real connection."""
+
+    def __init__(self, con, marker):
+        self._con = con
+        self._marker = marker.lower()
+
+    def execute(self, sql, *args):
+        if self._marker in sql.lower():
+            raise sqlite3.OperationalError(f"injected failure at: {self._marker}")
+        return self._con.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
 
 
 # =========================================================================== lock keys
@@ -171,6 +190,27 @@ def test_generation_start_guard(tmp_path):
     con.close()
 
 
+def test_generation_advance_is_atomic(tmp_path):
+    """The dirty-row insert and the write_generation bump commit as one transaction: a failure
+    injected between them leaves neither, so a later mutation cannot reuse a generation or hit the
+    dirty-row key."""
+    _require()
+    con = _catalog(tmp_path)
+    _proven_drive(con, "drive-00", generation=0)
+    proxy = _FailOn(con, "update drives")            # fail the write_generation bump, mid-advance
+    raised = False
+    try:
+        dm.begin_generation(proxy, "drive-00", "op")
+    except Exception:                                # noqa: BLE001 — any raise is fine; atomicity is the point
+        raised = True
+    assert raised, "the advance must raise on the injected failure"
+    assert con.execute("SELECT count(*) FROM drive_dirty_generations "
+                       "WHERE drive_label='drive-00'").fetchone()[0] == 0, "dirty row must roll back"
+    assert con.execute("SELECT write_generation FROM drives "
+                       "WHERE drive_label='drive-00'").fetchone()[0] == 0, "write_generation must roll back"
+    con.close()
+
+
 # =========================================================================== envelope: clean close vs dirty
 
 def test_clean_close_publishes_exactly_one_matching_anchor(tmp_path):
@@ -210,14 +250,21 @@ def test_failure_in_body_leaves_generation_durably_dirty(tmp_path):
 def test_identity_mismatch_during_observation_leaves_generation_dirty(tmp_path):
     _require()
     con = _catalog(tmp_path)
-    _proven_drive(con, "drive-00", generation=0)
+    _proven_drive(con, "drive-00", generation=0)     # row identity proven; the LIVE observation fails
+    raised = None
     try:
         with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(proven=False),
                                now="2026-01-01"):
             pass
     except dm.DriveMutationRefused as exc:
-        assert exc.code in ("DRIVE_IDENTITY_UNPROVEN", "DRIVE_FENCE_UNAVAILABLE"), exc.code
-    assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0   # no anchor
+        raised = exc.code
+    assert raised in ("DRIVE_IDENTITY_UNPROVEN", "DRIVE_FENCE_UNAVAILABLE"), raised
+    # the generation was advanced and durably dirtied; the clean anchor could not be published
+    assert con.execute("SELECT generation FROM drive_dirty_generations "
+                       "WHERE drive_label='drive-00'").fetchall() == [(1,)]
+    assert con.execute("SELECT write_generation FROM drives "
+                       "WHERE drive_label='drive-00'").fetchone()[0] == 1
+    assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
     con.close()
 
 
@@ -312,16 +359,25 @@ def test_cross_process_drive_lock_is_mutually_exclusive(tmp_path):
 # =========================================================================== dormancy guard
 
 def test_envelope_has_no_production_call_sites():
-    """PR-03a stays dormant/non-authoritative: no production module imports the envelope until 03b/03c."""
+    """PR-03a stays dormant/non-authoritative: no production module imports the envelope until 03b/03c.
+    Inspect import AST nodes (not raw substrings) so `import modelark.drive_fence` and
+    `from modelark.drive_mutation import X` are both caught."""
     root = Path(__file__).resolve().parent.parent / "modelark"
+    envelope = {"drive_fence", "drive_mutation"}
     offenders = []
     for path in root.rglob("*.py"):
         if path.name in ("drive_fence.py", "drive_mutation.py"):
             continue
-        text = path.read_text()
-        if "import drive_fence" in text or "import drive_mutation" in text \
-                or "drive_mutation(" in text:
-            offenders.append(str(path.relative_to(root)))
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for node in ast.walk(tree):
+            hit = False
+            if isinstance(node, ast.Import):
+                hit = any(alias.name.split(".")[-1] in envelope for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                module = (node.module or "").split(".")
+                hit = bool(set(module) & envelope) or any(a.name in envelope for a in node.names)
+            if hit:
+                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
     assert offenders == [], f"envelope must not be wired into production yet: {offenders}"
 
 
@@ -332,6 +388,7 @@ def main():
                    if n.startswith("test_") and callable(f))
     passed, failed = [], []
     for name, fn in tests:
+        catalog_globals = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)   # isolate: restore after each test
         try:
             if "tmp_path" in inspect.signature(fn).parameters:
                 fn(Path(tempfile.mkdtemp(prefix="mark-03a-")))
@@ -342,6 +399,8 @@ def main():
         except Exception as exc:                 # noqa: BLE001 — Gate-1 wants the full red/green map
             failed.append(name)
             print(f"FAIL  {name}  -> {type(exc).__name__}: {exc}")
+        finally:
+            db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = catalog_globals
     print(f"\n{len(passed)} passed, {len(failed)} failed")
     if failed:
         raise SystemExit(1)
