@@ -229,6 +229,32 @@ def test_legacy_catalog_rebuild_preserves_rows_and_applies_migrations(tmp_path):
     v2_backup.close()
 
 
+def test_v0_to_v3_migration_backs_up_a_genuine_v2_before_evidence(tmp_path):
+    """A v0 catalog migrating all the way to v3 must still take the evidence backup, and that backup
+    must be a genuine v2 (no v3 columns/tables): the integrity rebuild must not pull the v3 drive
+    columns backward and let the v3 step short-circuit past its own backup."""
+    con = _legacy_without_constraints(tmp_path)
+    con.execute("INSERT INTO drives(drive_label,free_bytes,role,raid_backed) "
+                "VALUES('drive-01',500,'primary',0)")
+    con.close()
+
+    con = db.connect()
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION
+    drive_columns = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
+    assert {"identity_epoch", "write_authority"} <= drive_columns
+    assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0   # no fabricated evidence
+    con.close()
+
+    v3_backup = db.DB_PATH.with_name(f"{db.DB_PATH.name}.pre-evidence-v3.bak")
+    assert v3_backup.is_file(), "v0->v3 must still take the evidence backup"
+    backup = sqlite3.connect(str(v3_backup))
+    assert backup.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert "identity_epoch" not in {r[1] for r in backup.execute("PRAGMA table_info(drives)").fetchall()}
+    tables = {r[0] for r in backup.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    assert "drive_clean_anchors" not in tables and "drive_dirty_generations" not in tables
+    backup.close()
+
+
 def test_legacy_orphans_abort_and_roll_back_integrity_rebuild(tmp_path):
     con = _legacy_without_constraints(tmp_path)
     con.execute("INSERT INTO selection(repo_id) VALUES('missing/model')")

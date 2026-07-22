@@ -22,13 +22,15 @@ _DIAGNOSTIC_SAFETY_FLOOR = 0
 @dataclass(frozen=True)
 class Evidence:
     """A typed admission-evidence verdict for one drive. `unknown` contributes zero executable
-    capacity; `legacy_free_bytes` is diagnostic only and never executable; `optimistic_usable_max` is
-    a non-executable sensitivity bound (post-safety-floor filesystem capacity, or None when the
-    current-epoch filesystem capacity is unknown)."""
+    capacity; `observed_free` is the raw live/anchor observation BEFORE the safety floor (None when
+    unknown), so exactly-once subtraction is auditable against `admissible_free`; `legacy_free_bytes`
+    is diagnostic only and never executable; `optimistic_usable_max` is a non-executable sensitivity
+    bound (post-safety-floor filesystem capacity, or None when the current-epoch capacity is unknown)."""
     kind: str                       # "live" | "anchor" | "unknown"
     executable: bool
     admissible_free: int
     code: str | None = None
+    observed_free: int | None = None
     optimistic_usable_max: int | None = None
     legacy_free_bytes: int | None = None
 
@@ -84,7 +86,7 @@ def derive(*, mounted, identity_proven, fence_held, write_authority, current_epo
             return unknown("CAPACITY_EVIDENCE_UNKNOWN")
         return Evidence(kind="live", executable=True,
                         admissible_free=max(0, live_free_bytes - safety_floor_bytes),
-                        code=None, optimistic_usable_max=optimistic)
+                        code=None, observed_free=live_free_bytes, optimistic_usable_max=optimistic)
 
     # offline
     if dirty:
@@ -100,7 +102,7 @@ def derive(*, mounted, identity_proven, fence_held, write_authority, current_epo
         return unknown("ANCHOR_OUT_OF_RANGE")
     return Evidence(kind="anchor", executable=True,
                     admissible_free=max(0, anchor_free_bytes - safety_floor_bytes),
-                    code=None, optimistic_usable_max=optimistic)
+                    code=None, observed_free=anchor_free_bytes, optimistic_usable_max=optimistic)
 
 
 def shadow_by_drive(con) -> dict[str, Evidence]:
@@ -114,22 +116,23 @@ def shadow_by_drive(con) -> dict[str, Evidence]:
     ).fetchall()
     out: dict[str, Evidence] = {}
     for label, epoch, generation, authority, fs_capacity, fingerprint, free in drives:
+        # Select the anchor for the drive's EXACT current (identity_epoch, write_generation): a stale
+        # anchor from an old epoch at a higher generation must not shadow the current-epoch one.
         anchor = con.execute(
-            "SELECT generation, anchor_free_bytes, identity_epoch, identity_fingerprint, "
-            "filesystem_capacity_bytes FROM drive_clean_anchors WHERE drive_label=? "
-            "ORDER BY generation DESC LIMIT 1", [label]).fetchone()
-        anchor_generation = anchor[0] if anchor else None
-        # A current generation is clean only when a matching anchor exists; otherwise it is dirty.
-        # A never-written drive (generation 0, no anchor) is simply unproven, not dirty.
-        dirty = generation > 0 and anchor_generation != generation
+            "SELECT anchor_free_bytes, identity_epoch, identity_fingerprint, filesystem_capacity_bytes "
+            "FROM drive_clean_anchors WHERE drive_label=? AND identity_epoch=? AND generation=?",
+            [label, epoch, generation]).fetchone()
+        # The current generation is clean iff its matching anchor exists; a never-written drive
+        # (generation 0, no anchor) is simply unproven, not dirty.
+        dirty = generation > 0 and anchor is None
         evidence = derive(
             mounted=False, identity_proven=False, fence_held=False, write_authority=authority,
             current_epoch=epoch, filesystem_capacity_bytes=fs_capacity,
             current_fingerprint=fingerprint, live_free_bytes=None, dirty=dirty,
-            anchor_free_bytes=(anchor[1] if anchor else None),
-            anchor_epoch=(anchor[2] if anchor else None),
-            anchor_fingerprint=(anchor[3] if anchor else None),
-            anchor_filesystem_capacity=(anchor[4] if anchor else None),
+            anchor_free_bytes=(anchor[0] if anchor else None),
+            anchor_epoch=(anchor[1] if anchor else None),
+            anchor_fingerprint=(anchor[2] if anchor else None),
+            anchor_filesystem_capacity=(anchor[3] if anchor else None),
             safety_floor_bytes=_DIAGNOSTIC_SAFETY_FLOOR,
         )
         out[label] = replace(evidence, legacy_free_bytes=free)

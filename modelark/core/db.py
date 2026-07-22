@@ -89,6 +89,10 @@ def _statements(sql: str) -> Iterable[str]:
 # Catalog-v3 (#35-A) append-only evidence tables. The v2->v3 migration creates these transactionally
 # after its backup, so the pre-migration tables-only pass must NOT create them first on a v2 catalog.
 _V3_EVIDENCE_TABLES = ("drive_dirty_generations", "drive_clean_anchors")
+# The v3 drives columns. The v0->v1 integrity rebuild excludes them so a legacy catalog keeps its
+# pre-v3 drive shape until the actual v3 transaction takes its own backup.
+_V3_DRIVE_COLUMN_NAMES = ("identity_epoch", "write_generation", "filesystem_capacity_bytes",
+                          "identity_fingerprint", "write_authority")
 
 
 def _apply_schema(con: sqlite3.Connection, tables_only: bool = False) -> None:
@@ -200,8 +204,33 @@ def _validate_catalog_version(version: int, *, read_only: bool = False) -> None:
         )
 
 
-def _canonical_table_sql(table: str, replacement: str) -> str:
-    """Return one canonical CREATE TABLE statement under a temporary table name."""
+def _drop_columns_from_ddl(ddl: str, exclude: tuple[str, ...]) -> str:
+    """Remove the named column definitions from a CREATE TABLE statement, splitting the column list on
+    depth-0 commas so CHECK(...) parens and quoted commas are respected."""
+    open_i = ddl.index("(")
+    close_i = ddl.rindex(")")
+    body = ddl[open_i + 1:close_i]
+    parts: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for char in body:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    kept = [p for p in parts if p.strip().split()[0].strip('"') not in exclude]
+    return ddl[:open_i + 1] + ",".join(kept) + ddl[close_i:]
+
+
+def _canonical_table_sql(table: str, replacement: str, exclude: tuple[str, ...] = ()) -> str:
+    """Return one canonical CREATE TABLE statement under a temporary table name, optionally excluding
+    named columns (used so the integrity rebuild does not pull future-version columns backward)."""
     prefix = re.compile(
         rf"^CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+{re.escape(table)}\b",
         re.IGNORECASE,
@@ -209,7 +238,8 @@ def _canonical_table_sql(table: str, replacement: str) -> str:
     for stmt in _statements(SCHEMA_PATH.read_text()):
         clean = stmt.strip()
         if prefix.match(clean):
-            return prefix.sub(f"CREATE TABLE {replacement}", clean, count=1)
+            ddl = prefix.sub(f"CREATE TABLE {replacement}", clean, count=1)
+            return _drop_columns_from_ddl(ddl, exclude) if exclude else ddl
     raise RuntimeError(f"Packaged schema has no CREATE TABLE statement for {table}")
 
 
@@ -249,7 +279,10 @@ def _rebuild_integrity_tables(con: sqlite3.Connection) -> None:
             current = table
             new = f"{table}__integrity_new"
             con.execute(f'DROP TABLE IF EXISTS "{new}"')
-            con.execute(_canonical_table_sql(table, new))
+            # Preserve the pre-v3 drive shape: a v0/v1 rebuild must not introduce the catalog-v3
+            # columns, so the later v2->v3 transaction takes a genuine pre-v3 backup.
+            exclude = _V3_DRIVE_COLUMN_NAMES if table == "drives" else ()
+            con.execute(_canonical_table_sql(table, new, exclude=exclude))
             old_cols = {r[1] for r in con.execute(f'PRAGMA table_info("{table}")').fetchall()}
             new_cols = [r[1] for r in con.execute(f'PRAGMA table_info("{new}")').fetchall()]
             cols = [c for c in new_cols if c in old_cols]
@@ -398,6 +431,10 @@ def _migrate_capacity_evidence_v3(con, *, backup_existing: bool) -> None:
                 con.execute(ddl)
         for stmt in _v3_object_ddl():
             con.execute(stmt)
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(
+                f"Capacity-evidence migration produced foreign-key violations: {violations[:12]}")
         con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
         con.execute("COMMIT")
     except Exception as exc:

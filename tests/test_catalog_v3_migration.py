@@ -169,6 +169,30 @@ def test_injected_failure_rolls_back_to_v2(tmp_path):
     assert db.DB_PATH.with_name(db.DB_PATH.name + ".pre-evidence-v3.bak").is_file()
 
 
+def test_migration_aborts_on_foreign_key_violation(tmp_path):
+    """The v3 migration runs PRAGMA foreign_key_check inside its transaction and refuses to stamp v3
+    over a catalog with foreign-key violations, rolling back to a pristine v2."""
+    assert hasattr(db, "_migrate_capacity_evidence_v3"), \
+        "v3 migration not implemented yet (expected Gate-1 red)"
+    _seed_v2(tmp_path)
+    con = _reopen_raw()
+    con.execute("PRAGMA foreign_keys=OFF")
+    con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+                "VALUES('org/m','ghost.safetensors',1,'safetensors','bf16')")
+    con.execute("INSERT INTO archived(repo_id,rfilename,drive_label,compressed) "    # orphan: no such drive
+                "VALUES('org/m','ghost.safetensors','ghost-drive',0)")
+    try:
+        db._migrate_capacity_evidence_v3(con, backup_existing=True)
+        raise AssertionError("migration must abort on a foreign-key violation")
+    except RuntimeError as exc:
+        assert "foreign" in str(exc).lower(), exc
+    con.close()
+    raw = _reopen_raw()
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == 2, "must roll back to v2"
+    assert "identity_epoch" not in {r[1] for r in raw.execute("PRAGMA table_info(drives)").fetchall()}
+    raw.close()
+
+
 def test_v3_schema_constraint_matrix(tmp_path):
     _seed_v2(tmp_path)
     con = db.connect()
