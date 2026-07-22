@@ -1,22 +1,28 @@
 """PR-03a internal physical-mutation envelope (tests-first, RFC-002 / DEC-049 issue #35-B slice 1).
 
 Gate 1: pins the contract for the same-host fence + dirty-generation/clean-anchor envelope BEFORE
-production. RED until modelark.drive_fence / modelark.drive_mutation exist; the lazy import + _require()
-guard makes each test fail cleanly for a MISSING module, not for a real error inside an existing one.
+production. RED until modelark.drive_fence / modelark.drive_mutation exist; find_spec activates the
+Gate-1 guard only for an ABSENT module, so a present-but-broken module surfaces its real error.
 
 Scope: the COMPLETE internal envelope, unconnected to any production call site.
-  - canonical same-host controller + identity+epoch drive-lock keys;
-  - controller -> sorted drive locks -> short SQLite transaction ordering;
-  - fenced identity/live-capacity observation (injected here; real observation is exercised with fakes);
-  - atomic dirty-generation advance before any allocation, both owner fields null;
-  - generation-touched reconciliation; exact epoch/generation clean-anchor CAS;
-  - failures leave the generation durably dirty.
-Gate-0 corrections folded in: (1) generation start requires generation zero OR an exact clean current
-generation, else DIRTY_GENERATION_CONFLICT; (2) only a stable proven drive-lock identity is accepted,
-missing/unproven identity is refused (migrated-drive reconciliation / provisional registration = 03c).
+Gate-0 corrections + Gate-1 review corrections folded in:
+  * identity is proven under the locks BEFORE dirtying — an initial mismatch refuses without a dirty
+    generation; a failure AFTER dirtying/writing leaves the generation durably dirty;
+  * generation start requires generation zero OR an exact clean current generation whose anchor still
+    matches the drive's fingerprint/capacity/authority/epoch — else DIRTY_GENERATION_CONFLICT;
+  * only a stable proven drive-lock identity is accepted (unproven refused);
+  * the touched path/key set is actually reconciled (injected reconciler); a reconcile failure leaves
+    the generation dirty;
+  * the clean anchor stores a FRESH post-reconciliation observation (free + capacity + fingerprint);
+  * multi-drive: unsorted input acquires identity+epoch locks deterministically; a second-drive advance
+    failure rolls back both; no SQLite write transaction is open while holding physical locks or
+    reconciling;
+  * physical lock namespace: same catalog + different --state-dir contend on one controller lock; same
+    drive identity+epoch contend across different catalog/state paths.
 
 Non-goals here: child-FD integration + transport conversion (03b); registration/recovery/full inventory
-+ operator entry points (03c); admission cutover (#35-C); durable sessions/tokens (#39).
++ operator entry points (03c); admission cutover (#35-C); durable sessions/tokens (#39). Disposable
+temp trees / fakes only.
 """
 from __future__ import annotations
 
@@ -32,9 +38,8 @@ from pathlib import Path
 
 from modelark.core import db
 
-# Only the envelope module being ABSENT activates the Gate-1 guard. find_spec locates the file without
-# executing it, so if the module exists but its import fails (e.g. a missing dependency), the real
-# error surfaces from the import below rather than masquerading as "not implemented".
+# find_spec locates the module file without executing it: only an ABSENT envelope module activates the
+# Gate-1 guard, while a present-but-broken module surfaces its real import error from the import below.
 _ENVELOPE_MODULES = ("modelark.drive_fence", "modelark.drive_mutation")
 if all(importlib.util.find_spec(m) is not None for m in _ENVELOPE_MODULES):
     from modelark import drive_fence
@@ -45,6 +50,7 @@ else:
     _HAS = False
 
 _FP = "a" * 64
+_FP2 = "c" * 64
 
 
 def _require():
@@ -70,8 +76,8 @@ def _catalog(tmp_path):
 
 
 class _FailOn:
-    """A connection proxy that raises when a (case-insensitive) marker appears in a statement, to
-    inject a mid-transaction failure while delegating everything else to the real connection."""
+    """A connection proxy that raises sqlite3.OperationalError when a (case-insensitive) marker appears
+    in a statement, to inject a mid-transaction failure; everything else delegates to the real con."""
 
     def __init__(self, con, marker):
         self._con = con
@@ -87,7 +93,6 @@ class _FailOn:
 
 
 def _proven_drive(con, label="drive-00", *, epoch=1, generation=0, fp=_FP, fscap=1000, free=900):
-    """A drive with a proven identity (fingerprint set), as if already registered/reconciled."""
     con.execute(
         "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,identity_epoch,write_generation,"
         "filesystem_capacity_bytes,identity_fingerprint,write_authority) "
@@ -99,19 +104,39 @@ def _dirty(con, label, epoch, generation, op="test"):
                 "VALUES(?,?,?,?)", [label, epoch, generation, op])
 
 
-def _anchor(con, label, epoch, generation, free=500, fscap=1000, fp=_FP):
+def _anchor(con, label, epoch, generation, *, free=500, fscap=1000, fp=_FP, authority="dedicated_local"):
     con.execute(
         "INSERT INTO drive_clean_anchors(drive_label,identity_epoch,generation,anchor_free_bytes,"
         "filesystem_capacity_bytes,identity_fingerprint,write_authority,identity_proof,fence_proof,"
-        "observed_at) VALUES(?,?,?,?,?,?, 'dedicated_local','p','p','2026-01-01')",
-        [label, epoch, generation, free, fscap, fp])
+        "observed_at) VALUES(?,?,?,?,?,?,?, 'p','p','2026-01-01')",
+        [label, epoch, generation, free, fscap, fp, authority])
 
 
-def _observe(free=500, proven=True):
+def _obs(free=500, *, capacity=1000, fp=_FP, proven=True):
+    return dm.Observation(identity_proven=proven, free_bytes=free, filesystem_capacity=capacity,
+                          fingerprint=fp, identity_proof="proof", fence_proof="fence")
+
+
+def _observer(con, *observations):
+    """A fenced observer returning successive observations; asserts no SQLite txn is open when called."""
+    box = list(observations)
+
     def observe(label):
-        return dm.Observation(identity_proven=proven, free_bytes=free,
-                              identity_proof="proof", fence_proof="fence")
+        assert not con.in_transaction, "no SQLite transaction may be open during a fenced observation"
+        if not box:
+            return _obs()
+        return box.pop(0) if len(box) > 1 else box[0]
     return observe
+
+
+def _reconciler(con, record=None, fail=False):
+    def reconcile(label, paths, keys):
+        assert not con.in_transaction, "no SQLite transaction may be open during reconciliation"
+        if record is not None:
+            record.append((label, tuple(paths), tuple(keys)))
+        if fail:
+            raise RuntimeError("reconcile failed")
+    return reconcile
 
 
 def _has_anchor(con, label, epoch, generation):
@@ -120,7 +145,7 @@ def _has_anchor(con, label, epoch, generation):
                        [label, epoch, generation]).fetchone()[0] == 1
 
 
-# =========================================================================== lock keys
+# =========================================================================== lock keys + namespace
 
 def test_controller_lock_key_is_catalog_identity_not_state_dir():
     _require()
@@ -133,8 +158,8 @@ def test_controller_lock_key_is_catalog_identity_not_state_dir():
 def test_drive_lock_key_from_identity_and_epoch():
     _require()
     assert drive_fence.drive_lock_key(_FP, 1) == drive_fence.drive_lock_key(_FP, 1)
-    assert drive_fence.drive_lock_key(_FP, 1) != drive_fence.drive_lock_key(_FP, 2)  # epoch bump
-    assert drive_fence.drive_lock_key(_FP, 1) != drive_fence.drive_lock_key("b" * 64, 1)
+    assert drive_fence.drive_lock_key(_FP, 1) != drive_fence.drive_lock_key(_FP, 2)
+    assert drive_fence.drive_lock_key(_FP, 1) != drive_fence.drive_lock_key(_FP2, 1)
 
 
 def test_drive_lock_key_refuses_unproven_identity():
@@ -147,18 +172,138 @@ def test_drive_lock_key_refuses_unproven_identity():
             pass
 
 
-# =========================================================================== envelope: identity + generation
+def test_controller_lock_path_is_state_dir_independent():
+    _require()
+    catalog = Path("/data/one/catalog.sqlite")
+    db.STATE_DIR = Path("/state/a")
+    path_a = drive_fence.controller_lock_path(catalog)
+    db.STATE_DIR = Path("/state/b")
+    path_b = drive_fence.controller_lock_path(catalog)
+    assert path_a == path_b, "the controller lock file must not depend on --state-dir"
 
-def test_envelope_refuses_a_drive_with_unproven_identity(tmp_path):
+
+def test_drive_lock_path_is_catalog_and_state_independent():
+    _require()
+    db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = Path("/c1"), Path("/c1/catalog.sqlite"), Path("/s1")
+    path_1 = drive_fence.drive_lock_path(_FP, 1)
+    db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = Path("/c2"), Path("/c2/catalog.sqlite"), Path("/s2")
+    path_2 = drive_fence.drive_lock_path(_FP, 1)
+    assert path_1 == path_2, "the drive lock file must depend only on identity+epoch"
+
+
+def _hold_flock_in_subprocess(tmp_path, script_body, held, release):
+    holder = textwrap.dedent(script_body)
+    proc = subprocess.Popen([sys.executable, "-c", holder])
+    for _ in range(500):
+        if held.exists():
+            break
+        time.sleep(0.01)
+    assert held.exists(), "holder process never acquired the flock"
+    return proc
+
+
+def test_cross_process_controller_lock_is_shared_across_state_dirs(tmp_path):
+    _require()
+    catalog_dir = tmp_path / "data"
+    catalog_dir.mkdir()
+    held, release = tmp_path / "held", tmp_path / "release"
+    # holder: SAME catalog, state dir A
+    proc = _hold_flock_in_subprocess(tmp_path, f"""
+        import fcntl, time
+        from pathlib import Path
+        from modelark.core import db
+        from modelark import drive_fence
+        db.configure({str(catalog_dir)!r}, {str(tmp_path / "stateA")!r})
+        p = drive_fence.controller_lock_path(db.DB_PATH); p.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(p, "w"); fcntl.flock(fh, fcntl.LOCK_EX)
+        Path({str(held)!r}).write_text("x")
+        while not Path({str(release)!r}).exists(): time.sleep(0.02)
+        fcntl.flock(fh, fcntl.LOCK_UN); fh.close()
+    """, held, release)
+    try:
+        import fcntl
+        # us: SAME catalog, DIFFERENT state dir B -> must contend on the same controller lock
+        db.configure(str(catalog_dir), str(tmp_path / "stateB"))
+        path = drive_fence.controller_lock_path(db.DB_PATH)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                raise AssertionError("controller lock was not shared across state dirs")
+            except BlockingIOError:
+                pass
+    finally:
+        release.write_text("go")
+        proc.wait(timeout=10)
+
+
+def test_cross_process_drive_lock_is_shared_across_catalogs(tmp_path):
+    _require()
+    held, release = tmp_path / "held", tmp_path / "release"
+    # holder: catalog/state pair #1 holds the drive lock for identity _FP epoch 1
+    proc = _hold_flock_in_subprocess(tmp_path, f"""
+        import fcntl, time
+        from pathlib import Path
+        from modelark.core import db
+        from modelark import drive_fence
+        db.configure({str(tmp_path / "c1")!r}, {str(tmp_path / "s1")!r})
+        p = drive_fence.drive_lock_path({_FP!r}, 1); p.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(p, "w"); fcntl.flock(fh, fcntl.LOCK_EX)
+        Path({str(held)!r}).write_text("x")
+        while not Path({str(release)!r}).exists(): time.sleep(0.02)
+        fcntl.flock(fh, fcntl.LOCK_UN); fh.close()
+    """, held, release)
+    try:
+        import fcntl
+        # us: DIFFERENT catalog/state, SAME drive identity+epoch -> must contend on the same drive lock
+        db.configure(str(tmp_path / "c2"), str(tmp_path / "s2"))
+        path = drive_fence.drive_lock_path(_FP, 1)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                raise AssertionError("drive lock was not shared across catalogs")
+            except BlockingIOError:
+                pass
+    finally:
+        release.write_text("go")
+        proc.wait(timeout=10)
+
+
+# =========================================================================== identity proof + generation
+
+def test_initial_identity_mismatch_refuses_without_dirtying(tmp_path):
     _require()
     with _catalog(tmp_path) as con:
-        _proven_drive(con, "drive-00", fp=None)          # migrated shape: no fingerprint -> unproven
+        _proven_drive(con, "drive-00", generation=0)     # row proven; the initial fenced observation fails
         try:
-            with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(), now="2026-01-01"):
-                raise AssertionError("body should not run for an unproven drive")
+            with dm.drive_mutation(con, ["drive-00"], "download",
+                                   observe=_observer(con, _obs(proven=False)),
+                                   reconcile=_reconciler(con), now="2026-01-01"):
+                raise AssertionError("body must not run when initial identity proof fails")
         except dm.DriveMutationRefused as exc:
             assert exc.code == "DRIVE_IDENTITY_UNPROVEN", exc.code
         assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
+        assert con.execute("SELECT write_generation FROM drives "
+                           "WHERE drive_label='drive-00'").fetchone()[0] == 0
+
+
+def test_failure_after_dirtying_leaves_generation_durably_dirty(tmp_path):
+    _require()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=0)
+        try:
+            with dm.drive_mutation(con, ["drive-00"], "download",
+                                   observe=_observer(con, _obs(900), _obs(400)),
+                                   reconcile=_reconciler(con), now="2026-01-01"):
+                raise RuntimeError("boom after dirtying")
+        except RuntimeError:
+            pass
+        assert con.execute("SELECT generation FROM drive_dirty_generations "
+                           "WHERE drive_label='drive-00'").fetchall() == [(1,)]
+        assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
+        assert con.execute("SELECT write_generation FROM drives "
+                           "WHERE drive_label='drive-00'").fetchone()[0] == 1
 
 
 def test_dirty_generation_advances_before_body_with_null_owner(tmp_path):
@@ -166,69 +311,182 @@ def test_dirty_generation_advances_before_body_with_null_owner(tmp_path):
     with _catalog(tmp_path) as con:
         _proven_drive(con, "drive-00", generation=0)
         seen = {}
-        with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(), now="2026-01-01"):
+        with dm.drive_mutation(con, ["drive-00"], "download",
+                               observe=_observer(con, _obs(900), _obs(400)),
+                               reconcile=_reconciler(con), now="2026-01-01"):
             seen["row"] = con.execute(
                 "SELECT identity_epoch,generation,owner_session_id,owner_fencing_token "
                 "FROM drive_dirty_generations WHERE drive_label='drive-00'").fetchone()
-            seen["write_generation"] = con.execute(
-                "SELECT write_generation FROM drives WHERE drive_label='drive-00'").fetchone()[0]
-        assert seen["row"] == (1, 1, None, None), seen      # gen 1, both owner fields null, before body
-        assert seen["write_generation"] == 1
+        assert seen["row"] == (1, 1, None, None), seen
 
 
 def test_generation_start_guard(tmp_path):
     _require()
     with _catalog(tmp_path) as con:
-        # (a) generation zero -> allowed
         _proven_drive(con, "zero", generation=0)
-        with dm.drive_mutation(con, ["zero"], "op", observe=_observe(), now="2026-01-01"):
+        with dm.drive_mutation(con, ["zero"], "op", observe=_observer(con, _obs(900), _obs(400)),
+                               reconcile=_reconciler(con), now="2026-01-01"):
             pass
         assert _has_anchor(con, "zero", 1, 1)
-        # (b) clean current generation -> allowed (advances to the next generation)
+
         _proven_drive(con, "clean", generation=1)
         _dirty(con, "clean", 1, 1)
-        _anchor(con, "clean", 1, 1)
-        with dm.drive_mutation(con, ["clean"], "op", observe=_observe(), now="2026-01-01"):
+        _anchor(con, "clean", 1, 1)                       # matching clean anchor -> clean current gen
+        with dm.drive_mutation(con, ["clean"], "op", observe=_observer(con, _obs(900), _obs(400)),
+                               reconcile=_reconciler(con), now="2026-01-01"):
             pass
         assert _has_anchor(con, "clean", 1, 2)
-        # (c) dirty current generation (no matching anchor) -> refused
+
         _proven_drive(con, "dirty", generation=1)
-        _dirty(con, "dirty", 1, 1)                          # dirty gen 1, no anchor
+        _dirty(con, "dirty", 1, 1)                        # dirty gen 1, no anchor
         try:
-            with dm.drive_mutation(con, ["dirty"], "op", observe=_observe(), now="2026-01-01"):
+            with dm.drive_mutation(con, ["dirty"], "op", observe=_observer(con), reconcile=_reconciler(con),
+                                   now="2026-01-01"):
                 raise AssertionError("must refuse starting over a dirty generation")
         except dm.DriveMutationRefused as exc:
             assert exc.code == "DIRTY_GENERATION_CONFLICT", exc.code
 
 
+def test_clean_check_requires_a_matching_anchor_identity(tmp_path):
+    _require()
+    with _catalog(tmp_path) as con:
+        # current generation 1 has an anchor, but its fingerprint differs from the drive's current
+        _proven_drive(con, "drive-00", generation=1, fp=_FP)
+        _dirty(con, "drive-00", 1, 1)
+        _anchor(con, "drive-00", 1, 1, fp=_FP2)           # mismatched identity -> not clean
+        try:
+            with dm.drive_mutation(con, ["drive-00"], "op", observe=_observer(con),
+                                   reconcile=_reconciler(con), now="2026-01-01"):
+                raise AssertionError("a mismatched-identity anchor must not count as a clean generation")
+        except dm.DriveMutationRefused as exc:
+            assert exc.code == "DIRTY_GENERATION_CONFLICT", exc.code
+
+
 def test_generation_advance_is_atomic(tmp_path):
-    """The dirty-row insert and the write_generation bump commit as one transaction: a failure
-    injected between them leaves neither, so a later mutation cannot reuse a generation or hit the
-    dirty-row key."""
     _require()
     with _catalog(tmp_path) as con:
         _proven_drive(con, "drive-00", generation=0)
         proxy = _FailOn(con, "update drives")            # fail the write_generation bump, mid-advance
-        raised = False
         try:
             dm.begin_generation(proxy, "drive-00", "op")
-        except Exception:                                # noqa: BLE001 — any raise is fine; atomicity is the point
-            raised = True
-        assert raised, "the advance must raise on the injected failure"
+            raise AssertionError("the advance must raise on the injected failure")
+        except sqlite3.OperationalError:
+            pass
         assert con.execute("SELECT count(*) FROM drive_dirty_generations "
                            "WHERE drive_label='drive-00'").fetchone()[0] == 0, "dirty row must roll back"
         assert con.execute("SELECT write_generation FROM drives "
                            "WHERE drive_label='drive-00'").fetchone()[0] == 0, "write_generation must roll back"
 
 
-# =========================================================================== envelope: clean close vs dirty
+# =========================================================================== reconciliation + fresh anchor
+
+def test_touched_set_is_reconciled(tmp_path):
+    _require()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=0)
+        record = []
+        with dm.drive_mutation(con, ["drive-00"], "download",
+                               observe=_observer(con, _obs(900), _obs(400)),
+                               reconcile=_reconciler(con, record=record), now="2026-01-01") as writer:
+            writer.record_touched("drive-00", paths=["a/b.safetensors"], keys=["KEY1"])
+        assert record == [("drive-00", ("a/b.safetensors",), ("KEY1",))], record
+
+
+def test_reconciliation_failure_leaves_generation_dirty(tmp_path):
+    _require()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=0)
+        try:
+            with dm.drive_mutation(con, ["drive-00"], "download",
+                                   observe=_observer(con, _obs(900), _obs(400)),
+                                   reconcile=_reconciler(con, fail=True), now="2026-01-01") as writer:
+                writer.record_touched("drive-00", paths=["a/b"], keys=["KEY1"])
+        except RuntimeError:
+            pass
+        assert con.execute("SELECT generation FROM drive_dirty_generations "
+                           "WHERE drive_label='drive-00'").fetchall() == [(1,)]
+        assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
+
+
+def test_anchor_uses_fresh_post_reconciliation_observation(tmp_path):
+    _require()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=0, fscap=1000)
+        # 900 free before allocation, 400 after reconciliation: the anchor must store the FRESH 400.
+        with dm.drive_mutation(con, ["drive-00"], "download",
+                               observe=_observer(con, _obs(900, capacity=1000, fp=_FP),
+                                                 _obs(400, capacity=1000, fp=_FP)),
+                               reconcile=_reconciler(con), now="2026-01-01") as writer:
+            writer.record_touched("drive-00", paths=["a/b"], keys=["KEY1"])
+        row = con.execute("SELECT anchor_free_bytes,filesystem_capacity_bytes,identity_fingerprint "
+                          "FROM drive_clean_anchors WHERE drive_label='drive-00'").fetchone()
+        assert row == (400, 1000, _FP), row
+
+
+# =========================================================================== multi-drive + txn safety
+
+def test_unsorted_drives_acquire_locks_in_deterministic_identity_order(tmp_path):
+    _require()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "later", fp=_FP2, generation=0)   # identity 'c...'
+        _proven_drive(con, "early", fp=_FP, generation=0)    # identity 'a...'
+        captured = {}
+        real = drive_fence.hold_drives_sorted
+
+        def traced(keyed_drives, *a, **k):
+            captured["keys"] = list(keyed_drives)
+            return real(keyed_drives, *a, **k)
+
+        drive_fence.hold_drives_sorted = traced
+        try:
+            with dm.drive_mutation(con, ["later", "early"], "op",     # unsorted input
+                                   observe=_observer(con, _obs(900), _obs(400), _obs(900), _obs(400)),
+                                   reconcile=_reconciler(con), now="2026-01-01"):
+                pass
+        finally:
+            drive_fence.hold_drives_sorted = real
+        assert captured["keys"] == sorted(captured["keys"]), captured["keys"]
+        assert captured["keys"][0][0] == _FP and captured["keys"][1][0] == _FP2, captured["keys"]
+
+
+def test_second_drive_advance_failure_rolls_back_both(tmp_path):
+    _require()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "aaa", fp=_FP, generation=0)          # clean
+        _proven_drive(con, "ccc", fp=_FP2, generation=1)         # dirty current generation
+        _dirty(con, "ccc", 1, 1)
+        try:
+            with dm.drive_mutation(con, ["aaa", "ccc"], "op", observe=_observer(con),
+                                   reconcile=_reconciler(con), now="2026-01-01"):
+                raise AssertionError("must refuse when any drive cannot start a generation")
+        except dm.DriveMutationRefused as exc:
+            assert exc.code == "DIRTY_GENERATION_CONFLICT", exc.code
+        # the first drive's advance must have rolled back too (atomic multi-drive advance)
+        assert con.execute("SELECT write_generation FROM drives WHERE drive_label='aaa'").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM drive_dirty_generations "
+                           "WHERE drive_label='aaa'").fetchone()[0] == 0
+
+
+def test_no_sqlite_transaction_during_observation_or_reconciliation(tmp_path):
+    _require()
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", generation=0)
+        # _observer and _reconciler assert `not con.in_transaction`; reaching a clean close exercises both
+        with dm.drive_mutation(con, ["drive-00"], "op", observe=_observer(con, _obs(900), _obs(400)),
+                               reconcile=_reconciler(con), now="2026-01-01") as writer:
+            writer.record_touched("drive-00", paths=["a"], keys=["K"])
+        assert _has_anchor(con, "drive-00", 1, 1)
+
+
+# =========================================================================== clean close + CAS + ordering
 
 def test_clean_close_publishes_exactly_one_matching_anchor(tmp_path):
     _require()
     with _catalog(tmp_path) as con:
         _proven_drive(con, "drive-00", generation=0, fscap=1000)
-        with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(free=400),
-                               now="2026-01-01") as writer:
+        with dm.drive_mutation(con, ["drive-00"], "download",
+                               observe=_observer(con, _obs(900), _obs(400)),
+                               reconcile=_reconciler(con), now="2026-01-01") as writer:
             writer.record_touched("drive-00", paths=["a/b.safetensors"], keys=["KEY1"])
         anchor = con.execute(
             "SELECT identity_epoch,generation,anchor_free_bytes,filesystem_capacity_bytes,"
@@ -237,62 +495,18 @@ def test_clean_close_publishes_exactly_one_matching_anchor(tmp_path):
         assert anchor == [(1, 1, 400, 1000, _FP, "dedicated_local")], anchor
 
 
-def test_failure_in_body_leaves_generation_durably_dirty(tmp_path):
-    _require()
-    with _catalog(tmp_path) as con:
-        _proven_drive(con, "drive-00", generation=0)
-        try:
-            with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(), now="2026-01-01"):
-                raise RuntimeError("boom mid-write")
-        except RuntimeError:
-            pass
-        # dirty generation recorded, no clean anchor -> durably dirty
-        assert con.execute("SELECT generation FROM drive_dirty_generations "
-                           "WHERE drive_label='drive-00'").fetchall() == [(1,)]
-        assert con.execute("SELECT count(*) FROM drive_clean_anchors "
-                           "WHERE drive_label='drive-00'").fetchone()[0] == 0
-        assert con.execute("SELECT write_generation FROM drives "
-                           "WHERE drive_label='drive-00'").fetchone()[0] == 1   # advance persisted
-
-
-def test_identity_mismatch_during_observation_leaves_generation_dirty(tmp_path):
-    _require()
-    with _catalog(tmp_path) as con:
-        _proven_drive(con, "drive-00", generation=0)     # row identity proven; the LIVE observation fails
-        raised = None
-        try:
-            with dm.drive_mutation(con, ["drive-00"], "download", observe=_observe(proven=False),
-                                   now="2026-01-01"):
-                pass
-        except dm.DriveMutationRefused as exc:
-            raised = exc.code
-        assert raised in ("DRIVE_IDENTITY_UNPROVEN", "DRIVE_FENCE_UNAVAILABLE"), raised
-        # the generation was advanced and durably dirtied; the clean anchor could not be published
-        assert con.execute("SELECT generation FROM drive_dirty_generations "
-                           "WHERE drive_label='drive-00'").fetchall() == [(1,)]
-        assert con.execute("SELECT write_generation FROM drives "
-                           "WHERE drive_label='drive-00'").fetchone()[0] == 1
-        assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
-
-
-# =========================================================================== clean-anchor CAS
-
 def test_clean_anchor_cas_refuses_a_stale_or_foreign_generation(tmp_path):
     _require()
     with _catalog(tmp_path) as con:
         _proven_drive(con, "drive-00", generation=2)     # current generation is 2
         _dirty(con, "drive-00", 1, 2)
-        obs = _observe()("drive-00")
-        # publishing an anchor for a generation other than the current one is a CAS failure (no cross-clear)
         try:
-            dm.publish_clean_anchor(con, "drive-00", 1, obs, now="2026-01-01")   # stale/foreign generation
+            dm.publish_clean_anchor(con, "drive-00", 1, _obs(500), now="2026-01-01")   # stale generation
             raise AssertionError("stale-generation anchor publish must fail")
         except dm.DriveMutationRefused as exc:
             assert exc.code == "CLEAN_ANCHOR_CAS_FAILED", exc.code
         assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
 
-
-# =========================================================================== lock ordering + contention
 
 def test_controller_lock_is_acquired_before_drive_locks(tmp_path):
     _require()
@@ -300,72 +514,23 @@ def test_controller_lock_is_acquired_before_drive_locks(tmp_path):
         _proven_drive(con, "drive-00", generation=0)
         order = []
         real_ctrl, real_drive = drive_fence.hold_controller, drive_fence.hold_drives_sorted
-
-        def traced_ctrl(*a, **k):
-            order.append("controller")
-            return real_ctrl(*a, **k)
-
-        def traced_drive(*a, **k):
-            order.append("drives")
-            return real_drive(*a, **k)
-
-        drive_fence.hold_controller, drive_fence.hold_drives_sorted = traced_ctrl, traced_drive
+        drive_fence.hold_controller = lambda *a, **k: (order.append("controller"), real_ctrl(*a, **k))[1]
+        drive_fence.hold_drives_sorted = lambda *a, **k: (order.append("drives"), real_drive(*a, **k))[1]
         try:
-            with dm.drive_mutation(con, ["drive-00"], "op", observe=_observe(), now="2026-01-01"):
+            with dm.drive_mutation(con, ["drive-00"], "op", observe=_observer(con, _obs(900), _obs(400)),
+                                   reconcile=_reconciler(con), now="2026-01-01"):
                 pass
         finally:
             drive_fence.hold_controller, drive_fence.hold_drives_sorted = real_ctrl, real_drive
         assert order[:2] == ["controller", "drives"], order
 
 
-def test_cross_process_drive_lock_is_mutually_exclusive(tmp_path):
-    _require()
-    with _catalog(tmp_path) as con:
-        _proven_drive(con, "drive-00", epoch=1, generation=0)
-        held = tmp_path / "held.flag"
-        release = tmp_path / "release.flag"
-        # a separate PROCESS holds the exact drive flock, then waits for us to release it
-        holder = textwrap.dedent(f"""
-            import fcntl, time
-            from pathlib import Path
-            from modelark.core import db
-            from modelark import drive_fence
-            db.configure({str(tmp_path)!r}, {str(tmp_path / "state")!r})
-            path = drive_fence.drive_lock_path({_FP!r}, 1)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fh = open(path, "w")
-            fcntl.flock(fh, fcntl.LOCK_EX)
-            Path({str(held)!r}).write_text("held")
-            while not Path({str(release)!r}).exists():
-                time.sleep(0.02)
-            fcntl.flock(fh, fcntl.LOCK_UN); fh.close()
-        """)
-        proc = subprocess.Popen([sys.executable, "-c", holder])
-        try:
-            for _ in range(500):                             # wait (no fixed sleep) until the flock is held
-                if held.exists():
-                    break
-                time.sleep(0.01)
-            assert held.exists(), "holder process never acquired the drive flock"
-            # with the drive flock held cross-process, a non-blocking envelope must refuse, not hang
-            try:
-                with dm.drive_mutation(con, ["drive-00"], "op", observe=_observe(), now="2026-01-01",
-                                       blocking=False):
-                    raise AssertionError("envelope acquired a flock held by another process")
-            except dm.DriveMutationRefused as exc:
-                assert exc.code == "DRIVE_FENCE_UNAVAILABLE", exc.code
-            assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
-        finally:
-            release.write_text("go")
-            proc.wait(timeout=10)
-
-
 # =========================================================================== dormancy guard
 
 def test_envelope_has_no_production_call_sites():
     """PR-03a stays dormant/non-authoritative: no production module imports the envelope until 03b/03c.
-    Inspect import AST nodes (not raw substrings) so `import modelark.drive_fence` and
-    `from modelark.drive_mutation import X` are both caught."""
+    Inspect import AST nodes so `import modelark.drive_fence` and `from modelark.drive_mutation import X`
+    are both caught."""
     root = Path(__file__).resolve().parent.parent / "modelark"
     envelope = {"drive_fence", "drive_mutation"}
     offenders = []
