@@ -58,6 +58,23 @@ def _require():
         raise AssertionError("drive_fence/drive_mutation envelope not implemented yet (Gate-1 red)")
 
 
+# Restore the db module globals around EVERY test (not only the _catalog ones), so a test that sets
+# CATALOG_DIR/DB_PATH/STATE_DIR or calls db.configure() cannot leak a temporary path into a later test.
+# Covered under pytest by this autouse fixture and under the script runner by main()'s save/restore.
+try:
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def _isolate_db_globals():
+        saved = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)
+        try:
+            yield
+        finally:
+            db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = saved
+except ImportError:                              # the plain script runner does not need pytest
+    pass
+
+
 @contextmanager
 def _catalog(tmp_path):
     """A v3 catalog wired into the db module for the block, restoring the module globals (and closing
@@ -557,6 +574,7 @@ def main():
                    if n.startswith("test_") and callable(f))
     passed, failed = [], []
     for name, fn in tests:
+        db_globals = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)   # isolate every test under the script runner
         try:
             if "tmp_path" in inspect.signature(fn).parameters:
                 fn(Path(tempfile.mkdtemp(prefix="mark-03a-")))
@@ -567,6 +585,8 @@ def main():
         except Exception as exc:                 # noqa: BLE001 — Gate-1 wants the full red/green map
             failed.append(name)
             print(f"FAIL  {name}  -> {type(exc).__name__}: {exc}")
+        finally:
+            db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = db_globals
     print(f"\n{len(passed)} passed, {len(failed)} failed")
     if failed:
         raise SystemExit(1)
