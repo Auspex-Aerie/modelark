@@ -32,6 +32,7 @@ from __future__ import annotations
 import fcntl
 import inspect
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -433,18 +434,28 @@ def test_touched_reconciliation_validates_recorded_set_narrowly(tmp_path):
     an unrelated (untouched) durable row + file on the same drive is ignored (no full-drive scan)."""
     with _catalog(tmp_path) as con:
         _proven_drive(con, "drive-00")
-        assert hasattr(fetch, "_reconcile_touched"), \
-            "PR-03b must add a narrow touched-set reconciler (fetch._reconcile_touched)"
+        # durable facts for the touched path (archived FK -> files -> models); FK enforcement is ON,
+        # so the parents must exist or the inserts IntegrityError before the narrowing is exercised.
+        con.execute("INSERT INTO models(repo_id) VALUES('must')")
+        con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
+                    "VALUES('must','model.safetensors',5,'safetensors')")
         (tmp_path / "must").mkdir()
         (tmp_path / "must" / "model.safetensors").write_bytes(b"bytes")
         con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
                     "orig_bytes,stored_bytes,compressed) VALUES('must','model.safetensors',"
                     "'model.safetensors','must/model.safetensors','drive-00',5,5,0)")
-        (tmp_path / "other").mkdir()                       # decoy a NARROW reconciler must never inspect
+        # a decoy unrelated durable row + file that a NARROW reconciler must never inspect
+        con.execute("INSERT INTO models(repo_id) VALUES('decoy')")
+        con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
+                    "VALUES('decoy','x.bin',1,'other')")
+        (tmp_path / "other").mkdir()
         (tmp_path / "other" / "x.bin").write_bytes(b"z")
         con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
                     "orig_bytes,stored_bytes,compressed) VALUES('decoy','x.bin','x.bin',"
                     "'other/x.bin','drive-00',1,1,0)")
+        # guard AFTER setup so the FK-correct fixture is exercised even while this stays RED at Gate-1
+        assert hasattr(fetch, "_reconcile_touched"), \
+            "PR-03b must add a narrow touched-set reconciler (fetch._reconcile_touched)"
         fetch._reconcile_touched(con, "drive-00", tmp_path, False, ["must/model.safetensors"], [])
 
 
@@ -519,9 +530,11 @@ def main():
     passed, failed = [], []
     for name, fn in tests:
         db_globals = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)
+        tmp = None
         try:
             if "tmp_path" in inspect.signature(fn).parameters:
-                fn(Path(tempfile.mkdtemp(prefix="mark-03b-")))
+                tmp = Path(tempfile.mkdtemp(prefix="mark-03b-"))
+                fn(tmp)
             else:
                 fn()
             passed.append(name)
@@ -531,6 +544,8 @@ def main():
             print(f"FAIL  {name}  -> {type(exc).__name__}: {exc}")
         finally:
             db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = db_globals
+            if tmp is not None:                  # the standalone runner cleans its own temp trees
+                shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(passed)} passed, {len(failed)} failed")
     if failed:
         raise SystemExit(1)
