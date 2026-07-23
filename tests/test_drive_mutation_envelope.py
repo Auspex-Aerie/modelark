@@ -611,14 +611,14 @@ def test_multi_drive_anchor_publish_is_all_or_nothing(tmp_path):
 # =========================================================================== wiring guard (PR-03b)
 
 def test_envelope_wired_only_into_reviewed_transport():
-    """PR-03b wires the envelope into exactly ONE reviewed production transport (modelark/fetch.py) and
-    nothing else. This supersedes the PR-03a dormancy guard: fetch.py MUST import the envelope, and no
-    other production module may (registration/recovery/operator paths are PR-03c; admission is #35-C).
-    Inspect import AST nodes so `import modelark.drive_fence` and `from modelark.drive_mutation import X`
-    are both caught."""
+    """The envelope + its fences may be imported ONLY by reviewed catalog-v3 owners, and each MUST be
+    wired: PR-03b's transport (modelark/fetch.py) and PR-03c1's registration/recovery/operator module
+    (modelark/drive_bootstrap.py, which reuses the same fenced primitives). No other production module
+    may import them (admission cutover is #35-C). Inspect import AST nodes so `import modelark.drive_fence`
+    and `from modelark.drive_mutation import X` are both caught."""
     root = Path(__file__).resolve().parent.parent / "modelark"
     envelope = {"drive_fence", "drive_mutation"}
-    allowed = {"fetch.py"}
+    allowed = {"fetch.py", "drive_bootstrap.py"}
     importers, offenders = set(), []
     for path in root.rglob("*.py"):
         if path.name in ("drive_fence.py", "drive_mutation.py"):
@@ -637,8 +637,10 @@ def test_envelope_wired_only_into_reviewed_transport():
                     offenders.append(f"{path.relative_to(root)}:{node.lineno}")
     assert offenders == [], f"only {sorted(allowed)} may import the envelope; found: {offenders}"
     assert "fetch.py" in importers, (
-        "PR-03b must wire the envelope into modelark/fetch.py (the reviewed transport); "
-        "the dormancy phase is over")
+        "PR-03b must wire the envelope into modelark/fetch.py (the reviewed transport)")
+    assert "drive_bootstrap.py" in importers, (
+        "PR-03c1 must reuse the fenced primitives in modelark/drive_bootstrap.py "
+        "(the reviewed registration/recovery/operator path)")
 
 
 def main():
