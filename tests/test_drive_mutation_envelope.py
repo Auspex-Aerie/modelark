@@ -4,8 +4,8 @@ Gate 1/2 test contract for the same-host fence + dirty-generation/clean-anchor e
 production. RED until modelark.drive_fence / modelark.drive_mutation exist; find_spec activates the
 guard only for an ABSENT module, so a present-but-broken module surfaces its real error.
 
-Scope: the COMPLETE internal envelope, unconnected to any production call site (dormant). Corrections
-folded in across review:
+Scope: the COMPLETE internal envelope contract; PR-03b now wires it into exactly one reviewed transport
+(modelark/fetch.py), enforced by the wiring guard below. Corrections folded in across review:
   * identity proven under the locks BEFORE dirtying (initial mismatch -> refuse, no dirty; failure
     after dirtying -> durably dirty, no anchor), with dirty durability proven via a SECOND connection;
   * generation start requires generation zero OR an exact clean current generation whose anchor still
@@ -608,15 +608,18 @@ def test_multi_drive_anchor_publish_is_all_or_nothing(tmp_path):
             other.close()
 
 
-# =========================================================================== dormancy guard
+# =========================================================================== wiring guard (PR-03b)
 
-def test_envelope_has_no_production_call_sites():
-    """PR-03a stays dormant/non-authoritative: no production module imports the envelope until 03b/03c.
+def test_envelope_wired_only_into_reviewed_transport():
+    """PR-03b wires the envelope into exactly ONE reviewed production transport (modelark/fetch.py) and
+    nothing else. This supersedes the PR-03a dormancy guard: fetch.py MUST import the envelope, and no
+    other production module may (registration/recovery/operator paths are PR-03c; admission is #35-C).
     Inspect import AST nodes so `import modelark.drive_fence` and `from modelark.drive_mutation import X`
     are both caught."""
     root = Path(__file__).resolve().parent.parent / "modelark"
     envelope = {"drive_fence", "drive_mutation"}
-    offenders = []
+    allowed = {"fetch.py"}
+    importers, offenders = set(), []
     for path in root.rglob("*.py"):
         if path.name in ("drive_fence.py", "drive_mutation.py"):
             continue
@@ -629,8 +632,13 @@ def test_envelope_has_no_production_call_sites():
                 module = (node.module or "").split(".")
                 hit = bool(set(module) & envelope) or any(a.name in envelope for a in node.names)
             if hit:
-                offenders.append(f"{path.relative_to(root)}:{node.lineno}")
-    assert offenders == [], f"envelope must not be wired into production yet: {offenders}"
+                importers.add(path.name)
+                if path.name not in allowed:
+                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
+    assert offenders == [], f"only {sorted(allowed)} may import the envelope; found: {offenders}"
+    assert "fetch.py" in importers, (
+        "PR-03b must wire the envelope into modelark/fetch.py (the reviewed transport); "
+        "the dormancy phase is over")
 
 
 def main():

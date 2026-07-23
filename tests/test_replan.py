@@ -11,12 +11,23 @@ Covers:
 """
 from __future__ import annotations
 
+import contextlib
 import sqlite3
+import types
 from pathlib import Path
 from unittest import mock
 
 from modelark.core import db
 from modelark import capacity, fetch, fill, plan, reconcile
+
+
+@contextlib.contextmanager
+def _passthru_mutation(*_a, **_k):
+    """Bypass the physical-mutation envelope so the transport-logic characterization tests below drive
+    the batch loop directly. The envelope's identity/fence/reconciliation integration is covered by
+    tests/test_transport_fence.py; these tests fix the transport branch behavior (dead-drive bail, 401
+    stop, gated follow-up, replica key proof) that the envelope must not change."""
+    yield types.SimpleNamespace(child_fence_fds=(), record_touched=lambda *a, **k: None)
 
 # ---- the write-probe --------------------------------------------------------------------------
 
@@ -439,11 +450,12 @@ def test_fetch_run_bails_on_dead_drive_midbatch(tmp_path):
     # not churn one error per repo through the whole assignment.
     from modelark import fetch
     events, calls = [], {"n": 0}
-    def boom(ctx, rid, dest, label, annex, cfg):
+    def boom(ctx, rid, dest, label, annex, cfg, **kw):
         calls["n"] += 1
         raise RuntimeError("write failed: I/O error")
     ctx = fetch.RunCtx(con=object(), on_progress=events.append)
-    with mock.patch.object(fetch.register, "archive_path", side_effect=lambda con, l: tmp_path), \
+    with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
+         mock.patch.object(fetch.register, "archive_path", side_effect=lambda con, l: tmp_path), \
          mock.patch.object(fetch, "_is_annex", side_effect=lambda d: False), \
          mock.patch.object(fetch, "fetch_model", side_effect=boom), \
          mock.patch.object(fetch, "_dest_writable", side_effect=lambda d: False), \
@@ -462,13 +474,14 @@ def test_fetch_run_stops_on_midrun_unauthorized_without_repo_churn(tmp_path):
 
     calls = []
 
-    def unauthorized(ctx, rid, dest, label, annex, cfg):
+    def unauthorized(ctx, rid, dest, label, annex, cfg, **kw):
         calls.append(rid)
         response = httpx.Response(401, request=httpx.Request("GET", "https://huggingface.co"))
         raise HfHubHTTPError("unauthorized", response=response)
 
     ctx = fetch.RunCtx(con=object())
-    with mock.patch.object(fetch.register, "archive_path", return_value=tmp_path), \
+    with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
+         mock.patch.object(fetch.register, "archive_path", return_value=tmp_path), \
          mock.patch.object(fetch, "_is_annex", return_value=False), \
          mock.patch.object(fetch, "fetch_model", side_effect=unauthorized), \
          mock.patch.object(fetch, "_bytes_last_24h", return_value=0), \
@@ -493,7 +506,8 @@ def test_fetch_run_records_typed_gated_followup_without_generic_retry(tmp_path):
     response = httpx.Response(403, request=httpx.Request("GET", "https://huggingface.co/org/gated"))
     gated = GatedRepoError("access required", response=response)
     ctx = fetch.RunCtx(con=con)
-    with mock.patch.object(fetch.register, "archive_path", return_value=tmp_path), \
+    with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
+         mock.patch.object(fetch.register, "archive_path", return_value=tmp_path), \
          mock.patch.object(fetch, "_is_annex", return_value=False), \
          mock.patch.object(fetch, "fetch_model", side_effect=gated), \
          mock.patch.object(fetch.wishlist, "compression", return_value={}):
@@ -621,7 +635,8 @@ def test_replica_records_only_after_target_uuid_proof(tmp_path):
 
     completed = mock.Mock(returncode=0, stdout="", stderr="")
     ctx = fetch.RunCtx(con=con)
-    with mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
+    with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
+         mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
          mock.patch.object(fetch.register, "library_root", return_value=library), \
          mock.patch.object(fetch, "_dest_writable", return_value=True), \
          mock.patch.object(fetch.subprocess, "run", return_value=completed), \
@@ -632,7 +647,8 @@ def test_replica_records_only_after_target_uuid_proof(tmp_path):
         "SELECT 1 FROM archived WHERE repo_id='must' AND drive_label='drive-04'"
     ).fetchone() is None
 
-    with mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
+    with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
+         mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
          mock.patch.object(fetch.register, "library_root", return_value=library), \
          mock.patch.object(fetch, "_dest_writable", return_value=True), \
          mock.patch.object(fetch.subprocess, "run", return_value=completed), \

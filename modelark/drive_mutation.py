@@ -16,7 +16,7 @@ durable sessions/fencing tokens = #39).
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 
 from modelark import drive_fence
@@ -46,10 +46,12 @@ class DriveMutationRefused(Exception):
 
 class _Writer:
     """Records the exact paths and annex keys a mutation touched per drive, for generation-scoped
-    reconciliation (no full-drive inventory)."""
+    reconciliation (no full-drive inventory), and exposes the held drive-fence FDs so monitored children
+    can inherit them (parent death cannot then release the fence while a child still writes)."""
 
-    def __init__(self):
+    def __init__(self, child_fence_fds=()):
         self._touched = {}
+        self.child_fence_fds = tuple(child_fence_fds)
 
     def record_touched(self, drive_label, *, paths=(), keys=()):
         entry = self._touched.setdefault(drive_label, ([], []))
@@ -154,15 +156,20 @@ def drive_mutation(con, drive_labels, operation_code, *, observe, reconcile, now
     label, paths, keys)`` reconciles the generation's touched set. Yields a writer with
     ``record_touched(label, paths=…, keys=…)``."""
     try:
-        # Controller fence FIRST: no lifecycle change can race between reading facts and dirtying,
-        # so identity facts + drive-lock keys are captured under it (not before it).
-        with drive_fence.hold_controller(db.DB_PATH, blocking=blocking):
-            facts = {label: _drive_facts(con, label) for label in drive_labels}
-            for label, (_epoch, _gen, fingerprint, _cap, _auth) in facts.items():
-                if not fingerprint:                  # only a stable proven identity may be locked here
-                    raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
-            keyed = sorted((facts[label][2], facts[label][0]) for label in drive_labels)  # (fp, epoch)
-            with drive_fence.hold_drives_sorted(keyed, blocking=blocking):
+        # The sorted drive fences span the whole mutation (body -> reconcile -> anchor). The controller
+        # fence is held ONLY long enough to capture facts under it, acquire the drive fences, prove
+        # identity, and commit the dirty advance; it is then RELEASED (RFC-002 / DEC-049) so operator
+        # graph writes and recovery are not blocked for the transport body, while the drive fences stay
+        # held below.
+        with ExitStack() as drive_fences:
+            with drive_fence.hold_controller(db.DB_PATH, blocking=blocking):
+                facts = {label: _drive_facts(con, label) for label in drive_labels}
+                for label, (_epoch, _gen, fingerprint, _cap, _auth) in facts.items():
+                    if not fingerprint:              # only a stable proven identity may be locked here
+                        raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
+                keyed = sorted((facts[label][2], facts[label][0]) for label in drive_labels)  # (fp, epoch)
+                handles = drive_fences.enter_context(
+                    drive_fence.hold_drives_sorted(keyed, blocking=blocking))
                 # identity proven under BOTH fences before any dirtying
                 for label, (_epoch, _gen, fingerprint, capacity, _auth) in facts.items():
                     _require_identity(observe(label), fingerprint, capacity, label)
@@ -170,20 +177,21 @@ def drive_mutation(con, drive_labels, operation_code, *, observe, reconcile, now
                 captured = _immediate(con, lambda: {
                     label: _advance_one(con, label, operation_code, facts[label])
                     for label in drive_labels})
-                writer = _Writer()
-                yield writer
-                # collect ALL candidate anchors (reconcile + fresh observation per drive), then publish
-                # them in ONE transaction so a later drive's failure leaves no drive marked clean
-                candidates = {}
-                for label, (_epoch, _gen, fingerprint, capacity, _auth) in facts.items():
-                    paths, keys = writer.touched_for(label)
-                    reconcile(label, paths, keys)
-                    observation = observe(label)
-                    _require_identity(observation, fingerprint, capacity, label)
-                    candidates[label] = observation
-                _immediate(con, lambda: [
-                    _publish_anchor_locked(con, label, facts[label][0], captured[label],
-                                           candidates[label], now)
-                    for label in drive_labels])
+            # controller released here; the drive fences remain held for the body below
+            writer = _Writer([handle.fileno() for handle in handles])
+            yield writer
+            # collect ALL candidate anchors (reconcile + fresh observation per drive), then publish
+            # them in ONE transaction so a later drive's failure leaves no drive marked clean
+            candidates = {}
+            for label, (_epoch, _gen, fingerprint, capacity, _auth) in facts.items():
+                paths, keys = writer.touched_for(label)
+                reconcile(label, paths, keys)
+                observation = observe(label)
+                _require_identity(observation, fingerprint, capacity, label)
+                candidates[label] = observation
+            _immediate(con, lambda: [
+                _publish_anchor_locked(con, label, facts[label][0], captured[label],
+                                       candidates[label], now)
+                for label in drive_labels])
     except drive_fence.FenceUnavailable as exc:
         raise DriveMutationRefused("DRIVE_FENCE_UNAVAILABLE", **exc.evidence) from exc
