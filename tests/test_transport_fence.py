@@ -598,6 +598,26 @@ def test_reconcile_touched_probe_timeout_is_a_typed_refusal_not_a_crash(tmp_path
                 assert exc.code == "DRIVE_RECONCILIATION_REQUIRED", exc.code
 
 
+def test_reconcile_touched_annex_accepts_proven_key_without_worktree_symlink(tmp_path):
+    """Replica presence is proven by the annex KEY, not a worktree symlink — `git annex copy --to`
+    deposits the object without creating the target link. _reconcile_touched must NOT require
+    (dest/relpath).exists() for the annex case; a proven key reconciles cleanly even with no symlink
+    (exercises the REAL reconciler — the replica integration test mocks it, so this is where it's caught)."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-04", fp=_FP2, annex_uuid="uuid-tgt")
+        con.execute("INSERT INTO models(repo_id) VALUES('must')")
+        con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
+                    "VALUES('must','model.gguf',5,'gguf')")
+        con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
+                    "orig_bytes,stored_bytes,compressed,annex_key) VALUES('must','model.gguf',"
+                    "'model.gguf','model.gguf','drive-04',5,5,0,'KEY-x')")
+        assert hasattr(fetch, "_reconcile_touched"), "PR-03b must add fetch._reconcile_touched"
+        # NB: no file/symlink at dest/must/model.gguf — only the annex object transferred; the key proves it
+        with mock.patch.object(fetch, "_annex_key_on_uuid", return_value=True), \
+             mock.patch.object(fetch, "_annex_key_for_path", return_value=None):
+            fetch._reconcile_touched(con, "drive-04", tmp_path, True, ["must/model.gguf"], ["KEY-x"])
+
+
 # ===================================================================== R (stop/error): typed + dirty
 
 def test_typed_terminal_is_preserved_as_result_and_durable_event(tmp_path):

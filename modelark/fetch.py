@@ -632,7 +632,14 @@ def _reconcile_touched(con, label: str, dest, annex: bool, paths, keys) -> None:
         durable = con.execute(
             "SELECT 1 FROM archived WHERE drive_label=? AND repo_id || '/' || stored_relpath = ?",
             [label, relpath]).fetchone()
-        if durable is None or not (dest / relpath).exists():
+        if durable is None:
+            raise drive_mutation.DriveMutationRefused(
+                "DRIVE_RECONCILIATION_REQUIRED", drive=label, path=relpath)
+        # A raw (non-annex) file must be physically present in the worktree. For an annex drive the
+        # worktree symlink is NOT the proof — `git annex copy --to` deposits the object without creating
+        # a working-tree link — so annex presence is proven by the key below (whereis/lookupkey), never
+        # by exists(); requiring the symlink here would false-fail every first-time replica copy.
+        if not annex and not (dest / relpath).exists():
             raise drive_mutation.DriveMutationRefused(
                 "DRIVE_RECONCILIATION_REQUIRED", drive=label, path=relpath)
     if annex and keys:
