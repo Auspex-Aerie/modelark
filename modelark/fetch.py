@@ -641,8 +641,17 @@ def _reconcile_touched(con, label: str, dest, annex: bool, paths, keys) -> None:
         # keys the touched paths actually resolve to on this drive — a uuid-INDEPENDENT proof, so a drive
         # whose annex_uuid is not (yet) recorded still reconciles from physical annex tracking rather than
         # failing closed on every key (`_annex_key_on_uuid` can only match against a known target uuid).
-        path_keys = {tracked for relpath in paths
-                     if (tracked := _annex_key_for_path(dest, dest / relpath))}
+        path_keys = set()
+        for relpath in paths:
+            try:
+                tracked = _annex_key_for_path(dest, dest / relpath)
+            except FetchTerminalError:
+                # a git-annex probe timeout (DownloadLocalError) leaves this path's key unproven here; it
+                # falls through to the uuid check and, failing that, the typed refusal below — never a
+                # FetchTerminalError escaping this function past run()'s DriveMutationRefused handler.
+                tracked = None
+            if tracked:
+                path_keys.add(tracked)
         for key in keys:
             if not (_annex_key_on_uuid(dest, key, target_uuid) or key in path_keys):
                 raise drive_mutation.DriveMutationRefused(

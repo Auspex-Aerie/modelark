@@ -573,6 +573,31 @@ def test_reconcile_touched_tolerates_unresolvable_dest(tmp_path):
             assert exc.code == "DRIVE_RECONCILIATION_REQUIRED", exc.code
 
 
+def test_reconcile_touched_probe_timeout_is_a_typed_refusal_not_a_crash(tmp_path):
+    """A git-annex lookupkey timeout during clean-close reconciliation (DownloadLocalError from
+    _annex_key_for_path) must surface as a typed DRIVE_RECONCILIATION_REQUIRED refusal, never a
+    FetchTerminalError escaping _reconcile_touched past run()'s DriveMutationRefused handler."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00")
+        con.execute("INSERT INTO models(repo_id) VALUES('must')")
+        con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
+                    "VALUES('must','model.gguf',5,'gguf')")
+        (tmp_path / "must").mkdir()
+        (tmp_path / "must" / "model.gguf").write_bytes(b"bytes")
+        con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
+                    "orig_bytes,stored_bytes,compressed,annex_key) VALUES('must','model.gguf',"
+                    "'model.gguf','model.gguf','drive-00',5,5,0,'KEY-x')")
+        assert hasattr(fetch, "_reconcile_touched"), "PR-03b must add fetch._reconcile_touched"
+        with mock.patch.object(fetch, "_annex_key_on_uuid", return_value=False), \
+             mock.patch.object(fetch, "_annex_key_for_path",
+                               side_effect=fetch.DownloadLocalError("git-annex probe exceeded 30s")):
+            try:
+                fetch._reconcile_touched(con, "drive-00", tmp_path, True, ["must/model.gguf"], ["KEY-x"])
+                raise AssertionError("a probe timeout during reconciliation must be a typed refusal")
+            except dm.DriveMutationRefused as exc:
+                assert exc.code == "DRIVE_RECONCILIATION_REQUIRED", exc.code
+
+
 # ===================================================================== R (stop/error): typed + dirty
 
 def test_typed_terminal_is_preserved_as_result_and_durable_event(tmp_path):
