@@ -617,52 +617,53 @@ def _observe_drive(con, label: str) -> drive_mutation.Observation:
 
 
 def _reconcile_touched(con, label: str, dest, annex: bool, paths, keys) -> None:
-    """Generation-scoped reconciliation (never a full-drive scan): validate ONLY the recorded touched
-    paths and annex keys against durable catalog facts + physical presence, using the existing proof
-    helpers. Any gap raises a typed refusal so the generation stays dirty rather than being marked clean.
-    Touched paths are drive-relative (``repo_id`` + '/' + ``stored_relpath``)."""
+    """Generation-scoped reconciliation (never a full-drive scan) of the recorded touched set, per path:
+
+      * read the path's durable ``archived.annex_key``;
+      * a raw (non-annex) touched path requires its durable row and the physical file present;
+      * an annex touched path requires a NON-NULL durable key that AGREES with a writer-recorded key and
+        is proven the exact key present here — via the path's own ``lookupkey`` or ``whereis`` against the
+        drive's annex uuid (the worktree symlink is not proof; ``git annex copy --to`` never creates it).
+
+    A null, mismatched/unrelated, or unprovable annex key — or a missing row / absent raw file — raises
+    DRIVE_RECONCILIATION_REQUIRED so the generation stays dirty rather than being marked clean. Touched
+    paths are drive-relative (``repo_id`` + '/' + ``stored_relpath``)."""
     if not paths and not keys:
         return                              # nothing was touched on this drive -> nothing to reconcile
     if dest is None:
-        # the drive is unresolvable/unmounted at close (archive_path -> None): a TYPED refusal, never a
-        # Path(None) TypeError that would escape the DriveMutationRefused handler and crash the caller.
+        # unresolvable/unmounted at close (archive_path -> None): a TYPED refusal, never a Path(None)
+        # TypeError that would escape the DriveMutationRefused handler and crash the caller.
         raise drive_mutation.DriveMutationRefused("DRIVE_RECONCILIATION_REQUIRED", drive=label)
     dest = Path(dest)
+    recorded = set(keys)                     # the keys the writer recorded for this generation
+    target_uuid = (con.execute(
+        "SELECT annex_uuid FROM drives WHERE drive_label=?", [label]).fetchone() or [None])[0] if annex else None
     for relpath in paths:
-        durable = con.execute(
-            "SELECT 1 FROM archived WHERE drive_label=? AND repo_id || '/' || stored_relpath = ?",
+        row = con.execute(
+            "SELECT annex_key FROM archived WHERE drive_label=? AND repo_id || '/' || stored_relpath = ?",
             [label, relpath]).fetchone()
-        if durable is None:
-            raise drive_mutation.DriveMutationRefused(
+        if row is None:
+            raise drive_mutation.DriveMutationRefused(   # no durable row for a path the writer touched
                 "DRIVE_RECONCILIATION_REQUIRED", drive=label, path=relpath)
-        # A raw (non-annex) file must be physically present in the worktree. For an annex drive the
-        # worktree symlink is NOT the proof — `git annex copy --to` deposits the object without creating
-        # a working-tree link — so annex presence is proven by the key below (whereis/lookupkey), never
-        # by exists(); requiring the symlink here would false-fail every first-time replica copy.
-        if not annex and not (dest / relpath).exists():
-            raise drive_mutation.DriveMutationRefused(
-                "DRIVE_RECONCILIATION_REQUIRED", drive=label, path=relpath)
-    if annex and keys:
-        target_uuid = (con.execute(
-            "SELECT annex_uuid FROM drives WHERE drive_label=?", [label]).fetchone() or [None])[0]
-        # keys the touched paths actually resolve to on this drive — a uuid-INDEPENDENT proof, so a drive
-        # whose annex_uuid is not (yet) recorded still reconciles from physical annex tracking rather than
-        # failing closed on every key (`_annex_key_on_uuid` can only match against a known target uuid).
-        path_keys = set()
-        for relpath in paths:
-            try:
-                tracked = _annex_key_for_path(dest, dest / relpath)
-            except FetchTerminalError:
-                # a git-annex probe timeout (DownloadLocalError) leaves this path's key unproven here; it
-                # falls through to the uuid check and, failing that, the typed refusal below — never a
-                # FetchTerminalError escaping this function past run()'s DriveMutationRefused handler.
-                tracked = None
-            if tracked:
-                path_keys.add(tracked)
-        for key in keys:
-            if not (_annex_key_on_uuid(dest, key, target_uuid) or key in path_keys):
+        if not annex:
+            if not (dest / relpath).exists():            # a raw file must be physically present here
                 raise drive_mutation.DriveMutationRefused(
-                    "DRIVE_RECONCILIATION_REQUIRED", drive=label, key=key)
+                    "DRIVE_RECONCILIATION_REQUIRED", drive=label, path=relpath)
+            continue
+        durable_key = row[0]
+        if not durable_key or durable_key not in recorded:   # null durable key, or one the writer never recorded
+            raise drive_mutation.DriveMutationRefused(
+                "DRIVE_RECONCILIATION_REQUIRED", drive=label, path=relpath, key=durable_key)
+        try:
+            tracked = _annex_key_for_path(dest, dest / relpath)
+        except FetchTerminalError:
+            # a git-annex probe timeout (DownloadLocalError) leaves path-lookup unproven; the uuid check
+            # below may still prove the key, and failing that the typed refusal fires — never a
+            # FetchTerminalError escaping this function past run()'s DriveMutationRefused handler.
+            tracked = None
+        if not (_annex_key_on_uuid(dest, durable_key, target_uuid) or tracked == durable_key):
+            raise drive_mutation.DriveMutationRefused(   # the exact durable key is not provably present here
+                "DRIVE_RECONCILIATION_REQUIRED", drive=label, key=durable_key)
 
 
 def fetch_model(

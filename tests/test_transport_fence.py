@@ -532,29 +532,47 @@ def test_touched_reconciliation_validates_recorded_set_narrowly(tmp_path):
         fetch._reconcile_touched(con, "drive-00", tmp_path, False, ["must/model.safetensors"], [])
 
 
-def test_touched_reconciliation_fails_closed_on_unprovable_annex_key(tmp_path):
-    """R7: reconciliation validates annex KEYS, not just paths — a recorded key that cannot be proven on
-    the drive fails closed. An implementation that ignores keys entirely cannot pass this."""
+def test_touched_reconciliation_annex_key_invariant(tmp_path):
+    """R7: an annex touched path reconciles ONLY with a non-null durable ``archived.annex_key`` that
+    AGREES with a writer-recorded key AND is provably the exact key present (path lookup or target-uuid
+    whereis). Each failure mode fails closed independently: a NULL durable key, a durable key the writer
+    never recorded (mismatched/unrelated), and a recorded-but-unprovable key. Bytes are present in every
+    case — the KEY is the problem — so an implementation that trusts the row/worktree alone cannot pass."""
     with _catalog(tmp_path) as con:
         _proven_drive(con, "drive-00")
         con.execute("INSERT INTO models(repo_id) VALUES('must')")
-        con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
-                    "VALUES('must','model.gguf',5,'gguf')")
+        for name in ("model.gguf", "nokey.gguf", "mismatch.gguf"):
+            con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) VALUES('must',?,5,'gguf')",
+                        [name])
         (tmp_path / "must").mkdir()
-        (tmp_path / "must" / "model.gguf").write_bytes(b"bytes")   # bytes present — the KEY is the problem
+        for name in ("model.gguf", "nokey.gguf", "mismatch.gguf"):
+            (tmp_path / "must" / name).write_bytes(b"bytes")   # bytes present — the KEY is the problem
+        # recorded-but-unprovable: durable key == the writer-recorded key, yet neither proof helper resolves it
         con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
                     "orig_bytes,stored_bytes,compressed,annex_key) VALUES('must','model.gguf',"
                     "'model.gguf','model.gguf','drive-00',5,5,0,'KEY-x')")
+        # missing key: an annex row whose durable key is NULL
+        con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
+                    "orig_bytes,stored_bytes,compressed) VALUES('must','nokey.gguf',"
+                    "'nokey.gguf','nokey.gguf','drive-00',5,5,0)")
+        # mismatched key: a durable key the writer never recorded for this generation
+        con.execute("INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
+                    "orig_bytes,stored_bytes,compressed,annex_key) VALUES('must','mismatch.gguf',"
+                    "'mismatch.gguf','mismatch.gguf','drive-00',5,5,0,'KEY-durable')")
         assert hasattr(fetch, "_reconcile_touched"), "PR-03b must add fetch._reconcile_touched"
-        # both annex-key proof helpers report the key unprovable on this drive
+        # both annex-key proof helpers report the recorded key unprovable on this drive
         with mock.patch.object(fetch, "_annex_key_on_uuid", return_value=False), \
              mock.patch.object(fetch, "_annex_key_for_path", return_value=None):
-            try:
-                fetch._reconcile_touched(con, "drive-00", tmp_path, True,
-                                         ["must/model.gguf"], ["KEY-x"])
-                raise AssertionError("reconciliation must fail closed on an unprovable annex key")
-            except dm.DriveMutationRefused as exc:
-                assert exc.code == "DRIVE_RECONCILIATION_REQUIRED", exc.code
+            for path, recorded, why in [
+                ("must/model.gguf", ["KEY-x"], "a recorded key neither proof helper can resolve"),
+                ("must/nokey.gguf", ["KEY-x"], "an annex path whose durable key is NULL"),
+                ("must/mismatch.gguf", ["KEY-x"], "a durable key the writer never recorded"),
+            ]:
+                try:
+                    fetch._reconcile_touched(con, "drive-00", tmp_path, True, [path], recorded)
+                    raise AssertionError(f"reconciliation must fail closed on {why}")
+                except dm.DriveMutationRefused as exc:
+                    assert exc.code == "DRIVE_RECONCILIATION_REQUIRED", (path, exc.code)
 
 
 def test_reconcile_touched_tolerates_unresolvable_dest(tmp_path):
