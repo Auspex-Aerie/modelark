@@ -22,6 +22,13 @@ Binding reviewer corrections encoded here:
   C4  same identity + unchanged capacity → refresh, same epoch; same identity + CHANGED capacity → an
       explicit capacity-epoch transition (new epoch + fresh generation/anchor); a DIFFERENT identity
       under an existing label → refuse BEFORE any mutation (label reuse/retirement stays DEF-029).
+      DRIFT RULE (#35): refreshing a currently-clean anchored drive advances to a fresh generation and
+      re-anchors the RAW observed free ONLY when the free delta is within the versioned diagnostic
+      tolerance (one filesystem allocation unit + a bounded metadata allowance — diagnostic only, NEVER
+      capacity headroom). An above-tolerance delta is a typed DRIVE_FREE_DRIFT refusal (old generation/
+      anchor unchanged) unless --accept-drift is given, which re-anchors after a full reconciliation under
+      a distinct 'accept-drift' operation code. Bootstrap and dirty-generation recovery have no prior
+      clean anchor to compare and are exempt from the drift check.
   C5  full reconciliation is bounded and report-only: catalogued raw+annex proven present; known
       staging/.incomplete debris recognized; missing/unprovable claims never counted present (fail
       closed, no anchor); unexplained extra reported and LEFT IN PLACE (the final free observation
@@ -34,17 +41,21 @@ deferred to #39; label reuse / retirement / dependency-aware replacement to DEF-
 
 Proposed production API surfaced by these tests (for Gate-1 review; names are the contract to confirm):
   * new NEUTRAL module modelark/drive_bootstrap.py (no register→fetch / register→drive_bootstrap cycle):
-      - reconcile_drive(con, label, *, now, dedicated=False, blocking=True) -> Reconciliation
+      - reconcile_drive(con, label, *, now, dedicated=False, accept_drift=False, blocking=True) -> Reconciliation
         (report attrs: .outcome in {bootstrapped, refreshed, epoch_advanced, recovered,
          unknown_no_authority}, .identity_epoch, .generation, .anchor_free_bytes | None, .inventory);
         raises dm.DriveMutationRefused with DRIVE_IDENTITY_UNPROVEN / DRIVE_IDENTITY_MISMATCH /
-        DRIVE_AUTHORITY_DOWNGRADE_REFUSED / DRIVE_RECOVERY_SESSION_ACTIVE /
+        DRIVE_AUTHORITY_DOWNGRADE_REFUSED / DRIVE_FREE_DRIFT / DRIVE_RECOVERY_SESSION_ACTIVE /
         DRIVE_RECONCILIATION_REQUIRED / CLEAN_ANCHOR_CAS_FAILED.
       - _live_observation(con, label) -> dm.Observation  (fenced live identity/free evidence seam)
       - _inventory(con, label, dest) -> report with .present/.missing/.debris/.extra and .complete
       - _annex_key_present(dest, key, *, target_uuid) -> bool  (annex presence proof seam)
+      - _alloc_unit(dest) -> int  (filesystem allocation unit feeding the drift tolerance seam)
+      - free_drift_tolerance_v1(alloc_unit_bytes) -> int  (versioned diagnostic tolerance = one allocation
+        unit + a bounded metadata allowance; NEVER capacity headroom — the anchor stores the raw free)
       - reuses drive_mutation._publish_anchor_locked for the anchor write inside its atomic bootstrap txn
-  * new CLI: a single `drive reconcile <label>` command -> cli.cmd_drive_reconcile (no command family)
+  * new CLI: a single `drive reconcile <label> [--accept-drift]` command -> cli.cmd_drive_reconcile
+    (no command family)
 
 Disposable temp trees / synthetic drives / mocked physical seams only — never a live catalog/drive.
 """
@@ -201,7 +212,7 @@ def test_bootstrap_without_dedicated_assertion_stays_unknown(tmp_path):
             f"dedicated=False must persist no authoritative evidence (fingerprint/capacity/authority): {row}"
         assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
         assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
-        assert report.anchor_free_bytes is None, report
+        assert report.anchor_free_bytes is None and report.outcome == "unknown_no_authority", report
 
 
 def test_dedicated_false_refuses_to_downgrade_an_authoritative_drive(tmp_path):
@@ -330,22 +341,95 @@ def test_inventory_reports_extra_and_debris_without_deleting(tmp_path):
 
 # ================================================================= capacity-epoch handling (C4)
 
-def test_same_identity_same_capacity_refreshes_without_new_epoch(tmp_path):
-    """C4: re-reconciling the same identity at unchanged capacity refreshes evidence WITHOUT advancing
-    the capacity epoch."""
+def test_free_drift_tolerance_v1_is_alloc_unit_plus_bounded_metadata(tmp_path):
+    """#35 drift tolerance is versioned and DIAGNOSTIC-ONLY: one filesystem allocation unit plus a bounded
+    metadata allowance — never extra capacity headroom (the anchor always stores the raw observed free;
+    the tolerance only gates refresh-vs-refuse). One representative formula is pinned here, not a
+    filesystem-policy framework."""
+    bs = _bootstrap()
+    allowance = 1 << 20                                        # v1: a 1 MiB bounded metadata allowance
+    assert bs.free_drift_tolerance_v1(4096) == 4096 + allowance
+    assert bs.free_drift_tolerance_v1(65536) == 65536 + allowance
+
+
+def test_within_tolerance_refresh_reanchors_generation_2_with_fresh_free(tmp_path):
+    """C4 + #35 drift rule: re-reconciling the same identity at unchanged capacity, when the observed free
+    has drifted only WITHIN the versioned tolerance, refreshes without a new epoch by advancing to
+    generation 2 and storing the fresh RAW observed free (a no-op refresh that keeps stale free evidence
+    is not allowed)."""
+    cap, anchored_free = 8_000_000_000_000, 4_000_000_000_000
     with _catalog(tmp_path) as con:
-        _proven_drive(con, "drive-00", fp=_FP, epoch=1, generation=1, fscap=1000)
+        _proven_drive(con, "drive-00", fp=_FP, epoch=1, generation=1, fscap=cap, free=anchored_free)
         _dirty_gen(con, "drive-00", epoch=1, gen=1)
-        _anchor(con, "drive-00", epoch=1, gen=1, free=900, fscap=1000)
+        _anchor(con, "drive-00", epoch=1, gen=1, free=anchored_free, fscap=cap)
         bs = _bootstrap()
-        with mock.patch.object(bs, "_live_observation", return_value=_obs(fp=_FP, capacity=1000, free=880)), \
+        fresh_free = anchored_free - (bs.free_drift_tolerance_v1(4096) - 1)   # drifted, strictly BELOW tolerance
+        with mock.patch.object(bs, "_live_observation",
+                               return_value=_obs(fp=_FP, capacity=cap, free=fresh_free)), \
              mock.patch.object(bs, "_inventory", return_value=_clean_inv()), \
+             mock.patch.object(bs, "_alloc_unit", return_value=4096), \
              mock.patch.object(register, "archive_path", return_value=tmp_path / "mount"):
             report = bs.reconcile_drive(con, "drive-00", now="2026-07-22 12:00:00", dedicated=True)
-        assert con.execute("SELECT identity_epoch FROM drives WHERE drive_label='drive-00'").fetchone()[0] == 1
-        assert con.execute("SELECT count(DISTINCT identity_epoch) FROM drive_clean_anchors "
-                           "WHERE drive_label='drive-00'").fetchone()[0] == 1, "no new epoch namespace"
+        assert con.execute("SELECT identity_epoch,write_generation FROM drives WHERE drive_label='drive-00'"
+                           ).fetchone() == (1, 2), "same epoch, advanced to a fresh generation 2"
+        anchor = con.execute("SELECT anchor_free_bytes FROM drive_clean_anchors WHERE drive_label='drive-00' "
+                            "AND identity_epoch=1 AND generation=2").fetchone()
+        assert anchor == (fresh_free,), f"generation 2 must store the fresh raw observed free: {anchor}"
         assert report.identity_epoch == 1 and report.outcome == "refreshed", report
+
+
+def test_refresh_above_drift_tolerance_refuses_without_acceptance(tmp_path):
+    """#35 drift rule: a free delta ABOVE the versioned tolerance on a currently-clean anchored drive is a
+    typed DRIVE_FREE_DRIFT refusal without --accept-drift — the old generation and anchor are left
+    unchanged, so a real capacity loss can never be silently re-anchored away."""
+    cap, anchored_free = 8_000_000_000_000, 4_000_000_000_000
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", fp=_FP, epoch=1, generation=1, fscap=cap, free=anchored_free)
+        _dirty_gen(con, "drive-00", epoch=1, gen=1)
+        _anchor(con, "drive-00", epoch=1, gen=1, free=anchored_free, fscap=cap)
+        bs = _bootstrap()
+        drifted_free = anchored_free - (bs.free_drift_tolerance_v1(4096) + 1)   # strictly ABOVE tolerance
+        with mock.patch.object(bs, "_live_observation",
+                               return_value=_obs(fp=_FP, capacity=cap, free=drifted_free)), \
+             mock.patch.object(bs, "_inventory", return_value=_clean_inv()), \
+             mock.patch.object(bs, "_alloc_unit", return_value=4096), \
+             mock.patch.object(register, "archive_path", return_value=tmp_path / "mount"):
+            try:
+                bs.reconcile_drive(con, "drive-00", now="2026-07-22 12:00:00", dedicated=True)
+                raise AssertionError("above-tolerance free drift must refuse without --accept-drift")
+            except dm.DriveMutationRefused as exc:
+                assert exc.code == "DRIVE_FREE_DRIFT", exc.code
+        assert con.execute("SELECT write_generation FROM drives WHERE drive_label='drive-00'").fetchone()[0] == 1
+        anchors = con.execute("SELECT identity_epoch,generation,anchor_free_bytes FROM drive_clean_anchors "
+                            "WHERE drive_label='drive-00'").fetchall()
+        assert anchors == [(1, 1, anchored_free)], f"the old generation/anchor must be unchanged: {anchors}"
+
+
+def test_refresh_above_drift_tolerance_reanchors_with_accept_drift(tmp_path):
+    """#35 drift rule: with --accept-drift, an above-tolerance free delta re-anchors AFTER a successful
+    full reconciliation — a fresh generation 2 + anchor storing the observed free, recorded under a
+    DISTINCT dirty-generation operation code ('accept-drift') so the acceptance is auditable."""
+    cap, anchored_free = 8_000_000_000_000, 4_000_000_000_000
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", fp=_FP, epoch=1, generation=1, fscap=cap, free=anchored_free)
+        _dirty_gen(con, "drive-00", epoch=1, gen=1)
+        _anchor(con, "drive-00", epoch=1, gen=1, free=anchored_free, fscap=cap)
+        bs = _bootstrap()
+        drifted_free = anchored_free - (bs.free_drift_tolerance_v1(4096) + 1)   # above tolerance, but accepted
+        with mock.patch.object(bs, "_live_observation",
+                               return_value=_obs(fp=_FP, capacity=cap, free=drifted_free)), \
+             mock.patch.object(bs, "_inventory", return_value=_clean_inv()), \
+             mock.patch.object(bs, "_alloc_unit", return_value=4096), \
+             mock.patch.object(register, "archive_path", return_value=tmp_path / "mount"):
+            report = bs.reconcile_drive(con, "drive-00", now="2026-07-22 12:00:00",
+                                        dedicated=True, accept_drift=True)
+        gen2 = con.execute("SELECT operation_code FROM drive_dirty_generations WHERE drive_label='drive-00' "
+                          "AND identity_epoch=1 AND generation=2").fetchone()
+        assert gen2 == ("accept-drift",), f"drift acceptance must use a distinct operation code: {gen2}"
+        anchor = con.execute("SELECT anchor_free_bytes FROM drive_clean_anchors WHERE drive_label='drive-00' "
+                            "AND identity_epoch=1 AND generation=2").fetchone()
+        assert anchor == (drifted_free,), f"the accepted anchor must store the observed free: {anchor}"
+        assert report.identity_epoch == 1, report
 
 
 def test_same_identity_changed_capacity_advances_epoch_and_reanchors(tmp_path):
