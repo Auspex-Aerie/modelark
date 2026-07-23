@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import stat
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from modelark import register
+from modelark.core import db
 
 
 def _cp(stdout="", returncode=0, stderr=""):
@@ -46,6 +49,63 @@ def _must_refuse(topology, message, **kwargs):
         raise AssertionError("unsafe target must be refused")
     except RuntimeError as exc:
         assert message in str(exc), exc
+
+
+# ---- PR-03c2: a blunt existing-label guard shared by both registration entry points -------------
+
+def _mem():
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    for statement in db._statements(db.SCHEMA_PATH.read_text()):
+        con.execute(statement)
+    return con
+
+
+def test_existing_label_guard_refuses_only_an_existing_label():
+    """One tiny private guard refuses a label that already owns a `drives` row and passes a fresh one —
+    a blunt existing-label check with NO identity comparison or lifecycle behavior (DEF-029 owns reuse)."""
+    con = _mem()
+    con.execute("INSERT INTO drives(drive_label) VALUES('existing')")
+    register._guard_existing_label(con, "fresh")                     # an unused label -> no refusal
+    try:
+        register._guard_existing_label(con, "existing")
+        raise AssertionError("an already-registered label must be refused")
+    except RuntimeError as exc:
+        assert "existing" in str(exc).lower(), exc
+
+
+def test_register_drive_refuses_existing_label_before_any_mutation(tmp_path):
+    """register_drive refuses an already-registered label BEFORE the dry-run preview and before any
+    physical/remote/catalog mutation (SMART/mkfs/mount/clone/upsert) — re-registration can never silently
+    rewrite the row."""
+    con = _mem()
+    con.execute("INSERT INTO drives(drive_label) VALUES('existing')")
+    with mock.patch.object(register.db, "connect", return_value=con), \
+         mock.patch.object(register, "_transport", return_value="usb"), \
+         mock.patch.object(register, "smart_baseline") as smart, \
+         mock.patch.object(register, "_mkfs") as mkfs:
+        try:
+            register.register_drive(dev="/dev/fake", label="existing", dry_run=True)
+            raise AssertionError("an existing label must be refused, even for --dry-run")
+        except RuntimeError as exc:
+            assert "existing" in str(exc).lower(), exc
+    smart.assert_not_called()
+    mkfs.assert_not_called()
+
+
+def test_register_nas_refuses_existing_label():
+    """register_nas shares the same guard — it must not upsert over an existing label's row, which could
+    transfer an authoritative local drive's claims to a special remote."""
+    con = _mem()
+    con.execute("INSERT INTO drives(drive_label) VALUES('existing')")
+    with mock.patch.object(register.db, "connect", return_value=con), \
+         mock.patch.object(register, "library_root", return_value=Path("/fake/lib")), \
+         mock.patch.object(register, "_git", return_value="x"), \
+         mock.patch.object(register, "_add_to_active_plan", return_value="ark"):
+        try:
+            register.register_nas(label="existing")
+            raise AssertionError("an existing label must be refused")
+        except RuntimeError as exc:
+            assert "existing" in str(exc).lower(), exc
 
 
 def test_unmounted_plain_disk_is_accepted():

@@ -2,7 +2,8 @@
 half-empty NAS, and a mounted-but-dead drive getting its whole assignment silently skipped).
 
 Covers:
-  • _writable          — probes real writability (mounted != healthy); OSError → False.
+  • _writable          — a CHEAP, NON-MUTATING readiness check (mount + statvfs + readability); no probe
+                         write/unlink (real writeability is proven inside the mutation envelope, post-dirty).
   • _await_drive       — a mounted-but-UNWRITABLE drive is awaited, never accepted (no silent skip).
   • execute() re-plan  — the primary tier re-plans each pass, fills the priority drive first, then
                          advances, then does replica copy #2, and TERMINATES (GATE-C ok).
@@ -31,16 +32,21 @@ def _passthru_mutation(*_a, **_k):
 
 # ---- the write-probe --------------------------------------------------------------------------
 
-def test_writable_probe(tmp_path):
+def test_readiness_check_is_read_only(tmp_path):
+    """PR-03c2: _writable is a cheap, NON-MUTATING readiness check — mount resolution + statvfs +
+    directory readability, never a probe write/read/unlink (real writeability is proven inside the
+    mutation envelope, post-dirty). It keeps its boolean signature."""
     ctx = fetch.RunCtx(con=None)
-    with mock.patch.object(fill.register, "archive_path", side_effect=lambda con, l: tmp_path):
-        assert fill._writable(ctx, "drive-00") is True                 # real writable dir
-        assert not (tmp_path / fill._PROBE_NAME).exists(), "probe file must be cleaned up"
-    missing = tmp_path / "gone" / "deeper"                             # parent absent → write raises → False
-    with mock.patch.object(fill.register, "archive_path", side_effect=lambda con, l: missing):
-        assert fill._writable(ctx, "drive-00") is False
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    with mock.patch.object(fill.register, "archive_path", side_effect=lambda con, l: archive), \
+         mock.patch.object(Path, "write_bytes", side_effect=AssertionError("readiness must not write a probe")), \
+         mock.patch.object(Path, "unlink", side_effect=AssertionError("readiness must not unlink a probe")):
+        assert fill._writable(ctx, "drive-00") is True                 # ready dir — no probe written/removed
     with mock.patch.object(fill.register, "archive_path", side_effect=lambda con, l: None):
-        assert fill._writable(ctx, "drive-00") is False               # unmounted → False
+        assert fill._writable(ctx, "drive-00") is False               # unresolvable/unmounted → False
+    with mock.patch.object(fill.register, "archive_path", side_effect=lambda con, l: tmp_path / "gone"):
+        assert fill._writable(ctx, "drive-00") is False               # absent dir → statvfs fails → False
 
 
 # ---- _await_drive: never accept a mounted-but-dead drive ------------------------------------
