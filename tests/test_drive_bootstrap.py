@@ -11,6 +11,9 @@ Binding reviewer corrections encoded here:
       statvfs AVAILABLE bytes (metadata/reserve/clone/annex overhead ⇒ free < capacity), never capacity.
   C2  write_authority=dedicated_local is an explicit operator/policy assertion of exclusivity, NOT
       derivable from identity probes; without it (shared/NAS/unfenceable) the drive stays `unknown`.
+      A dedicated=False reconcile persists NO catalog-v3 authoritative evidence (fingerprint, capacity,
+      authority all stay unset; no epoch/generation/anchor), and must NEVER downgrade an already
+      dedicated_local drive — that is a typed policy refusal; authority revocation is a separate lifecycle.
   C3  ONE atomic bootstrap: controller fence → derive live identity + lock key → drive fence + re-prove
       → bounded reconcile + final free observation with NO write txn → then a single short transaction
       persists identity evidence + bootstrap dirty generation + clean anchor + authority ATOMICALLY. A
@@ -35,7 +38,8 @@ Proposed production API surfaced by these tests (for Gate-1 review; names are th
         (report attrs: .outcome in {bootstrapped, refreshed, epoch_advanced, recovered,
          unknown_no_authority}, .identity_epoch, .generation, .anchor_free_bytes | None, .inventory);
         raises dm.DriveMutationRefused with DRIVE_IDENTITY_UNPROVEN / DRIVE_IDENTITY_MISMATCH /
-        DRIVE_RECOVERY_SESSION_ACTIVE / DRIVE_RECONCILIATION_REQUIRED / CLEAN_ANCHOR_CAS_FAILED.
+        DRIVE_AUTHORITY_DOWNGRADE_REFUSED / DRIVE_RECOVERY_SESSION_ACTIVE /
+        DRIVE_RECONCILIATION_REQUIRED / CLEAN_ANCHOR_CAS_FAILED.
       - _live_observation(con, label) -> dm.Observation  (fenced live identity/free evidence seam)
       - _inventory(con, label, dest) -> report with .present/.missing/.debris/.extra and .complete
       - _annex_key_present(dest, key, *, target_uuid) -> bool  (annex presence proof seam)
@@ -47,6 +51,7 @@ Disposable temp trees / synthetic drives / mocked physical seams only — never 
 from __future__ import annotations
 
 import importlib
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
@@ -178,9 +183,11 @@ def test_bootstrap_local_dedicated_establishes_identity_authority_and_anchor(tmp
 
 
 def test_bootstrap_without_dedicated_assertion_stays_unknown(tmp_path):
-    """C2: dedicated_local is an explicit exclusivity assertion — identity probes never prove it. Without
-    the assertion (shared/NAS/unfenceable) the drive stays a VALID `unknown` identity with NO anchor;
-    nothing silently upgrades it."""
+    """C2 + Issue-3 ruling: dedicated_local is an explicit exclusivity assertion — identity probes never
+    prove it. A dedicated=False reconcile persists NO catalog-v3 authoritative evidence: identity
+    fingerprint and filesystem capacity stay NULL, authority stays `unknown`, and no epoch/generation/
+    anchor is created. Live observations may be surfaced diagnostically in the report but are never
+    persisted as authority; the drive remains a valid `unknown` identity."""
     with _catalog(tmp_path) as con:
         _drive_row(con, "drive-00", capacity=1000)
         bs = _bootstrap()
@@ -188,10 +195,36 @@ def test_bootstrap_without_dedicated_assertion_stays_unknown(tmp_path):
              mock.patch.object(bs, "_inventory", return_value=_clean_inv()), \
              mock.patch.object(register, "archive_path", return_value=tmp_path / "mount"):
             report = bs.reconcile_drive(con, "drive-00", now="2026-07-22 12:00:00", dedicated=False)
-        authority = con.execute("SELECT write_authority FROM drives WHERE drive_label='drive-00'").fetchone()[0]
-        assert authority == "unknown", "no probe set may upgrade authority to dedicated_local"
+        row = con.execute("SELECT identity_fingerprint,filesystem_capacity_bytes,write_authority,"
+                          "identity_epoch,write_generation FROM drives WHERE drive_label='drive-00'").fetchone()
+        assert row == (None, None, "unknown", 1, 0), \
+            f"dedicated=False must persist no authoritative evidence (fingerprint/capacity/authority): {row}"
+        assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
         assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
         assert report.anchor_free_bytes is None, report
+
+
+def test_dedicated_false_refuses_to_downgrade_an_authoritative_drive(tmp_path):
+    """Issue-3 boundary: a dedicated=False reconcile against an ALREADY dedicated_local drive must refuse
+    with a typed policy/lifecycle result and leave every piece of evidence unchanged. Authority
+    revocation is a separate lifecycle operation, never a side effect of a non-dedicated reconcile."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", fp=_FP, epoch=1, generation=1, fscap=1000)
+        _dirty_gen(con, "drive-00", epoch=1, gen=1)
+        _anchor(con, "drive-00", epoch=1, gen=1, free=900, fscap=1000)
+        bs = _bootstrap()
+        with mock.patch.object(bs, "_live_observation", return_value=_obs(fp=_FP, capacity=1000, free=880)), \
+             mock.patch.object(bs, "_inventory", return_value=_clean_inv()), \
+             mock.patch.object(register, "archive_path", return_value=tmp_path / "mount"):
+            try:
+                bs.reconcile_drive(con, "drive-00", now="2026-07-22 12:00:00", dedicated=False)
+                raise AssertionError("dedicated=False must not downgrade an authoritative drive")
+            except dm.DriveMutationRefused as exc:
+                assert exc.code == "DRIVE_AUTHORITY_DOWNGRADE_REFUSED", exc.code
+        row = con.execute("SELECT identity_epoch,write_generation,identity_fingerprint,write_authority "
+                          "FROM drives WHERE drive_label='drive-00'").fetchone()
+        assert row == (1, 1, _FP, "dedicated_local"), f"authoritative evidence must be untouched: {row}"
+        assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 1
 
 
 # =========================================================================== atomic bootstrap (C3 / R4)
@@ -312,7 +345,7 @@ def test_same_identity_same_capacity_refreshes_without_new_epoch(tmp_path):
         assert con.execute("SELECT identity_epoch FROM drives WHERE drive_label='drive-00'").fetchone()[0] == 1
         assert con.execute("SELECT count(DISTINCT identity_epoch) FROM drive_clean_anchors "
                            "WHERE drive_label='drive-00'").fetchone()[0] == 1, "no new epoch namespace"
-        assert report.identity_epoch == 1, report
+        assert report.identity_epoch == 1 and report.outcome == "refreshed", report
 
 
 def test_same_identity_changed_capacity_advances_epoch_and_reanchors(tmp_path):
@@ -378,6 +411,9 @@ def test_reconcile_recovers_sessionless_dirty_generation(tmp_path):
         anchor = con.execute("SELECT generation,anchor_free_bytes FROM drive_clean_anchors "
                             "WHERE drive_label='drive-00'").fetchone()
         assert anchor == (1, 870), anchor
+        assert con.execute("SELECT identity_fingerprint,write_authority FROM drives "
+                          "WHERE drive_label='drive-00'").fetchone() == (_FP, "dedicated_local"), \
+            "recovery must not downgrade identity/authority during the anchor CAS"
         assert report.outcome == "recovered", report
 
 
@@ -429,6 +465,13 @@ def test_single_drive_reconcile_command_covers_bootstrap_and_recovery(tmp_path):
         "PR-03c1 must add a single `drive reconcile <label>` command (cli.cmd_drive_reconcile)"
     assert not hasattr(cli, "cmd_drive_bootstrap") and not hasattr(cli, "cmd_drive_recover"), \
         "bootstrap and recovery are one `drive reconcile` operation, not a command family"
+    # wiring is checked at the PARSER level; the real op is never executed (the handler is mocked)
+    with mock.patch.object(cli, "cmd_drive_reconcile") as handler:
+        try:
+            cli.main(["drive", "reconcile", "drive-00"])      # argparse binds func to the mocked handler
+        except SystemExit as exc:                             # 'invalid choice: reconcile' => not wired
+            raise AssertionError(f"`drive reconcile <label>` is not wired into argparse (SystemExit {exc.code})")
+    handler.assert_called_once()
 
 
 # ================================================================================= GREEN characterization
@@ -450,15 +493,20 @@ if __name__ == "__main__":
     import tempfile
 
     saved = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)
-    failures = 0
+    passed, failed = [], []
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
+            tmp = Path(tempfile.mkdtemp(prefix="mark-03c1-"))
             try:
-                fn(Path(tempfile.mkdtemp()))
-                print(f"ok   {name}")
-            except Exception as exc:                     # noqa: BLE001 — script runner reports, never aborts
-                failures += 1
-                print(f"FAIL {name}: {exc}")
+                fn(tmp)
+                passed.append(name)
+                print(f"PASS  {name}")
+            except Exception as exc:                     # noqa: BLE001 — Gate-1 wants the full red/green map
+                failed.append(name)
+                print(f"FAIL  {name}  -> {type(exc).__name__}: {exc}")
             finally:
                 db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = saved
-    print("all passed" if not failures else f"{failures} failing (expected RED at Gate 1)")
+                shutil.rmtree(tmp, ignore_errors=True)   # the standalone runner cleans its own temp trees
+    print(f"\n{len(passed)} passed, {len(failed)} failed")
+    if failed:
+        raise SystemExit(1)                              # a failing test MUST fail CI (set -e; python "$t")
