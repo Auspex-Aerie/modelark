@@ -467,6 +467,25 @@ def cmd_drive_list(args):
               f"{str(d['health'] or '-'):8} {free}/{cap} free  {d['physical_location'] or ''}")
 
 
+def cmd_drive_reconcile(args):
+    from datetime import datetime, timezone
+
+    from modelark import drive_bootstrap
+    con = db.connect()
+    try:
+        r = drive_bootstrap.reconcile_drive(
+            con, args.label, now=datetime.now(timezone.utc).isoformat(sep=" "),
+            dedicated=args.dedicated, accept_drift=args.accept_drift)
+    except drive_bootstrap.DriveMutationRefused as exc:
+        # an offline/failed/unproven drive is an EXPECTED reconciliation outcome, not a crash: surface the
+        # typed refusal as a clean operator message (the restore/hash-repair convention), not a traceback.
+        raise SystemExit(f"drive reconcile failed: {exc.code}") from exc
+    finally:
+        con.close()
+    free = f"  free={r.anchor_free_bytes}" if r.anchor_free_bytes is not None else ""
+    print(f"{args.label}: {r.outcome}  epoch={r.identity_epoch} generation={r.generation}{free}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="modelark", description="Catalog & verify open model weights.")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -632,6 +651,15 @@ def main(argv=None):
     reg.set_defaults(func=cmd_drive_register)
     dl = drsub.add_parser("list", help="list registered drives")
     dl.set_defaults(func=cmd_drive_list)
+    rec = drsub.add_parser("reconcile",
+                           help="bootstrap identity + first clean anchor, or recover a dirty generation")
+    rec.add_argument("label", help="the registered drive label to reconcile")
+    rec.add_argument("--dedicated", action="store_true",
+                     help="assert dedicated local storage no unsupported writer may modify (grants "
+                          "dedicated_local authority); omit for shared/NAS/unfenceable storage → unknown")
+    rec.add_argument("--accept-drift", dest="accept_drift", action="store_true",
+                     help="accept an above-tolerance free-space drift and re-anchor after full reconciliation")
+    rec.set_defaults(func=cmd_drive_reconcile)
 
     args = p.parse_args(argv)
     if args.data_dir is not None or args.state_dir is not None:
