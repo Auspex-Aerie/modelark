@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Sequence
 
-from modelark import archive_manifest, compress, streamznn, wishlist
+from modelark import archive_manifest, capacity_evidence, compress, streamznn, wishlist
 from modelark.reconcile import (
     CopyFact,
     DiagnosticSeverity,
@@ -54,17 +54,44 @@ class FailureCode(str, Enum):
 
 @dataclass(frozen=True)
 class CapacityDrive:
+    """A plan drive paired with ONE admission-evidence record (#35-C). Usable free is the evidence's
+    already-floor-adjusted ``admissible_free`` — there is no second, independently-writable free scalar.
+    ``capacity_bytes`` is nominal device capacity for display/structural sizing only, never evidence."""
     drive_label: str
     role: str
     raid_backed: bool
     capacity_bytes: int
-    physical_free: int
-    free_evidence: FreeEvidence
-    safety_floor: int
+    evidence: capacity_evidence.Evidence
+    safety_floor: int                              # reporting only — the floor is already applied in evidence
 
     @property
     def usable_now(self) -> int:
-        return max(0, self.physical_free - self.safety_floor)
+        return self.evidence.admissible_free       # floor subtracted exactly once, inside `derive`
+
+    @property
+    def observed_free(self) -> int | None:
+        return self.evidence.observed_free
+
+    @property
+    def evidence_kind(self) -> str:
+        return self.evidence.kind
+
+    @property
+    def evidence_code(self) -> str | None:
+        return self.evidence.code
+
+    @property
+    def observed_at(self) -> str | None:
+        return self.evidence.observed_at
+
+    @property
+    def identity_epoch(self) -> int | None:
+        return self.evidence.identity_epoch
+
+    @property
+    def free_evidence(self) -> FreeEvidence | None:
+        # One-release compatibility alias mapping the evidence kind to the legacy diagnostic enum.
+        return {"live": FreeEvidence.LIVE, "anchor": FreeEvidence.SNAPSHOT}.get(self.evidence.kind)
 
 
 @dataclass(frozen=True)
@@ -125,8 +152,12 @@ class AssignedTask:
 @dataclass(frozen=True)
 class DriveLedger:
     drive_label: str
-    physical_free: int
-    free_evidence: FreeEvidence
+    observed_free: int | None                      # raw admission observation (None when evidence unknown)
+    free_evidence: FreeEvidence | None
+    evidence_kind: str
+    evidence_code: str | None
+    observed_at: str | None
+    identity_epoch: int | None
     safety_floor: int
     usable_now: int
     guaranteed_durable: int
@@ -156,6 +187,7 @@ class CapacityFailure:
     evidence: FreeEvidence | None
     actions: tuple[str, ...]
     blocked_by_requirement: str | None = None
+    evidence_code: str | None = None               # the drive's typed evidence code (e.g. unknown), if any
 
 
 @dataclass(frozen=True)
@@ -213,8 +245,12 @@ class CapacityPlan:
             "ledgers": [
                 {
                     "drive": item.drive_label,
-                    "physical_free": item.physical_free,
-                    "free_evidence": item.free_evidence.value,
+                    "observed_free": item.observed_free,
+                    "free_evidence": item.free_evidence.value if item.free_evidence else None,
+                    "evidence_kind": item.evidence_kind,
+                    "evidence_code": item.evidence_code,
+                    "observed_at": item.observed_at,
+                    "identity_epoch": item.identity_epoch,
                     "safety_floor": item.safety_floor,
                     "usable_now": item.usable_now,
                     "guaranteed_durable": item.guaranteed_durable,
@@ -240,6 +276,7 @@ class CapacityPlan:
                     "workspace_bytes": item.workspace_bytes,
                     "shortfall_bytes": item.shortfall_bytes,
                     "evidence": item.evidence.value if item.evidence else None,
+                    "evidence_code": item.evidence_code,
                     "actions": list(item.actions),
                     "blocked_by_requirement": item.blocked_by_requirement,
                 }
@@ -319,36 +356,32 @@ def inspect_drives(
     con,
     plan_id: str,
     *,
-    live_free_by_drive: Mapping[str, int] | None = None,
+    evidence_by_drive: Mapping[str, capacity_evidence.Evidence] | None = None,
 ) -> tuple[CapacityDrive, ...]:
-    """Load safe capacity facts; supplied live free is already net of every physical byte."""
-    live_free_by_drive = live_free_by_drive or {}
-    archived = dict(con.execute(
-        "SELECT drive_label,coalesce(sum(stored_bytes),0) FROM archived GROUP BY drive_label"
-    ).fetchall())
+    """Pair each plan drive with its admission Evidence (#35-C). Usable free is the evidence's
+    admissible_free — the admission fact loader never reads the legacy per-drive free column and never
+    reconstructs free as capacity minus archived bytes. A drive with no supplied evidence is fail-closed
+    ``unknown`` (zero executable). ``capacity_bytes`` (nominal) stays for display/structural sizing; the
+    reporting safety floor uses the current-epoch filesystem capacity."""
+    evidence_by_drive = evidence_by_drive or {}
     rows = con.execute(
         "SELECT d.drive_label,coalesce(d.role,'primary'),coalesce(d.raid_backed,0),"
-        "coalesce(d.capacity_bytes,d.free_bytes,0),coalesce(d.free_bytes,0) "
+        "coalesce(d.capacity_bytes,0),coalesce(d.filesystem_capacity_bytes,d.capacity_bytes,0) "
         "FROM plan_drives pd JOIN drives d USING(drive_label) WHERE pd.plan_id=? "
         "ORDER BY d.drive_label",
         [plan_id],
     ).fetchall()
     facts = []
-    for label, role, raid, capacity, snapshot_free in rows:
-        if label in live_free_by_drive:
-            physical_free = max(0, int(live_free_by_drive[label]))
-            evidence = FreeEvidence.LIVE
-        else:
-            physical_free = max(0, int(snapshot_free or 0) - int(archived.get(label, 0) or 0))
-            evidence = FreeEvidence.SNAPSHOT
+    for label, role, raid, nominal_capacity, epoch_capacity in rows:
+        evidence = evidence_by_drive.get(label) or capacity_evidence.Evidence(
+            kind="unknown", executable=False, admissible_free=0, code="CAPACITY_EVIDENCE_UNKNOWN")
         facts.append(CapacityDrive(
             drive_label=label,
             role=role,
             raid_backed=bool(raid),
-            capacity_bytes=int(capacity or 0),
-            physical_free=physical_free,
-            free_evidence=evidence,
-            safety_floor=safety_floor(int(capacity or 0), bool(raid)),
+            capacity_bytes=int(nominal_capacity or 0),
+            evidence=evidence,
+            safety_floor=safety_floor(int(epoch_capacity or 0), bool(raid)),
         ))
     return tuple(facts)
 
@@ -477,6 +510,15 @@ def _drive_tier(drive: CapacityDrive) -> str:
     return "raid_home" if drive.raid_backed else "primary"
 
 
+def _actions_for(drive: CapacityDrive, base: tuple[str, ...]) -> tuple[str, ...]:
+    """When a block is due to UNKNOWN evidence (zero executable), lead with mount/reconcile so the
+    operator is not told to free/trim observed space that was never actually observed. The complete
+    mixed-fleet outcome ladder is #38; this only preserves the typed cause and the right first action."""
+    if drive.evidence_kind == "unknown":
+        return ("mount_or_reconcile_drive", *base)
+    return base
+
+
 def preflight_file(
     drive: CapacityDrive,
     file_budget: FileBudget,
@@ -485,7 +527,8 @@ def preflight_file(
     requirement_id: str | None = None,
     task_id: str = "file-preflight",
 ) -> CapacityFailure | None:
-    """Fresh-operation guard; callers replace ``physical_free`` with current live evidence."""
+    """Fresh-operation guard; the drive carries current admission evidence (``usable_now`` is the
+    already-floor-adjusted admissible free), so this never re-subtracts the safety floor."""
     durable = file_budget.durable_for(mode)
     workspace = file_budget.workspace_for(mode)
     required = durable + workspace
@@ -506,7 +549,8 @@ def preflight_file(
         workspace_bytes=workspace,
         shortfall_bytes=required - drive.usable_now,
         evidence=drive.free_evidence,
-        actions=("free_target_space", "add_eligible_drive", "replan"),
+        evidence_code=drive.evidence_code,
+        actions=_actions_for(drive, ("free_target_space", "add_eligible_drive", "replan")),
     )
 
 
@@ -618,7 +662,8 @@ def _failure_for_unassigned(
         workspace_bytes=workspace,
         shortfall_bytes=max(0, required - drive.usable_now),
         evidence=drive.free_evidence,
-        actions=("expand_eligible_tier", "trim_selection", "change_capacity_mode"),
+        evidence_code=drive.evidence_code,
+        actions=_actions_for(drive, ("expand_eligible_tier", "trim_selection", "change_capacity_mode")),
         blocked_by_requirement=intent.depends_on_requirement,
     )
 
@@ -629,8 +674,12 @@ def _ledgers(drives: Sequence[CapacityDrive], tasks: Sequence[AssignedTask]) -> 
         budgets = [item.budget for item in tasks if item.target_drive == drive.drive_label]
         out.append(DriveLedger(
             drive_label=drive.drive_label,
-            physical_free=drive.physical_free,
+            observed_free=drive.observed_free,
             free_evidence=drive.free_evidence,
+            evidence_kind=drive.evidence_kind,
+            evidence_code=drive.evidence_code,
+            observed_at=drive.observed_at,
+            identity_epoch=drive.identity_epoch,
             safety_floor=drive.safety_floor,
             usable_now=drive.usable_now,
             guaranteed_durable=sum(item.guaranteed_durable for item in budgets),
@@ -681,11 +730,13 @@ def plan_capacity(
     result: ReconcileResult,
     *,
     capacity_mode: str | CapacityMode | None = None,
-    live_free_by_drive: Mapping[str, int] | None = None,
+    evidence_by_drive: Mapping[str, capacity_evidence.Evidence] | None = None,
     compression_cfg: Mapping[str, object] | None = None,
     provisioning: str | None = None,
 ) -> CapacityPlan:
-    """Materialize deterministic ``tiered_v1`` assignments and feasibility evidence."""
+    """Materialize deterministic ``tiered_v1`` assignments and feasibility evidence. Usable free comes
+    from ``evidence_by_drive`` (the shared admission authority); a drive absent from it is fail-closed
+    ``unknown`` and contributes zero executable capacity (#35-C)."""
     if provisioning is not None:
         warnings.warn(
             "plan_capacity(provisioning=...) is deprecated; use capacity_mode=...",
@@ -697,7 +748,7 @@ def plan_capacity(
             raise ValueError("capacity_mode and deprecated provisioning disagree")
         capacity_mode = legacy
     mode = mode_from_value(capacity_mode or CapacityMode.GUARANTEED)
-    drives = inspect_drives(con, result.plan_id, live_free_by_drive=live_free_by_drive)
+    drives = inspect_drives(con, result.plan_id, evidence_by_drive=evidence_by_drive)
     drive_by_label = {item.drive_label: item for item in drives}
     facts = _fact_by_repo_drive(result)
     ratio = plan_float_ratio(con)
@@ -867,7 +918,8 @@ def plan_capacity(
             workspace_bytes=workspace,
             shortfall_bytes=required - ledger.usable_now,
             evidence=ledger.free_evidence,
-            actions=("expand_eligible_tier", "trim_selection", "change_capacity_mode"),
+            evidence_code=ledger.evidence_code,
+            actions=_actions_for(drive, ("expand_eligible_tier", "trim_selection", "change_capacity_mode")),
         ))
         failed_requirements.update(item.requirement_id for item in roots)
 

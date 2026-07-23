@@ -18,8 +18,19 @@ import types
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
+import _admission_compat
 from modelark.core import db
 from modelark import capacity, fetch, fill, plan, reconcile
+
+
+@pytest.fixture(autouse=True)
+def _admission_snapshot_compat():
+    """#35-C: synthesize admission evidence from free_bytes (pre-cutover snapshot semantics) so the
+    reconciled-executor tests keep exercising the executor, not the evidence seam (covered by PR-04)."""
+    with _admission_compat.seam_patch():
+        yield
 
 
 @contextlib.contextmanager
@@ -199,10 +210,16 @@ def test_reconcile_uses_and_closes_dedicated_read_connection():
     class ReadConnection:
         closed = False
 
+        def __init__(self, real):
+            self._real = real
+
+        def execute(self, *args, **kwargs):     # evidence reads share the dedicated read connection
+            return self._real.execute(*args, **kwargs)
+
         def close(self):
             self.closed = True
 
-    read_con = ReadConnection()
+    read_con = ReadConnection(con)
     graph = object()
     ledger = object()
     ctx = fetch.RunCtx(con=con, read_connection_factory=lambda: read_con)
@@ -693,7 +710,8 @@ if __name__ == "__main__":
     import tempfile
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
-            with tempfile.TemporaryDirectory() as td:
+            # Mirror the autouse pytest fixture under the plain script runner (CI's `python "$t"`).
+            with _admission_compat.seam_patch(), tempfile.TemporaryDirectory() as td:
                 if inspect.signature(fn).parameters:
                     fn(Path(td))
                 else:

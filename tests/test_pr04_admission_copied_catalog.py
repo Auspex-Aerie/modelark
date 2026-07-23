@@ -22,10 +22,10 @@ from modelark.core import db
 from modelark import capacity, reconcile
 
 try:
-    from modelark import admission
+    import modelark.admission as admission
     _HAS_ADMISSION = True
-except ImportError as exc:                       # ONLY the missing shell — a real import/init defect surfaces
-    if "admission" not in f"{getattr(exc, 'name', '') or ''} {exc}":
+except ModuleNotFoundError as exc:               # ONLY the exact absent submodule — a real defect surfaces
+    if exc.name != "modelark.admission":
         raise
     admission = None
     _HAS_ADMISSION = False

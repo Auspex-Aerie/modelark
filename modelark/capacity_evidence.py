@@ -33,6 +33,10 @@ class Evidence:
     observed_free: int | None = None
     optimistic_usable_max: int | None = None
     legacy_free_bytes: int | None = None
+    # Provenance attached by the admission shell (not by pure `derive`, which has no clock): the
+    # observation time and the applicable identity epoch, so API/CLI provenance is real, not a bare kind.
+    observed_at: str | None = None
+    identity_epoch: int | None = None
 
 
 def identity_fingerprint_v1(*, fs_uuid, annex_uuid, serial, filesystem_capacity_bytes) -> str:

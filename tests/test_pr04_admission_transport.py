@@ -16,7 +16,6 @@ from __future__ import annotations
 import fcntl
 import inspect
 import shutil
-import types
 from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
@@ -25,10 +24,10 @@ from modelark.core import db
 from modelark import archive_manifest, capacity, drive_fence, drive_mutation as dm, fetch, fill, reconcile
 
 try:
-    from modelark import admission  # noqa: F401 — presence gate for the cutover
+    import modelark.admission as admission  # noqa: F401 — presence gate for the cutover
     _HAS_ADMISSION = True
-except ImportError as exc:                       # ONLY the missing shell — a real import/init defect surfaces
-    if "admission" not in f"{getattr(exc, 'name', '') or ''} {exc}":
+except ModuleNotFoundError as exc:               # ONLY the exact absent submodule — a real defect surfaces
+    if exc.name != "modelark.admission":
         raise
     _HAS_ADMISSION = False
 
@@ -102,17 +101,18 @@ def _fetch_task(target="drive-00", rfilename="model.gguf", size=500):
 def _acquirable(path):
     """True iff the advisory flock at `path` can be taken non-blocking right now (released immediately)."""
     try:
-        fh = open(path, "w")                      # noqa: SIM115 — released below
+        fh = open(path, "w")                      # noqa: SIM115 — closed in finally
     except OSError:
         return False
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        return True
+    finally:
         fh.close()
-        return False
-    fcntl.flock(fh, fcntl.LOCK_UN)
-    fh.close()
-    return True
 
 
 def test_per_file_guard_admits_from_fresh_held_fence_observation_not_preview(tmp_path):
@@ -136,9 +136,6 @@ def test_per_file_guard_admits_from_fresh_held_fence_observation_not_preview(tmp
 
         captured = {}
         with mock.patch.object(fetch, "_observe_drive", return_value=_obs(free=100, fscap=1000)) as obs_spy, \
-             mock.patch.object(fetch.register, "archive_path", return_value=tmp_path), \
-             mock.patch.object(fill.shutil, "disk_usage",
-                               return_value=types.SimpleNamespace(total=1000, used=100, free=900)), \
              mock.patch.object(drive_fence, "hold_drives_sorted", side_effect=counting_hold):
             # run the guard exactly where the transport runs it: inside the held-fence batch envelope
             with dm.drive_mutation(con, ["drive-00"], "fetch",

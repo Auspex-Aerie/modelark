@@ -82,6 +82,20 @@ def _seed(con) -> None:
         "'demo/embed','model.safetensors','model.safetensors','model.safetensors',"
         "'drive-replica',1000000000,600000000,1,'KEY-embed')"
     )
+    # Reconcile both drives (proven identity + a matching clean anchor) so admission evidence is
+    # available offline (#35-C). A migrated drive would be `unknown` and capacity-block everything —
+    # the fail-closed migration default — masking the intended policy/replica-capacity blockers.
+    for label, cap, fp in (("drive-00", 10000000000000, "a" * 64), ("drive-replica", 1000000000, "b" * 64)):
+        con.execute("UPDATE drives SET identity_epoch=1, write_generation=1, filesystem_capacity_bytes=?, "
+                    "identity_fingerprint=?, write_authority='dedicated_local' WHERE drive_label=?",
+                    (cap, fp, label))
+        con.execute("INSERT INTO drive_dirty_generations(drive_label,identity_epoch,generation,"
+                    "operation_code) VALUES(?,1,1,'reconcile')", (label,))
+        con.execute("INSERT INTO drive_clean_anchors(drive_label,identity_epoch,generation,"
+                    "anchor_free_bytes,filesystem_capacity_bytes,identity_fingerprint,write_authority,"
+                    "identity_proof,fence_proof,observed_at) "
+                    "VALUES(?,1,1,?,?,?, 'dedicated_local','proof','fence','2026-07-15 00:00:00')",
+                    (label, cap, cap, fp))
 
 
 def _wait_port(port: int, timeout: int = 40) -> bool:

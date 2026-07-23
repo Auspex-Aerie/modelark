@@ -619,8 +619,16 @@ def shadow_report(
         legacy_error = f"{type(exc).__name__}: {exc}"
     normalized = normalize_legacy_reservations(reservations, result)
     payload = result.to_dict()
-    from modelark import capacity  # local import: capacity types depend on Phase-1 graph types
-    capacity_result = capacity.plan_capacity(con, result, capacity_mode=canonical_mode)
+    from datetime import datetime, timezone
+
+    from modelark import admission, capacity, fetch  # local imports: types/transport depend on graph types
+    labels = [row[0] for row in con.execute(
+        "SELECT drive_label FROM plan_drives WHERE plan_id=? ORDER BY drive_label", [plan_id]).fetchall()]
+    now = datetime.now(timezone.utc).isoformat(sep=" ")
+    evidence = admission.preview_by_drive(
+        con, labels, observe=lambda label: fetch.observe_for_admission(con, label), now=now)
+    capacity_result = capacity.plan_capacity(
+        con, result, capacity_mode=canonical_mode, evidence_by_drive=evidence)
     payload["capacity"] = capacity_result.to_dict()
     legacy_counts = Counter(item.requirement_id for item in normalized)
     legacy_duplicates = sorted(key for key, count in legacy_counts.items() if count > 1)

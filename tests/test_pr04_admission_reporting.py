@@ -22,10 +22,10 @@ from modelark import capacity, librarian, plan
 from modelark.web import library_api
 
 try:
-    from modelark import admission  # noqa: F401 — presence gate for the cutover
+    import modelark.admission as admission  # noqa: F401 — presence gate for the cutover
     _HAS_ADMISSION = True
-except ImportError as exc:                       # ONLY the missing shell — a real import/init defect surfaces
-    if "admission" not in f"{getattr(exc, 'name', '') or ''} {exc}":
+except ModuleNotFoundError as exc:               # ONLY the exact absent submodule — a real defect surfaces
+    if exc.name != "modelark.admission":
         raise
     _HAS_ADMISSION = False
 
