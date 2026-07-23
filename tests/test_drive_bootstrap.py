@@ -623,6 +623,23 @@ def test_single_drive_reconcile_command_covers_bootstrap_and_recovery(tmp_path):
     handler.assert_called_once()
 
 
+def test_cli_reconcile_translates_refusal_to_a_clean_exit(tmp_path):
+    """A typed reconciliation refusal (an offline/failed drive — the expected Drive-02 outcome, not a
+    programming failure) must surface as a clean SystemExit message, never a raw DriveMutationRefused
+    traceback — matching the CLI's restore/hash-repair error convention."""
+    from modelark import cli, drive_bootstrap
+    refusal = dm.DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive="drive-02")
+    with mock.patch.object(db, "connect", return_value=mock.Mock()), \
+         mock.patch.object(drive_bootstrap, "reconcile_drive", side_effect=refusal):
+        try:
+            cli.main(["drive", "reconcile", "drive-02", "--dedicated"])
+            raise AssertionError("a typed refusal must exit, not return silently")
+        except dm.DriveMutationRefused:
+            raise AssertionError("DriveMutationRefused leaked as a raw traceback instead of SystemExit")
+        except SystemExit as exc:
+            assert "drive reconcile failed" in str(exc.code), exc.code
+
+
 def test_migrated_drive_is_unknown_and_anchorless_until_reconcile(tmp_path):
     """GREEN floor (must stay true): registration/migration records a valid drive identity but NO write
     authority and NO clean anchor — only `drive reconcile` establishes them. This is the inert state the
