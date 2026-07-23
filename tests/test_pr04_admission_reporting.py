@@ -24,7 +24,9 @@ from modelark.web import library_api
 try:
     from modelark import admission  # noqa: F401 — presence gate for the cutover
     _HAS_ADMISSION = True
-except Exception:                                # noqa: BLE001
+except ImportError as exc:                       # ONLY the missing shell — a real import/init defect surfaces
+    if "admission" not in f"{getattr(exc, 'name', '') or ''} {exc}":
+        raise
     _HAS_ADMISSION = False
 
 _FP = "a" * 64
@@ -124,7 +126,8 @@ def test_library_api_fleet_and_total_free_from_evidence_legacy_diagnostic():
     assert drive["evidence_kind"] == "unknown"
     assert drive["free"] is None                                 # no evidence -> no admissible free
     assert drive["legacy_free"] == 500                           # raw scalar only under a legacy field
-    assert out["totals"]["free"] is None or out["totals"]["free"] == 0   # evidence-derived, not raw sum
+    # unknown fleet -> no admissible fleet free; `is None` (not 0) so a legacy SUM(free_bytes) can't pass
+    assert out["totals"]["free"] is None
     con.close()
 
 
@@ -135,16 +138,23 @@ def test_library_js_renders_evidence_kind_not_bare_free():
     from modelark.web import server
     js = (server.STATIC / "library.js").read_text()
     assert "evidence_kind" in js, "library.js must render the drive's evidence kind (unknown vs live/anchor)"
+    # and the old bare arithmetic must be gone: a zero/unknown free must not silently read as "fully used"
+    assert "t.capacity - t.free" not in js, \
+        "library.js must not render bare `capacity − free` (unknown/None free reads as fully used)"
 
 
 # --------------------------------------------------------------------------- no legacy authority
 
-def test_inspect_drives_has_no_capacity_minus_stored_reconstruction():
-    """The #35 contract: remove every admission `capacity − SUM(stored_bytes)` reconstruction. The
-    admission fact loader must derive usable free from evidence, not by differencing stored bytes."""
-    src = inspect.getsource(capacity.inspect_drives)
-    assert "archived.get(label" not in src, \
-        "inspect_drives must not reconstruct free as snapshot_free − Σ stored_bytes (evidence is authority)"
+def test_inspect_drives_reads_no_legacy_free_authority():
+    """The #35 contract: remove every admission read of `drives.free_bytes` and every
+    `capacity − SUM(stored_bytes)` reconstruction. Assert both legacy authorities are absent from the
+    admission fact loader (matched on the durable column names, so a rename/alias cannot slip past);
+    nominal `capacity_bytes` may remain for display/structural sizing."""
+    src = inspect.getsource(capacity.inspect_drives).lower()
+    assert "free_bytes" not in src, \
+        "inspect_drives must not read drives.free_bytes as admission authority (evidence is authority)"
+    assert "stored_bytes" not in src, \
+        "inspect_drives must not reconstruct free as capacity − Σ stored_bytes (evidence is authority)"
 
 
 # --------------------------------------------------------------------------- plan.py gate stays (#38)

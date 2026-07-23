@@ -34,7 +34,9 @@ from modelark.core import db
 try:
     from modelark import admission
     _HAS_ADMISSION = True
-except Exception:                                # noqa: BLE001 — module is the thing under construction
+except ImportError as exc:                       # ONLY the missing shell — a real import/init defect surfaces
+    if "admission" not in f"{getattr(exc, 'name', '') or ''} {exc}":
+        raise
     admission = None
     _HAS_ADMISSION = False
 
@@ -244,6 +246,42 @@ def test_preview_path_offline_uses_anchor_or_typed_unknown():
     con.close()
 
 
+def test_preview_path_revalidates_facts_changed_between_capture_and_fence():
+    """The race the try-hold guards: the drive's identity/epoch changes AFTER facts are captured but
+    while the fence is being acquired. The seam must RE-READ facts under the held fence and fail closed —
+    never admit on the pre-lock snapshot. Modeled by mutating the row at fence acquisition."""
+    _require_admission()
+    con = _mem()
+    _proven(con, "drive-00", fscap=1000, free=900, fp=_FP)          # captured identity: epoch 1 / _FP
+
+    class _MutatingFence:
+        """Acquisition commits a lifecycle change (epoch bump) between capture and the held fence."""
+
+        def __init__(self):
+            self.blocking = "unset"
+
+        def __call__(self, keyed, *, blocking=True):
+            self.blocking = blocking
+            return self
+
+        def __enter__(self):
+            con.execute("UPDATE drives SET identity_epoch=2, identity_fingerprint=? "
+                        "WHERE drive_label='drive-00'", [_FP_OTHER])
+            return []
+
+        def __exit__(self, *exc):
+            return False
+
+    got = admission.preview_by_drive(
+        con, ["drive-00"],
+        observe=lambda label: _obs(free=900, fscap=1000, fp=_FP),   # attests the pre-lock identity
+        now="t", fence=_MutatingFence())
+    ev = got["drive-00"]
+    assert ev.kind == "unknown" and ev.admissible_free == 0, ev     # re-read under the fence -> fail closed
+    assert ev.code == "DRIVE_IDENTITY_UNPROVEN", ev
+    con.close()
+
+
 # --------------------------------------------------------------------------- ruling 2: representation
 
 def test_capacity_drive_usable_now_is_admissible_free_with_no_second_subtraction():
@@ -315,23 +353,26 @@ def test_unknown_evidence_survives_into_ledger_and_recommends_reconcile():
     assert ledger.evidence_kind == "unknown"                                    # kind survives to the ledger
     failure = result.failures[0]
     assert failure.evidence_code == "CAPACITY_EVIDENCE_UNKNOWN"                  # typed code survives
-    # the operator is told to mount/reconcile, NOT that observed free space is exhausted
+    # the operator is told to mount/reconcile, NOT that observed free space is exhausted. The complete
+    # outcome-code ladder (which top-level FailureCode applies) belongs to #38, not this PR.
     assert any("reconcile" in action or "mount" in action for action in failure.actions), failure.actions
-    assert failure.code != capacity.FailureCode.CAPACITY_DURABLE_SHORT
     con.close()
 
 
 def main():
     import inspect
+    import shutil
     import tempfile
     from pathlib import Path
     tests = sorted((n, f) for n, f in globals().items()
                    if n.startswith("test_") and callable(f))
     passed, failed = [], []
     for name, fn in tests:
+        tmp = None
         try:
             if "tmp_path" in inspect.signature(fn).parameters:
-                fn(Path(tempfile.mkdtemp(prefix="mark-pr04-")))
+                tmp = Path(tempfile.mkdtemp(prefix="mark-pr04-"))
+                fn(tmp)
             else:
                 fn()
             passed.append(name)
@@ -339,6 +380,9 @@ def main():
         except Exception as exc:                 # noqa: BLE001 — Gate-1 wants the full red/green map
             failed.append(name)
             print(f"FAIL  {name}  -> {type(exc).__name__}: {exc}")
+        finally:
+            if tmp is not None:                  # the standalone runner cleans its own temp trees
+                shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{len(passed)} passed, {len(failed)} failed")
     if failed:
         raise SystemExit(1)

@@ -24,7 +24,9 @@ from modelark import capacity, reconcile
 try:
     from modelark import admission
     _HAS_ADMISSION = True
-except Exception:                                # noqa: BLE001
+except ImportError as exc:                       # ONLY the missing shell — a real import/init defect surfaces
+    if "admission" not in f"{getattr(exc, 'name', '') or ''} {exc}":
+        raise
     admission = None
     _HAS_ADMISSION = False
 
@@ -36,6 +38,22 @@ def _require_admission():
         raise AssertionError("PR-04 must add modelark/admission.py (see test_pr04_admission_seam)")
 
 
+# Restore the db module globals around EVERY test so a mid-setup failure cannot leak a temp path into a
+# later test (autouse under pytest; the script runner save/restores in main()).
+try:
+    import pytest
+
+    @pytest.fixture(autouse=True)
+    def _isolate_db_globals():
+        saved = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)
+        try:
+            yield
+        finally:
+            db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = saved
+except ImportError:                              # the plain script runner does not need pytest
+    pass
+
+
 def _sha256(path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -43,21 +61,26 @@ def _sha256(path) -> str:
 def _build_source(tmp_path):
     """A migrated v3 catalog on disk: one primary drive + one finalized single-copy repo, no anchors."""
     saved = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)
-    db.CATALOG_DIR = tmp_path
-    db.DB_PATH = tmp_path / "catalog.sqlite"
-    db.STATE_DIR = tmp_path / "state"
-    con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 3, "fixture must be a v3 catalog"
-    con.execute("INSERT INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
-    con.execute("INSERT INTO drives(drive_label,capacity_bytes,free_bytes) VALUES('drive-00',1000000,500000)")
-    con.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('ark','drive-00')")
-    con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/model',1)")
-    con.execute("INSERT INTO selection(repo_id,finalized_at) VALUES('org/model','2026-01-01')")
-    con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
-                "VALUES('org/model','model.gguf',100,'gguf',NULL)")
-    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")               # self-contained single file for copy/hash
-    con.close()
-    db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = saved
+    try:                                                         # restore globals even if setup fails
+        db.CATALOG_DIR = tmp_path
+        db.DB_PATH = tmp_path / "catalog.sqlite"
+        db.STATE_DIR = tmp_path / "state"
+        con = db.connect()
+        try:
+            assert con.execute("PRAGMA user_version").fetchone()[0] == 3, "fixture must be a v3 catalog"
+            con.execute("INSERT INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
+            con.execute("INSERT INTO drives(drive_label,capacity_bytes,free_bytes) "
+                        "VALUES('drive-00',1000000,500000)")
+            con.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('ark','drive-00')")
+            con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/model',1)")
+            con.execute("INSERT INTO selection(repo_id,finalized_at) VALUES('org/model','2026-01-01')")
+            con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+                        "VALUES('org/model','model.gguf',100,'gguf',NULL)")
+            con.execute("PRAGMA wal_checkpoint(TRUNCATE)")       # self-contained single file for copy/hash
+        finally:
+            con.close()
+    finally:
+        db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = saved
     return tmp_path / "catalog.sqlite"
 
 
@@ -114,19 +137,25 @@ def test_copied_catalog_fail_closed_then_prepared_deterministic(tmp_path):
 
 
 def main():
+    import shutil as _shutil
     import tempfile
     from pathlib import Path
     tests = sorted((n, f) for n, f in globals().items()
                    if n.startswith("test_") and callable(f))
     passed, failed = [], []
     for name, fn in tests:
+        saved = (db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR)
+        tmp = Path(tempfile.mkdtemp(prefix="mark-pr04-cc-"))
         try:
-            fn(Path(tempfile.mkdtemp(prefix="mark-pr04-cc-")))
+            fn(tmp)
             passed.append(name)
             print(f"PASS  {name}")
         except Exception as exc:                 # noqa: BLE001
             failed.append(name)
             print(f"FAIL  {name}  -> {type(exc).__name__}: {exc}")
+        finally:
+            db.CATALOG_DIR, db.DB_PATH, db.STATE_DIR = saved   # never leak a temp path into a later test
+            _shutil.rmtree(tmp, ignore_errors=True)            # the standalone runner cleans its temp trees
     print(f"\n{len(passed)} passed, {len(failed)} failed")
     if failed:
         raise SystemExit(1)

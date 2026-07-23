@@ -22,7 +22,9 @@ from modelark.core import db
 try:
     from modelark import admission
     _HAS_ADMISSION = True
-except Exception:                                # noqa: BLE001
+except ImportError as exc:                       # ONLY the missing shell — a real import/init defect surfaces
+    if "admission" not in f"{getattr(exc, 'name', '') or ''} {exc}":
+        raise
     admission = None
     _HAS_ADMISSION = False
 
