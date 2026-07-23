@@ -492,6 +492,9 @@ def test_replica_fences_source_and_target_and_passes_both_fds(tmp_path):
         for cmd, fds in mutating:
             assert tuple(fds or ()) == held["fds"], \
                 f"replica child {cmd[:5]} must inherit BOTH actual held fence FDs; got {fds}"
+        syncs = [cmd for cmd, _fds in captured if "annex" in cmd and "sync" in cmd]
+        assert syncs and all("drive-00" in cmd and "drive-04" in cmd for cmd in syncs), \
+            f"the replica map sync must name only this group's source+target remotes; got {syncs}"
         # the copied target key must reach reconciliation (not just be written and forgotten)
         assert any(label == "drive-04" and "key-must" in keys for label, _paths, keys in reconciled), \
             f"the copied target path/key must reach reconciliation; saw {reconciled}"
@@ -719,9 +722,12 @@ def test_run_threads_writer_fence_fds_into_fetch_model_and_tail_sync(tmp_path):
             "run() must pass the mutation writer (with child_fence_fds) into fetch_model"
         assert tuple(writer.child_fence_fds) == held.get("fds"), \
             "fetch_model must receive the ACTUAL held drive-fence FDs"
-        syncs = [fds for cmd, fds in runs if "annex" in cmd and "sync" in cmd]
-        assert syncs and all(tuple(f or ()) == held.get("fds") for f in syncs), \
+        syncs = [(cmd, fds) for cmd, fds in runs if "annex" in cmd and "sync" in cmd]
+        assert syncs and all(tuple(f or ()) == held.get("fds") for _c, f in syncs), \
             f"the run()-tail annex sync must inherit the held fence FDs; got {syncs}"
+        map_sync = [cmd for cmd, _f in syncs if str(tmp_path / "lib") in cmd]
+        assert map_sync and "drive-00" in map_sync[0], \
+            f"the library-map sync must name only the current drive remote (drive-00); got {map_sync}"
 
 
 def test_download_and_compression_forward_inherit_fds_to_run_monitored(tmp_path):

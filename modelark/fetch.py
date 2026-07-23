@@ -1059,12 +1059,15 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                             break
                 # DEC-006: propagate to the central map — sync the drive (commit + push the location
                 # log) then sync the map (merge the file tree into its index) so the map is both the
-                # authoritative "where" (location log) and a browsable "what". These mutating sync
-                # children inherit the held drive-fence FDs.
+                # authoritative "where" (location log) and a browsable "what". The map sync names ONLY
+                # this drive's remote (drive_label) — the same explicit-remote form registration uses —
+                # never all remotes, so it cannot reach other (possibly offline) drives; both mutating
+                # sync children inherit the held drive-fence FDs.
                 if annex:
                     s = subprocess.run(["git", "-C", str(dest), "annex", "sync"], capture_output=True,
                                        text=True, pass_fds=tuple(_writer.child_fence_fds))
-                    m = subprocess.run(["git", "-C", str(register.library_root()), "annex", "sync"],
+                    m = subprocess.run(["git", "-C", str(register.library_root()), "annex", "sync",
+                                        drive_label],
                                        capture_output=True, text=True, pass_fds=tuple(_writer.child_fence_fds))
                     if s.returncode == 0 and m.returncode == 0:
                         print("  synced drive + map (location log + index)")
@@ -1282,9 +1285,12 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                         if group_deferred:
                             break
                     if group_copied and not group_deferred:
-                        # propagate the landed copies into the central map (inside the fence; the sync
-                        # child inherits the held FDs)
-                        subprocess.run(["git", "-C", str(lib), "annex", "sync"],
+                        # Propagate the landed copies into the central map, naming ONLY this group's
+                        # source+target remotes. This is now pair-scoped and per-group — rather than one
+                        # all-remotes `annex sync` after every group — so the sync stays inside this
+                        # pair's held drive fences and never reaches unrelated (possibly offline) drive
+                        # remotes; the sync child inherits the held FDs.
+                        subprocess.run(["git", "-C", str(lib), "annex", "sync", source, target],
                                        capture_output=True, text=True, pass_fds=fds)
                     if group_deferred:
                         ctx.on_progress({
