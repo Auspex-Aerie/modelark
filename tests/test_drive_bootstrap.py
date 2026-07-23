@@ -20,7 +20,7 @@ Binding reviewer corrections encoded here:
       crash before that commit leaves the drive unknown + anchorless. Bootstrap never calls the ordinary
       drive_mutation() envelope to dodge its NULL-fingerprint identity refusal.
   C4  same identity + unchanged capacity → refresh, same epoch; same identity + CHANGED capacity → an
-      explicit capacity-epoch transition (new epoch + fresh generation/anchor); a DIFFERENT identity
+      explicit capacity-epoch transition (new epoch, generation 1 + fresh anchor); a DIFFERENT identity
       under an existing label → refuse BEFORE any mutation (label reuse/retirement stays DEF-029).
       DRIFT RULE (#35): refreshing a currently-clean anchored drive advances to a fresh generation and
       re-anchors the RAW observed free ONLY when the free delta is within the versioned diagnostic
@@ -42,7 +42,7 @@ deferred to #39; label reuse / retirement / dependency-aware replacement to DEF-
 Proposed production API surfaced by these tests (for Gate-1 review; names are the contract to confirm):
   * new NEUTRAL module modelark/drive_bootstrap.py (no register→fetch / register→drive_bootstrap cycle):
       - reconcile_drive(con, label, *, now, dedicated=False, accept_drift=False, blocking=True) -> Reconciliation
-        (report attrs: .outcome in {bootstrapped, refreshed, epoch_advanced, recovered,
+        (report attrs: .outcome in {bootstrapped, refreshed, drift_accepted, epoch_advanced, recovered,
          unknown_no_authority}, .identity_epoch, .generation, .anchor_free_bytes | None, .inventory);
         raises dm.DriveMutationRefused with DRIVE_IDENTITY_UNPROVEN / DRIVE_IDENTITY_MISMATCH /
         DRIVE_AUTHORITY_DOWNGRADE_REFUSED / DRIVE_FREE_DRIFT / DRIVE_RECOVERY_SESSION_ACTIVE /
@@ -429,7 +429,7 @@ def test_refresh_above_drift_tolerance_reanchors_with_accept_drift(tmp_path):
         anchor = con.execute("SELECT anchor_free_bytes FROM drive_clean_anchors WHERE drive_label='drive-00' "
                             "AND identity_epoch=1 AND generation=2").fetchone()
         assert anchor == (drifted_free,), f"the accepted anchor must store the observed free: {anchor}"
-        assert report.identity_epoch == 1, report
+        assert report.identity_epoch == 1 and report.outcome == "drift_accepted", report
 
 
 def test_same_identity_changed_capacity_advances_epoch_and_reanchors(tmp_path):
@@ -444,12 +444,12 @@ def test_same_identity_changed_capacity_advances_epoch_and_reanchors(tmp_path):
              mock.patch.object(bs, "_inventory", return_value=_clean_inv()), \
              mock.patch.object(register, "archive_path", return_value=tmp_path / "mount"):
             report = bs.reconcile_drive(con, "drive-00", now="2026-07-22 12:00:00", dedicated=True)
-        row = con.execute("SELECT identity_epoch,filesystem_capacity_bytes FROM drives "
+        row = con.execute("SELECT identity_epoch,write_generation,filesystem_capacity_bytes FROM drives "
                           "WHERE drive_label='drive-00'").fetchone()
-        assert row == (2, 2000), row
-        new = con.execute("SELECT anchor_free_bytes,filesystem_capacity_bytes FROM drive_clean_anchors "
-                          "WHERE drive_label='drive-00' AND identity_epoch=2").fetchone()
-        assert new == (1900, 2000), new
+        assert row == (2, 1, 2000), f"an epoch transition resets the namespace to (epoch 2, generation 1): {row}"
+        new = con.execute("SELECT generation,anchor_free_bytes,filesystem_capacity_bytes FROM "
+                          "drive_clean_anchors WHERE drive_label='drive-00' AND identity_epoch=2").fetchone()
+        assert new == (1, 1900, 2000), f"epoch 2's first anchor must be generation 1: {new}"
         assert report.outcome == "epoch_advanced" and report.identity_epoch == 2, report
 
 
