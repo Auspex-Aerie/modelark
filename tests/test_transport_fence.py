@@ -692,6 +692,26 @@ def test_live_identity_mismatch_refuses(tmp_path):
         assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
 
 
+def test_observe_drive_unmounted_is_unproven_not_a_crash(tmp_path):
+    """If the live filesystem probe fails (drive registered but its archive dir is unmounted/absent),
+    _observe_drive returns an UNPROVEN observation, so the mutation refuses DRIVE_IDENTITY_UNPROVEN
+    rather than letting an OSError escape the refusal handler and crash the caller."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00", fp=_FP)
+        assert hasattr(fetch, "_observe_drive"), "PR-03b must add fetch._observe_drive"
+        with mock.patch.object(fetch.register, "archive_path", return_value=tmp_path / "gone"), \
+             mock.patch.object(fetch.os, "statvfs", side_effect=FileNotFoundError(2, "not mounted")):
+            assert fetch._observe_drive(con, "drive-00").identity_proven is False
+            try:
+                with dm.drive_mutation(con, ["drive-00"], "op",
+                                       observe=lambda label: fetch._observe_drive(con, label),
+                                       reconcile=_reconciler(con), now="2026-01-01"):
+                    raise AssertionError("body must not run when the live probe fails")
+            except dm.DriveMutationRefused as exc:
+                assert exc.code == "DRIVE_IDENTITY_UNPROVEN", exc.code
+        assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
+
+
 # ===================================================================== seam 2: end-to-end fence FDs
 
 def test_writer_exposes_actual_held_drive_fence_fds(tmp_path):

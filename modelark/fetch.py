@@ -577,7 +577,14 @@ def _live_drive_evidence(con, label: str) -> dict | None:
     path = register.archive_path(con, label)
     if path is None:
         return None
-    st = os.statvfs(path)
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        # registered but not statvfs-able right now (archive dir absent / unmounted / vanished
+        # mid-probe): identity is unknown, not an error. Returning None -> unproven observation ->
+        # the envelope refuses DRIVE_IDENTITY_UNPROVEN (a typed, handled terminal), never an OSError
+        # that would escape the refusal handler and crash the caller.
+        return None
     return {
         "fs_uuid": register.probe_fs_uuid(path),
         "annex_uuid": register.probe_annex_uuid(path),
