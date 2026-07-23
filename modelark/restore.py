@@ -47,12 +47,16 @@ def _run_annex(archive: Path, *args: str) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(args, 127, "", str(exc))
 
 
-def _annex_content(archive: Path, row: dict, stored: Path) -> tuple[Path | None, bool, str]:
-    """Return readable content, asking git-annex to retrieve a dropped blob when possible."""
+def _annex_content(archive: Path, row: dict, stored: Path, *, may_mutate: bool) -> tuple[Path | None, bool, str]:
+    """Return readable content, asking git-annex to retrieve a dropped blob when that retrieval would not
+    mutate an authoritative drive. Local content is always returned as-is (no mutation)."""
     if stored.exists():
         return stored, False, "available"
     if not (archive / ".git").exists():
         return None, False, "recorded blob is missing (archive is not a git-annex checkout)"
+    if not may_mutate:
+        return (None, False, "recorded copy is dropped and retrieval is refused: it would mutate an "
+                "authoritative (dedicated_local) drive and invalidate its clean anchor")
 
     rel = stored.relative_to(archive).as_posix()
     result = _run_annex(archive, "get", "--", rel)
@@ -140,6 +144,14 @@ def _rows(con, repo_id: str) -> dict[str, list[dict]]:
     return grouped
 
 
+def _may_mutate(con, drive: str) -> bool:
+    """Retrieval may mutate a drive UNLESS it is authoritative (write_authority='dedicated_local'): an
+    authoritative drive holds a clean anchor that a git-annex get would invalidate. A missing/unknown
+    drive row is non-authoritative (no anchor to protect), so retrieval is allowed there."""
+    row = con.execute("SELECT write_authority FROM drives WHERE drive_label=?", [drive]).fetchone()
+    return not (row and row[0] == "dedicated_local")
+
+
 def restore_repo(con, repo_id: str, output_root: str | Path) -> dict:
     """Restore one repo below ``output_root`` and return an operator-facing summary.
 
@@ -207,7 +219,8 @@ def restore_repo(con, repo_id: str, output_root: str | Path) -> dict:
                     attempts.append(f"{drive}: {exc}")
                     continue
                 stored = Path(archive) / Path(*repo_rel.parts) / Path(*stored_rel.parts)
-                source, retrieved, source_detail = _annex_content(Path(archive), row, stored)
+                source, retrieved, source_detail = _annex_content(
+                    Path(archive), row, stored, may_mutate=_may_mutate(con, drive))
                 if source is None:
                     attempts.append(f"{drive}: {source_detail}")
                     continue
