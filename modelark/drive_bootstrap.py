@@ -39,6 +39,11 @@ from modelark import capacity_evidence, drive_fence, register
 from modelark import drive_mutation as dm
 from modelark.core import db
 
+# Re-export the typed refusal so operator entry points (the `drive reconcile` CLI) can translate it to a
+# clean message via THIS module, without importing the fenced envelope directly — keeping the envelope
+# importer set limited to the reviewed owners (see test_envelope_wired_only_into_reviewed_transport).
+DriveMutationRefused = dm.DriveMutationRefused
+
 # The diagnostic free-drift tolerance is one filesystem allocation unit plus this bounded metadata
 # allowance. DIAGNOSTIC ONLY — it gates refresh-vs-refuse; the anchor always stores the raw observed
 # free, so the tolerance is never extra capacity headroom.

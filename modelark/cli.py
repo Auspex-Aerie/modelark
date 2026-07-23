@@ -470,13 +470,13 @@ def cmd_drive_list(args):
 def cmd_drive_reconcile(args):
     from datetime import datetime, timezone
 
-    from modelark import drive_bootstrap, drive_mutation
+    from modelark import drive_bootstrap
     con = db.connect()
     try:
         r = drive_bootstrap.reconcile_drive(
             con, args.label, now=datetime.now(timezone.utc).isoformat(sep=" "),
             dedicated=args.dedicated, accept_drift=args.accept_drift)
-    except drive_mutation.DriveMutationRefused as exc:
+    except drive_bootstrap.DriveMutationRefused as exc:
         # an offline/failed/unproven drive is an EXPECTED reconciliation outcome, not a crash: surface the
         # typed refusal as a clean operator message (the restore/hash-repair convention), not a traceback.
         raise SystemExit(f"drive reconcile failed: {exc.code}") from exc
