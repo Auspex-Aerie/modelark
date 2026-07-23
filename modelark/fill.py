@@ -7,6 +7,7 @@ next graph.  Both CLI and portal call :func:`execute`.
 """
 from __future__ import annotations
 
+import os
 import secrets
 import shutil
 import time
@@ -15,7 +16,6 @@ from pathlib import Path
 
 from modelark import capacity, fetch, plan, reconcile, register
 
-_PROBE_NAME = ".modelark-write-probe"
 _MAX_TASK_ATTEMPTS = 2
 _GATED_DECISION_TIMEOUT = 5 * 60
 
@@ -37,23 +37,19 @@ def _mounted(ctx, label: str) -> tuple[bool, bool]:
 
 
 def _writable(ctx, label: str) -> bool:
-    """A mount is usable only after a write/read/delete probe succeeds."""
+    """A cheap, NON-MUTATING readiness check: the drive resolves to a mounted archive directory that
+    statvfs's and is readable. It performs no probe write/unlink and no identity subprocess — authoritative
+    identity proof and real write access are established inside the mutation envelope (post-dirty)."""
     with ctx.lock:
         path = register.archive_path(ctx.con, label)
     if path is None:
         return False
-    probe = Path(path) / _PROBE_NAME
+    path = Path(path)
     try:
-        probe.write_bytes(b"modelark")
-        ok = probe.read_bytes() == b"modelark"
-        probe.unlink()
-        return ok
+        os.statvfs(path)
     except OSError:
-        try:
-            probe.unlink()
-        except OSError:
-            pass
         return False
+    return path.is_dir() and os.access(path, os.R_OK)
 
 
 def _await_drive(ctx, label: str, poll_secs: float) -> bool:

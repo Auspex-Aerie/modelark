@@ -338,6 +338,17 @@ def _add_to_active_plan(con, label: str) -> str:
     return ap["plan_id"]
 
 
+def _guard_existing_label(con, label: str) -> None:
+    """Refuse (re-)registering a label that already owns a drive row, BEFORE any physical, remote, or
+    catalog mutation. A blunt existing-label guard — never an identity comparison, refresh, or reuse:
+    collision-safe re-registration and retirement are the deferred lifecycle workflow (DEF-029)."""
+    if con.execute("SELECT 1 FROM drives WHERE drive_label=?", [label]).fetchone():
+        raise RuntimeError(
+            f"drive label '{label}' is already registered — re-registration is not supported here. "
+            f"Use the drive lifecycle workflow (identity-aware re-registration / retirement, DEF-029) "
+            f"to change or replace an existing drive.")
+
+
 def register_drive(dev: str, label: str, mount: str | None = None,
                    format_fs: str | None = None, location: str | None = None,
                    library: str | None = None, dry_run: bool = False,
@@ -348,6 +359,11 @@ def register_drive(dev: str, label: str, mount: str | None = None,
     redundancy is the array's, integrity is our sha256 + canary, so SMART is skipped.
     `skip_smart` (INC-002) registers a drive whose USB bridge won't pass SMART with an
     'unchecked' verdict — an explicit operator override; verify health externally."""
+    con = db.connect()
+    try:
+        _guard_existing_label(con, label)      # before SMART, dry-run, or any physical/remote/catalog mutation
+    finally:
+        con.close()
     if confirm_format and not format_fs:
         raise ValueError("--confirm-format is valid only together with --format")
     if format_fs and not osplat.BLOCKDEV_OPS_SUPPORTED:
@@ -490,6 +506,11 @@ def register_nas(remote: str = "nas", label: str = "drive-99", role: str = "repl
     librarian target. No SMART/mkfs — the special remote already receives content via
     `git annex copy --to <remote>`. Reads its uuid + directory from the map repo config, and
     the free/total from the mount the directory lives on (DEC-006, DEC-014)."""
+    con = db.connect()
+    try:
+        _guard_existing_label(con, label)      # before library/remote inspection or the catalog upsert
+    finally:
+        con.close()
     lib = library_root()
     uuid = _git(lib, "config", f"remote.{remote}.annex-uuid", check=False)
     directory = _git(lib, "config", f"remote.{remote}.annex-directory", check=False)

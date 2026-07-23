@@ -73,7 +73,7 @@ def test_existing_label_guard_refuses_only_an_existing_label():
         assert "existing" in str(exc).lower(), exc
 
 
-def test_register_drive_refuses_existing_label_before_any_mutation(tmp_path):
+def test_register_drive_refuses_existing_label_before_any_mutation():
     """register_drive refuses an already-registered label BEFORE the dry-run preview and before any
     physical/remote/catalog mutation (SMART/mkfs/mount/clone/upsert) — re-registration can never silently
     rewrite the row."""
