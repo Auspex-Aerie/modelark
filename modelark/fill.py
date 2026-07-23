@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import os
 import secrets
-import shutil
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
-from modelark import capacity, fetch, plan, reconcile, register
+from modelark import admission, capacity, fetch, plan, reconcile, register
 
 _MAX_TASK_ATTEMPTS = 2
 _GATED_DECISION_TIMEOUT = 5 * 60
@@ -78,41 +78,34 @@ def _await_drive(ctx, label: str, poll_secs: float) -> bool:
     return False
 
 
-def _live_free(ctx, plan_id: str) -> dict[str, int]:
-    """Snapshot only currently mounted drives; offline drives retain catalog evidence for planning."""
-    with ctx.lock:
-        labels = [row[0] for row in ctx.con.execute(
-            "SELECT drive_label FROM plan_drives WHERE plan_id=? ORDER BY drive_label", [plan_id]
-        ).fetchall()]
-        paths = {label: register.archive_path(ctx.con, label) for label in labels}
-    live = {}
-    for label, path in paths.items():
-        if path is None:
-            continue
-        try:
-            live[label] = shutil.disk_usage(path).free
-        except OSError:
-            pass
-    return live
+def _evidence(con, plan_id: str) -> dict:
+    """Admission evidence for the plan's drives via the shared snapshot seam (#35-C): a non-blocking
+    fenced live/anchor read per drive. Offline drives derive anchor/unknown; a mounted drive is live only
+    while identity-proven and drive-fenced. Never a legacy free scalar or capacity-minus-stored guess."""
+    labels = [row[0] for row in con.execute(
+        "SELECT drive_label FROM plan_drives WHERE plan_id=? ORDER BY drive_label", [plan_id]
+    ).fetchall()]
+    now = datetime.now(timezone.utc).isoformat(sep=" ")
+    return admission.preview_by_drive(
+        con, labels, observe=lambda label: fetch.observe_for_admission(con, label), now=now)
+
+
+def _snapshot(con, plan_id: str, capacity_mode: str, repo_scope: list[str] | None) -> _Snapshot:
+    graph = reconcile.reconcile_plan(con, plan_id, repo_scope)
+    ledger = capacity.plan_capacity(
+        con, graph, capacity_mode=capacity_mode, evidence_by_drive=_evidence(con, plan_id),
+    )
+    return _Snapshot(graph, ledger)
 
 
 def _reconcile(ctx, plan_id: str, capacity_mode: str, repo_scope: list[str] | None) -> _Snapshot:
     """Bulk graph/ledger snapshot, using a dedicated read connection in real executions."""
-    live_free = _live_free(ctx, plan_id)
     if ctx.read_connection_factory is None:  # isolated in-memory/unit harness
         with ctx.lock:
-            graph = reconcile.reconcile_plan(ctx.con, plan_id, repo_scope)
-            ledger = capacity.plan_capacity(
-                ctx.con, graph, capacity_mode=capacity_mode, live_free_by_drive=live_free,
-            )
-        return _Snapshot(graph, ledger)
+            return _snapshot(ctx.con, plan_id, capacity_mode, repo_scope)
     con = ctx.read_connection_factory()
     try:
-        graph = reconcile.reconcile_plan(con, plan_id, repo_scope)
-        ledger = capacity.plan_capacity(
-            con, graph, capacity_mode=capacity_mode, live_free_by_drive=live_free,
-        )
-        return _Snapshot(graph, ledger)
+        return _snapshot(con, plan_id, capacity_mode, repo_scope)
     finally:
         con.close()
 
@@ -227,24 +220,17 @@ def _file_guard(ctx, plan_id: str, capacity_mode: str, task: capacity.AssignedTa
                 [repo_id, item.rfilename, task.target_drive],
             ).fetchone():
                 return False
-            path = register.archive_path(ctx.con, task.target_drive)
-        if path is None:
-            with ctx.lock:
-                drive = next((
-                    entry for entry in capacity.inspect_drives(ctx.con, plan_id)
-                    if entry.drive_label == task.target_drive
-                ), None)
-        else:
-            try:
-                free = shutil.disk_usage(path).free
-            except OSError:
-                free = 0
-            with ctx.lock:
-                drive = next((
-                    entry for entry in capacity.inspect_drives(
-                        ctx.con, plan_id, live_free_by_drive={task.target_drive: free}
-                    ) if entry.drive_label == task.target_drive
-                ), None)
+            # Admit from a FRESH observation taken while the transport already holds the drive fence
+            # (this runs inside the drive_mutation envelope): never reacquire a fence, never a legacy read.
+            observation = fetch._observe_drive(ctx.con, task.target_drive)
+            evidence = admission.execution_evidence(
+                ctx.con, task.target_drive, observation,
+                now=datetime.now(timezone.utc).isoformat(sep=" "))
+            drive = next((
+                entry for entry in capacity.inspect_drives(
+                    ctx.con, plan_id, evidence_by_drive={task.target_drive: evidence}
+                ) if entry.drive_label == task.target_drive
+            ), None)
         if drive is None:
             raise fetch.CapacityPreflightError(
                 capacity.target_drive_changed_failure(task, mode)

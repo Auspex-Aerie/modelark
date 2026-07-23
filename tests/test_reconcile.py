@@ -6,8 +6,19 @@ import time
 from argparse import Namespace
 from unittest import mock
 
+import pytest
+
+import _admission_compat
 from modelark import archive_manifest, cli, reconcile
 from modelark.core import db
+
+
+@pytest.fixture(autouse=True)
+def _admission_snapshot_compat():
+    """#35-C: synthesize admission evidence from free_bytes (pre-cutover snapshot semantics) so the
+    shadow/explain comparison keeps exercising placement, not the evidence seam (covered by PR-04)."""
+    with _admission_compat.seam_patch():
+        yield
 
 
 def _mem():

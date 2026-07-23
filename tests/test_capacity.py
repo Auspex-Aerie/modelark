@@ -6,9 +6,20 @@ import time
 from dataclasses import replace
 from unittest import mock
 
-from modelark import capacity, reconcile
+import pytest
+
+import _admission_compat
+from modelark import capacity, capacity_evidence, reconcile
 from modelark.core import db
 from modelark.web import plan_api
+
+
+@pytest.fixture(autouse=True)
+def _admission_snapshot_compat():
+    """#35-C: synthesize admission evidence from free_bytes (pre-cutover snapshot semantics) so these
+    tiered_v1 placement tests keep exercising placement, not the evidence seam (covered by PR-04)."""
+    with _admission_compat.seam_patch():
+        yield
 
 
 def _mem():
@@ -205,21 +216,19 @@ def test_file_preflight_is_exact_at_workspace_boundary():
         workspace_peak_expected=137,
         evidence="estimate",
     )
-    exact = capacity.CapacityDrive(
-        drive_label="primary",
-        role="primary",
-        raid_backed=False,
-        capacity_bytes=1_000,
-        physical_free=259,
-        free_evidence=capacity.FreeEvidence.LIVE,
-        safety_floor=50,
-    )
+    def _drive(admissible):
+        # CapacityDrive is now backed by ONE Evidence record; usable_now == admissible_free (floor once).
+        return capacity.CapacityDrive(
+            drive_label="primary", role="primary", raid_backed=False, capacity_bytes=1_000,
+            evidence=capacity_evidence.Evidence(
+                kind="live", executable=True, admissible_free=admissible, observed_free=admissible + 50),
+            safety_floor=50)
+
+    exact = _drive(209)                                  # usable_now 209 == required peak (fits exactly)
     assert capacity.preflight_file(
         exact, file_budget, capacity.CapacityMode.GUARANTEED
     ) is None
-    short = capacity.CapacityDrive(
-        **{**exact.__dict__, "physical_free": 258}
-    )
+    short = _drive(208)                                  # usable_now 208 -> 1 byte short
     failure = capacity.preflight_file(
         short, file_budget, capacity.CapacityMode.GUARANTEED,
         requirement_id="primary:org/model", task_id="fetch:primary:org/model",

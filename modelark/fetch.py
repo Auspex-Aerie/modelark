@@ -616,6 +616,16 @@ def _observe_drive(con, label: str) -> drive_mutation.Observation:
         identity_proof=proof, fence_proof=proof)
 
 
+def observe_for_admission(con, label: str) -> "drive_mutation.Observation | None":
+    """Observation for the admission preview/reporting seam: ``None`` when the drive is NOT mounted (so
+    the seam derives the offline anchor/unknown path), else the fenced live observation (proven or not).
+    The per-file EXECUTION path uses :func:`_observe_drive` directly — there the drive is mounted and a
+    vanished/unproven volume must refuse, not fall through to an offline anchor."""
+    if register.archive_path(con, label) is None:
+        return None
+    return _observe_drive(con, label)
+
+
 def _reconcile_touched(con, label: str, dest, annex: bool, paths, keys) -> None:
     """Generation-scoped reconciliation (never a full-drive scan) of the recorded touched set, per path:
 

@@ -463,8 +463,10 @@ def cmd_drive_list(args):
         return
     for d in drives:
         cap, free = _humanize(d["capacity_bytes"]), _humanize(d["free_bytes"])
+        # This is the raw hardware inventory; `free` is the registration-time snapshot, a diagnostic —
+        # admission-authoritative free (evidence) is shown by `library`/`plan` (#35-C), not here.
         print(f"{d['drive_label']:12} {str(d['hw_model'] or '-'):26} {str(d['serial'] or '-'):16} "
-              f"{str(d['health'] or '-'):8} {free}/{cap} free  {d['physical_location'] or ''}")
+              f"{str(d['health'] or '-'):8} {free}/{cap} reg-free  {d['physical_location'] or ''}")
 
 
 def cmd_drive_reconcile(args):

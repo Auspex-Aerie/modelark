@@ -611,31 +611,35 @@ def test_multi_drive_anchor_publish_is_all_or_nothing(tmp_path):
 # =========================================================================== wiring guard (PR-03b)
 
 def test_envelope_wired_only_into_reviewed_transport():
-    """The envelope + its fences may be imported ONLY by reviewed catalog-v3 owners, and each MUST be
-    wired: PR-03b's transport (modelark/fetch.py) and PR-03c1's registration/recovery/operator module
-    (modelark/drive_bootstrap.py, which reuses the same fenced primitives). No other production module
-    may import them (admission cutover is #35-C). Inspect import AST nodes so `import modelark.drive_fence`
-    and `from modelark.drive_mutation import X` are both caught."""
+    """The catalog-v3 primitives may be imported ONLY by reviewed owners. The mutation ENVELOPE
+    (``drive_mutation``, which dirties/anchors) stays wired into PR-03b's transport (modelark/fetch.py)
+    and PR-03c1's registration/recovery module (modelark/drive_bootstrap.py) — no other production module
+    may import it. The neutral drive FENCE (``drive_fence``, the lock primitive) is ADDITIONALLY used by
+    the #35-C admission shell (modelark/admission.py) for its read-only preview snapshot. Inspect import
+    AST nodes so `import modelark.drive_fence` and `from modelark.drive_mutation import X` are both
+    caught."""
     root = Path(__file__).resolve().parent.parent / "modelark"
     envelope = {"drive_fence", "drive_mutation"}
-    allowed = {"fetch.py", "drive_bootstrap.py"}
+    mutation_allowed = {"fetch.py", "drive_bootstrap.py"}
+    fence_allowed = mutation_allowed | {"admission.py"}   # #35-C: the preview seam holds the drive fence
     importers, offenders = set(), []
     for path in root.rglob("*.py"):
         if path.name in ("drive_fence.py", "drive_mutation.py"):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
-            hit = False
+            hits: set[str] = set()
             if isinstance(node, ast.Import):
-                hit = any(alias.name.split(".")[-1] in envelope for alias in node.names)
+                hits = {alias.name.split(".")[-1] for alias in node.names} & envelope
             elif isinstance(node, ast.ImportFrom):
                 module = (node.module or "").split(".")
-                hit = bool(set(module) & envelope) or any(a.name in envelope for a in node.names)
-            if hit:
+                hits = (set(module) & envelope) | {a.name for a in node.names if a.name in envelope}
+            for mod in hits:
                 importers.add(path.name)
+                allowed = fence_allowed if mod == "drive_fence" else mutation_allowed
                 if path.name not in allowed:
-                    offenders.append(f"{path.relative_to(root)}:{node.lineno}")
-    assert offenders == [], f"only {sorted(allowed)} may import the envelope; found: {offenders}"
+                    offenders.append(f"{path.relative_to(root)}:{node.lineno} ({mod})")
+    assert offenders == [], f"envelope import policy violated; found: {offenders}"
     assert "fetch.py" in importers, (
         "PR-03b must wire the envelope into modelark/fetch.py (the reviewed transport)")
     assert "drive_bootstrap.py" in importers, (
