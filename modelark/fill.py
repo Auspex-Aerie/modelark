@@ -61,7 +61,7 @@ def _await_drive(ctx, label: str, poll_secs: float) -> bool:
         return True
     if mounted and _writable(ctx, label):
         return True
-    reason = "insert it" if not mounted else "mounted but not writable (I/O error) — re-seat it"
+    reason = "insert it" if not mounted else "mounted but not ready/readable (I/O error) — re-seat it"
     ctx.on_progress({
         "phase": "awaiting-drive", "awaiting_drive": label,
         "say": f"⏳ drive {label}: {reason} — the fill continues once it's writable.",
