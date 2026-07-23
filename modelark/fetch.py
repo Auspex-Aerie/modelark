@@ -614,6 +614,12 @@ def _reconcile_touched(con, label: str, dest, annex: bool, paths, keys) -> None:
     paths and annex keys against durable catalog facts + physical presence, using the existing proof
     helpers. Any gap raises a typed refusal so the generation stays dirty rather than being marked clean.
     Touched paths are drive-relative (``repo_id`` + '/' + ``stored_relpath``)."""
+    if not paths and not keys:
+        return                              # nothing was touched on this drive -> nothing to reconcile
+    if dest is None:
+        # the drive is unresolvable/unmounted at close (archive_path -> None): a TYPED refusal, never a
+        # Path(None) TypeError that would escape the DriveMutationRefused handler and crash the caller.
+        raise drive_mutation.DriveMutationRefused("DRIVE_RECONCILIATION_REQUIRED", drive=label)
     dest = Path(dest)
     for relpath in paths:
         durable = con.execute(

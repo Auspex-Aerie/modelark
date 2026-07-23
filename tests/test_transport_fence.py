@@ -557,6 +557,22 @@ def test_touched_reconciliation_fails_closed_on_unprovable_annex_key(tmp_path):
                 assert exc.code == "DRIVE_RECONCILIATION_REQUIRED", exc.code
 
 
+def test_reconcile_touched_tolerates_unresolvable_dest(tmp_path):
+    """At clean close a drive can be unresolvable (archive_path -> None, e.g. NULL physical_location),
+    which the replica closure passes straight through. An empty touched set is a no-op; a non-empty one
+    is a TYPED refusal — never a Path(None) TypeError that would escape the DriveMutationRefused handler
+    and crash the caller with the generation left dirty."""
+    with _catalog(tmp_path) as con:
+        _proven_drive(con, "drive-00")
+        assert hasattr(fetch, "_reconcile_touched"), "PR-03b must add fetch._reconcile_touched"
+        fetch._reconcile_touched(con, "drive-00", None, True, [], [])        # empty set -> no-op, no crash
+        try:
+            fetch._reconcile_touched(con, "drive-00", None, True, ["must/model.gguf"], ["KEY-x"])
+            raise AssertionError("an unresolvable dest with a touched set must be a typed refusal")
+        except dm.DriveMutationRefused as exc:
+            assert exc.code == "DRIVE_RECONCILIATION_REQUIRED", exc.code
+
+
 # ===================================================================== R (stop/error): typed + dirty
 
 def test_typed_terminal_is_preserved_as_result_and_durable_event(tmp_path):
