@@ -625,8 +625,13 @@ def _reconcile_touched(con, label: str, dest, annex: bool, paths, keys) -> None:
     if annex and keys:
         target_uuid = (con.execute(
             "SELECT annex_uuid FROM drives WHERE drive_label=?", [label]).fetchone() or [None])[0]
+        # keys the touched paths actually resolve to on this drive — a uuid-INDEPENDENT proof, so a drive
+        # whose annex_uuid is not (yet) recorded still reconciles from physical annex tracking rather than
+        # failing closed on every key (`_annex_key_on_uuid` can only match against a known target uuid).
+        path_keys = {tracked for relpath in paths
+                     if (tracked := _annex_key_for_path(dest, dest / relpath))}
         for key in keys:
-            if not _annex_key_on_uuid(dest, key, target_uuid):
+            if not (_annex_key_on_uuid(dest, key, target_uuid) or key in path_keys):
                 raise drive_mutation.DriveMutationRefused(
                     "DRIVE_RECONCILIATION_REQUIRED", drive=label, key=key)
 
