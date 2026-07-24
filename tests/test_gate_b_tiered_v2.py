@@ -1734,6 +1734,10 @@ def test_adapter_structural_unproven_provenance():
     )
     plan = _plan(con, {"d0": _evidence("d0", free=100_000, max_usable=100_000)})
     _assert_adapter_nonfeasible(plan, "UNPROVEN_PROVENANCE")
+    assert plan.failures
+    fcode = plan.failures[0].code.value if hasattr(plan.failures[0].code, "value") else str(plan.failures[0].code)
+    assert fcode == "UNPROVEN_PROVENANCE"
+    assert plan.failures[0].eligible_drives == ("d0",)
     con.close()
 
 
@@ -1750,6 +1754,16 @@ def test_adapter_structural_requirement_exceeds_usable_max():
         "peak_bytes": 10_000,
         "maxima": (("d0", 100),),
     })
+    # Positive projection pin: typed FailureCode (not GRAPH_INVARIANT) and drives from maxima.
+    assert plan.failures, "structural exceed-max must project a CapacityFailure for operators"
+    assert len(plan.failures) == 1
+    failure = plan.failures[0]
+    fcode = failure.code.value if hasattr(failure.code, "value") else str(failure.code)
+    assert fcode == "REQUIREMENT_EXCEEDS_USABLE_MAX"
+    assert fcode != "GRAPH_INVARIANT"
+    assert failure.requirement_id == "primary:org/giant"
+    assert failure.eligible_drives == ("d0",)
+    assert failure.required_bytes == 10_000
     con.close()
 
 
