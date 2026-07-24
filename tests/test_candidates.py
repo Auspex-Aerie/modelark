@@ -304,8 +304,12 @@ def _scenario_format_and_byte_edges():
     _, cset = _run(inp)
     gguf = _cands(cset, "primary:g/gguf")[0]
     assert gguf.budget.guaranteed_durable == 50 and gguf.movement_cost.transfer_bytes == 50
-    pt = _cands(cset, "primary:p/pt")           # pickle is stored raw (no compression)
-    assert len(pt) == 1 and pt[0].budget.guaranteed_durable == 50 and pt[0].budget.expected_durable == 50
+    pt = _cands(cset, "primary:p/pt")           # pickle is stored raw (no compression shrink)
+    # guaranteed == size proves no compression shrink for a raw file; expected still carries the shared
+    # seam's estimate margin (capacity applies EXPECTED_MARGIN to raw and compress alike — test_capacity
+    # pins the same margin-on-raw for a gguf replica estimate).
+    assert len(pt) == 1 and pt[0].budget.guaranteed_durable == 50
+    assert pt[0].budget.expected_durable == int(50 * MARGIN)
     aux = _cands(cset, "primary:a/aux")         # aux-only repo is stored raw
     assert len(aux) == 1 and aux[0].budget.guaranteed_durable == 5
     huge_c = _cands(cset, "primary:h/huge")[0]

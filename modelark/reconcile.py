@@ -1,8 +1,12 @@
-"""Desired-state reconciliation for archive work (DEC-045).
+"""Desired-state reconciliation for archive work (DEC-045, RFC-002 / DEC-049, issue #36a).
 
-The durable catalog remains authoritative.  This module derives exact copy facts,
-requirements, and unassigned work intents without mutating the database. Capacity placement
-materializes concrete tasks; the executor discards and re-derives them at drive-batch boundaries.
+The durable catalog remains authoritative. ``reconcile_plan`` is now a compatibility façade over the
+pure functional core in :mod:`modelark.candidates`: one consistent read transaction captures catalog
+facts (and freezes config/ratio) into an immutable ``PlannerInput``; the pure ``requirements`` and
+``candidates`` functions are the sole semantic authority for satisfaction, reuse, sources, and candidate
+work. The canonical, no-pin :class:`~modelark.candidates.CandidateSet` is exposed on the result; the
+legacy ``ReconcileResult`` fields are projections of it for compatibility. Placement selection is the
+legacy ``tiered_v1`` adapter in :mod:`modelark.capacity` (removed at #38) — reconcile chooses nothing.
 """
 from __future__ import annotations
 
@@ -10,22 +14,24 @@ import hashlib
 import json
 import warnings
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping, Sequence
 
-from modelark import archive_manifest
+from modelark import archive_manifest, candidates
+from modelark.candidates import (  # re-exported: candidates.py is the owner of these shared types
+    CopyRequirement,
+    DriveFact,
+    RequirementKind,
+    TaskKind,
+)
 
-
-class RequirementKind(str, Enum):
-    PRIMARY = "primary"
-    PROTECTED_HOME = "protected_home"
-    PROTECTED_REPLICA = "protected_replica"
-
-
-class TaskKind(str, Enum):
-    FETCH = "fetch"
-    REPLICATE = "replicate"
+__all__ = [  # names other modules import from reconcile
+    "CopyFact", "CopyRequirement", "DriveFact", "DiagnosticSeverity", "PlanDiagnostic",
+    "RecoveryClass", "ReconcileResult", "RequirementKind", "TaskKind", "WorkIntent",
+    "capture_planner_input", "reconcile_plan", "shadow_report",
+]
 
 
 class DiagnosticSeverity(str, Enum):
@@ -39,26 +45,6 @@ class RecoveryClass(str, Enum):
     AUTOMATIC = "automatic"
     OPERATOR_ACTION = "operator_action"
     CODE_DEFECT = "code_defect"
-
-
-@dataclass(frozen=True)
-class DriveFact:
-    drive_label: str
-    role: str
-    raid_backed: bool
-    capacity_bytes: int
-    fs_uuid: str | None = None
-    annex_uuid: str | None = None
-    serial: str | None = None
-
-
-@dataclass(frozen=True)
-class CopyRequirement:
-    requirement_id: str
-    repo_id: str
-    kind: RequirementKind
-    eligible_drives: tuple[str, ...]
-    independent_of: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,12 +66,14 @@ class CopyFact:
 
 @dataclass(frozen=True)
 class WorkIntent:
+    # Compatibility projection only: an unsatisfied requirement's work list for legacy consumers.
+    # It carries NO pinned_target — placement selection is the capacity tiered_v1 adapter over the
+    # canonical CandidateSet, never a reconcile-side pin (#36a removes _choose_partial authority).
     task_id: str
     kind: TaskKind
     requirement_id: str
     repo_id: str
     eligible_drives: tuple[str, ...]
-    pinned_target: str | None
     source_drive: str | None
     depends_on_requirement: str | None
 
@@ -118,6 +106,7 @@ class ReconcileResult:
     satisfied: frozenset[str]
     matches: tuple[tuple[str, str], ...]
     diagnostics: tuple[PlanDiagnostic, ...]
+    candidates: candidates.CandidateSet  # canonical no-pin authority; legacy fields above project from it
 
     def to_dict(self) -> dict:
         payload = {
@@ -165,7 +154,6 @@ class ReconcileResult:
                     "requirement_id": item.requirement_id,
                     "repo": item.repo_id,
                     "eligible_drives": list(item.eligible_drives),
-                    "pinned_target": item.pinned_target,
                     "source_drive": item.source_drive,
                     "depends_on_requirement": item.depends_on_requirement,
                 }
@@ -216,164 +204,117 @@ def _selected_repos(con, repo_ids: Sequence[str] | None) -> tuple[str, ...]:
     )
 
 
-def _drives(con, plan_id: str) -> tuple[DriveFact, ...]:
+@contextmanager
+def _consistent_read(con):
+    """One consistent catalog read snapshot. Reuse the caller's transaction if one is already open."""
+    if con.in_transaction:
+        yield
+        return
+    con.execute("BEGIN")
+    try:
+        yield
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+
+
+def _drive_facts(con, plan_id: str) -> tuple[DriveFact, ...]:
     rows = con.execute(
         "SELECT d.drive_label,coalesce(d.role,'primary'),coalesce(d.raid_backed,0),"
-        "coalesce(d.capacity_bytes,d.free_bytes,0),d.fs_uuid,d.annex_uuid,d.serial "
+        "coalesce(d.capacity_bytes,d.free_bytes,0),"
+        "coalesce(d.filesystem_capacity_bytes,d.capacity_bytes,0),coalesce(d.identity_epoch,1),"
+        "d.fs_uuid,d.annex_uuid,d.serial "
         "FROM plan_drives pd JOIN drives d USING(drive_label) WHERE pd.plan_id=? "
         "ORDER BY d.drive_label",
         [plan_id],
     ).fetchall()
     return tuple(
         DriveFact(
-            drive_label=row[0],
-            role=row[1],
-            raid_backed=bool(row[2]),
-            capacity_bytes=int(row[3] or 0),
-            fs_uuid=row[4],
-            annex_uuid=row[5],
-            serial=row[6],
+            drive_label=row[0], role=row[1], raid_backed=bool(row[2]),
+            capacity_bytes=int(row[3] or 0), filesystem_capacity_bytes=int(row[4] or 0),
+            identity_epoch=int(row[5] or 1), fs_uuid=row[6], annex_uuid=row[7], serial=row[8],
         )
         for row in rows
     )
 
 
-def _requirements(con, repo_ids: tuple[str, ...], drives: tuple[DriveFact, ...]) -> tuple[CopyRequirement, ...]:
+def _numcopies(con, repo_ids: tuple[str, ...]) -> dict[str, int]:
     if not repo_ids:
-        return ()
+        return {}
     placeholders = ",".join("?" for _ in repo_ids)
-    copies = dict(
+    return dict(
         con.execute(
             f"SELECT repo_id,coalesce(numcopies,1) FROM models WHERE repo_id IN ({placeholders})",
             list(repo_ids),
         ).fetchall()
     )
-    primary = tuple(d.drive_label for d in drives if d.role == "primary")
-    raids = tuple(d.drive_label for d in drives if d.role == "primary" and d.raid_backed)
-    replicas = tuple(d.drive_label for d in drives if d.role == "replica")
-    fallback = ()
-    if not raids and primary:
-        by_label = {d.drive_label: d for d in drives}
-        fallback = (
-            sorted(primary, key=lambda label: (-by_label[label].capacity_bytes, label))[0],
-        )
-
-    out = []
-    for repo_id in repo_ids:
-        if int(copies.get(repo_id, 1) or 1) < 2:
-            out.append(
-                CopyRequirement(
-                    requirement_id=f"primary:{repo_id}",
-                    repo_id=repo_id,
-                    kind=RequirementKind.PRIMARY,
-                    eligible_drives=primary,
-                )
-            )
-            continue
-        home_id = f"protected_home:{repo_id}"
-        out.append(
-            CopyRequirement(
-                requirement_id=home_id,
-                repo_id=repo_id,
-                kind=RequirementKind.PROTECTED_HOME,
-                eligible_drives=raids or fallback,
-            )
-        )
-        out.append(
-            CopyRequirement(
-                requirement_id=f"protected_replica:{repo_id}",
-                repo_id=repo_id,
-                kind=RequirementKind.PROTECTED_REPLICA,
-                eligible_drives=replicas,
-                independent_of=home_id,
-            )
-        )
-    return tuple(out)
 
 
-def _copy_facts(
-    con,
-    repo_ids: tuple[str, ...],
-    plan_drives: tuple[DriveFact, ...],
-    manifests: Mapping[str, tuple[archive_manifest.ManifestFile, ...]],
-) -> tuple[CopyFact, ...]:
-    if not repo_ids or not plan_drives:
+def _archived_facts(
+    con, repo_ids: tuple[str, ...], drive_labels: tuple[str, ...], rfilenames: tuple[str, ...]
+) -> tuple[candidates.ArchivedFileFact, ...]:
+    # Only archived rows for files some manifest actually references are relevant to satisfaction/reuse;
+    # skipping the rest keeps candidate construction bounded by required files, not total archived rows.
+    if not repo_ids or not drive_labels or not rfilenames:
         return ()
     repo_ph = ",".join("?" for _ in repo_ids)
-    drive_labels = tuple(d.drive_label for d in plan_drives)
     drive_ph = ",".join("?" for _ in drive_labels)
+    file_ph = ",".join("?" for _ in rfilenames)
     rows = con.execute(
-        "SELECT repo_id,drive_label,rfilename,coalesce(stored_bytes,0) FROM archived "
-        f"WHERE repo_id IN ({repo_ph}) AND drive_label IN ({drive_ph}) "
+        "SELECT repo_id,drive_label,rfilename,orig_sha256,orig_bytes,stored_bytes,annex_key FROM archived "
+        f"WHERE repo_id IN ({repo_ph}) AND drive_label IN ({drive_ph}) AND rfilename IN ({file_ph}) "
         "ORDER BY repo_id,drive_label,rfilename",
-        [*repo_ids, *drive_labels],
+        [*repo_ids, *drive_labels, *rfilenames],
     ).fetchall()
-    grouped: dict[tuple[str, str], list[tuple[str, int]]] = {}
-    for repo_id, drive_label, rfilename, stored_bytes in rows:
-        grouped.setdefault((repo_id, drive_label), []).append((rfilename, int(stored_bytes or 0)))
-
-    facts = []
-    for (repo_id, drive_label), present in sorted(grouped.items()):
-        manifest = manifests.get(repo_id)
-        if manifest is None:
-            continue
-        facts.append(
-            CopyFact(
-                repo_id=repo_id,
-                drive_label=drive_label,
-                required_files=frozenset(item.rfilename for item in manifest),
-                present_files=frozenset(name for name, _ in present),
-                stored_bytes_by_file=tuple(present),
-            )
+    return tuple(
+        candidates.ArchivedFileFact(
+            repo_id=row[0], drive_label=row[1], rfilename=row[2], orig_sha256=row[3],
+            orig_bytes=(int(row[4]) if row[4] is not None else None),
+            stored_bytes=(int(row[5]) if row[5] is not None else None), annex_key=row[6],
         )
-    return tuple(facts)
+        for row in rows
+    )
 
 
-def _drive_rank(kind: RequirementKind, drive: DriveFact) -> tuple:
-    if kind == RequirementKind.PROTECTED_REPLICA:
-        return (drive.capacity_bytes, drive.drive_label)
-    # PRIMARY and PROTECTED_HOME both prefer RAID-backed drives, then largest capacity.
-    return (0 if drive.raid_backed else 1, -drive.capacity_bytes, drive.drive_label)
+@dataclass(frozen=True)
+class _Facts:
+    planner_input: candidates.PlannerInput
+    manifest_batch: archive_manifest.ManifestBatch
+    selected_repos: tuple[str, ...]
 
 
-def _choose_complete(
-    requirement: CopyRequirement,
-    facts: Sequence[CopyFact],
-    drive_by_label: Mapping[str, DriveFact],
-) -> CopyFact | None:
-    candidates = [
-        fact for fact in facts
-        if fact.complete and fact.drive_label in requirement.eligible_drives
-    ]
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda fact: _drive_rank(requirement.kind, drive_by_label[fact.drive_label]))[0]
+def _read_facts(con, plan_id, repo_ids=None, policy=None) -> _Facts:
+    from modelark import capacity, wishlist  # local: capacity imports reconcile at module scope
+    with _consistent_read(con):
+        repos = _selected_repos(con, repo_ids)
+        batch = archive_manifest.inspect_manifests_for_repos(con, repos, policy)
+        usable = tuple(repo for repo in repos if repo in batch.manifests)
+        drives = _drive_facts(con, plan_id)
+        numcopies = _numcopies(con, usable)
+        manifest_files = tuple(sorted({
+            item.rfilename for manifest in batch.manifests.values() for item in manifest
+        }))
+        archived = _archived_facts(con, usable, tuple(d.drive_label for d in drives), manifest_files)
+        config = wishlist.compression()
+        ratio = capacity.plan_float_ratio(con)
+    planner_input = candidates.PlannerInput(
+        plan_id=plan_id,
+        selection=usable,
+        manifests=tuple((repo, batch.manifests[repo]) for repo in usable),
+        numcopies=tuple(sorted(numcopies.items())),
+        drives=drives,
+        archived=archived,
+        compression_cfg=tuple(sorted((str(key), value) for key, value in config.items())),
+        float_ratio=ratio,
+    )
+    return _Facts(planner_input, batch, repos)
 
 
-def _choose_partial(
-    requirement: CopyRequirement,
-    facts: Sequence[CopyFact],
-    manifest: Sequence[archive_manifest.ManifestFile],
-    drive_by_label: Mapping[str, DriveFact],
-) -> CopyFact | None:
-    sizes = {item.rfilename: item.size_bytes for item in manifest}
-    candidates = [
-        fact for fact in facts
-        if not fact.complete and fact.required_present and fact.drive_label in requirement.eligible_drives
-    ]
-    if not candidates:
-        return None
-
-    def rank(fact: CopyFact) -> tuple:
-        missing = sum(sizes[name] for name in fact.required_files - fact.present_files)
-        return (
-            missing,
-            -len(fact.required_present),
-            _drive_rank(requirement.kind, drive_by_label[fact.drive_label]),
-            fact.drive_label,
-        )
-
-    return sorted(candidates, key=rank)[0]
+def capture_planner_input(con, plan_id, repo_ids=None, policy=None) -> candidates.PlannerInput:
+    """Fact reader (impure shell): capture catalog facts in one consistent read transaction and freeze
+    graph-affecting config + the observed float ratio into an immutable, pure ``PlannerInput``."""
+    return _read_facts(con, plan_id, repo_ids, policy).planner_input
 
 
 def _same_failure_domain(left: DriveFact, right: DriveFact) -> bool:
@@ -387,142 +328,148 @@ def _same_failure_domain(left: DriveFact, right: DriveFact) -> bool:
     )
 
 
+def _rank_satisfying_drive(kind: RequirementKind, drive: DriveFact) -> tuple:
+    """Canonical pick among proven complete copies for the legacy ``matches`` projection (mirrors the
+    pre-#36a ``_choose_complete`` order: RAID-first/largest for homes, smallest for replicas)."""
+    if kind == RequirementKind.PROTECTED_REPLICA:
+        return (drive.capacity_bytes, drive.drive_label)
+    return (0 if drive.raid_backed else 1, -drive.capacity_bytes, drive.drive_label)
+
+
+def _facts_projection(inp: candidates.PlannerInput) -> tuple[CopyFact, ...]:
+    """Raw archived facts for display (ruling #4: raw facts may remain visible). Not authority."""
+    manifests = dict(inp.manifests)
+    grouped: dict[tuple[str, str], list[tuple[str, int]]] = {}
+    for row in inp.archived:
+        grouped.setdefault((row.repo_id, row.drive_label), []).append(
+            (row.rfilename, int(row.stored_bytes or 0))
+        )
+    facts = []
+    for (repo_id, drive_label), present in sorted(grouped.items()):
+        manifest = manifests.get(repo_id)
+        if manifest is None:
+            continue
+        facts.append(
+            CopyFact(
+                repo_id=repo_id, drive_label=drive_label,
+                required_files=frozenset(item.rfilename for item in manifest),
+                present_files=frozenset(name for name, _ in present),
+                stored_bytes_by_file=tuple(present),
+            )
+        )
+    return tuple(facts)
+
+
+def _intents_projection(cset: candidates.CandidateSet) -> tuple[WorkIntent, ...]:
+    """Compatibility work list projected from the canonical candidates — no pin, one row per unsatisfied
+    requirement, with the canonical source/dependency for legacy display only."""
+    intents = []
+    for requirement_id, cands in cset.by_requirement:
+        if not cands:
+            continue
+        kind = cands[0].task_kind
+        repo_id = requirement_id.split(":", 1)[1]
+        eligible = tuple(sorted({item.target_drive for item in cands}))
+        source_drive = None
+        depends_on = None
+        sources = sorted({
+            item.source.drive_label for item in cands
+            if isinstance(item.source, candidates.SourceIdentity)
+        })
+        if sources:
+            source_drive = sources[0]
+        else:
+            pending = [
+                item.source.requirement_id for item in cands
+                if isinstance(item.source, candidates.PendingHome)
+            ]
+            depends_on = pending[0] if pending else None
+        intents.append(
+            WorkIntent(
+                task_id=f"{kind.value}:{requirement_id}", kind=kind, requirement_id=requirement_id,
+                repo_id=repo_id, eligible_drives=eligible, source_drive=source_drive,
+                depends_on_requirement=depends_on,
+            )
+        )
+    return tuple(sorted(intents, key=lambda item: (item.repo_id, item.requirement_id)))
+
+
 def reconcile_plan(
     con,
     plan_id: str,
     repo_ids: Sequence[str] | None = None,
     policy: archive_manifest.ArchivePolicy | None = None,
 ) -> ReconcileResult:
-    """Derive exact requirements and work intents without writes or physical I/O."""
-    repos = _selected_repos(con, repo_ids)
-    manifest_batch = archive_manifest.inspect_manifests_for_repos(con, repos, policy)
-    usable_repos = tuple(repo for repo in repos if repo in manifest_batch.manifests)
-    drives = _drives(con, plan_id)
-    drive_by_label = {drive.drive_label: drive for drive in drives}
-    requirements = _requirements(con, usable_repos, drives)
-    facts = _copy_facts(con, usable_repos, drives, manifest_batch.manifests)
-    facts_by_repo: dict[str, list[CopyFact]] = {}
-    for fact in facts:
-        facts_by_repo.setdefault(fact.repo_id, []).append(fact)
+    """Compatibility façade over the pure core: capture one consistent snapshot, run pure
+    requirements/candidates (the sole authority for satisfaction, reuse, sources, and work), expose the
+    canonical no-pin ``CandidateSet``, and project the legacy fields from it. Chooses no placement."""
+    facts = _read_facts(con, plan_id, repo_ids, policy)
+    inp = facts.planner_input
+    graph = candidates.requirements(inp)
+    cset = candidates.candidates(inp, graph)
+
+    drive_by_label = {drive.drive_label: drive for drive in inp.drives}
+    req_by_id = {item.requirement_id: item for item in graph.desired}
+
+    satisfied = frozenset(item.requirement_id for item in cset.satisfied)
+    matches: dict[str, str] = {}
+    for sat in cset.satisfied:
+        kind = req_by_id[sat.requirement_id].kind
+        matches[sat.requirement_id] = sorted(
+            (copy.drive_label for copy in sat.copies),
+            key=lambda label: _rank_satisfying_drive(kind, drive_by_label[label]),
+        )[0]
 
     diagnostics = [
-        _diag(
-            "MANIFEST_POLICY",
-            DiagnosticSeverity.BLOCKING,
-            RecoveryClass.OPERATOR_ACTION,
-            None,
-            repo_id=repo_id,
-            message=str(error),
-        )
-        for repo_id, error in sorted(manifest_batch.errors.items())
+        _diag("MANIFEST_POLICY", DiagnosticSeverity.BLOCKING, RecoveryClass.OPERATOR_ACTION, None,
+              repo_id=repo_id, message=str(error))
+        for repo_id, error in sorted(facts.manifest_batch.errors.items())
     ]
-    matches: dict[str, str] = {}
-    requirement_by_id = {item.requirement_id: item for item in requirements}
-
-    for requirement in requirements:
+    for requirement in graph.desired:
         if not requirement.eligible_drives:
-            diagnostics.append(
-                _diag(
-                    "TARGET_TIER_MISSING",
-                    DiagnosticSeverity.BLOCKING,
-                    RecoveryClass.OPERATOR_ACTION,
-                    requirement.requirement_id,
-                    repo_id=requirement.repo_id,
-                    kind=requirement.kind.value,
-                )
-            )
-            continue
-        match = _choose_complete(
-            requirement, facts_by_repo.get(requirement.repo_id, ()), drive_by_label
-        )
-        if match is not None:
-            matches[requirement.requirement_id] = match.drive_label
-            continue
-        wrong = sorted(
-            fact.drive_label
-            for fact in facts_by_repo.get(requirement.repo_id, ())
-            if fact.complete and fact.drive_label not in requirement.eligible_drives
-        )
-        if wrong:
-            diagnostics.append(
-                _diag(
-                    "COPY_POLICY_DRIFT",
-                    DiagnosticSeverity.WARNING,
-                    RecoveryClass.AUTOMATIC,
-                    requirement.requirement_id,
-                    repo_id=requirement.repo_id,
-                    drives=tuple(wrong),
-                )
-            )
+            diagnostics.append(_diag(
+                "TARGET_TIER_MISSING", DiagnosticSeverity.BLOCKING, RecoveryClass.OPERATOR_ACTION,
+                requirement.requirement_id, repo_id=requirement.repo_id, kind=requirement.kind.value))
 
-    intents = []
-    for requirement in requirements:
-        if requirement.requirement_id in matches:
-            continue
-        manifest = manifest_batch.manifests[requirement.repo_id]
-        partial = _choose_partial(
-            requirement, facts_by_repo.get(requirement.repo_id, ()), manifest, drive_by_label
-        )
-        source_drive = None
-        depends_on = None
-        if requirement.kind == RequirementKind.PROTECTED_REPLICA:
-            home_id = requirement.independent_of
-            source_drive = matches.get(home_id or "")
-            if source_drive is None and home_id in requirement_by_id:
-                depends_on = home_id
-        kind = (TaskKind.REPLICATE if requirement.kind == RequirementKind.PROTECTED_REPLICA
-                else TaskKind.FETCH)
-        intents.append(
-            WorkIntent(
-                task_id=f"{kind.value}:{requirement.requirement_id}",
-                kind=kind,
-                requirement_id=requirement.requirement_id,
-                repo_id=requirement.repo_id,
-                eligible_drives=requirement.eligible_drives,
-                pinned_target=partial.drive_label if partial else None,
-                source_drive=source_drive,
-                depends_on_requirement=depends_on,
-            )
-        )
-        if kind == TaskKind.REPLICATE and source_drive is None and depends_on is None:
-            diagnostics.append(
-                _diag(
-                    "SOURCE_INCOMPLETE",
-                    DiagnosticSeverity.ERROR,
-                    RecoveryClass.CODE_DEFECT,
-                    requirement.requirement_id,
-                    repo_id=requirement.repo_id,
-                )
-            )
+    # Drift projected from the canonical CandidateSet (ruling #4). Wrong-tier proven copies are the
+    # legacy COPY_POLICY_DRIFT (only when the requirement is not otherwise satisfied); unproven/mismatched
+    # rows on eligible targets surface why a partial did not become finish-in-place work.
+    wrong_tier: dict[str, set[str]] = {}
+    unproven: dict[str, set[str]] = {}
+    for row in cset.drift:
+        if row.reason == "wrong_tier" and row.requirement_id not in satisfied:
+            wrong_tier.setdefault(row.requirement_id, set()).add(row.drive_label)
+        elif row.reason == "unproven_provenance":
+            unproven.setdefault(row.requirement_id, set()).add(row.drive_label)
+    for requirement_id, drives in sorted(wrong_tier.items()):
+        diagnostics.append(_diag(
+            "COPY_POLICY_DRIFT", DiagnosticSeverity.WARNING, RecoveryClass.AUTOMATIC, requirement_id,
+            repo_id=requirement_id.split(":", 1)[1], drives=tuple(sorted(drives))))
+    for requirement_id, drives in sorted(unproven.items()):
+        diagnostics.append(_diag(
+            "UNPROVEN_PROVENANCE", DiagnosticSeverity.WARNING, RecoveryClass.OPERATOR_ACTION,
+            requirement_id, repo_id=requirement_id.split(":", 1)[1], drives=tuple(sorted(drives))))
 
-    # Warn only from matched copies: unmet dependencies already have a more useful root diagnostic.
-    for repo_id in usable_repos:
+    for repo_id in inp.selection:
         home = matches.get(f"protected_home:{repo_id}")
         replica = matches.get(f"protected_replica:{repo_id}")
         if home and replica and _same_failure_domain(drive_by_label[home], drive_by_label[replica]):
-            diagnostics.append(
-                _diag(
-                    "FAILURE_DOMAIN_SUSPECT",
-                    DiagnosticSeverity.WARNING,
-                    RecoveryClass.OPERATOR_ACTION,
-                    f"protected_replica:{repo_id}",
-                    repo_id=repo_id,
-                    drives=(home, replica),
-                )
-            )
+            diagnostics.append(_diag(
+                "FAILURE_DOMAIN_SUSPECT", DiagnosticSeverity.WARNING, RecoveryClass.OPERATOR_ACTION,
+                f"protected_replica:{repo_id}", repo_id=repo_id, drives=(home, replica)))
 
     diagnostics.sort(key=lambda item: (item.code, item.requirement_id or "", item.detail))
-    intents.sort(key=lambda item: (item.repo_id, item.requirement_id))
     return ReconcileResult(
         plan_id=plan_id,
-        repo_ids=repos,
-        manifests=dict(manifest_batch.manifests),
-        requirements=requirements,
-        facts=facts,
-        intents=tuple(intents),
-        satisfied=frozenset(matches),
+        repo_ids=facts.selected_repos,
+        manifests=dict(inp.manifests),
+        requirements=graph.desired,
+        facts=_facts_projection(inp),
+        intents=_intents_projection(cset),
+        satisfied=satisfied,
         matches=tuple(sorted(matches.items())),
         diagnostics=tuple(diagnostics),
+        candidates=cset,
     )
 
 
