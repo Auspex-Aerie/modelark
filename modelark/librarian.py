@@ -534,7 +534,8 @@ def queue_view(con, plan_id: str | None = None, capacity_mode: str = "guaranteed
         if repo in copy2:
             continue
         candidates = replica_candidates.get(repo, [])
-        hint = intent.pinned_target or (candidates[0] if candidates else None)
+        # #36a: reconcile emits no pin; the copy-2 hint is the eligible-tier candidate only.
+        hint = candidates[0] if candidates else None
         if hint:
             copy2[repo] = hint
             copy2_evidence[repo] = "eligible_hint"
