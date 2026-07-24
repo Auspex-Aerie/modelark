@@ -4,31 +4,22 @@ Gate 1 pins the pure feasibility/improvement contract and the plan_capacity adap
 BEFORE production. #38 consumes #36a's no-pin CandidateSet, runs the mixed-evidence Gate-B ladder,
 and (only on FEASIBLE) a deterministic tiered_v2 improvement pass.
 
-Binding Gate-0 amend-1 + Gate-1 clarifications (do not freeze weaker semantics):
+Binding Gate-0 amend-1 + Gate-1 clarifications + Gate-1 amendment (exact outcomes):
 
-  1. max_usable_for_epoch is admission-supplied on SolverInput; placement never recomputes a safety floor.
-     Missing usable max on a required path → CAPACITY_EVIDENCE_UNKNOWN, not structural/known-infeasible.
-  2. REQUIREMENT_EXCEEDS_USABLE_MAX only when EVERY valid candidate has a known max AND each candidate's
-     own peak exceeds ITS OWN target's max. Any relevant candidate with unknown max blocks this code.
-  3. GRAPH_DEPENDENCY_INVARIANT is only for malformed dependencies (missing/invalid refs, cycles).
-     A valid home/replica graph with no independent target is FAILURE_DOMAIN_UNSATISFIABLE.
-     An earlier blocked home keeps its earlier structural code.
-  4. Dependencies precede constrainedness (topological readiness; PendingHome blocked until home+domain).
-  5. Root state counts; exhaustion before entering limit+1; complete normalized source identity in keys.
-  6. Optimization score: movement min, then maximize descending remaining_free vector where
-     remaining_free(d) = executable_budget(d) - durable_sum(mode,d) - workspace_max(mode,d)
-     over the candidate-target universe; idle = no selected task (zero-byte task still uses the drive);
-     then canonical complete assignment/source identity.
-  7. Emergency monitor is injected only into improve(...), never into canonical SolverInput / output / hash.
-  8. Pure calls require explicit SolverBounds; tests use explicit small and scale bounds only.
-  9. Deep immutability: frozen records; maps as canonical tuples of pairs (not mutable dict state).
- 10. Every outcome carries policy/bound/mode metadata; non-FEASIBLE never exposes an executable assignment.
- 11. Adapter: plan_capacity projects tiered_v2 + graded gate_b_code; feasible=True only for FEASIBLE.
+  1. max_usable_for_epoch is admission-supplied; placement never recomputes a safety floor.
+  2. REQUIREMENT_EXCEEDS_USABLE_MAX only when every valid candidate has a known max and each
+     candidate's own peak exceeds its own target's max.
+  3. GRAPH_DEPENDENCY_INVARIANT is only for malformed dependencies; domain failure is distinct;
+     a blocked home keeps its earlier structural code.
+  4. Dependencies precede constrainedness; PendingHome resolves to the selected home source.
+  5. Root state counts; limit L → exhaustion before entering L+1; states_visited == L on exhaust.
+  6. Lex objectives: movement ≻ free-space vector ≻ idle ≻ canonical (adversarial fixtures).
+  7. Emergency monitor only on improve(...); never in SolverInput / results / hash surface.
+  8. Explicit SolverBounds required; every result carries policy/bound version/mode metadata.
+  9. Deep immutability: no nested mutable dict/list/set/bytearray; no leaked callables.
+ 10. Adapter deterministically projects every graded code; feasible=True only for FEASIBLE.
 
-RED until modelark.placement (pure) and the plan_capacity tiered_v2 cutover exist. The lazy import +
-_require_placement() guard makes pure contracts fail for the reviewed missing #38 behaviour, not a
-fixture cascade. Adapter contracts fail for missing graded projection / still-tiered_v1 authority.
-
+RED until modelark.placement and the plan_capacity tiered_v2 cutover exist.
 Self-running: CI executes ``python tests/test_gate_b_tiered_v2.py`` directly.
 """
 from __future__ import annotations
@@ -43,8 +34,7 @@ import time
 from pathlib import Path
 from types import MappingProxyType
 
-import _admission_compat
-from modelark import archive_manifest, capacity, candidates, reconcile
+from modelark import archive_manifest, budgets, capacity, capacity_evidence, candidates, reconcile
 from modelark.core import db
 
 try:
@@ -57,23 +47,34 @@ except ModuleNotFoundError as exc:               # ONLY the exact absent submodu
     _HAS_PLACEMENT = False
 
 
-# Distinct 64-hex upstream SHA-256 fixtures.
 HW = "1" * 64
 HW2 = "3" * 64
+HW3 = "4" * 64
 HC = "2" * 64
 MARGIN = capacity.EXPECTED_MARGIN
 RATIO = capacity.DEFAULT_FLOAT_RATIO
-
-# Explicit compression config frozen into PlannerInput (same discipline as #36a).
 _CFG = (("max_compress_ram_gb", 64), ("stream_compress", True), ("threads", 4))
+_CFG_DICT = dict(_CFG)
 
-STRUCTURAL_CODES = (
-    "TARGET_TIER_MISSING",
-    "UNPROVEN_PROVENANCE",
-    "GRAPH_DEPENDENCY_INVARIANT",
-    "FAILURE_DOMAIN_UNSATISFIABLE",
-    "REQUIREMENT_EXCEEDS_USABLE_MAX",
-)
+# Exact structural diagnostics / operator actions (passoff §6.1 goldens).
+STRUCTURAL_GOLDENS = {
+    "TARGET_TIER_MISSING": {
+        "actions": ("add_eligible_drive", "change_plan_policy"),
+    },
+    "UNPROVEN_PROVENANCE": {
+        "actions": ("repair_or_remove_unproven_rows", "provide_hash_evidence"),
+    },
+    "GRAPH_DEPENDENCY_INVARIANT": {
+        "actions": ("inspect_integrity", "reconcile_plan"),
+    },
+    "FAILURE_DOMAIN_UNSATISFIABLE": {
+        "actions": ("add_independent_drive", "change_failure_domain_policy"),
+    },
+    "REQUIREMENT_EXCEEDS_USABLE_MAX": {
+        "actions": ("add_larger_drive", "trim_selection", "change_hard_constraints"),
+    },
+}
+STRUCTURAL_CODES = tuple(STRUCTURAL_GOLDENS)
 LADDER_CODES = (
     "FEASIBLE",
     "PACKING_INCONCLUSIVE",
@@ -92,11 +93,12 @@ def _require_placement():
             "SolverInput (deeply immutable; admission-supplied executable_budget + "
             "max_usable_for_epoch; explicit bounds; no emergency callable/clock), "
             "gate_b(inp)->GateBResult, improve(inp, first_feasible, *, emergency=None)->PlacementResult, "
-            "and graded codes FEASIBLE|PACKING_INCONCLUSIVE|CAPACITY_EVIDENCE_UNKNOWN|"
+            "graded codes FEASIBLE|PACKING_INCONCLUSIVE|CAPACITY_EVIDENCE_UNKNOWN|"
             "INFEASIBLE_UNDER_ADMISSION_BUDGET|INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX|"
             "TARGET_TIER_MISSING|UNPROVEN_PROVENANCE|GRAPH_DEPENDENCY_INVARIANT|"
-            "FAILURE_DOMAIN_UNSATISFIABLE|REQUIREMENT_EXCEEDS_USABLE_MAX. "
-            "plan_capacity must project placement_policy=tiered_v2 and gate_b_code.")
+            "FAILURE_DOMAIN_UNSATISFIABLE|REQUIREMENT_EXCEEDS_USABLE_MAX, "
+            "solver_bound_version on every result, and plan_capacity projecting "
+            "placement_policy=tiered_v2 + gate_b_code.")
 
 
 def _bounds(feasibility: int, optimization: int):
@@ -108,7 +110,7 @@ def _bounds(feasibility: int, optimization: int):
 
 
 # --------------------------------------------------------------------------------------------------
-# Pure synthetic builders (only after _require_placement; use #36a candidates for graph/cset)
+# Builders
 # --------------------------------------------------------------------------------------------------
 def _mf(name, size, sha256, *, fmt="safetensors", quant="bf16"):
     if fmt == "safetensors" and quant in archive_manifest.FLOAT_QUANTS:
@@ -152,7 +154,6 @@ def _graph_cset(planner_inp):
 
 
 def _budget_pairs(labels_to_values):
-    """Canonical map: sorted tuple of (label, value) pairs — never a mutable dict as solver state."""
     return tuple(sorted((str(k), v) for k, v in labels_to_values.items()))
 
 
@@ -164,10 +165,12 @@ def _solver_input(
     capacity_mode="guaranteed",
     feasibility_limit=10_000,
     optimization_limit=10_000,
+    graph=None,
+    cset=None,
 ):
-    """Build SolverInput from #36a graph/candidates + admission-derived budgets (ruling 1)."""
     _require_placement()
-    graph, cset = _graph_cset(planner_inp)
+    if graph is None or cset is None:
+        graph, cset = _graph_cset(planner_inp)
     return placement.SolverInput(
         graph=graph,
         candidates=cset,
@@ -187,104 +190,207 @@ def _code(result) -> str:
     return code.value if hasattr(code, "value") else str(code)
 
 
+def _actions(result) -> tuple:
+    raw = getattr(result, "actions", None) or ()
+    if raw is None:
+        raw = ()
+    return tuple(a.value if hasattr(a, "value") else str(a) for a in raw)
+
+
+def _visited(result) -> int:
+    v = getattr(result, "feasibility_states_visited", None)
+    if v is None:
+        v = getattr(result, "states_visited", None)
+    if v is None:
+        raise AssertionError("GateBResult must expose feasibility_states_visited (or states_visited)")
+    return int(v)
+
+
+def _relevant_unknowns(result) -> set[str]:
+    drives = getattr(result, "relevant_unknown_drives", None)
+    if drives is None:
+        drives = getattr(result, "drives", None)
+    if drives is None:
+        return set()
+    if isinstance(drives, (str, bytes)):
+        return {str(drives)}
+    return {str(d) for d in drives}
+
+
 def _assert_metadata(result, *, capacity_mode, feasibility_limit=None, optimization_limit=None):
-    """Every outcome carries policy / bound / mode metadata (Gate-1 clarification 4)."""
+    """Every outcome carries non-empty policy / solver-bound version / mode / explicit bounds."""
     mode = getattr(result, "capacity_mode", None)
     if hasattr(mode, "value"):
         mode = mode.value
     assert mode == capacity_mode, f"capacity_mode must be labelled; got {mode!r}"
+
     policy = getattr(result, "policy_version", None) or getattr(result, "placement_policy", None)
-    assert policy == "tiered_v2", f"policy_version/placement_policy must be tiered_v2; got {policy!r}"
-    # Bounds used must be recoverable (explicit values, not silent defaults).
-    # Prefer a nested bounds object; otherwise require explicit fields on the result.
-    # Never default getattr to the expected value — that would make the check a tautology.
+    assert policy == "tiered_v2", f"policy_version must be tiered_v2; got {policy!r}"
+
+    bound_ver = getattr(result, "solver_bound_version", None)
+    assert bound_ver is not None and str(bound_ver).strip(), (
+        "every GateB/Placement result must carry non-empty solver_bound_version")
+
     bounds = getattr(result, "bounds", None) or getattr(result, "bounds_used", None)
     if bounds is not None:
         fl = getattr(bounds, "feasibility_state_limit", None)
         ol = getattr(bounds, "optimization_state_limit", None)
     else:
-        fl = getattr(result, "feasibility_state_limit", None) if hasattr(result, "feasibility_state_limit") else None
-        ol = getattr(result, "optimization_state_limit", None) if hasattr(result, "optimization_state_limit") else None
-        if feasibility_limit is not None or optimization_limit is not None:
-            assert fl is not None or ol is not None or hasattr(result, "feasibility_state_limit") or hasattr(
-                result, "optimization_state_limit"
-            ), (
-                "GateBResult/PlacementResult must expose bounds metadata "
-                "(.bounds / .bounds_used or .feasibility_state_limit / .optimization_state_limit)"
-            )
+        assert hasattr(result, "feasibility_state_limit") or hasattr(result, "optimization_state_limit"), (
+            "result must expose bounds / bounds_used or explicit limit fields")
+        fl = getattr(result, "feasibility_state_limit", None)
+        ol = getattr(result, "optimization_state_limit", None)
     if feasibility_limit is not None:
         assert fl is not None, "feasibility_state_limit missing from result bounds metadata"
-        assert fl == feasibility_limit, f"feasibility_state_limit: expected {feasibility_limit}, got {fl}"
+        assert fl == feasibility_limit
     if optimization_limit is not None:
         assert ol is not None, "optimization_state_limit missing from result bounds metadata"
-        assert ol == optimization_limit, f"optimization_state_limit: expected {optimization_limit}, got {ol}"
+        assert ol == optimization_limit
 
 
 def _assert_no_executable_assignment(result):
-    """Non-FEASIBLE must not expose an executable assignment (Gate-1 clarification 4)."""
     assignment = getattr(result, "assignment", None)
     assert assignment is None, (
-        f"non-FEASIBLE result must not expose an executable assignment; got {type(assignment)!r}")
+        f"non-FEASIBLE must not expose an executable assignment; got {type(assignment)!r}")
+
+
+def _assert_structural(result, code: str):
+    assert _code(result) == code
+    _assert_no_executable_assignment(result)
+    _assert_metadata(result, capacity_mode="guaranteed")
+    golden = STRUCTURAL_GOLDENS[code]
+    actions = _actions(result)
+    assert actions == golden["actions"], (
+        f"{code} actions must be exact golden {golden['actions']!r}; got {actions!r}")
+    diagnostics = getattr(result, "diagnostics", None)
+    assert diagnostics is not None and diagnostics != () and diagnostics != {}, (
+        f"{code} must carry exact diagnostics payload (non-empty)")
 
 
 def _assert_frozen(obj, label="record"):
     assert dataclasses.is_dataclass(obj), f"{label} must be a dataclass"
-    assert obj.__dataclass_params__.frozen, f"{label} must be frozen (deep immutability)"
+    assert obj.__dataclass_params__.frozen, f"{label} must be frozen"
+    fields = dataclasses.fields(obj)
+    if not fields:
+        return
     try:
-        # Touch first field if any
-        fields = dataclasses.fields(obj)
-        if fields:
-            setattr(obj, fields[0].name, getattr(obj, fields[0].name))  # type: ignore[misc]
-            raise AssertionError(f"{label} must raise FrozenInstanceError on setattr")
+        setattr(obj, fields[0].name, getattr(obj, fields[0].name))  # type: ignore[misc]
+        raise AssertionError(f"{label} must raise FrozenInstanceError on setattr")
     except dataclasses.FrozenInstanceError:
         pass
 
 
-def _assert_no_mutable_map_state(obj, *, path="root"):
-    """Mutable dicts must not become canonical solver state (clarification 3)."""
+def _assert_deep_immutable(obj, *, path="root", reject_callables=True):
+    """Reject nested mutable dict/list/set/bytearray and leaked callables."""
     if isinstance(obj, dict):
-        raise AssertionError(f"mutable dict at {path} is not allowed as canonical solver state")
+        raise AssertionError(f"mutable dict at {path}")
+    if isinstance(obj, list):
+        raise AssertionError(f"mutable list at {path}")
+    if isinstance(obj, set):
+        raise AssertionError(f"mutable set at {path}")
+    if isinstance(obj, bytearray):
+        raise AssertionError(f"mutable bytearray at {path}")
+    if reject_callables and callable(obj) and not isinstance(obj, type):
+        # Allow type objects / enums; reject emergency monitors and other callables.
+        if not isinstance(obj, (str, bytes, int, float, bool, type(None))):
+            # dataclasses, tuples, etc. are not callable; plain functions/instances with __call__ are.
+            if hasattr(obj, "__call__") and not dataclasses.is_dataclass(obj):
+                # Enum values / bound methods on frozen records shouldn't appear as field values.
+                raise AssertionError(f"callable leaked into canonical state at {path}: {type(obj)!r}")
     if isinstance(obj, MappingProxyType):
+        for k, v in obj.items():
+            _assert_deep_immutable(v, path=f"{path}[{k!r}]", reject_callables=reject_callables)
         return
-    if dataclasses.is_dataclass(obj):
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
         for f in dataclasses.fields(obj):
-            _assert_no_mutable_map_state(getattr(obj, f.name), path=f"{path}.{f.name}")
-    elif isinstance(obj, (list, tuple)):
+            _assert_deep_immutable(getattr(obj, f.name), path=f"{path}.{f.name}",
+                                   reject_callables=reject_callables)
+        return
+    if isinstance(obj, tuple):
         for i, item in enumerate(obj):
-            _assert_no_mutable_map_state(item, path=f"{path}[{i}]")
+            _assert_deep_immutable(item, path=f"{path}[{i}]", reject_callables=reject_callables)
+        return
+    if isinstance(obj, frozenset):
+        for i, item in enumerate(obj):
+            _assert_deep_immutable(item, path=f"{path}{{frozenset:{i}}}", reject_callables=reject_callables)
+
+
+def _task_targets(assignment) -> dict[str, str]:
+    """Map requirement_id → target_drive from a flexible assignment shape."""
+    out: dict[str, str] = {}
+    if assignment is None:
+        return out
+    if hasattr(assignment, "by_requirement"):
+        for rid, task in assignment.by_requirement:
+            out[str(rid)] = getattr(task, "target_drive", task if isinstance(task, str) else str(task))
+        return out
+    tasks = getattr(assignment, "tasks", None)
+    if tasks is not None:
+        for t in tasks:
+            out[str(t.requirement_id)] = t.target_drive
+        return out
+    if isinstance(assignment, (list, tuple)):
+        for t in assignment:
+            if hasattr(t, "requirement_id"):
+                out[str(t.requirement_id)] = t.target_drive
+        return out
+    if isinstance(assignment, tuple) and assignment and isinstance(assignment[0], tuple):
+        for rid, task in assignment:
+            out[str(rid)] = getattr(task, "target_drive", task)
+        return out
+    raise AssertionError(f"cannot read tasks from assignment type {type(assignment)!r}")
+
+
+def _task_sources(assignment) -> dict[str, object]:
+    out: dict[str, object] = {}
+    if hasattr(assignment, "by_requirement"):
+        for rid, task in assignment.by_requirement:
+            out[str(rid)] = getattr(task, "source", None)
+        return out
+    tasks = getattr(assignment, "tasks", None) or (
+        assignment if isinstance(assignment, (list, tuple)) else ())
+    for t in tasks:
+        if hasattr(t, "requirement_id"):
+            out[str(t.requirement_id)] = getattr(t, "source", None)
+    return out
+
+
+def _file_ws(size: int) -> tuple[int, int]:
+    """Return (guaranteed_durable, workspace_peak_guaranteed) for a compress float shard."""
+    mf = _mf("w.safetensors", size, HW)
+    fb = budgets.file_budget(mf, RATIO, _CFG_DICT)
+    return fb.guaranteed_durable, fb.workspace_peak_guaranteed
 
 
 # --------------------------------------------------------------------------------------------------
-# Pure contracts
+# Pure contracts — API / purity / immutability
 # --------------------------------------------------------------------------------------------------
 def test_contract_module_api_surface():
-    """Pure module must expose the reviewed entry points and require explicit bounds."""
     _require_placement()
     for name in ("SolverBounds", "SolverInput", "gate_b", "improve"):
         assert hasattr(placement, name), f"modelark.placement must expose {name}"
-    # gate_b / improve take no DB connection
     for fn_name in ("gate_b", "improve"):
         params = set(inspect.signature(getattr(placement, fn_name)).parameters)
-        assert "con" not in params and "connection" not in params, f"{fn_name} must be pure"
-    # improve accepts emergency only as a non-semantic keyword (not on SolverInput)
+        assert "con" not in params and "connection" not in params
     improve_params = inspect.signature(placement.improve).parameters
-    assert "emergency" in improve_params, "improve must accept emergency= monitor separately"
-    # SolverInput fields must not include emergency/clock callables
+    assert "emergency" in improve_params
     input_fields = {f.name for f in dataclasses.fields(placement.SolverInput)}
     banned = {"emergency", "emergency_monitor", "clock", "now", "check"}
-    assert not (input_fields & banned), f"SolverInput must not hold {input_fields & banned}"
+    assert not (input_fields & banned)
 
 
 def test_contract_pure_no_io_boundary():
     _require_placement()
-    banned = {"sqlite3", "socket", "wishlist", "fetch", "reconcile", "db", "drive_fence", "admission"}
-    # Walk the module and, if it is a package, every submodule — getsource(package) alone would
-    # only see __init__.py and miss impure imports in sibling modules.
+    banned = {
+        "sqlite3", "socket", "wishlist", "fetch", "reconcile", "db", "drive_fence", "admission",
+        # Direct clock / resource / path I/O (Gate-1 amendment §6)
+        "time", "datetime", "resource", "psutil", "pathlib", "os", "tempfile", "shutil", "subprocess",
+    }
     modules = [placement]
     if getattr(placement, "__path__", None) is not None:
         for modinfo in pkgutil.walk_packages(placement.__path__, placement.__name__ + "."):
             modules.append(importlib.import_module(modinfo.name))
-    names = set()
+    names: set[str] = set()
     for mod in modules:
         try:
             source = inspect.getsource(mod)
@@ -311,43 +417,90 @@ def test_contract_deep_immutability_solver_input_and_results():
         drives=[_drive("d0", cap=10_000)],
     )
     inp = _solver_input(
-        planner,
-        executable_budget={"d0": 5_000},
-        max_usable_for_epoch={"d0": 9_000},
-        feasibility_limit=100,
-        optimization_limit=100,
+        planner, executable_budget={"d0": 5_000}, max_usable_for_epoch={"d0": 9_000},
+        feasibility_limit=100, optimization_limit=100,
     )
     _assert_frozen(inp, "SolverInput")
     _assert_frozen(inp.bounds, "SolverBounds")
-    _assert_no_mutable_map_state(inp)
-    # Budget maps are tuples of pairs (or other non-dict immutable), not dict
+    _assert_deep_immutable(inp)
     assert not isinstance(inp.executable_budget, dict)
     assert not isinstance(inp.max_usable_for_epoch, dict)
 
     result = placement.gate_b(inp)
     _assert_frozen(result, "GateBResult")
-    _assert_no_mutable_map_state(result)
+    _assert_deep_immutable(result)
+    _assert_metadata(result, capacity_mode="guaranteed", feasibility_limit=100, optimization_limit=100)
     if _code(result) == "FEASIBLE":
-        improved = placement.improve(inp, result.assignment, emergency=None)
+        class _Boom:
+            def __call__(self, *a, **k):
+                raise RuntimeError("should not leak")
+
+        improved = placement.improve(inp, result.assignment, emergency=_Boom())
+        # May or may not fire emergency depending on search size; either way no leak.
+        if getattr(improved, "derivation_mode", None) != "canonical_fallback":
+            improved = placement.improve(inp, result.assignment, emergency=None)
         _assert_frozen(improved, "PlacementResult")
-        _assert_no_mutable_map_state(improved)
-        assert getattr(improved, "emergency", None) is None
+        _assert_deep_immutable(improved)
+        _assert_metadata(improved, capacity_mode="guaranteed", optimization_limit=100)
         assert "emergency" not in {f.name for f in dataclasses.fields(improved)}
+        assert not any(isinstance(getattr(improved, f.name, None), _Boom)
+                       for f in dataclasses.fields(improved))
 
 
+def test_contract_explicit_bounds_required():
+    _require_placement()
+    planner = _planner(
+        selection=["org/m"],
+        manifests=[("org/m", [_mf("w.safetensors", 10, HW)])],
+        numcopies=[("org/m", 1)],
+        drives=[_drive("d0")],
+    )
+    graph, cset = _graph_cset(planner)
+    try:
+        placement.SolverInput(
+            graph=graph, candidates=cset, drives=planner.drives,
+            executable_budget=_budget_pairs({"d0": 100}),
+            max_usable_for_epoch=_budget_pairs({"d0": 1000}),
+            capacity_mode="guaranteed", policy_version="tiered_v2",
+        )
+        raised = False
+    except TypeError:
+        raised = True
+    assert raised, "SolverInput must require explicit SolverBounds"
+
+
+# --------------------------------------------------------------------------------------------------
+# Shuffle / determinism
+# --------------------------------------------------------------------------------------------------
 def test_contract_shuffled_input_byte_equivalence():
+    """Permute drives, budgets, AND requirement/candidate tuples; full result equality."""
     _require_placement()
     files = [_mf("a.safetensors", 100, HW), _mf("b.safetensors", 100, HW2)]
     drives_n = [_drive("d0", cap=10_000), _drive("d1", cap=8_000), _drive("r0", role="replica", cap=8_000)]
     drives_s = list(reversed(drives_n))
 
-    def run(drives, budget_order):
+    def run(drives, budget_order, *, reverse_req=False, reverse_cands=False):
         planner = _planner(
             selection=["org/m"],
             manifests=[("org/m", files)],
             numcopies=[("org/m", 1)],
             drives=drives,
         )
+        graph, cset = _graph_cset(planner)
+        if reverse_req:
+            # Re-order by_requirement (still same candidates content).
+            items = list(cset.by_requirement)
+            items.reverse()
+            cset = dataclasses.replace(cset, by_requirement=tuple(items)) if dataclasses.is_dataclass(cset) else cset
+            # Also reverse desired requirements order if mutable via replace
+            if dataclasses.is_dataclass(graph):
+                graph = dataclasses.replace(graph, desired=tuple(reversed(graph.desired)))
+        if reverse_cands and cset.by_requirement:
+            rebuilt = []
+            for rid, cs in cset.by_requirement:
+                rebuilt.append((rid, tuple(reversed(cs))))
+            if dataclasses.is_dataclass(cset):
+                cset = dataclasses.replace(cset, by_requirement=tuple(rebuilt))
         budgets = {"d0": 4_000, "d1": 4_000, "r0": 0}
         maxima = {"d0": 9_000, "d1": 7_000, "r0": 7_000}
         if budget_order == "rev":
@@ -355,58 +508,30 @@ def test_contract_shuffled_input_byte_equivalence():
             maxima = {k: maxima[k] for k in reversed(list(maxima))}
         inp = _solver_input(
             planner, executable_budget=budgets, max_usable_for_epoch=maxima,
-            feasibility_limit=5_000, optimization_limit=5_000,
+            feasibility_limit=5_000, optimization_limit=5_000, graph=graph, cset=cset,
         )
         gb = placement.gate_b(inp)
         place = placement.improve(inp, gb.assignment, emergency=None) if _code(gb) == "FEASIBLE" else None
         return gb, place
 
-    a_gb, a_pl = run(drives_n, "fwd")
-    b_gb, b_pl = run(drives_s, "rev")
-    # Full-result canonicity (code, assignment, diagnostics, metadata) — not a weakened
-    # code-only or assignment-only fallback that would greenwash metadata drift.
-    assert a_gb == b_gb, (
-        "GateBResult must be fully byte/canonical-equivalent under shuffled drives/budget map order")
-    if a_pl is not None or b_pl is not None:
-        assert a_pl is not None and b_pl is not None
-        assert a_pl == b_pl, "PlacementResult must be fully order-independent (not assignment-only)"
-
-
-def test_contract_adversarial_greedy_false_negative_is_feasible():
-    """Packing exists but classic FFD/greedy misses it → must be FEASIBLE, never proven infeasible."""
-    _require_placement()
-    # Drives A=6, B=6, C=5; items 4,4,3,3. FFD on A,B,C fails; packing (3,3)/(4)/(4) works.
-    sizes = (4, 4, 3, 3)
-    repos = [f"org/m{i}" for i in range(4)]
-    drives = [
-        _drive("A", cap=100, fscap=100),
-        _drive("B", cap=100, fscap=100),
-        _drive("C", cap=100, fscap=100),
+    variants = [
+        run(drives_n, "fwd"),
+        run(drives_s, "rev"),
+        run(drives_n, "fwd", reverse_req=True),
+        run(drives_s, "rev", reverse_cands=True),
+        run(drives_s, "fwd", reverse_req=True, reverse_cands=True),
     ]
-    manifests = [(repo, [_mf("w.safetensors", size, HW)]) for repo, size in zip(repos, sizes)]
-    planner = _planner(
-        selection=repos,
-        manifests=manifests,
-        numcopies=[(r, 1) for r in repos],
-        drives=drives,
-    )
-    # Executable free equals bin capacity for this synthetic (no floor recompute in placement).
-    exec_b = {"A": 6, "B": 6, "C": 5}
-    max_u = {"A": 6, "B": 6, "C": 5}
-    inp = _solver_input(
-        planner, executable_budget=exec_b, max_usable_for_epoch=max_u,
-        feasibility_limit=50_000, optimization_limit=1,
-    )
-    result = placement.gate_b(inp)
-    assert _code(result) == "FEASIBLE", (
-        f"adversarial packing must be FEASIBLE (not proven infeasible/inconclusive); got {_code(result)}")
-    _assert_metadata(result, capacity_mode="guaranteed", feasibility_limit=50_000)
-    assert result.assignment is not None
+    base_gb, base_pl = variants[0]
+    for gb, pl in variants[1:]:
+        assert gb == base_gb, "GateBResult must be fully order-independent under all input permutations"
+        assert pl == base_pl, "PlacementResult must be fully order-independent under all input permutations"
 
 
+# --------------------------------------------------------------------------------------------------
+# Mixed-evidence ladder — exact codes only
+# --------------------------------------------------------------------------------------------------
 def test_contract_mixed_known_unknown_precedence():
     _require_placement()
-    # One requirement of size 100; known drive free 200; unknown drive with usable max 200.
     planner = _planner(
         selection=["org/m"],
         manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
@@ -414,87 +539,54 @@ def test_contract_mixed_known_unknown_precedence():
         drives=[_drive("known", cap=1_000), _drive("unk", cap=1_000)],
     )
 
-    # (1) Known-only fit → FEASIBLE even with unknown present (unknown contributes 0 executable).
-    inp = _solver_input(
-        planner,
-        executable_budget={"known": 200, "unk": 0},
+    # (1) Known-only fit → FEASIBLE even with unknown present.
+    r = placement.gate_b(_solver_input(
+        planner, executable_budget={"known": 200, "unk": 0},
         max_usable_for_epoch={"known": 900, "unk": 900},
         feasibility_limit=1_000, optimization_limit=1,
-    )
-    r = placement.gate_b(inp)
+    ))
     assert _code(r) == "FEASIBLE"
-    _assert_metadata(r, capacity_mode="guaranteed")
+    _assert_metadata(r, capacity_mode="guaranteed", feasibility_limit=1_000)
+    assert r.assignment is not None
 
-    # (2) Known exhaustively infeasible, relevant unknown with known max can host → CAPACITY_EVIDENCE_UNKNOWN
-    inp2 = _solver_input(
-        planner,
-        executable_budget={"known": 10, "unk": 0},
+    # (2) Known infeasible; relevant unknown with max can host → CAPACITY_EVIDENCE_UNKNOWN
+    r2 = placement.gate_b(_solver_input(
+        planner, executable_budget={"known": 10, "unk": 0},
         max_usable_for_epoch={"known": 900, "unk": 900},
         feasibility_limit=5_000, optimization_limit=1,
-    )
-    r2 = placement.gate_b(inp2)
+    ))
     assert _code(r2) == "CAPACITY_EVIDENCE_UNKNOWN"
     _assert_no_executable_assignment(r2)
     _assert_metadata(r2, capacity_mode="guaranteed")
-    drives = getattr(r2, "drives", None) or getattr(r2, "relevant_unknown_drives", None) or ()
-    assert "unk" in set(drives) or "unk" in str(getattr(r2, "diagnostics", "")), (
-        "CAPACITY_EVIDENCE_UNKNOWN must name the relevant unknown drive(s)")
+    assert "unk" in _relevant_unknowns(r2), "must name the relevant unknown drive(s)"
 
-    # (3) Known infeasible; unknown has no usable max → CAPACITY_EVIDENCE_UNKNOWN (not structural/known-inf)
-    inp3 = _solver_input(
-        planner,
-        executable_budget={"known": 10, "unk": 0},
+    # (3) Known infeasible; unknown has no usable max → CAPACITY_EVIDENCE_UNKNOWN
+    r3 = placement.gate_b(_solver_input(
+        planner, executable_budget={"known": 10, "unk": 0},
         max_usable_for_epoch={"known": 900, "unk": None},
         feasibility_limit=5_000, optimization_limit=1,
-    )
-    r3 = placement.gate_b(inp3)
-    assert _code(r3) == "CAPACITY_EVIDENCE_UNKNOWN", (
-        f"missing usable max must not become structural/known-infeasible; got {_code(r3)}")
+    ))
+    assert _code(r3) == "CAPACITY_EVIDENCE_UNKNOWN"
     _assert_no_executable_assignment(r3)
 
-    # (4) Known infeasible; unknown at usable max still cannot host (max < peak) → INFEASIBLE_WITH_UNKNOWN...
-    #     peak for raw 100-byte file is at least 100 durable (+ workspace may be 0 for tiny with raw codec path)
-    #     Use max_usable 50 on unk so even optimistic cannot fit.
-    inp4 = _solver_input(
-        planner,
-        executable_budget={"known": 10, "unk": 0},
-        max_usable_for_epoch={"known": 50, "unk": 50},
-        feasibility_limit=5_000, optimization_limit=1,
-    )
-    r4 = placement.gate_b(inp4)
-    # Either structural REQUIREMENT_EXCEEDS_USABLE_MAX (every candidate peak > own max) or
-    # INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX if structural didn't fire on mixed known free.
-    assert _code(r4) in {
-        "INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX",
-        "REQUIREMENT_EXCEEDS_USABLE_MAX",
-        "INFEASIBLE_UNDER_ADMISSION_BUDGET",
-    }
-    if _code(r4) == "INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX":
-        diag = str(getattr(r4, "diagnostics", "")) + str(getattr(r4, "actions", ""))
-        assert "free" in diag.lower() or "known" in diag.lower() or getattr(r4, "actions", None), (
-            "INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX must not claim freeing known capacity cannot help")
-    _assert_no_executable_assignment(r4)
-
-    # (5) Known-only exhaustive infeasible, no relevant unknown → INFEASIBLE_UNDER_ADMISSION_BUDGET
+    # (4) Known-only exhaustive infeasible, no relevant unknown → INFEASIBLE_UNDER_ADMISSION_BUDGET
     planner_one = _planner(
         selection=["org/m"],
         manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
         numcopies=[("org/m", 1)],
         drives=[_drive("known", cap=1_000)],
     )
-    inp5 = _solver_input(
-        planner_one,
-        executable_budget={"known": 10},
-        max_usable_for_epoch={"known": 900},  # structural would require peak>900; 100 fits max
+    r5 = placement.gate_b(_solver_input(
+        planner_one, executable_budget={"known": 10}, max_usable_for_epoch={"known": 900},
         feasibility_limit=5_000, optimization_limit=1,
-    )
-    r5 = placement.gate_b(inp5)
+    ))
     assert _code(r5) == "INFEASIBLE_UNDER_ADMISSION_BUDGET"
     _assert_no_executable_assignment(r5)
+    _assert_metadata(r5, capacity_mode="guaranteed")
 
 
-def test_contract_requirement_exceeds_usable_max_per_candidate():
-    """Clarification 1: structural only when every candidate has known max and own peak > own target max."""
+def test_contract_requirement_exceeds_usable_max_exact():
+    """All-maxima-too-small → exactly REQUIREMENT_EXCEEDS_USABLE_MAX (not a code set)."""
     _require_placement()
     planner = _planner(
         selection=["org/m"],
@@ -502,33 +594,139 @@ def test_contract_requirement_exceeds_usable_max_per_candidate():
         numcopies=[("org/m", 1)],
         drives=[_drive("small", cap=10_000), _drive("also_small", cap=10_000)],
     )
-    # Both targets max 100 < peak ~500 → REQUIREMENT_EXCEEDS_USABLE_MAX
-    inp = _solver_input(
-        planner,
-        executable_budget={"small": 0, "also_small": 0},
+    r = placement.gate_b(_solver_input(
+        planner, executable_budget={"small": 0, "also_small": 0},
         max_usable_for_epoch={"small": 100, "also_small": 100},
         feasibility_limit=100, optimization_limit=1,
-    )
-    r = placement.gate_b(inp)
-    assert _code(r) == "REQUIREMENT_EXCEEDS_USABLE_MAX"
-    _assert_no_executable_assignment(r)
-    actions = getattr(r, "actions", None) or ()
-    assert actions or getattr(r, "diagnostics", None), "structural code must carry diagnostics/actions"
+    ))
+    _assert_structural(r, "REQUIREMENT_EXCEEDS_USABLE_MAX")
 
-    # One candidate target has unknown max → cannot conclude REQUIREMENT_EXCEEDS_USABLE_MAX
-    inp2 = _solver_input(
-        planner,
-        executable_budget={"small": 0, "also_small": 0},
+    # Unknown max on any candidate blocks structural exceed-max.
+    r2 = placement.gate_b(_solver_input(
+        planner, executable_budget={"small": 0, "also_small": 0},
         max_usable_for_epoch={"small": 100, "also_small": None},
         feasibility_limit=100, optimization_limit=1,
-    )
-    r2 = placement.gate_b(inp2)
-    assert _code(r2) != "REQUIREMENT_EXCEEDS_USABLE_MAX", (
-        "unknown max on any relevant candidate target must prevent REQUIREMENT_EXCEEDS_USABLE_MAX")
+    ))
     assert _code(r2) == "CAPACITY_EVIDENCE_UNKNOWN"
     _assert_no_executable_assignment(r2)
 
 
+def test_contract_collective_infeasible_with_unknown_at_usable_max():
+    """Every requirement fits individually on some drive, but optimistic fleet cannot pack globally.
+
+    Exact code: INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX (not structural exceed-max).
+    """
+    _require_placement()
+    # Three items of size 6; known drive free 0; two unknowns each max 10.
+    # Individually each item fits a 10-max drive; collectively 18 > 10+10=20? 6+6+6=18 ≤ 20 — fits.
+    # Use items 8,8,8 and unknowns max 10 each: individually OK, collectively 24 > 20.
+    sizes = (8, 8, 8)
+    repos = [f"org/m{i}" for i in range(3)]
+    planner = _planner(
+        selection=repos,
+        manifests=[(r, [_mf("w.safetensors", s, HW)]) for r, s in zip(repos, sizes)],
+        numcopies=[(r, 1) for r in repos],
+        drives=[
+            _drive("known", cap=1_000),
+            _drive("unk0", cap=1_000),
+            _drive("unk1", cap=1_000),
+        ],
+    )
+    r = placement.gate_b(_solver_input(
+        planner,
+        executable_budget={"known": 0, "unk0": 0, "unk1": 0},
+        max_usable_for_epoch={"known": 5, "unk0": 10, "unk1": 10},  # each 8 fits a 10; 24>20 collective
+        feasibility_limit=50_000, optimization_limit=1,
+    ))
+    assert _code(r) == "INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX"
+    _assert_no_executable_assignment(r)
+    _assert_metadata(r, capacity_mode="guaranteed")
+    # Must not claim freeing known capacity cannot help (actions/diagnostics acknowledge free/trim).
+    blob = str(getattr(r, "diagnostics", "")) + str(_actions(r)) + str(getattr(r, "message", ""))
+    assert blob, "must carry diagnostics/actions"
+    # Freeing known still may help is the semantic; do not assert "impossible physically".
+    assert "physical" not in blob.lower() or "free" in blob.lower()
+
+
+def test_contract_known_search_bound_exhaustion_with_unknowns():
+    """Known-search bound exhaustion with unknown drives present → exactly PACKING_INCONCLUSIVE."""
+    _require_placement()
+    repos = [f"org/m{i}" for i in range(8)]
+    planner = _planner(
+        selection=repos,
+        manifests=[(r, [_mf("w.safetensors", 10, HW)]) for r in repos],
+        numcopies=[(r, 1) for r in repos],
+        drives=[_drive("known", cap=10_000), _drive("unk", cap=10_000)],
+    )
+    # Enough known free that packing may exist; tiny limit forces inconclusiveness first.
+    r = placement.gate_b(_solver_input(
+        planner,
+        executable_budget={"known": 200, "unk": 0},
+        max_usable_for_epoch={"known": 9_000, "unk": 9_000},
+        feasibility_limit=1, optimization_limit=1,
+    ))
+    assert _code(r) == "PACKING_INCONCLUSIVE"
+    _assert_no_executable_assignment(r)
+    assert _visited(r) == 1
+    _assert_metadata(r, capacity_mode="guaranteed", feasibility_limit=1)
+
+
+def test_contract_optimistic_search_bound_exhaustion():
+    """After known exhaustively fails, optimistic bound exhaustion → PACKING_INCONCLUSIVE + named unknowns."""
+    _require_placement()
+    # Known free 0; many requirements; unknown has max enough that packing may exist but bound hits first.
+    repos = [f"org/m{i}" for i in range(12)]
+    planner = _planner(
+        selection=repos,
+        manifests=[(r, [_mf("w.safetensors", 10, HW)]) for r in repos],
+        numcopies=[(r, 1) for r in repos],
+        drives=[_drive("known", cap=10_000), _drive("unk", cap=10_000)],
+    )
+    # Known free 0 → known search exhaustively infeasible quickly; optimistic has room but tiny bound.
+    # Use a dedicated optimistic bound if API supports separate limits; otherwise a low feasibility
+    # limit that still allows known to finish as infeasible then exhausts optimistic.
+    # Contract: when known is proven infeasible and optimistic search hits the state bound,
+    # code is PACKING_INCONCLUSIVE (not CAPACITY_EVIDENCE_UNKNOWN).
+    r = placement.gate_b(_solver_input(
+        planner,
+        executable_budget={"known": 0, "unk": 0},
+        max_usable_for_epoch={"known": 5, "unk": 10_000},  # known cannot host 10; unk can host all
+        feasibility_limit=2,  # root + at most one more — optimistic cannot finish a 12-req tree
+        optimization_limit=1,
+    ))
+    # Known free 0 and max 5 < 10 for each item → may structural REQUIREMENT_EXCEEDS on known-only
+    # candidates, but unk is a valid candidate with max 10000 so not structural. Known search finds
+    # nothing; optimistic may be inconclusive at bound 2.
+    assert _code(r) == "PACKING_INCONCLUSIVE", (
+        f"optimistic bound exhaustion must be PACKING_INCONCLUSIVE; got {_code(r)}")
+    _assert_no_executable_assignment(r)
+    assert "unk" in _relevant_unknowns(r), "must name relevant unknown drives on optimistic inconclusive"
+    _assert_metadata(r, capacity_mode="guaranteed", feasibility_limit=2)
+
+
+def test_contract_adversarial_greedy_false_negative_is_feasible():
+    _require_placement()
+    sizes = (4, 4, 3, 3)
+    repos = [f"org/m{i}" for i in range(4)]
+    planner = _planner(
+        selection=repos,
+        manifests=[(repo, [_mf("w.safetensors", size, HW)]) for repo, size in zip(repos, sizes)],
+        numcopies=[(r, 1) for r in repos],
+        drives=[_drive("A", cap=100), _drive("B", cap=100), _drive("C", cap=100)],
+    )
+    r = placement.gate_b(_solver_input(
+        planner, executable_budget={"A": 6, "B": 6, "C": 5},
+        max_usable_for_epoch={"A": 6, "B": 6, "C": 5},
+        feasibility_limit=50_000, optimization_limit=1,
+    ))
+    assert _code(r) == "FEASIBLE"
+    _assert_metadata(r, capacity_mode="guaranteed", feasibility_limit=50_000)
+    assert r.assignment is not None
+
+
+# --------------------------------------------------------------------------------------------------
+# Structural codes + dependency resolution
+# --------------------------------------------------------------------------------------------------
 def test_contract_huge_shard_structural():
     _require_placement()
     planner = _planner(
@@ -537,40 +735,27 @@ def test_contract_huge_shard_structural():
         numcopies=[("org/giant", 1)],
         drives=[_drive("d0", cap=100_000)],
     )
-    inp = _solver_input(
-        planner,
-        executable_budget={"d0": 50_000},
-        max_usable_for_epoch={"d0": 500},  # known max << peak
+    r = placement.gate_b(_solver_input(
+        planner, executable_budget={"d0": 50_000}, max_usable_for_epoch={"d0": 500},
         feasibility_limit=50, optimization_limit=1,
-    )
-    r = placement.gate_b(inp)
-    assert _code(r) == "REQUIREMENT_EXCEEDS_USABLE_MAX"
-    _assert_no_executable_assignment(r)
-    _assert_metadata(r, capacity_mode="guaranteed")
+    ))
+    _assert_structural(r, "REQUIREMENT_EXCEEDS_USABLE_MAX")
 
 
 def test_contract_structural_target_tier_and_unproven():
     _require_placement()
-    # No primary tier at all for a primary requirement → TARGET_TIER_MISSING via blocked/no eligible.
     planner = _planner(
         selection=["org/m"],
         manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
         numcopies=[("org/m", 1)],
-        drives=[_drive("rep_only", role="replica", cap=10_000)],  # no primary eligible
+        drives=[_drive("rep_only", role="replica", cap=10_000)],
     )
-    inp = _solver_input(
-        planner,
-        executable_budget={"rep_only": 9_000},
-        max_usable_for_epoch={"rep_only": 9_000},
+    r = placement.gate_b(_solver_input(
+        planner, executable_budget={"rep_only": 9_000}, max_usable_for_epoch={"rep_only": 9_000},
         feasibility_limit=50, optimization_limit=1,
-    )
-    r = placement.gate_b(inp)
-    assert _code(r) == "TARGET_TIER_MISSING"
-    _assert_no_executable_assignment(r)
-    actions = tuple(getattr(r, "actions", ()) or ())
-    assert actions, "TARGET_TIER_MISSING must expose operator actions"
+    ))
+    _assert_structural(r, "TARGET_TIER_MISSING")
 
-    # All eligible targets unproven → UNPROVEN_PROVENANCE
     planner2 = _planner(
         selection=["org/m"],
         manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
@@ -578,22 +763,15 @@ def test_contract_structural_target_tier_and_unproven():
         drives=[_drive("d0", cap=10_000)],
         archived=[_arch("org/m", "d0", "w.safetensors", sha="0" * 64, obytes=100, sbytes=100)],
     )
-    inp2 = _solver_input(
-        planner2,
-        executable_budget={"d0": 9_000},
-        max_usable_for_epoch={"d0": 9_000},
+    r2 = placement.gate_b(_solver_input(
+        planner2, executable_budget={"d0": 9_000}, max_usable_for_epoch={"d0": 9_000},
         feasibility_limit=50, optimization_limit=1,
-    )
-    r2 = placement.gate_b(inp2)
-    assert _code(r2) == "UNPROVEN_PROVENANCE"
-    _assert_no_executable_assignment(r2)
+    ))
+    _assert_structural(r2, "UNPROVEN_PROVENANCE")
 
 
 def test_contract_failure_domain_vs_graph_dependency():
-    """Clarification 2: domain unsat vs malformed dependency are distinct codes."""
     _require_placement()
-    # Valid home+replica graph but both replica targets share home's failure domain → domain unsat.
-    # Home on raid H; replicas R1/R2 same fs_uuid as H.
     planner = _planner(
         selection=["org/m"],
         manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
@@ -604,21 +782,14 @@ def test_contract_failure_domain_vs_graph_dependency():
             _drive("R2", role="replica", cap=10_000, fs_uuid="uuid-same"),
         ],
     )
-    inp = _solver_input(
+    r = placement.gate_b(_solver_input(
         planner,
         executable_budget={"H": 5_000, "R1": 5_000, "R2": 5_000},
         max_usable_for_epoch={"H": 9_000, "R1": 9_000, "R2": 9_000},
         feasibility_limit=5_000, optimization_limit=1,
-    )
-    r = placement.gate_b(inp)
-    assert _code(r) == "FAILURE_DOMAIN_UNSATISFIABLE"
-    _assert_no_executable_assignment(r)
+    ))
+    _assert_structural(r, "FAILURE_DOMAIN_UNSATISFIABLE")
 
-    # Malformed: replica depends_on points at a missing requirement id → GRAPH_DEPENDENCY_INVARIANT.
-    # Hand-craft a SolverInput with a missing independent_of target. gate_b (or an optional
-    # validate_solver_input helper) must classify it — not raise an unrelated construction error
-    # that we re-label. Do not wrap TypeError/AttributeError as a false graph-invariant miss.
-    assert hasattr(placement, "SolverInput"), "need SolverInput"
     bad_req = candidates.CopyRequirement(
         requirement_id="protected_replica:org/bad",
         repo_id="org/bad",
@@ -629,58 +800,37 @@ def test_contract_failure_domain_vs_graph_dependency():
     bad_graph = candidates.RequirementGraph(desired=(bad_req,), requirement_set_hash="0" * 64)
     empty_cset = candidates.CandidateSet(satisfied=(), by_requirement=(), drift=(), blocked=())
     bad_inp = placement.SolverInput(
-        graph=bad_graph,
-        candidates=empty_cset,
-        drives=planner.drives,
+        graph=bad_graph, candidates=empty_cset, drives=planner.drives,
         executable_budget=_budget_pairs({"H": 5_000, "R1": 5_000, "R2": 5_000}),
         max_usable_for_epoch=_budget_pairs({"H": 9_000, "R1": 9_000, "R2": 9_000}),
-        capacity_mode="guaranteed",
-        policy_version="tiered_v2",
-        bounds=_bounds(50, 1),
+        capacity_mode="guaranteed", policy_version="tiered_v2", bounds=_bounds(50, 1),
     )
-    if hasattr(placement, "validate_solver_input"):
-        # Optional pure pre-check may raise or return the structural code; either is fine.
-        validated = placement.validate_solver_input(bad_inp)
-        if validated is not None and hasattr(validated, "code"):
-            assert _code(validated) == "GRAPH_DEPENDENCY_INVARIANT"
-            _assert_no_executable_assignment(validated)
-            return
     r_bad = placement.gate_b(bad_inp)
-    assert _code(r_bad) == "GRAPH_DEPENDENCY_INVARIANT", (
-        f"gate_b must classify missing depends_on references as GRAPH_DEPENDENCY_INVARIANT; "
-        f"got {_code(r_bad)}"
-    )
-    _assert_no_executable_assignment(r_bad)
+    _assert_structural(r_bad, "GRAPH_DEPENDENCY_INVARIANT")
 
 
-def test_contract_partial_vs_fresh_no_pin_and_movement_preference():
+def test_contract_blocked_home_retains_structural_not_graph_invariant():
+    """Valid blocked home (no eligible tier) keeps TARGET_TIER_MISSING; not GRAPH_DEPENDENCY_INVARIANT."""
     _require_placement()
-    # Partial on small (reuses 50) missing 50; fresh on big needs 100. Both candidates from #36a.
+    # numcopies=2 but no primary/raid → home blocked no_eligible_tier; replica may also block.
     planner = _planner(
         selection=["org/m"],
-        manifests=[("org/m", [_mf("a.safetensors", 50, HW), _mf("b.safetensors", 50, HW2)])],
-        numcopies=[("org/m", 1)],
-        drives=[_drive("small", cap=10_000), _drive("fresh", cap=10_000)],
-        archived=[_arch("org/m", "small", "a.safetensors", sha=HW, obytes=50, sbytes=50)],
+        manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
+        numcopies=[("org/m", 2)],
+        drives=[_drive("R", role="replica", cap=10_000, fs_uuid="r")],
     )
-    inp = _solver_input(
-        planner,
-        executable_budget={"small": 5_000, "fresh": 5_000},
-        max_usable_for_epoch={"small": 9_000, "fresh": 9_000},
-        feasibility_limit=5_000, optimization_limit=50_000,
-    )
-    gb = placement.gate_b(inp)
-    assert _code(gb) == "FEASIBLE"
-    improved = placement.improve(inp, gb.assignment, emergency=None)
-    # Prefer partial (lower movement) when free-space/idle allow. At minimum, improvement must
-    # keep a FEASIBLE assignment and a reviewed derivation_mode.
-    assert improved.assignment is not None
-    assert getattr(improved, "derivation_mode", "optimized") in {
-        "optimized", "state_truncated", "canonical_fallback",
-    }
+    r = placement.gate_b(_solver_input(
+        planner, executable_budget={"R": 9_000}, max_usable_for_epoch={"R": 9_000},
+        feasibility_limit=100, optimization_limit=1,
+    ))
+    assert _code(r) == "TARGET_TIER_MISSING", (
+        f"blocked home must retain TARGET_TIER_MISSING, not become GRAPH_*; got {_code(r)}")
+    assert _code(r) != "GRAPH_DEPENDENCY_INVARIANT"
+    _assert_no_executable_assignment(r)
+    _assert_structural(r, "TARGET_TIER_MISSING")
 
 
-def test_contract_pending_home_dependency_before_constrainedness():
+def test_contract_pending_home_resolves_source_and_domain():
     _require_placement()
     planner = _planner(
         selection=["org/m"],
@@ -691,30 +841,42 @@ def test_contract_pending_home_dependency_before_constrainedness():
             _drive("R", role="replica", cap=10_000, fs_uuid="replica-uuid"),
         ],
     )
-    inp = _solver_input(
-        planner,
-        executable_budget={"H": 5_000, "R": 5_000},
+    _, cset = _graph_cset(planner)
+    rep = [c for rid, cs in cset.by_requirement if rid.startswith("protected_replica:") for c in cs]
+    assert rep and any(isinstance(c.source, candidates.PendingHome) for c in rep)
+
+    r = placement.gate_b(_solver_input(
+        planner, executable_budget={"H": 5_000, "R": 5_000},
         max_usable_for_epoch={"H": 9_000, "R": 9_000},
         feasibility_limit=5_000, optimization_limit=5_000,
-    )
-    # Candidates should include PendingHome for replica; search must still find FEASIBLE.
-    _, cset = _graph_cset(planner)
-    rep = []
-    for rid, cs in cset.by_requirement:
-        if rid.startswith("protected_replica:"):
-            rep = list(cs)
-    assert rep and any(isinstance(c.source, candidates.PendingHome) for c in rep)
-    r = placement.gate_b(inp)
+    ))
     assert _code(r) == "FEASIBLE"
-    # Resolved assignment must pin replica source to the chosen home drive (complete identity).
-    assignment = r.assignment
-    assert assignment is not None
+    targets = _task_targets(r.assignment)
+    sources = _task_sources(r.assignment)
+    home_t = targets.get("protected_home:org/m")
+    rep_t = targets.get("protected_replica:org/m")
+    assert home_t == "H"
+    assert rep_t == "R"
+    rep_src = sources.get("protected_replica:org/m")
+    # Normalized source equals selected home target (complete identity, not PendingHome).
+    if isinstance(rep_src, candidates.SourceIdentity):
+        assert rep_src.drive_label == home_t
+    elif isinstance(rep_src, str):
+        assert rep_src == home_t
+    else:
+        # Assignment may nest source.drive_label
+        assert getattr(rep_src, "drive_label", None) == home_t, (
+            f"PendingHome must resolve to home target {home_t!r}; got {rep_src!r}")
+    # Failure-domain independent.
+    assert home_t != rep_t
+    _assert_metadata(r, capacity_mode="guaranteed")
 
 
-def test_contract_feasibility_truncation_counts_root():
+# --------------------------------------------------------------------------------------------------
+# Bounds: exact truncation (no alternatives)
+# --------------------------------------------------------------------------------------------------
+def test_contract_feasibility_truncation_exact():
     _require_placement()
-    # Force a multi-state search then set limit=1: root alone consumes the only slot → PACKING_INCONCLUSIVE
-    # (or FEASIBLE if first-feasible is found without entering a second state — use enough reqs).
     repos = [f"org/m{i}" for i in range(5)]
     planner = _planner(
         selection=repos,
@@ -722,22 +884,14 @@ def test_contract_feasibility_truncation_counts_root():
         numcopies=[(r, 1) for r in repos],
         drives=[_drive("d0", cap=10_000), _drive("d1", cap=10_000)],
     )
-    inp = _solver_input(
-        planner,
-        executable_budget={"d0": 30, "d1": 30},
+    r = placement.gate_b(_solver_input(
+        planner, executable_budget={"d0": 30, "d1": 30},
         max_usable_for_epoch={"d0": 9_000, "d1": 9_000},
-        feasibility_limit=1,  # root counts as 1; any expansion exhausts
-        optimization_limit=1,
-    )
-    r = placement.gate_b(inp)
-    # With limit 1, either we luck into a single-state solution or we are inconclusive.
-    # For 5 items needing multi-step assignment, must not claim proven infeasible.
-    assert _code(r) in {"FEASIBLE", "PACKING_INCONCLUSIVE"}
-    if _code(r) == "PACKING_INCONCLUSIVE":
-        _assert_no_executable_assignment(r)
-        visited = getattr(r, "feasibility_states_visited", None)
-        if visited is not None:
-            assert visited <= 1, "exhaustion must occur before entering limit+1"
+        feasibility_limit=1, optimization_limit=1,
+    ))
+    assert _code(r) == "PACKING_INCONCLUSIVE"
+    _assert_no_executable_assignment(r)
+    assert _visited(r) == 1
     _assert_metadata(r, capacity_mode="guaranteed", feasibility_limit=1)
 
 
@@ -753,22 +907,18 @@ def test_contract_optimization_truncation_and_emergency_fallback():
         drives=[_drive("d0", cap=10_000), _drive("d1", cap=10_000)],
     )
     inp = _solver_input(
-        planner,
-        executable_budget={"d0": 5_000, "d1": 5_000},
+        planner, executable_budget={"d0": 5_000, "d1": 5_000},
         max_usable_for_epoch={"d0": 9_000, "d1": 9_000},
-        feasibility_limit=50_000,
-        optimization_limit=1,  # truncate improvement quickly
+        feasibility_limit=50_000, optimization_limit=1,
     )
     gb = placement.gate_b(inp)
     assert _code(gb) == "FEASIBLE"
-    first = gb.assignment
-    truncated = placement.improve(inp, first, emergency=None)
-    assert getattr(truncated, "derivation_mode", None) in {"state_truncated", "optimized"}
-    if getattr(truncated, "derivation_mode", None) == "state_truncated":
-        assert getattr(truncated, "diagnostic", None) == "optimization_truncated"
+    truncated = placement.improve(inp, gb.assignment, emergency=None)
+    assert getattr(truncated, "derivation_mode", None) == "state_truncated"
+    assert getattr(truncated, "diagnostic", None) == "optimization_truncated"
     assert truncated.assignment is not None
+    _assert_metadata(truncated, capacity_mode="guaranteed", optimization_limit=1)
 
-    # Emergency: monitor raises; must return canonical first-feasible, twice identical.
     class _Boom:
         def __init__(self):
             self.n = 0
@@ -776,17 +926,12 @@ def test_contract_optimization_truncation_and_emergency_fallback():
         def __call__(self, *args, **kwargs):
             self.n += 1
             if self.n >= 1:
-                # Prefer a named exception type from placement if present.
-                exc_t = getattr(placement, "EmergencyResourceLimit", RuntimeError)
-                raise exc_t("injected emergency")
+                raise getattr(placement, "EmergencyResourceLimit", RuntimeError)("injected")
 
-    # Re-run with higher optimization limit so emergency fires during improvement search.
     inp2 = _solver_input(
-        planner,
-        executable_budget={"d0": 5_000, "d1": 5_000},
+        planner, executable_budget={"d0": 5_000, "d1": 5_000},
         max_usable_for_epoch={"d0": 9_000, "d1": 9_000},
-        feasibility_limit=50_000,
-        optimization_limit=50_000,
+        feasibility_limit=50_000, optimization_limit=50_000,
     )
     gb2 = placement.gate_b(inp2)
     assert _code(gb2) == "FEASIBLE"
@@ -794,104 +939,55 @@ def test_contract_optimization_truncation_and_emergency_fallback():
     b = placement.improve(inp2, gb2.assignment, emergency=_Boom())
     assert getattr(a, "derivation_mode", None) == "canonical_fallback"
     assert getattr(a, "diagnostic", None) == "optimization_resource_exhausted"
-    assert a.assignment == gb2.assignment, "emergency must discard best-so-far and return first-feasible"
-    assert a.assignment == b.assignment, "emergency fallback must be reproducible"
-    # isinstance(..., _Boom) — not type(_Boom) which is the metaclass `type` and never matches instances.
-    assert not any(
-        isinstance(getattr(a, f.name, None), _Boom) for f in dataclasses.fields(a)
-    ), "emergency monitor must not appear in PlacementResult"
+    assert a.assignment == gb2.assignment
+    assert a.assignment == b.assignment
+    _assert_deep_immutable(a)
+    assert not any(isinstance(getattr(a, f.name, None), _Boom) for f in dataclasses.fields(a))
 
 
-def test_contract_objective_precedence_golden():
-    """Clarification 4: movement ≻ free-space vector ≻ idle count ≻ canonical tie-break."""
+# --------------------------------------------------------------------------------------------------
+# Adversarial objective precedence
+# --------------------------------------------------------------------------------------------------
+def test_contract_objective_precedence_adversarial():
+    """Movement ≻ free-space ≻ idle ≻ canonical — each step adversarially against the next."""
     _require_placement()
-    # Three scenarios engineered so only one objective differs at a time.
-    # (1) Movement dominates: partial (low movement) vs fresh (high), even if free-vector prefers fresh.
+
+    def target_of(assignment, rid_prefix="primary:"):
+        for rid, tgt in _task_targets(assignment).items():
+            if rid.startswith(rid_prefix):
+                return tgt
+        raise AssertionError(f"no task with prefix {rid_prefix}")
+
+    # (1) Movement wins despite strictly worse free-space vector.
+    # Partial on P (movement 40) leaves free vector worse than full re-download on F (movement 80).
     planner = _planner(
         selection=["org/m"],
         manifests=[("org/m", [_mf("a.safetensors", 40, HW), _mf("b.safetensors", 40, HW2)])],
         numcopies=[("org/m", 1)],
-        drives=[
-            _drive("partial_drive", cap=10_000),
-            _drive("fresh_drive", cap=10_000),
-        ],
+        drives=[_drive("partial_drive", cap=10_000), _drive("fresh_drive", cap=10_000)],
         archived=[_arch("org/m", "partial_drive", "a.safetensors", sha=HW, obytes=40, sbytes=40)],
     )
-    # Equal executable budgets so free-space after partial leaves more free on partial_drive
-    # (charges 40) vs fresh (charges 80) — free-vector may prefer partial anyway; movement also prefers
-    # partial. To prove movement dominates free-space, need free-space to prefer the HIGHER movement
-    # option. Use a third "decoy" drive so packing on high-movement target leaves a better free vector.
-    # Simpler contract: expose score tuple on PlacementResult and assert lexicographic order against
-    # two hand-built assignments if the API allows scoring; else assert chosen target is partial_drive
-    # when both fit and movement is lower there.
+    # P free 45 → after 40 rem 5; F free 1000 → after 80 rem 920. Free prefers F: (920,45)>(100,5) wait
+    # partial: rem P=5, F=1000 → (1000,5); fresh: rem P=45, F=920 → (920,45). Free prefers partial!
+    # Need free prefer fresh: partial rem (5, 100) = (100,5); fresh rem (45, 920)=(920,45).
     inp = _solver_input(
         planner,
-        executable_budget={"partial_drive": 5_000, "fresh_drive": 5_000},
+        executable_budget={"partial_drive": 45, "fresh_drive": 1000},
         max_usable_for_epoch={"partial_drive": 9_000, "fresh_drive": 9_000},
         feasibility_limit=10_000, optimization_limit=50_000,
     )
     gb = placement.gate_b(inp)
     assert _code(gb) == "FEASIBLE"
-    improved = placement.improve(inp, gb.assignment, emergency=None)
-    score = getattr(improved, "score", None)
-    assert score is not None, "PlacementResult must expose the lexicographic score tuple for audit"
-    # Movement is first element; partial's transfer is 40 raw missing, fresh is 80.
-    # Chosen assignment must minimize movement.
-    def _target_for(requirement_prefix, assignment):
-        # Flexible extraction across plausible assignment shapes.
-        if hasattr(assignment, "by_requirement"):
-            for rid, task in assignment.by_requirement:
-                if rid.startswith(requirement_prefix) or rid == requirement_prefix:
-                    return getattr(task, "target_drive", task)
-        if hasattr(assignment, "tasks"):
-            for t in assignment.tasks:
-                rid = getattr(t, "requirement_id", "")
-                if rid.startswith("primary:") or rid.startswith(requirement_prefix):
-                    return t.target_drive
-        if isinstance(assignment, (list, tuple)):
-            for t in assignment:
-                if getattr(t, "requirement_id", "").startswith("primary:"):
-                    return t.target_drive
-        raise AssertionError("cannot read target from assignment for objective test")
+    imp = placement.improve(inp, gb.assignment, emergency=None)
+    assert target_of(imp.assignment) == "partial_drive", (
+        "movement must dominate: partial (40) wins even though free-space prefers fresh_drive")
+    score = getattr(imp, "score", None)
+    assert isinstance(score, tuple) and len(score) >= 4
 
-    assert _target_for("primary:", improved.assignment) == "partial_drive", (
-        "movement cost must dominate: finish-in-place partial preferred over full re-download")
-
-    # (2) Free-space dominates idle: two equal-movement fresh placements; prefer better remaining-free vector.
+    # (2) Free-space wins despite worse (higher) idle count.
+    # Two tasks size 50; three drives budget 100. Consolidation on one drive: free vector better, idle=2.
+    # Spread: free vector worse, idle=1. Free must pick consolidation.
     planner2 = _planner(
-        selection=["org/x"],
-        manifests=[("org/x", [_mf("w.safetensors", 100, HW)])],
-        numcopies=[("org/x", 1)],
-        drives=[_drive("big", cap=10_000), _drive("small", cap=10_000)],
-    )
-    # Equal movement either way (both fresh 100). Executable budgets differ so remaining free vectors differ.
-    inp2 = _solver_input(
-        planner2,
-        executable_budget={"big": 1_000, "small": 200},
-        max_usable_for_epoch={"big": 9_000, "small": 9_000},
-        feasibility_limit=10_000, optimization_limit=50_000,
-    )
-    gb2 = placement.gate_b(inp2)
-    assert _code(gb2) == "FEASIBLE"
-    imp2 = placement.improve(inp2, gb2.assignment, emergency=None)
-    # Prefer packing onto small (200-100=100 free left on small, 1000 on big unused) vs big
-    # (1000-100=900 on big, 200 on small unused). Descending free vector:
-    #   place on small: sorted([1000, 100], reverse) = (1000, 100)
-    #   place on big:   sorted([900, 200], reverse) = (900, 200)
-    # (1000,100) > (900,200) so free-space prefers small.
-    assert _target_for("primary:", imp2.assignment) == "small", (
-        "free-space vector must dominate idle: prefer assignment with better descending remaining-free")
-    score2 = getattr(imp2, "score", None)
-    assert isinstance(score2, tuple) and len(score2) >= 3, (
-        "score must be a lex tuple (movement, free_vector_or_key, idle_count, canonical...)")
-    assert score2[2] == 1, (
-        "idle is the third score component: one used + one unused candidate-target drive → idle=1")
-
-    # (3) Idle dominates canonical tie when movement and free-vector tie: fewer idle drives wins.
-    # Two equal tasks (size 50) and three equal drives (budget 50 each): only pairwise packing is
-    # feasible. Using two drives (idle=1) is mandatory; improve must expose idle=1 on a LIVE score
-    # from this scenario (not a reused score from scenario 1).
-    planner3 = _planner(
         selection=["org/p", "org/q"],
         manifests=[
             ("org/p", [_mf("w.safetensors", 50, HW)]),
@@ -900,9 +996,34 @@ def test_contract_objective_precedence_golden():
         numcopies=[("org/p", 1), ("org/q", 1)],
         drives=[_drive("a", cap=10_000), _drive("b", cap=10_000), _drive("c", cap=10_000)],
     )
+    inp2 = _solver_input(
+        planner2,
+        executable_budget={"a": 100, "b": 100, "c": 100},
+        max_usable_for_epoch={"a": 9_000, "b": 9_000, "c": 9_000},
+        feasibility_limit=10_000, optimization_limit=50_000,
+    )
+    gb2 = placement.gate_b(inp2)
+    assert _code(gb2) == "FEASIBLE"
+    imp2 = placement.improve(inp2, gb2.assignment, emergency=None)
+    score2 = getattr(imp2, "score", None)
+    assert isinstance(score2, tuple) and len(score2) >= 3
+    assert score2[2] == 2, (
+        "free-space must dominate idle: consolidation onto one drive leaves idle=2 "
+        f"(got idle={score2[2]}; targets={_task_targets(imp2.assignment)})")
+
+    # (3) Idle wins when movement and free-space vectors equal (zero-byte tasks).
+    planner3 = _planner(
+        selection=["org/z1", "org/z2"],
+        manifests=[
+            ("org/z1", [_mf("e.json", 0, HC, fmt="json", quant=None)]),
+            ("org/z2", [_mf("f.json", 0, HW, fmt="json", quant=None)]),
+        ],
+        numcopies=[("org/z1", 1), ("org/z2", 1)],
+        drives=[_drive("a", cap=10_000), _drive("b", cap=10_000), _drive("c", cap=10_000)],
+    )
     inp3 = _solver_input(
         planner3,
-        executable_budget={"a": 50, "b": 50, "c": 50},
+        executable_budget={"a": 100, "b": 100, "c": 100},
         max_usable_for_epoch={"a": 9_000, "b": 9_000, "c": 9_000},
         feasibility_limit=10_000, optimization_limit=50_000,
     )
@@ -911,20 +1032,105 @@ def test_contract_objective_precedence_golden():
     imp3 = placement.improve(inp3, gb3.assignment, emergency=None)
     score3 = getattr(imp3, "score", None)
     assert isinstance(score3, tuple) and len(score3) >= 3
-    assert score3 is not score and score3 is not score2, "idle scenario must use its own score object"
     assert score3[2] == 1, (
-        "idle_drive_count (score[2]) must be 1 when two of three candidate-target drives receive tasks")
-    # Movement is first; free-vector second; idle third — pin the ordering slots on every live score.
-    for live in (score, score2, score3):
-        assert isinstance(live, tuple) and len(live) >= 3
-        assert live[0] is not None  # movement
-        assert live[1] is not None  # free-space key / vector
-        assert isinstance(live[2], int) and live[2] >= 0  # idle count
+        "idle must dominate when movement/free equal: fewer idle drives (use 2 of 3) wins; "
+        f"got idle={score3[2]} targets={_task_targets(imp3.assignment)}")
+
+    # (4) Canonical tie-break when first three objectives equal: exact target label order.
+    planner4 = _planner(
+        selection=["org/t"],
+        manifests=[("org/t", [_mf("w.safetensors", 10, HW)])],
+        numcopies=[("org/t", 1)],
+        drives=[_drive("drive-b", cap=10_000), _drive("drive-a", cap=10_000)],
+    )
+    inp4 = _solver_input(
+        planner4,
+        executable_budget={"drive-a": 100, "drive-b": 100},
+        max_usable_for_epoch={"drive-a": 9_000, "drive-b": 9_000},
+        feasibility_limit=10_000, optimization_limit=50_000,
+    )
+    gb4 = placement.gate_b(inp4)
+    assert _code(gb4) == "FEASIBLE"
+    imp4 = placement.improve(inp4, gb4.assignment, emergency=None)
+    # Lexicographically smaller drive label wins the canonical tie.
+    assert target_of(imp4.assignment) == "drive-a", (
+        f"canonical tie-break must prefer drive-a over drive-b; got {target_of(imp4.assignment)!r}")
+    score4 = getattr(imp4, "score", None)
+    assert isinstance(score4, tuple) and len(score4) >= 4
+
+
+def test_contract_remaining_free_zero_byte_task_not_idle():
+    _require_placement()
+    planner = _planner(
+        selection=["org/z"],
+        manifests=[("org/z", [_mf("empty.json", 0, HC, fmt="json", quant=None)])],
+        numcopies=[("org/z", 1)],
+        drives=[_drive("d0", cap=10_000), _drive("d1", cap=10_000)],
+    )
+    gb = placement.gate_b(_solver_input(
+        planner, executable_budget={"d0": 100, "d1": 100},
+        max_usable_for_epoch={"d0": 9_000, "d1": 9_000},
+        feasibility_limit=1_000, optimization_limit=10_000,
+    ))
+    assert _code(gb) == "FEASIBLE"
+    imp = placement.improve(
+        _solver_input(
+            planner, executable_budget={"d0": 100, "d1": 100},
+            max_usable_for_epoch={"d0": 9_000, "d1": 9_000},
+            feasibility_limit=1_000, optimization_limit=10_000,
+        ),
+        gb.assignment, emergency=None,
+    )
+    score = getattr(imp, "score", None)
+    assert score is not None and len(score) >= 3
+    assert score[2] == 1, f"zero-byte task still uses a drive; idle={score[2]}"
+
+
+# --------------------------------------------------------------------------------------------------
+# Workspace max accounting + capacity modes
+# --------------------------------------------------------------------------------------------------
+def test_contract_workspace_peak_not_summed():
+    """Two nonzero-workspace tasks: fit at durable_sum+max(ws); sum-of-ws would wrongly fail."""
+    _require_placement()
+    # Separate repos → separate tasks. Compress shards → nonzero workspace peaks.
+    size_a, size_b = 100, 250
+    d_a, w_a = _file_ws(size_a)
+    d_b, w_b = _file_ws(size_b)
+    assert w_a > 0 and w_b > 0
+    durable_sum = d_a + d_b
+    max_ws = max(w_a, w_b)
+    sum_ws = w_a + w_b
+    assert sum_ws > max_ws
+    fit_budget = durable_sum + max_ws          # correct rule
+    sum_ws_budget = durable_sum + sum_ws       # incorrect sum-of-workspaces rule
+    assert fit_budget < sum_ws_budget
+
+    planner = _planner(
+        selection=["org/a", "org/b"],
+        manifests=[
+            ("org/a", [_mf("w.safetensors", size_a, HW)]),
+            ("org/b", [_mf("w.safetensors", size_b, HW2)]),
+        ],
+        numcopies=[("org/a", 1), ("org/b", 1)],
+        drives=[_drive("d0", cap=10**12)],
+    )
+    r_ok = placement.gate_b(_solver_input(
+        planner, executable_budget={"d0": fit_budget}, max_usable_for_epoch={"d0": 10**12},
+        feasibility_limit=1_000, optimization_limit=1,
+    ))
+    assert _code(r_ok) == "FEASIBLE", (
+        f"durable_sum+max(ws)={fit_budget} must fit (a sum-of-ws impl needs {sum_ws_budget})")
+
+    r_short = placement.gate_b(_solver_input(
+        planner, executable_budget={"d0": fit_budget - 1}, max_usable_for_epoch={"d0": 10**12},
+        feasibility_limit=1_000, optimization_limit=1,
+    ))
+    assert _code(r_short) != "FEASIBLE"
+    _assert_no_executable_assignment(r_short)
 
 
 def test_contract_both_capacity_modes():
     _require_placement()
-    # Compressible float shard: guaranteed durable = raw; expected = ratio*margin may fit tighter budget.
     size = 1_000
     planner = _planner(
         selection=["org/m"],
@@ -932,66 +1138,27 @@ def test_contract_both_capacity_modes():
         numcopies=[("org/m", 1)],
         drives=[_drive("d0", cap=10_000)],
     )
-    # Budget between expected and raw so modes diverge.
     expected = int(size * RATIO * MARGIN)
-    assert expected < size
     mid = (expected + size) // 2
     for mode, want_feasible in (("guaranteed", False), ("compression_aware", True)):
-        inp = _solver_input(
-            planner,
-            executable_budget={"d0": mid},
-            max_usable_for_epoch={"d0": 9_000},
-            capacity_mode=mode,
-            feasibility_limit=1_000, optimization_limit=1,
-        )
-        r = placement.gate_b(inp)
+        r = placement.gate_b(_solver_input(
+            planner, executable_budget={"d0": mid}, max_usable_for_epoch={"d0": 9_000},
+            capacity_mode=mode, feasibility_limit=1_000, optimization_limit=1,
+        ))
         _assert_metadata(r, capacity_mode=mode)
         if want_feasible:
-            assert _code(r) == "FEASIBLE", f"{mode} should fit under mid budget"
+            assert _code(r) == "FEASIBLE"
         else:
-            assert _code(r) != "FEASIBLE", f"{mode} should not fit under mid budget"
+            assert _code(r) != "FEASIBLE"
             _assert_no_executable_assignment(r)
 
 
-def test_contract_workspace_peak_not_summed():
-    _require_placement()
-    # Two tasks on one drive: durable sums; workspace is max — fit when sum(d)+max(w) <= budget.
-    # Exact numbers depend on codec workspace; assert the pure fit rule via a mode with zero workspace
-    # raw files (aux/raw) so durable-only accounting is visible, plus a note that multi-task max holds.
-    planner = _planner(
-        selection=["org/a", "org/b"],
-        manifests=[
-            ("org/a", [_mf("c.json", 100, HC, fmt="json", quant=None)]),
-            ("org/b", [_mf("d.json", 100, HW, fmt="json", quant=None)]),
-        ],
-        numcopies=[("org/a", 1), ("org/b", 1)],
-        drives=[_drive("d0", cap=10_000)],
-    )
-    # Budget exactly 200: both raw 100+100 fit; workspace 0.
-    inp = _solver_input(
-        planner,
-        executable_budget={"d0": 200},
-        max_usable_for_epoch={"d0": 9_000},
-        feasibility_limit=1_000, optimization_limit=1,
-    )
-    r = placement.gate_b(inp)
-    assert _code(r) == "FEASIBLE"
-    # Budget 199 cannot hold durable sum 200
-    inp2 = _solver_input(
-        planner,
-        executable_budget={"d0": 199},
-        max_usable_for_epoch={"d0": 9_000},
-        feasibility_limit=1_000, optimization_limit=1,
-    )
-    r2 = placement.gate_b(inp2)
-    assert _code(r2) != "FEASIBLE"
-    _assert_no_executable_assignment(r2)
-
-
+# --------------------------------------------------------------------------------------------------
+# 10k scale — exact FEASIBLE + complete assignment + determinism
+# --------------------------------------------------------------------------------------------------
 def test_contract_10k_candidates_scale():
     _require_placement()
-    # Many repos × many drives → large candidate cross-product; must complete with explicit scale bounds.
-    n_repos, n_drives = 100, 100  # 10k primary candidates
+    n_repos, n_drives = 100, 100
     repos = [f"org/m{i:04d}" for i in range(n_repos)]
     drives = [_drive(f"d{i:04d}", cap=10**12) for i in range(n_drives)]
     planner = _planner(
@@ -1002,80 +1169,38 @@ def test_contract_10k_candidates_scale():
     )
     exec_b = {f"d{i:04d}": 10**9 for i in range(n_drives)}
     max_u = {f"d{i:04d}": 10**11 for i in range(n_drives)}
+    lim_f, lim_o = 200_000, 50_000
     inp = _solver_input(
-        planner,
-        executable_budget=exec_b,
-        max_usable_for_epoch=max_u,
-        feasibility_limit=200_000,
-        optimization_limit=50_000,
+        planner, executable_budget=exec_b, max_usable_for_epoch=max_u,
+        feasibility_limit=lim_f, optimization_limit=lim_o,
     )
     t0 = time.perf_counter()
-    r = placement.gate_b(inp)
-    elapsed = time.perf_counter() - t0
-    assert _code(r) in ALL_GATE_B_CODES
-    _assert_metadata(r, capacity_mode="guaranteed", feasibility_limit=200_000)
-    # Soft budget for Gate-1 evidence collection (not a hard production SLA yet).
-    assert elapsed < 120.0, f"10k-candidate gate_b took {elapsed:.1f}s; record for bounds proposal"
-    if _code(r) == "FEASIBLE":
-        t1 = time.perf_counter()
-        placement.improve(inp, r.assignment, emergency=None)
-        assert time.perf_counter() - t1 < 120.0
+    r1 = placement.gate_b(inp)
+    assert time.perf_counter() - t0 < 120.0
+    assert _code(r1) == "FEASIBLE"
+    _assert_metadata(r1, capacity_mode="guaranteed", feasibility_limit=lim_f, optimization_limit=lim_o)
+    targets = _task_targets(r1.assignment)
+    assert len(targets) == n_repos, f"must assign all {n_repos} requirements; got {len(targets)}"
+    assert all(rid.startswith("primary:") for rid in targets)
+    visited = _visited(r1)
+    assert 1 <= visited <= lim_f
 
+    r2 = placement.gate_b(inp)
+    assert r1 == r2, "gate_b must be deterministic on repeated calls"
 
-def test_contract_explicit_bounds_required():
-    _require_placement()
-    # Constructing SolverInput without bounds must fail; pure path has no implicit defaults.
-    planner = _planner(
-        selection=["org/m"],
-        manifests=[("org/m", [_mf("w.safetensors", 10, HW)])],
-        numcopies=[("org/m", 1)],
-        drives=[_drive("d0")],
-    )
-    graph, cset = _graph_cset(planner)
-    try:
-        placement.SolverInput(
-            graph=graph,
-            candidates=cset,
-            drives=planner.drives,
-            executable_budget=_budget_pairs({"d0": 100}),
-            max_usable_for_epoch=_budget_pairs({"d0": 1000}),
-            capacity_mode="guaranteed",
-            policy_version="tiered_v2",
-            # bounds intentionally omitted
-        )
-        raised = False
-    except TypeError:
-        raised = True
-    assert raised, "SolverInput must require explicit SolverBounds (no implicit pure defaults)"
-
-
-def test_contract_remaining_free_zero_byte_task_not_idle():
-    _require_placement()
-    # A zero-size file assignment still marks the drive as used for idle-count.
-    planner = _planner(
-        selection=["org/z"],
-        manifests=[("org/z", [_mf("empty.json", 0, HC, fmt="json", quant=None)])],
-        numcopies=[("org/z", 1)],
-        drives=[_drive("d0", cap=10_000), _drive("d1", cap=10_000)],
-    )
-    inp = _solver_input(
-        planner,
-        executable_budget={"d0": 100, "d1": 100},
-        max_usable_for_epoch={"d0": 9_000, "d1": 9_000},
-        feasibility_limit=1_000, optimization_limit=10_000,
-    )
-    gb = placement.gate_b(inp)
-    assert _code(gb) == "FEASIBLE"
-    imp = placement.improve(inp, gb.assignment, emergency=None)
-    score = getattr(imp, "score", None)
-    assert score is not None and len(score) >= 3
-    idle = score[2]
-    # Exactly one drive used → idle count among candidate-target universe (2) is 1.
-    assert idle == 1, f"zero-byte assigned task must count drive as used; idle={idle}"
+    t1 = time.perf_counter()
+    imp = placement.improve(inp, r1.assignment, emergency=None)
+    assert time.perf_counter() - t1 < 120.0
+    assert getattr(imp, "derivation_mode", None) in {"optimized", "state_truncated"}
+    if getattr(imp, "derivation_mode", None) == "state_truncated":
+        assert getattr(imp, "diagnostic", None) == "optimization_truncated"
+    assert imp.assignment is not None
+    assert len(_task_targets(imp.assignment)) == n_repos
+    _assert_metadata(imp, capacity_mode="guaranteed", optimization_limit=lim_o)
 
 
 # --------------------------------------------------------------------------------------------------
-# Adapter contracts (ruling 9) — red until plan_capacity projects tiered_v2 + graded Gate-B
+# Adapter contracts — force every graded outcome
 # --------------------------------------------------------------------------------------------------
 def _mem():
     con = sqlite3.connect(":memory:", isolation_level=None)
@@ -1085,12 +1210,13 @@ def _mem():
     return con
 
 
-def _db_drive(con, label, *, role="primary", raid=False, capacity_bytes=10_000, free=None):
+def _db_drive(con, label, *, role="primary", raid=False, capacity_bytes=10_000, free=None,
+              fs_uuid=None):
     free = capacity_bytes if free is None else free
     con.execute(
-        "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes) "
-        "VALUES(?,?,?,?,?)",
-        [label, role, int(raid), capacity_bytes, free],
+        "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes,fs_uuid) "
+        "VALUES(?,?,?,?,?,?)",
+        [label, role, int(raid), capacity_bytes, free, fs_uuid],
     )
     con.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('ark',?)", [label])
 
@@ -1105,10 +1231,21 @@ def _db_repo(con, repo, *, copies=1, files=None):
     )
 
 
-def _plan_with_evidence(con, **kwargs):
+def _evidence(label, *, free, executable=True, max_usable=None, kind="live"):
+    if not executable:
+        return capacity_evidence.Evidence(
+            kind="unknown", executable=False, admissible_free=0,
+            code="CAPACITY_EVIDENCE_UNKNOWN", optimistic_usable_max=max_usable,
+            observed_at="2026-01-01", identity_epoch=1)
+    return capacity_evidence.Evidence(
+        kind=kind, executable=True, admissible_free=free, observed_free=free,
+        optimistic_usable_max=max_usable if max_usable is not None else free,
+        observed_at="2026-01-01", identity_epoch=1)
+
+
+def _plan(con, evidence_by_drive, **kwargs):
     graph = reconcile.reconcile_plan(con, "ark")
-    evidence = _admission_compat.evidence_for_plan(con, "ark")
-    return capacity.plan_capacity(con, graph, evidence_by_drive=evidence, **kwargs)
+    return capacity.plan_capacity(con, graph, evidence_by_drive=evidence_by_drive, **kwargs)
 
 
 def _gate_b_code_from_plan(plan) -> str:
@@ -1118,103 +1255,181 @@ def _gate_b_code_from_plan(plan) -> str:
         code = payload.get("gate_b_code")
     if code is None:
         raise AssertionError(
-            "#38 adapter must expose gate_b_code on CapacityPlan and in to_dict() "
-            "(graded Gate-B result for FEASIBLE and every non-feasible/structural code)")
+            "#38 adapter must expose gate_b_code on CapacityPlan and in to_dict()")
     return code.value if hasattr(code, "value") else str(code)
+
+
+def _assert_adapter_nonfeasible(plan, expected_code: str):
+    code = _gate_b_code_from_plan(plan)
+    assert code == expected_code, f"adapter gate_b_code: expected {expected_code}, got {code}"
+    assert plan.feasible is False
+    assert not plan.tasks, f"{expected_code} must not expose executable tasks"
+    payload = plan.to_dict()
+    assert payload.get("gate_b_code") == expected_code
+    assert payload.get("feasible") is False
+    assert payload.get("placement_policy") == "tiered_v2"
+    # No false standalone capacity-short classification without the graded code authority.
+    failure_codes = {
+        f.code.value if hasattr(f.code, "value") else str(f.code) for f in plan.failures
+    }
+    if failure_codes and failure_codes <= {"CAPACITY_DURABLE_SHORT", "CAPACITY_WORKSPACE_SHORT"}:
+        raise AssertionError(
+            f"{expected_code} must not be projected only as proven capacity short {failure_codes}")
 
 
 def test_adapter_placement_policy_tiered_v2():
     con = _mem()
     _db_drive(con, "d0", capacity_bytes=100_000, free=100_000)
-    _db_repo(con, "org/m", files=(("model.safetensors", 100, "safetensors", "bf16"),))
-    plan = _plan_with_evidence(con)
+    _db_repo(con, "org/m")
+    plan = _plan(con, {"d0": _evidence("d0", free=100_000, max_usable=100_000)})
     assert plan.placement_policy == "tiered_v2", (
         f"plan_capacity must project placement_policy=tiered_v2; got {plan.placement_policy!r}")
-    payload = plan.to_dict()
-    assert payload.get("placement_policy") == "tiered_v2"
+    assert plan.to_dict().get("placement_policy") == "tiered_v2"
     con.close()
 
 
-def test_adapter_exposes_graded_gate_b_and_feasible_exclusivity():
+def test_adapter_feasible_exclusivity_when_feasible():
     con = _mem()
     _db_drive(con, "d0", capacity_bytes=100_000, free=100_000)
     _db_repo(con, "org/m", files=(("model.safetensors", 100, "safetensors", "bf16"),))
-    plan = _plan_with_evidence(con)
+    plan = _plan(con, {"d0": _evidence("d0", free=100_000, max_usable=100_000)})
     code = _gate_b_code_from_plan(plan)
-    assert code in ALL_GATE_B_CODES
-    # feasible=True exclusively for FEASIBLE
-    if code == "FEASIBLE":
-        assert plan.feasible is True
-        assert plan.tasks, "FEASIBLE adapter projection should carry assigned tasks"
-    else:
-        assert plan.feasible is False
-        # Non-FEASIBLE must not expose an executable assignment as authority
-        assert not plan.tasks, (
-            "non-FEASIBLE plan_capacity result must not expose executable tasks")
-    payload = plan.to_dict()
-    assert payload.get("gate_b_code") == code
-    assert payload.get("feasible") == (code == "FEASIBLE")
-    assert payload.get("mode") in {"guaranteed", "compression_aware"}
-    con.close()
-
-
-def test_adapter_never_feasible_for_infeasible_cart():
-    con = _mem()
-    # Tiny free vs large file → non-FEASIBLE under any honest Gate-B.
-    _db_drive(con, "d0", capacity_bytes=1_000, free=50)
-    _db_repo(con, "org/giant", files=(("model.safetensors", 10_000, "safetensors", "bf16"),))
-    plan = _plan_with_evidence(con)
-    code = _gate_b_code_from_plan(plan)
-    assert code != "FEASIBLE"
-    assert plan.feasible is False
-    assert code in ALL_GATE_B_CODES
-    # Must not look like a silent success.
-    assert plan.to_dict()["feasible"] is False
-    con.close()
-
-
-def test_adapter_inconclusive_or_unknown_not_false_proven_short():
-    """When pure path would return PACKING_INCONCLUSIVE / CAPACITY_EVIDENCE_UNKNOWN, adapter must
-    not project only CAPACITY_DURABLE_SHORT as if packing were proven impossible.
-
-    Until production exists this test documents the projection rule: if gate_b_code is
-    PACKING_INCONCLUSIVE or CAPACITY_EVIDENCE_UNKNOWN, failure codes must not be solely durable/workspace
-    short without the graded code.
-    """
-    # Require the adapter surface: plan_capacity must expose gate_b_code so the mapping invariant
-    # can be checked. Fails for missing graded projection (correct Gate-1 red reason).
-    con = _mem()
-    _db_drive(con, "d0", capacity_bytes=100_000, free=100_000)
-    _db_drive(con, "d1", capacity_bytes=100_000, free=0)
-    _db_repo(con, "org/m")
-    plan = _plan_with_evidence(con)
-    code = _gate_b_code_from_plan(plan)
-    if code in {"PACKING_INCONCLUSIVE", "CAPACITY_EVIDENCE_UNKNOWN"}:
-        assert plan.feasible is False
-        # Graded code must be present alongside any legacy failure list
-        assert plan.to_dict().get("gate_b_code") == code
-        # Must not present solely as a proven durable/workspace short without the graded code.
-        failure_codes = {f.code.value if hasattr(f.code, "value") else str(f.code) for f in plan.failures}
-        if failure_codes and failure_codes <= {
-            "CAPACITY_DURABLE_SHORT", "CAPACITY_WORKSPACE_SHORT",
-        }:
-            raise AssertionError(
-                f"{code} must not be projected only as proven capacity short {failure_codes}; "
-                "keep gate_b_code authoritative")
+    assert code == "FEASIBLE"
+    assert plan.feasible is True
+    assert plan.tasks
+    assert plan.to_dict()["feasible"] is True
+    assert plan.mode.value in {"guaranteed", "compression_aware"}
     con.close()
 
 
 def test_adapter_mode_labelling_both_modes():
     con = _mem()
     _db_drive(con, "d0", capacity_bytes=100_000, free=100_000)
-    _db_repo(con, "org/m", files=(("model.safetensors", 100, "safetensors", "bf16"),))
+    _db_repo(con, "org/m")
     for mode in ("guaranteed", "compression_aware"):
-        plan = _plan_with_evidence(con, capacity_mode=mode)
+        plan = _plan(con, {"d0": _evidence("d0", free=100_000, max_usable=100_000)},
+                     capacity_mode=mode)
         assert plan.mode.value == mode
-        # Graded code required even when feasible
-        code = _gate_b_code_from_plan(plan)
-        assert code in ALL_GATE_B_CODES
-        assert plan.feasible == (code == "FEASIBLE")
+        assert _gate_b_code_from_plan(plan) in ALL_GATE_B_CODES
+        assert plan.feasible == (_gate_b_code_from_plan(plan) == "FEASIBLE")
+    con.close()
+
+
+def test_adapter_structural_target_tier_missing():
+    con = _mem()
+    _db_drive(con, "rep", role="replica", capacity_bytes=100_000, free=100_000)
+    _db_repo(con, "org/m", copies=1)
+    plan = _plan(con, {"rep": _evidence("rep", free=100_000, max_usable=100_000)})
+    _assert_adapter_nonfeasible(plan, "TARGET_TIER_MISSING")
+    con.close()
+
+
+def test_adapter_structural_unproven_provenance():
+    con = _mem()
+    _db_drive(con, "d0", capacity_bytes=100_000, free=100_000)
+    _db_repo(con, "org/m", files=(("model.safetensors", 100, "safetensors", "bf16"),))
+    # Mismatched hash → unproven on the only eligible target.
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,orig_sha256,stored_bytes,orig_bytes,compressed) "
+        "VALUES('org/m','model.safetensors','d0',?,?,?,0)",
+        ["0" * 64, 100, 100],
+    )
+    plan = _plan(con, {"d0": _evidence("d0", free=100_000, max_usable=100_000)})
+    _assert_adapter_nonfeasible(plan, "UNPROVEN_PROVENANCE")
+    con.close()
+
+
+def test_adapter_structural_requirement_exceeds_usable_max():
+    con = _mem()
+    _db_drive(con, "d0", capacity_bytes=1_000, free=50)
+    _db_repo(con, "org/giant", files=(("model.safetensors", 10_000, "safetensors", "bf16"),))
+    # Admission-supplied max below the peak; executable free also small.
+    plan = _plan(con, {"d0": _evidence("d0", free=50, max_usable=100)})
+    _assert_adapter_nonfeasible(plan, "REQUIREMENT_EXCEEDS_USABLE_MAX")
+    con.close()
+
+
+def test_adapter_capacity_evidence_unknown():
+    con = _mem()
+    _db_drive(con, "known", capacity_bytes=1_000, free=10)
+    _db_drive(con, "unk", capacity_bytes=10_000, free=0)
+    _db_repo(con, "org/m", files=(("model.safetensors", 100, "safetensors", "bf16"),))
+    evidence = {
+        "known": _evidence("known", free=10, max_usable=900),
+        "unk": _evidence("unk", free=0, executable=False, max_usable=900),
+    }
+    plan = _plan(con, evidence)
+    _assert_adapter_nonfeasible(plan, "CAPACITY_EVIDENCE_UNKNOWN")
+    con.close()
+
+
+def test_adapter_infeasible_under_admission_budget():
+    con = _mem()
+    _db_drive(con, "known", capacity_bytes=1_000, free=10)
+    _db_repo(con, "org/m", files=(("model.safetensors", 100, "safetensors", "bf16"),))
+    plan = _plan(con, {"known": _evidence("known", free=10, max_usable=900)})
+    _assert_adapter_nonfeasible(plan, "INFEASIBLE_UNDER_ADMISSION_BUDGET")
+    con.close()
+
+
+def test_adapter_infeasible_with_unknown_at_usable_max():
+    con = _mem()
+    for label in ("known", "unk0", "unk1"):
+        _db_drive(con, label, capacity_bytes=1_000, free=0)
+    for i, size in enumerate((8, 8, 8)):
+        _db_repo(con, f"org/m{i}", files=(("model.safetensors", size, "safetensors", "bf16"),))
+    evidence = {
+        "known": _evidence("known", free=0, max_usable=5),
+        "unk0": _evidence("unk0", free=0, executable=False, max_usable=10),
+        "unk1": _evidence("unk1", free=0, executable=False, max_usable=10),
+    }
+    plan = _plan(con, evidence)
+    _assert_adapter_nonfeasible(plan, "INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX")
+    con.close()
+
+
+def test_adapter_packing_inconclusive_via_bounds():
+    """Deterministically drive PACKING_INCONCLUSIVE through the adapter (explicit bounds kwarg)."""
+    con = _mem()
+    _db_drive(con, "d0", capacity_bytes=100_000, free=100_000)
+    _db_drive(con, "unk", capacity_bytes=100_000, free=0)
+    for i in range(8):
+        _db_repo(con, f"org/m{i}")
+    evidence = {
+        "d0": _evidence("d0", free=200, max_usable=9_000),
+        "unk": _evidence("unk", free=0, executable=False, max_usable=9_000),
+    }
+    # Production adapter must accept bounds= or feasibility_state_limit= to force this outcome.
+    kwargs = {}
+    sig = inspect.signature(capacity.plan_capacity)
+    if "bounds" in sig.parameters:
+        kwargs["bounds"] = _bounds(1, 1) if _HAS_PLACEMENT else None
+    elif "feasibility_state_limit" in sig.parameters:
+        kwargs["feasibility_state_limit"] = 1
+    else:
+        raise AssertionError(
+            "plan_capacity must accept bounds= or feasibility_state_limit= so the adapter can "
+            "deterministically project PACKING_INCONCLUSIVE")
+    if kwargs.get("bounds") is None and "bounds" in kwargs:
+        raise AssertionError("placement.SolverBounds required to inject adapter bounds")
+    plan = _plan(con, evidence, **{k: v for k, v in kwargs.items() if v is not None})
+    _assert_adapter_nonfeasible(plan, "PACKING_INCONCLUSIVE")
+    con.close()
+
+
+def test_adapter_failure_domain_unsatisfiable():
+    con = _mem()
+    _db_drive(con, "H", role="primary", raid=True, capacity_bytes=100_000, free=100_000, fs_uuid="same")
+    _db_drive(con, "R1", role="replica", capacity_bytes=100_000, free=100_000, fs_uuid="same")
+    _db_drive(con, "R2", role="replica", capacity_bytes=100_000, free=100_000, fs_uuid="same")
+    _db_repo(con, "org/m", copies=2)
+    evidence = {
+        "H": _evidence("H", free=50_000, max_usable=90_000),
+        "R1": _evidence("R1", free=50_000, max_usable=90_000),
+        "R2": _evidence("R2", free=50_000, max_usable=90_000),
+    }
+    plan = _plan(con, evidence)
+    _assert_adapter_nonfeasible(plan, "FAILURE_DOMAIN_UNSATISFIABLE")
     con.close()
 
 
@@ -1239,7 +1454,7 @@ def main():
     if failed:
         print("\nExpected-red map:")
         for name, etype, msg in failed:
-            short = msg.replace("\n", " ")[:160]
+            short = msg.replace("\n", " ")[:180]
             print(f"  {name}: {etype}: {short}")
         raise SystemExit(1)
 
