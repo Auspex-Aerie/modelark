@@ -1764,6 +1764,16 @@ def test_adapter_capacity_evidence_unknown():
     }
     plan = _plan(con, evidence)
     _assert_adapter_nonfeasible(plan, "CAPACITY_EVIDENCE_UNKNOWN")
+    # Positive projection pin (not only "not proven-short"): operators see typed failures,
+    # not GRAPH_INVARIANT. Primary taxonomy is FailureCode; evidence_code is admission code.
+    assert plan.failures, "CAPACITY_EVIDENCE_UNKNOWN must project failure rows for CLI/library"
+    for failure in plan.failures:
+        code = failure.code.value if hasattr(failure.code, "value") else str(failure.code)
+        assert code == "CAPACITY_EVIDENCE_UNKNOWN", (
+            f"unknown evidence must not use GRAPH_INVARIANT or CAPACITY_*_SHORT; got {code!r}")
+        assert code not in {"GRAPH_INVARIANT", "CAPACITY_DURABLE_SHORT", "CAPACITY_WORKSPACE_SHORT"}
+        assert "unk" in failure.eligible_drives
+        assert failure.evidence_code == "CAPACITY_EVIDENCE_UNKNOWN"
     con.close()
 
 
