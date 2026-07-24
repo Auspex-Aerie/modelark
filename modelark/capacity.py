@@ -721,25 +721,23 @@ def _legacy_placeables(cset, drive_by_label) -> list[_Placeable]:
 def _adapter_solver_bounds() -> placement.SolverBounds:
     """Production solver bounds for the plan_capacity adapter (patchable; not a public kwarg).
 
-    Measured 2026-07-24 on the Gate-1 10k-candidate scale fixture (100 requirements × 100 drives,
-    each requirement has a candidate on every drive — 10_000 candidates):
+    Measured 2026-07-24 (local) on the Gate-1 10k-candidate scale fixture (100 requirements ×
+    100 drives = 10_000 candidates) and the phase-2 1000×10 characterization:
 
-    | phase         | states visited | wall time   | notes |
-    |---------------|----------------|-------------|-------|
-    | gate_b (feas) | 101            | ~0.03 s     | first-feasible chain (root + 100) |
-    | improve 5k    | 5_000 (cap)    | ~2–3 s      | state_truncated; interactive-friendly |
-    | improve 50k   | 50_000 (cap)   | ~30 s       | still truncated; not interactive |
-    | improve 200k  | 200_000 (cap)  | ~120 s      | still truncated |
+    | phase / case                         | states      | wall time   | notes |
+    |--------------------------------------|-------------|-------------|-------|
+    | gate_b 10k first-feasible            | 101         | ~0.03 s     | root + 100  |
+    | improve 10k @ optim=50_000           | 50_000 cap  | ~30 s       | truncated   |
+    | improve 10k @ optim=5_000            | 5_000 cap   | ~2–3 s      | over 2 s budget |
+    | phase-2 1000×10 plan @ optim=1_500   | ≤1_500      | ~1.07–1.15 s| 3/3 local; ~40% headroom under 2.0 s |
 
-    Also exercised: 1000 requirements × 10 drives (phase-2 characterization) first-feasible in
-    ~1001 states; improve must not exceed a few thousand states to stay under the 2 s budget.
-
-    Proposed production defaults (frozen here with the cutover):
+    Frozen production defaults (must match the return values below):
       feasibility_state_limit = 200_000  — headroom over easy first-feasible; matches Gate-1 scale
                                            fixture cap; adversarial multi-drive packing << 50k.
-      optimization_state_limit = 5_000   — interactive plan_capacity ceiling; returns best-so-far
-                                           under state_truncated. Full lex optimization of dense
-                                           10k-candidate trees is intentionally truncated.
+      optimization_state_limit = 1_500   — keeps phase-2 plan_capacity under the 2.0 s budget with
+                                           CI headroom; returns best-so-far under state_truncated.
+                                           Full lex optimization of dense trees is intentionally
+                                           truncated. Do not ship 5_000: it breaches the 2 s budget.
     """
     return placement.SolverBounds(
         feasibility_state_limit=200_000,
@@ -1129,26 +1127,9 @@ def plan_capacity(
     actions = tuple(gate.actions) if gate.actions else ()
     code = gate.code
 
-    # Reconcile already blocked the plan (e.g. MANIFEST_POLICY) and Gate-B has nothing to place:
-    # do not claim FEASIBLE (ruling G exclusivity + legacy shadow infeasibility).
-    if code == "FEASIBLE" and blocking and (
-            gate.assignment is None or not gate.assignment.tasks
-    ) and not result.candidates.by_requirement and not result.candidates.satisfied:
-        return CapacityPlan(
-            mode=mode,
-            placement_policy="tiered_v2",
-            tasks=(),
-            batch_order=(),
-            blocking_diagnostics=blocking,
-            unassigned_intents=(),
-            ledgers=_ledgers(capacity_drives, ()),
-            failures=(),
-            gate_b_code=blocking[0],
-            gate_b_diagnostics={"reason": "reconcile_blocking", "codes": blocking},
-            gate_b_actions=("inspect_integrity", "reconcile_plan"),
-            derivation_mode=None,
-            solver_bound_version=gate.solver_bound_version,
-        )
+    # gate_b_code is the pure Gate-B / structural ladder only — never a reconcile diagnostic
+    # (e.g. MANIFEST_POLICY). Reconcile blockers live on blocking_diagnostics; feasible already
+    # requires gate_b_code == FEASIBLE and not blocking_diagnostics (evidence levels stay separate).
 
     if code != "FEASIBLE":
         # Graded non-feasible: no executable tasks.
