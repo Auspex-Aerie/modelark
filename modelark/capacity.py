@@ -712,6 +712,12 @@ def plan_capacity(
     the only placement choice before #38 and is not canonical authority. Usable free comes from
     ``evidence_by_drive`` (the shared admission authority); a drive absent from it is fail-closed
     ``unknown`` and contributes zero executable capacity (#35-C)."""
+    if compression_cfg is not None:
+        # #36a: candidate budgets are captured during reconcile_plan() (from PlannerInput.compression_cfg),
+        # so a codec config here would be a safety-affecting no-op. Reject it loudly rather than mislead.
+        raise TypeError(
+            "plan_capacity(compression_cfg=...) is no longer honoured: candidate budgets are captured "
+            "during reconciliation. Pass compression_cfg to reconcile_plan()/capture_planner_input().")
     if provisioning is not None:
         warnings.warn(
             "plan_capacity(provisioning=...) is deprecated; use capacity_mode=...",
@@ -871,6 +877,38 @@ def plan_capacity(
         item for item in failures
         if not item.blocked_by_requirement or item.blocked_by_requirement not in root_failures
     ]
+
+    # Account for EVERY desired requirement (gap #1): exactly one of satisfied / assigned / unassigned /
+    # blocking. A requirement that had canonical candidates but whose targets all left the plan between
+    # reconcile_plan() and here is a typed stale-snapshot (TARGET_DRIVE_CHANGED); a requirement blocked at
+    # candidate time is already a blocking diagnostic. Anything else unaccounted is a graph defect.
+    accounted = (
+        {item.requirement_id for item in result.candidates.satisfied}
+        | {item.requirement_id for item in placement.tasks}
+        | {item.requirement_id for item in failures}
+        | {item.requirement_id for item in unassigned}          # failed to fit (failure may be dedup'd)
+        | {item.requirement_id for item in result.candidates.blocked}
+    )
+    had_candidates = {requirement_id for requirement_id, _ in result.candidates.by_requirement}
+    for requirement in result.requirements:
+        rid = requirement.requirement_id
+        if rid in accounted:
+            continue
+        stale = rid in had_candidates
+        is_replica = rid.startswith("protected_replica:")
+        failures.append(CapacityFailure(
+            code=FailureCode.TARGET_DRIVE_CHANGED if stale else FailureCode.GRAPH_INVARIANT,
+            capacity_mode=mode,
+            requirement_id=rid,
+            task_ids=(f"{'replicate' if is_replica else 'fetch'}:{rid}",),
+            target_tier=("replica" if is_replica else "primary"),
+            eligible_drives=requirement.eligible_drives,
+            required_bytes=0, available_bytes=0, safety_floor_bytes=0, workspace_bytes=0,
+            shortfall_bytes=0, evidence=None,
+            actions=(("reconcile_plan", "restore_target_drive_to_plan") if stale
+                     else ("inspect_integrity",)),
+        ))
+
     placement.tasks.sort(key=lambda item: (item.target_drive, item.kind.value, item.requirement_id))
     failures.sort(key=lambda item: (item.code.value, item.requirement_id or ""))
     return CapacityPlan(

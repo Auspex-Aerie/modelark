@@ -143,10 +143,20 @@ class DriftRow:
 
 
 @dataclass(frozen=True)
+class BlockedRequirement:
+    """A desired requirement with no satisfying copy and no valid candidate: either no eligible tier at
+    all, or every eligible target holds an unproven/mismatched required row (all-targets-unproven). It is
+    an infeasibility, not a warning — every requirement is exactly one of satisfied/candidate/blocked."""
+    requirement_id: str
+    reason: str          # "no_eligible_tier" | "all_targets_unproven"
+
+
+@dataclass(frozen=True)
 class CandidateSet:
     satisfied: tuple[Satisfaction, ...]
     by_requirement: tuple[tuple[str, tuple[Candidate, ...]], ...]
     drift: tuple[DriftRow, ...]
+    blocked: tuple[BlockedRequirement, ...]
 
 
 @dataclass(frozen=True)
@@ -245,6 +255,7 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
     satisfied: list[Satisfaction] = []
     by_requirement: list[tuple[str, tuple[Candidate, ...]]] = []
     drift: list[DriftRow] = []
+    blocked: list[BlockedRequirement] = []
 
     for req in graph.desired:
         manifest = manifests[req.repo_id]
@@ -256,7 +267,7 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
             rows = archived.get((req.repo_id, label), {})
             reused: list[ReusableFile] = []
             missing: list[archive_manifest.ManifestFile] = []
-            blocked = False
+            target_blocked = False
             for mf in manifest:
                 verdict = _proof(mf, rows.get(mf.rfilename))
                 if verdict == "missing":
@@ -265,8 +276,8 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
                     reused.append(_reusable(mf, rows[mf.rfilename]))
                 else:
                     drift.append(DriftRow(req.requirement_id, label, mf.rfilename, "unproven_provenance"))
-                    blocked = True
-            if blocked:
+                    target_blocked = True
+            if target_blocked:
                 continue                                   # target omitted — never overwrite an unproven row
             reused_t = tuple(sorted(reused, key=lambda item: item.rfilename))
             if missing:
@@ -305,11 +316,17 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
         if cands:
             cands.sort(key=lambda c: (c.target_drive, _source_key(c.source), c.task_kind.value))
             by_requirement.append((req.requirement_id, tuple(cands)))
+        else:
+            # No satisfying copy and no valid candidate: an eligible drive that produced no candidate did
+            # so only because an unproven/mismatched required row omitted it. Account it as blocked.
+            reason = "no_eligible_tier" if not eligible else "all_targets_unproven"
+            blocked.append(BlockedRequirement(req.requirement_id, reason))
 
     satisfied.sort(key=lambda item: item.requirement_id)
     by_requirement.sort(key=lambda item: item[0])
     drift = sorted(set(drift), key=lambda item: (item.requirement_id, item.drive_label, item.rfilename, item.reason))
-    return CandidateSet(tuple(satisfied), tuple(by_requirement), tuple(drift))
+    blocked.sort(key=lambda item: item.requirement_id)
+    return CandidateSet(tuple(satisfied), tuple(by_requirement), tuple(drift), tuple(blocked))
 
 
 def _home_sources(req, reqs_by_id, manifest, archived) -> tuple[SourceIdentity, ...]:

@@ -284,7 +284,7 @@ class _Facts:
     selected_repos: tuple[str, ...]
 
 
-def _read_facts(con, plan_id, repo_ids=None, policy=None) -> _Facts:
+def _read_facts(con, plan_id, repo_ids=None, policy=None, compression_cfg=None) -> _Facts:
     from modelark import capacity, wishlist  # local: capacity imports reconcile at module scope
     with _consistent_read(con):
         repos = _selected_repos(con, repo_ids)
@@ -296,7 +296,9 @@ def _read_facts(con, plan_id, repo_ids=None, policy=None) -> _Facts:
             item.rfilename for manifest in batch.manifests.values() for item in manifest
         }))
         archived = _archived_facts(con, usable, tuple(d.drive_label for d in drives), manifest_files)
-        config = wishlist.compression()
+        # Graph-affecting compression config is captured ONCE here (the impure shell); an explicit
+        # override is the supported injection point (e.g. tests), never a later plan_capacity argument.
+        config = wishlist.compression() if compression_cfg is None else dict(compression_cfg)
         ratio = capacity.plan_float_ratio(con)
     planner_input = candidates.PlannerInput(
         plan_id=plan_id,
@@ -311,10 +313,12 @@ def _read_facts(con, plan_id, repo_ids=None, policy=None) -> _Facts:
     return _Facts(planner_input, batch, repos)
 
 
-def capture_planner_input(con, plan_id, repo_ids=None, policy=None) -> candidates.PlannerInput:
+def capture_planner_input(con, plan_id, repo_ids=None, policy=None,
+                          compression_cfg=None) -> candidates.PlannerInput:
     """Fact reader (impure shell): capture catalog facts in one consistent read transaction and freeze
-    graph-affecting config + the observed float ratio into an immutable, pure ``PlannerInput``."""
-    return _read_facts(con, plan_id, repo_ids, policy).planner_input
+    graph-affecting config (``compression_cfg`` override or ``wishlist.compression()``) plus the observed
+    float ratio into an immutable, pure ``PlannerInput``."""
+    return _read_facts(con, plan_id, repo_ids, policy, compression_cfg).planner_input
 
 
 def _same_failure_domain(left: DriveFact, right: DriveFact) -> bool:
@@ -399,11 +403,13 @@ def reconcile_plan(
     plan_id: str,
     repo_ids: Sequence[str] | None = None,
     policy: archive_manifest.ArchivePolicy | None = None,
+    *,
+    compression_cfg: Mapping[str, object] | None = None,
 ) -> ReconcileResult:
     """Compatibility façade over the pure core: capture one consistent snapshot, run pure
     requirements/candidates (the sole authority for satisfaction, reuse, sources, and work), expose the
     canonical no-pin ``CandidateSet``, and project the legacy fields from it. Chooses no placement."""
-    facts = _read_facts(con, plan_id, repo_ids, policy)
+    facts = _read_facts(con, plan_id, repo_ids, policy, compression_cfg)
     inp = facts.planner_input
     graph = candidates.requirements(inp)
     cset = candidates.candidates(inp, graph)
@@ -425,30 +431,43 @@ def reconcile_plan(
               repo_id=repo_id, message=str(error))
         for repo_id, error in sorted(facts.manifest_batch.errors.items())
     ]
-    for requirement in graph.desired:
-        if not requirement.eligible_drives:
+    unproven_drives: dict[str, set[str]] = {}
+    for row in cset.drift:
+        if row.reason == "unproven_provenance":
+            unproven_drives.setdefault(row.requirement_id, set()).add(row.drive_label)
+
+    # Every blocked requirement (no eligible tier, or all eligible targets unproven) is a BLOCKING
+    # diagnostic — an unfinished copy can never be reported feasible (gap #1).
+    for item in cset.blocked:
+        req = req_by_id[item.requirement_id]
+        if item.reason == "no_eligible_tier":
             diagnostics.append(_diag(
                 "TARGET_TIER_MISSING", DiagnosticSeverity.BLOCKING, RecoveryClass.OPERATOR_ACTION,
-                requirement.requirement_id, repo_id=requirement.repo_id, kind=requirement.kind.value))
+                item.requirement_id, repo_id=req.repo_id, kind=req.kind.value))
+        else:
+            diagnostics.append(_diag(
+                "UNPROVEN_PROVENANCE", DiagnosticSeverity.BLOCKING, RecoveryClass.OPERATOR_ACTION,
+                item.requirement_id, repo_id=req.repo_id,
+                drives=tuple(sorted(unproven_drives.get(item.requirement_id, ())))))
 
-    # Drift projected from the canonical CandidateSet (ruling #4). Wrong-tier proven copies are the
-    # legacy COPY_POLICY_DRIFT (only when the requirement is not otherwise satisfied); unproven/mismatched
-    # rows on eligible targets surface why a partial did not become finish-in-place work.
+    # Drift on requirements that still have a valid candidate is advisory only (ruling #4): wrong-tier
+    # proven copies are COPY_POLICY_DRIFT; unproven rows on some targets while others remain valid warn.
+    blocked_ids = {item.requirement_id for item in cset.blocked}
+    with_candidates = {requirement_id for requirement_id, _ in cset.by_requirement}
     wrong_tier: dict[str, set[str]] = {}
-    unproven: dict[str, set[str]] = {}
     for row in cset.drift:
-        if row.reason == "wrong_tier" and row.requirement_id not in satisfied:
+        if (row.reason == "wrong_tier" and row.requirement_id not in satisfied
+                and row.requirement_id not in blocked_ids):
             wrong_tier.setdefault(row.requirement_id, set()).add(row.drive_label)
-        elif row.reason == "unproven_provenance":
-            unproven.setdefault(row.requirement_id, set()).add(row.drive_label)
     for requirement_id, drives in sorted(wrong_tier.items()):
         diagnostics.append(_diag(
             "COPY_POLICY_DRIFT", DiagnosticSeverity.WARNING, RecoveryClass.AUTOMATIC, requirement_id,
             repo_id=requirement_id.split(":", 1)[1], drives=tuple(sorted(drives))))
-    for requirement_id, drives in sorted(unproven.items()):
-        diagnostics.append(_diag(
-            "UNPROVEN_PROVENANCE", DiagnosticSeverity.WARNING, RecoveryClass.OPERATOR_ACTION,
-            requirement_id, repo_id=requirement_id.split(":", 1)[1], drives=tuple(sorted(drives))))
+    for requirement_id, drives in sorted(unproven_drives.items()):
+        if requirement_id in with_candidates:
+            diagnostics.append(_diag(
+                "UNPROVEN_PROVENANCE", DiagnosticSeverity.WARNING, RecoveryClass.OPERATOR_ACTION,
+                requirement_id, repo_id=requirement_id.split(":", 1)[1], drives=tuple(sorted(drives))))
 
     for repo_id in inp.selection:
         home = matches.get(f"protected_home:{repo_id}")
