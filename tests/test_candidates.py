@@ -494,20 +494,24 @@ def test_contract_pure_no_io_boundary():
     for fn in (candidates.requirements, candidates.candidates):
         params = set(inspect.signature(fn).parameters)
         assert "con" not in params and "connection" not in params, f"{fn.__name__} must take no DB connection"
-    # Import/dependency boundary, checked at the source (catches BOTH `import X` and `from X import Y`):
-    # neither pure module pulls in SQLite/socket/DB/transport, reads global config (wishlist), or
-    # re-enters the impure reconcile/capacity layer (which would also be an import cycle). Banning
-    # wishlist proves the budget path takes config as data and never consults global configuration.
-    banned = ("sqlite3", "socket", "modelark.fetch", "modelark.core.db",
-              "modelark.reconcile", "modelark.capacity", "modelark.wishlist")
+    # Import/dependency boundary, checked at the source: neither pure module may pull in SQLite/socket/
+    # DB/transport, read global config (wishlist), or re-enter the impure reconcile/capacity layer (also
+    # an import cycle). Banning wishlist proves the budget path takes config as data, never global config.
+    # Match on dotted COMPONENTS so every import form is covered, including the relative/aliased ones a
+    # fully-qualified prefix check misses: `import modelark.wishlist`, `from modelark import wishlist`
+    # (records the name, not just `modelark`), `from modelark.wishlist import x`, `from . import wishlist`
+    # (ImportFrom.module is None), and `from .wishlist import x` (module is the bare leaf `wishlist`).
+    banned = {"sqlite3", "socket", "wishlist", "fetch", "reconcile", "capacity", "db"}
     for module in (candidates, budgets):
-        imported = set()
+        names = set()
         for node in ast.walk(ast.parse(inspect.getsource(module))):
             if isinstance(node, ast.Import):
-                imported.update(alias.name for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported.add(node.module)
-        offenders = sorted(m for m in imported if any(m == b or m.startswith(b + ".") for b in banned))
+                names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    names.add(node.module)
+                names.update(alias.name for alias in node.names)   # `from pkg import submodule`
+        offenders = sorted(n for n in names if banned & set(n.split(".")))
         assert not offenders, f"pure {module.__name__} must not import {offenders}"
     # Proportional runtime proof: a full run under a poisoned connection still succeeds.
     inp = _input(
