@@ -43,6 +43,7 @@ Self-running: CI executes ``python tests/test_candidates.py`` directly.
 """
 from __future__ import annotations
 
+import ast
 import dataclasses
 import inspect
 import sqlite3
@@ -281,6 +282,10 @@ def _scenario_format_and_byte_edges():
     _, cset = _run(inp)
     gguf = _cands(cset, "primary:g/gguf")[0]
     assert gguf.budget.guaranteed_durable == 50 and gguf.movement_cost.transfer_bytes == 50
+    pt = _cands(cset, "primary:p/pt")           # pickle is stored raw (no compression)
+    assert len(pt) == 1 and pt[0].budget.guaranteed_durable == 50 and pt[0].budget.expected_durable == 50
+    aux = _cands(cset, "primary:a/aux")         # aux-only repo is stored raw
+    assert len(aux) == 1 and aux[0].budget.guaranteed_durable == 5
     huge_c = _cands(cset, "primary:h/huge")[0]
     assert huge_c.budget.guaranteed_durable == huge
     assert huge_c.budget.expected_durable == int(huge * RATIO * MARGIN)   # compressible float shard
@@ -401,8 +406,8 @@ def test_contract_candidate_matrix():
     for name, fn in _MATRIX:
         try:
             fn()
-        except AssertionError as exc:
-            failures.append(f"{name}: {exc}")
+        except Exception as exc:                 # noqa: BLE001 — keep the whole matrix map, not the first abort
+            failures.append(f"{name}: {type(exc).__name__}: {exc}")
     assert not failures, "matrix scenarios failed:\n  " + "\n  ".join(failures)
 
 
@@ -416,10 +421,9 @@ def test_contract_no_pin_no_delete_deep_immutability():
         drives=[_drive("d1")],
         archived=[_arch("org/m", "d1", "a.safetensors", sha=HW, obytes=100, sbytes=100)],
     )
-    archived_before = inp.archived
     _, cset = _run(inp)
-    assert inp.archived is archived_before, "the pure path never mutates/rewrites archived facts"
     # Deeply immutable: mutating any frozen record raises, and containers are tuples not lists/dicts.
+    # (No-mutate/no-delete of archived facts is proven by the drift scenarios preserving unproven rows.)
     sat = cset.satisfied[0]
     caught = False
     try:
@@ -464,9 +468,19 @@ def test_contract_pure_no_io_boundary():
     for fn in (candidates.requirements, candidates.candidates):
         params = set(inspect.signature(fn).parameters)
         assert "con" not in params and "connection" not in params, f"{fn.__name__} must take no DB connection"
-    # Import boundary: the pure module pulls in no SQLite/transport.
-    assert getattr(candidates, "sqlite3", None) is None, "candidates.py must not import sqlite3"
-    assert getattr(candidates, "fetch", None) is None, "candidates.py must not import the transport"
+    # Import/dependency boundary, checked at the source (catches BOTH `import X` and `from X import Y`):
+    # the pure module pulls in no SQLite/socket/DB/transport and never re-enters the impure
+    # reconcile/capacity layer (which would also be an import cycle).
+    banned = ("sqlite3", "socket", "modelark.fetch", "modelark.core.db",
+              "modelark.reconcile", "modelark.capacity")
+    imported = set()
+    for node in ast.walk(ast.parse(inspect.getsource(candidates))):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    offenders = sorted(m for m in imported if any(m == b or m.startswith(b + ".") for b in banned))
+    assert not offenders, f"pure candidates.py must not import {offenders}"
     # Proportional runtime proof: a full run under a poisoned connection still succeeds.
     inp = _input(
         selection=["org/m"],
