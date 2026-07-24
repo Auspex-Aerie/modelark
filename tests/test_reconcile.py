@@ -41,17 +41,26 @@ def _drive(con, label, *, role="primary", raid=False, capacity=10**12, identity=
 def _repo(con, repo, *, copies=1, files=(("model.safetensors", 100, "safetensors", "bf16"),)):
     con.execute("INSERT INTO models(repo_id,numcopies) VALUES(?,?)", [repo, copies])
     con.execute("INSERT INTO selection(repo_id,finalized_at) VALUES(?,'2026-01-01')", [repo])
+    # #36a: valid archived content needs provable provenance — give every file a manifest sha256 so its
+    # matching archived orig_sha256 (below) binds reuse. Intentional legacy/hashless cases pass sha=None.
     con.executemany(
-        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) VALUES(?,?,?,?,?)",
-        [(repo, name, size, fmt, quant) for name, size, fmt, quant in files],
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) VALUES(?,?,?,?,?,?)",
+        [(repo, name, size, fmt, quant, f"sha-{repo}-{name}") for name, size, fmt, quant in files],
     )
 
 
 def _archive(con, repo, drive, *names):
-    con.executemany(
-        "INSERT INTO archived(repo_id,rfilename,drive_label,stored_bytes,compressed) VALUES(?,?,?,?,0)",
-        [(repo, name, drive, 1) for name in names],
-    )
+    # Reusable archived content: orig_sha256 == the manifest sha256 and orig_bytes == the manifest size.
+    for name in names:
+        row = con.execute(
+            "SELECT size_bytes, sha256 FROM files WHERE repo_id=? AND rfilename=?", [repo, name]
+        ).fetchone()
+        size, sha = (row[0], row[1]) if row else (1, None)
+        con.execute(
+            "INSERT INTO archived(repo_id,rfilename,drive_label,orig_sha256,orig_bytes,stored_bytes,compressed) "
+            "VALUES(?,?,?,?,?,?,0)",
+            [repo, name, drive, sha, size, 1],
+        )
 
 
 def test_incident_shape_creates_only_nine_home_fetches_and_shadow_removes_116_phantoms():
@@ -78,8 +87,14 @@ def test_incident_shape_creates_only_nine_home_fetches_and_shadow_removes_116_ph
     assert len(replicas) == 125
     assert sum(i.source_drive == "drive-00" for i in replicas) == 116
     assert sum(i.depends_on_requirement is not None for i in replicas) == 9
-    assert all(i.pinned_target == "drive-00" for i in homes[:8])
-    assert homes[-1].pinned_target is None
+    # #36a: reconcile emits no pin. The 8 shard-partial homes carry a finish-in-place candidate on
+    # drive-00 (reused files); the 9th (nothing archived) has a fresh-only candidate. #38 chooses.
+    by_req = dict(result.candidates.by_requirement)
+    home_reqs = [r for r in by_req if r.startswith("protected_home:")]
+    assert len(home_reqs) == 9
+    assert sum(any(c.reused_files for c in by_req[r]) for r in home_reqs) == 8
+    assert sum(all(not c.reused_files for c in by_req[r]) for r in home_reqs) == 1
+    assert all(c.target_drive == "drive-00" for r in home_reqs for c in by_req[r])
 
     report = reconcile.shadow_report(con, "ark")
     assert report["shadow"]["satisfied_legacy_reservations_removed"] == 116
@@ -105,11 +120,15 @@ def test_exact_sets_prevent_extra_file_from_masking_missing_required_file():
     fact = next(f for f in result.facts if f.drive_label == "raid")
     assert not fact.complete
     assert fact.required_files == {"model.safetensors", "config.json"}
-    home = next(i for i in result.intents if i.requirement_id.startswith("protected_home:"))
-    assert home.pinned_target == "raid"
+    # #36a: the finish-in-place candidate on raid reuses the proven weight and lists the missing config
+    # as exact work — the extra ignored.onnx never masks the missing required file.
+    home_cands = dict(result.candidates.by_requirement)["protected_home:org/model"]
+    on_raid = next(c for c in home_cands if c.target_drive == "raid")
+    assert {f.rfilename for f in on_raid.reused_files} == {"model.safetensors"}
+    assert {f.rfilename for f in on_raid.missing_files} == {"config.json"}
 
 
-def test_multiple_partials_choose_least_missing_without_unioning_drives():
+def test_multiple_partials_are_emitted_without_unioning_drives():
     con = _mem()
     _drive(con, "raid-a", raid=True)
     _drive(con, "raid-b", raid=True)
@@ -125,8 +144,12 @@ def test_multiple_partials_choose_least_missing_without_unioning_drives():
     _archive(con, "org/model", "raid-a", "model.safetensors", "config.json")
     _archive(con, "org/model", "raid-b", "config.json", "tokenizer.json")
     result = reconcile.reconcile_plan(con, "ark")
-    home = next(i for i in result.intents if i.requirement_id.startswith("protected_home:"))
-    assert home.pinned_target == "raid-a"  # 20 missing vs 100 missing
+    # #36a emits BOTH finish-in-place partials as separate candidates (no union, no choice — #38 ranks
+    # by the least-missing cost). raid-a misses only tokenizer.json; raid-b misses model.safetensors.
+    by_target = {c.target_drive: c for c in dict(result.candidates.by_requirement)["protected_home:org/model"]}
+    assert set(by_target) == {"raid-a", "raid-b"}
+    assert {f.rfilename for f in by_target["raid-a"].missing_files} == {"tokenizer.json"}
+    assert {f.rfilename for f in by_target["raid-b"].missing_files} == {"model.safetensors"}
     assert not any(f.complete for f in result.facts)
 
 

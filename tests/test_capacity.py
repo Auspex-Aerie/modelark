@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from dataclasses import replace
 from unittest import mock
 
 import pytest
@@ -43,17 +42,19 @@ def _drive(con, label, *, role="primary", raid=False, capacity_bytes=10_000, fre
 def _repo(con, repo, *, copies=1, files=(("model.safetensors", 100, "safetensors", "bf16"),)):
     con.execute("INSERT INTO models(repo_id,numcopies) VALUES(?,?)", [repo, copies])
     con.execute("INSERT INTO selection(repo_id,finalized_at) VALUES(?,'2026-01-01')", [repo])
+    # #36a: manifest sha256 lets the matching archived orig_sha256 prove reuse.
     con.executemany(
-        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) VALUES(?,?,?,?,?)",
-        [(repo, name, size, fmt, quant) for name, size, fmt, quant in files],
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) VALUES(?,?,?,?,?,?)",
+        [(repo, name, size, fmt, quant, f"sha-{repo}-{name}") for name, size, fmt, quant in files],
     )
 
 
 def _archive(con, repo, drive, rows):
+    # Reusable archived content proves provenance: orig_sha256 matches the manifest sha256 for that file.
     con.executemany(
-        "INSERT INTO archived(repo_id,rfilename,drive_label,stored_bytes,orig_bytes,compressed) "
-        "VALUES(?,?,?,?,?,?)",
-        [(repo, name, drive, stored, original, int(stored < original))
+        "INSERT INTO archived(repo_id,rfilename,drive_label,orig_sha256,stored_bytes,orig_bytes,compressed) "
+        "VALUES(?,?,?,?,?,?,?)",
+        [(repo, name, drive, f"sha-{repo}-{name}", stored, original, int(stored < original))
          for name, stored, original in rows],
     )
 
@@ -160,31 +161,17 @@ def test_dependent_replica_failure_is_deduplicated_to_missing_home_tier():
     _repo(con, "org/model", copies=2)
     graph = reconcile.reconcile_plan(con, "ark")
     result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
-    assert [item.code for item in result.failures] == [capacity.FailureCode.TARGET_TIER_MISSING]
-    assert result.failures[0].requirement_id == "protected_home:org/model"
-    assert any(item.requirement_id == "protected_replica:org/model"
-               for item in result.unassigned_intents)
-
-
-def test_stale_home_pin_cannot_create_an_unledgered_feasible_task():
-    con = _mem()
-    _drive(con, "raid", raid=True)
-    _drive(con, "replica", role="replica")
-    _repo(con, "org/model", copies=2)
-    graph = reconcile.reconcile_plan(con, "ark")
-    home = next(item for item in graph.intents
-                if item.requirement_id == "protected_home:org/model")
-    stale_home = replace(home, pinned_target="removed-drive")
-    graph = replace(
-        graph,
-        intents=tuple(stale_home if item is home else item for item in graph.intents),
-    )
-    result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
+    # #36a: a home with no eligible tier has no candidate, so it is a reconcile blocking diagnostic
+    # (TARGET_TIER_MISSING) rather than a capacity failure. The dependent replica is still not reported
+    # as a spurious capacity failure — the missing home tier remains the single root cause.
     assert not result.feasible
-    assert all(item.target_drive != "removed-drive" for item in result.tasks)
-    failure = next(item for item in result.failures
-                   if item.requirement_id == "protected_home:org/model")
-    assert failure.code == capacity.FailureCode.GRAPH_INVARIANT
+    assert "TARGET_TIER_MISSING" in result.blocking_diagnostics
+    assert not any(item.requirement_id == "protected_replica:org/model" for item in result.failures)
+
+
+# (Removed test_stale_home_pin_cannot_create_an_unledgered_feasible_task: #36a removes _choose_partial /
+# WorkIntent.pinned_target entirely, so a stale reconcile-side pin can no longer exist. Placement now
+# chooses only among canonical candidates whose targets are in-plan drives.)
 
 
 def test_compression_aware_mode_can_fit_where_guaranteed_durable_cannot():
@@ -344,9 +331,9 @@ def test_phase2_candidate_cross_product_stays_bounded():
     con.execute("COMMIT")
     del files, archived
 
-    graph = reconcile.reconcile_plan(con, "ark")
+    from modelark import budgets
     calls = 0
-    original = capacity._fetch_budget
+    original = budgets.file_budget
 
     def counted(*args, **kwargs):
         nonlocal calls
@@ -355,7 +342,11 @@ def test_phase2_candidate_cross_product_stays_bounded():
 
     try:
         started = time.perf_counter()
-        with mock.patch.object(capacity, "_fetch_budget", side_effect=counted):
+        # #36a: the candidate cross-product (one shared-seam budget per requirement×eligible-target) is
+        # built in reconcile_plan -> candidates(); placement wraps them without recomputation. Count the
+        # per-file budget calls there: 1000 repos × 10 eligible primaries × 1 missing file = 10k, bounded.
+        with mock.patch.object(budgets, "file_budget", side_effect=counted):
+            graph = reconcile.reconcile_plan(con, "ark")
             result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
         elapsed = time.perf_counter() - started
         assert elapsed < 2.0, f"10k-candidate placement took {elapsed:.3f}s"

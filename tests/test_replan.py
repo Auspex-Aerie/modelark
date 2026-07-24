@@ -125,10 +125,10 @@ def _executor_harness(*, failed=()):
             for item in task_manifests[repo]:
                 con.execute(
                     "INSERT OR IGNORE INTO archived"
-                    "(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed,annex_key) "
-                    "VALUES(?,?,?,?,?,0,?)",
-                    [repo, item.rfilename, drive_label, item.size_bytes, item.size_bytes,
-                     f"key-{repo}-{item.rfilename}"],
+                    "(repo_id,rfilename,drive_label,orig_sha256,orig_bytes,stored_bytes,compressed,annex_key) "
+                    "VALUES(?,?,?,?,?,?,0,?)",
+                    [repo, item.rfilename, drive_label, f"sha-{repo}-{item.rfilename}",
+                     item.size_bytes, item.size_bytes, f"key-{repo}-{item.rfilename}"],
                 )
             stored.append(repo)
         return {"stored_repos": stored, "failed_repos": bad, "capacity_failure": None,
@@ -141,14 +141,14 @@ def _executor_harness(*, failed=()):
         for task in tasks:
             for name in task.budget.missing_files:
                 row = con.execute(
-                    "SELECT orig_bytes,stored_bytes,compressed,annex_key FROM archived "
+                    "SELECT orig_sha256,orig_bytes,stored_bytes,compressed,annex_key FROM archived "
                     "WHERE repo_id=? AND rfilename=? AND drive_label=?",
                     [task.repo_id, name, task.source_drive],
                 ).fetchone()
                 con.execute(
                     "INSERT OR IGNORE INTO archived"
-                    "(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed,annex_key) "
-                    "VALUES(?,?,?,?,?,?,?)", [task.repo_id, name, task.target_drive, *row],
+                    "(repo_id,rfilename,drive_label,orig_sha256,orig_bytes,stored_bytes,compressed,annex_key) "
+                    "VALUES(?,?,?,?,?,?,?,?)", [task.repo_id, name, task.target_drive, *row],
                 )
                 copied += 1
         return {"deferred": False, "source_offline": False, "deferred_targets": [],
@@ -173,8 +173,8 @@ def test_satisfied_home_copy_is_not_reserved_or_fetched_again():
     con, calls, fake_run, fake_replica = _executor_harness()
     con.execute(
         "INSERT INTO archived"
-        "(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed,annex_key) "
-        "VALUES('must','model.gguf','drive-00',200,200,0,'key-must-model.gguf')"
+        "(repo_id,rfilename,drive_label,orig_sha256,orig_bytes,stored_bytes,compressed,annex_key) "
+        "VALUES('must','model.gguf','drive-00','sha-must-model.gguf',200,200,0,'key-must-model.gguf')"
     )
     with mock.patch.object(fill.fetch, "run", side_effect=fake_run), \
          mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=fake_replica), \
@@ -192,8 +192,8 @@ def test_bulk_fetch_always_ranks_before_partial_replica():
     con, _, _, _ = _executor_harness()
     con.execute(
         "INSERT INTO archived"
-        "(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed,annex_key) "
-        "VALUES('must','model.gguf','drive-00',200,200,0,'key-must-model.gguf')"
+        "(repo_id,rfilename,drive_label,orig_sha256,orig_bytes,stored_bytes,compressed,annex_key) "
+        "VALUES('must','model.gguf','drive-00','sha-must-model.gguf',200,200,0,'key-must-model.gguf')"
     )
     snapshot = fill._reconcile(fetch.RunCtx(con=con), "ark", "guaranteed", None)
     fetch_tasks = [task for task in snapshot.ledger.tasks if task.kind == reconcile.TaskKind.FETCH]
