@@ -850,10 +850,10 @@ def test_contract_optimistic_search_bound_exhaustion():
 
 
 def test_contract_adversarial_greedy_false_negative_is_feasible():
-    """Ordinary FFD fails; exact packing exists. Solver must report FEASIBLE with a complete fit.
+    """Ordinary first-fit decreasing fails; exact packing exists. Solver must report FEASIBLE.
 
-    Raw zero-workspace items (5,4,2,2,2,2) into capacities (6,6,5).
-    FFD largest-first into A=6,B=6,C=5: 5→C, 4→A (rem2), 2→A (full), 2→B, 2→B, last 2 fails.
+    Raw zero-workspace items (5,4,2,2,2,2) into capacities A=6,B=6,C=5.
+    Sorted-desc first-fit (A,B,C): 5→A, 4→B, 2→A, 2→B, 2→C, last 2 fails (C rem 3, A/B full).
     Exact packing exists: 5→C, 4+2→A, 2+2+2→B.
     """
     _require_placement()
@@ -1305,50 +1305,64 @@ def test_contract_objective_precedence_adversarial():
         f"idle must dominate when movement/free equal; got idle={score3[2]} "
         f"targets={_task_targets(imp3.assignment)}")
 
-    # (4) Complete SourceIdentity tie-break: same drive_label, differing annex_key/hash.
-    # Manually place the lexically worse full identity first so drive_label-only order would pick wrong.
+    # (4) Complete SourceIdentity tie-break on a real REPLICATE candidate (never FETCH+source).
+    # Proven home on H; unsatisfied replica on R. Duplicate that replica candidate with the same
+    # source drive_label but differing annex_key/hash; place the worse identity first.
     planner4 = _planner(
         selection=["org/t"],
         manifests=[("org/t", [_raw_mf("w.bin", 10, HW)])],
-        numcopies=[("org/t", 1)],
-        drives=[_drive("tgt", cap=10_000)],
+        numcopies=[("org/t", 2)],
+        drives=[
+            _drive("H", role="primary", raid=True, cap=10_000, fs_uuid="home-uuid"),
+            _drive("R", role="replica", cap=10_000, fs_uuid="replica-uuid"),
+        ],
+        archived=[
+            _arch("org/t", "H", "w.bin", sha=HW, obytes=10, sbytes=10, key="annex-home"),
+        ],
     )
     graph4, cset4 = _graph_cset(planner4)
-    # Build two otherwise-identical fetch/replica-style candidates differing only in source identity.
-    # Use the existing candidate as a template for budget/missing/reused fields.
-    assert cset4.by_requirement, "need at least one unsatisfied requirement"
-    rid0, base_cands = cset4.by_requirement[0]
-    assert base_cands, "need a base candidate template"
+    # Home is satisfied; only protected_replica remains, with SourceIdentity sources from H.
+    rep_entries = [
+        (rid, cs) for rid, cs in cset4.by_requirement if rid.startswith("protected_replica:")
+    ]
+    assert rep_entries, "need an unsatisfied replica requirement with REPLICATE candidates"
+    rid0, base_cands = rep_entries[0]
+    assert base_cands, "need at least one REPLICATE candidate template"
     base = base_cands[0]
-    worse = candidates.SourceIdentity("src", "annex-zzz", "f" * 64)
-    better = candidates.SourceIdentity("src", "annex-aaa", "a" * 64)
-    # Deliberately order worse first — pure label/drive order cannot distinguish; full identity must.
-    c_worse = dataclasses.replace(base, source=worse) if dataclasses.is_dataclass(base) else base
-    c_better = dataclasses.replace(base, source=better) if dataclasses.is_dataclass(base) else base
-    # If replace doesn't apply source (frozen may work), construct via type
-    if getattr(c_worse, "source", None) is not worse:
-        # Fall back: build Candidate with explicit fields from base
-        def _with_source(src):
-            return candidates.Candidate(
-                requirement_id=base.requirement_id,
-                task_kind=base.task_kind,
-                target_drive=base.target_drive,
-                source=src,
-                depends_on_requirement=base.depends_on_requirement,
-                reused_files=base.reused_files,
-                missing_files=base.missing_files,
-                budget=base.budget,
-                movement_cost=base.movement_cost,
-            )
-        c_worse, c_better = _with_source(worse), _with_source(better)
+    assert base.task_kind == candidates.TaskKind.REPLICATE, (
+        f"template must be REPLICATE, not {base.task_kind!r}")
+    assert base.source is not None and not isinstance(base.source, candidates.PendingHome), (
+        "replica template must already carry a SourceIdentity (home is proven)")
+    # Same source drive_label; annex_key/hash differ. Worse full identity first.
+    worse = candidates.SourceIdentity("H", "annex-zzz", "f" * 64)
+    better = candidates.SourceIdentity("H", "annex-aaa", "a" * 64)
+
+    def _with_source(src: candidates.SourceIdentity) -> candidates.Candidate:
+        return candidates.Candidate(
+            requirement_id=base.requirement_id,
+            task_kind=base.task_kind,
+            target_drive=base.target_drive,
+            source=src,
+            depends_on_requirement=base.depends_on_requirement,
+            reused_files=base.reused_files,
+            missing_files=base.missing_files,
+            budget=base.budget,
+            movement_cost=base.movement_cost,
+        )
+
+    c_worse, c_better = _with_source(worse), _with_source(better)
+    assert c_worse.task_kind == candidates.TaskKind.REPLICATE
+    assert c_better.task_kind == candidates.TaskKind.REPLICATE
     cset_fwd = dataclasses.replace(
         cset4, by_requirement=((rid0, (c_worse, c_better)),))
     cset_rev = dataclasses.replace(
         cset4, by_requirement=((rid0, (c_better, c_worse)),))
-    bud4 = {"tgt": 100}
+    bud4 = {"H": 0, "R": 100}
+
     def run_src(cset):
         inp = _solver_input(
-            planner4, executable_budget=bud4, max_usable_for_epoch={"tgt": 9_000},
+            planner4, executable_budget=bud4,
+            max_usable_for_epoch={"H": 9_000, "R": 9_000},
             feasibility_limit=10_000, optimization_limit=50_000, graph=graph4, cset=cset,
         )
         gb = placement.gate_b(inp)
@@ -1363,7 +1377,7 @@ def test_contract_objective_precedence_adversarial():
         f"chosen source must be SourceIdentity; got {type(src_fwd)!r}")
     assert src_fwd == better, (
         f"complete identity tie-break must pick annex-aaa over annex-zzz; got {src_fwd!r}")
-    assert src_fwd.drive_label == "src"
+    assert src_fwd.drive_label == "H"
     assert src_fwd.annex_key == "annex-aaa"
     assert src_fwd.orig_sha256 == "a" * 64
     assert src_rev == better == src_fwd, "reversing candidate order must yield the same identity"
@@ -1580,6 +1594,24 @@ def _gate_b_code_from_plan(plan) -> str:
     return code.value if hasattr(code, "value") else str(code)
 
 
+def _norm_golden_value(v):
+    if isinstance(v, list):
+        return tuple(_norm_golden_value(x) for x in v)
+    if isinstance(v, tuple):
+        return tuple(_norm_golden_value(x) for x in v)
+    if hasattr(v, "value") and not isinstance(v, (str, bytes, int, float, bool)):
+        return str(v.value)
+    return v
+
+
+def _normalize_actions(actions) -> tuple:
+    if actions is None:
+        return ()
+    return tuple(
+        a.value if hasattr(a, "value") else str(a) for a in actions
+    )
+
+
 def _assert_adapter_nonfeasible(plan, expected_code: str, *, diagnostics_override=None):
     code = _gate_b_code_from_plan(plan)
     assert code == expected_code, f"adapter gate_b_code: expected {expected_code}, got {code}"
@@ -1589,38 +1621,46 @@ def _assert_adapter_nonfeasible(plan, expected_code: str, *, diagnostics_overrid
     assert payload.get("gate_b_code") == expected_code
     assert payload.get("feasible") is False
     assert payload.get("placement_policy") == "tiered_v2"
-    # Structural codes: diagnostics + actions must survive projection on plan and to_dict().
+    # Structural codes: diagnostics + actions must survive projection on plan AND to_dict()
+    # with exact golden values (not merely non-None keys).
     if expected_code in STRUCTURAL_GOLDENS:
         golden = STRUCTURAL_GOLDENS[expected_code]
         want_actions = golden["actions"]
         want_diag = diagnostics_override or golden["diagnostics"]
-        # CapacityPlan fields
-        plan_actions = getattr(plan, "gate_b_actions", None) or getattr(plan, "actions", None)
-        plan_diag = getattr(plan, "gate_b_diagnostics", None) or getattr(plan, "diagnostics", None)
-        if plan_actions is None and "actions" in payload:
-            plan_actions = payload["actions"]
-        if plan_diag is None and "diagnostics" in payload:
-            plan_diag = payload["diagnostics"]
+        want_diag_n = {k: _norm_golden_value(v) for k, v in want_diag.items()}
+
+        plan_actions = getattr(plan, "gate_b_actions", None)
+        if plan_actions is None:
+            plan_actions = getattr(plan, "actions", None)
+        plan_diag = getattr(plan, "gate_b_diagnostics", None)
+        if plan_diag is None:
+            plan_diag = getattr(plan, "diagnostics", None)
         assert plan_actions is not None, f"{expected_code} must project actions onto CapacityPlan"
         assert plan_diag is not None, f"{expected_code} must project diagnostics onto CapacityPlan"
-        got_actions = tuple(
-            a.value if hasattr(a, "value") else str(a) for a in (plan_actions or ()))
-        assert got_actions == want_actions, (
-            f"{expected_code} projected actions {got_actions!r} != golden {want_actions!r}")
-        got_diag = _diagnostics_as_dict(plan_diag)
-        def norm(v):
-            if isinstance(v, list):
-                return tuple(norm(x) for x in v)
-            if isinstance(v, tuple):
-                return tuple(norm(x) for x in v)
-            return v
-        got_n = {k: norm(v) for k, v in got_diag.items() if k in want_diag}
-        want_n = {k: norm(v) for k, v in want_diag.items()}
-        assert got_n == want_n, (
-            f"{expected_code} projected diagnostics {got_n!r} != golden {want_n!r}")
-        # to_dict must also carry them
-        assert payload.get("actions") is not None or payload.get("gate_b_actions") is not None
-        assert payload.get("diagnostics") is not None or payload.get("gate_b_diagnostics") is not None
+        got_plan_actions = _normalize_actions(plan_actions)
+        assert got_plan_actions == want_actions, (
+            f"{expected_code} CapacityPlan actions {got_plan_actions!r} != golden {want_actions!r}")
+        got_plan_diag = {
+            k: _norm_golden_value(v)
+            for k, v in _diagnostics_as_dict(plan_diag).items() if k in want_diag_n
+        }
+        assert got_plan_diag == want_diag_n, (
+            f"{expected_code} CapacityPlan diagnostics {got_plan_diag!r} != golden {want_diag_n!r}")
+
+        # Serialized to_dict() must carry the same exact golden values.
+        ser_actions = payload.get("gate_b_actions", payload.get("actions"))
+        ser_diag = payload.get("gate_b_diagnostics", payload.get("diagnostics"))
+        assert ser_actions is not None, f"{expected_code} to_dict() must include actions"
+        assert ser_diag is not None, f"{expected_code} to_dict() must include diagnostics"
+        got_ser_actions = _normalize_actions(ser_actions)
+        assert got_ser_actions == want_actions, (
+            f"{expected_code} to_dict() actions {got_ser_actions!r} != golden {want_actions!r}")
+        got_ser_diag = {
+            k: _norm_golden_value(v)
+            for k, v in _diagnostics_as_dict(ser_diag).items() if k in want_diag_n
+        }
+        assert got_ser_diag == want_diag_n, (
+            f"{expected_code} to_dict() diagnostics {got_ser_diag!r} != golden {want_diag_n!r}")
     # No false standalone capacity-short for inconclusive/unknown/structural (passoff).
     no_false_short = {
         "PACKING_INCONCLUSIVE", "CAPACITY_EVIDENCE_UNKNOWN",
