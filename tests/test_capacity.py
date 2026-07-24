@@ -141,6 +141,11 @@ def test_manifest_policy_diagnostic_makes_shadow_capacity_infeasible():
     result = capacity.plan_capacity(con, graph)
     assert result.blocking_diagnostics == ("MANIFEST_POLICY",)
     assert not result.feasible
+    # Evidence levels stay separate: gate_b_code is the pure ladder (empty placeable set packs as
+    # FEASIBLE); MANIFEST_POLICY stays on blocking_diagnostics — never copied into gate_b_code.
+    assert result.gate_b_code == "FEASIBLE"
+    assert result.gate_b_code not in result.blocking_diagnostics
+    assert not result.tasks
 
 
 def test_workspace_short_is_distinct_from_durable_short():
@@ -262,10 +267,9 @@ def test_file_preflight_is_exact_at_workspace_boundary():
 def test_tiered_v2_is_deterministic_and_lexicographic():
     """#38: tiered_v2 replaces RAID-first FFD with deterministic Gate-B + lex improve.
 
-    Characterization of the new policy: byte-stable under repeat, placement_policy=tiered_v2,
-    protected home stays on a raid-capable primary when one exists, and replica stays domain-
-    separated. Exact drive picks follow movement ≻ free-vector ≻ idle ≻ canonical — not the
-    retired tiered_v1 RAID-first / smallest-replica consolidation rules.
+    Pins the exact assignment this fixture produces under movement ≻ free-vector ≻ idle ≻
+    canonical (lex objectives are proven in pure Gate-1 contracts; this freezes the adapter
+    projection for a multi-drive mixed home/bulk/replica plan).
     """
     con = _mem()
     _drive(con, "raid", raid=True, capacity_bytes=4_000)
@@ -282,23 +286,16 @@ def test_tiered_v2_is_deterministic_and_lexicographic():
     assert first.to_dict() == second.to_dict()
     assert first.placement_policy == "tiered_v2"
     assert first.feasible and first.gate_b_code == "FEASIBLE"
+    assert first.derivation_mode == "optimized"
     targets = {item.requirement_id: item.target_drive for item in first.tasks}
-    assert set(targets) == {
-        "protected_home:org/protected",
-        "protected_replica:org/protected",
-        "primary:org/bulk-a",
-        "primary:org/bulk-b",
+    # Exact pins (measured under tiered_v2 lex improve — not membership ranges).
+    assert targets == {
+        "protected_home:org/protected": "raid",
+        "protected_replica:org/protected": "replica-small",
+        "primary:org/bulk-a": "primary-small",
+        "primary:org/bulk-b": "primary-small",
     }
-    # Home must land on a primary/raid drive; replica on a replica-role drive.
-    assert targets["protected_home:org/protected"] in {"raid", "primary-big", "primary-small"}
-    assert targets["protected_replica:org/protected"] in {"replica-small", "replica-big"}
-    assert targets["primary:org/bulk-a"] in {"raid", "primary-big", "primary-small"}
-    assert targets["primary:org/bulk-b"] in {"raid", "primary-big", "primary-small"}
-    assert first.batch_order  # non-empty drive batch order
-    # Legacy librarian vs tiered_v2 may diverge on drive picks; comparison remains well-formed.
-    shadow = reconcile.shadow_report(con, "ark")
-    assert "placement_comparison" in shadow
-    assert "target_equivalent" in shadow["placement_comparison"]
+    assert first.batch_order == ("raid", "primary-small", "replica-small")
 
 
 def test_portal_shadow_explain_uses_dedicated_read_only_connection():
@@ -344,14 +341,14 @@ def test_shadow_comparison_never_normalizes_away_changed_target():
         report = reconcile.shadow_report(con, "ark")
     comparison = report["placement_comparison"]
     assert comparison["target_equivalent"] is False
-    # #38: the non-legacy side is tiered_v2; key retained as placement_policy target.
-    mismatch = comparison["target_mismatches"]
-    assert len(mismatch) == 1
-    assert mismatch[0]["requirement_id"] == "primary:org/model"
-    assert mismatch[0]["legacy"] == "wrong-primary"
-    assert mismatch[0].get("tiered_v2", mismatch[0].get("tiered_v1")) in {
-        "raid", "wrong-primary",
-    } or mismatch[0].get("tiered_v2", mismatch[0].get("tiered_v1"))
+    # Exact mismatch row: legacy librarian forced wrong-primary; tiered_v2 places on raid.
+    # Both tiered_v2 (canonical) and tiered_v1 (one-release alias) keys are required.
+    assert comparison["target_mismatches"] == [{
+        "requirement_id": "primary:org/model",
+        "legacy": "wrong-primary",
+        "tiered_v2": "raid",
+        "tiered_v1": "raid",
+    }]
 
 
 def test_phase2_candidate_cross_product_stays_bounded():
