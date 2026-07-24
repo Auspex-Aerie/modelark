@@ -79,6 +79,16 @@ HC = "2" * 64        # a config/aux file with an upstream hash
 MARGIN = capacity.EXPECTED_MARGIN
 RATIO = capacity.DEFAULT_FLOAT_RATIO
 
+# Explicit graph-affecting compression config copied into the immutable input. The pure budget path
+# consumes exactly these values via compress.plan_codec (which does direct cfg[...] access) — it must
+# never invent defaults or fall back to wishlist.compression(). max_compress_ram_gb=64 keeps a small
+# shard in CODEC_WHOLE deterministically (no dependence on host zstd availability).
+_CFG = (("max_compress_ram_gb", 64), ("stream_compress", True), ("threads", 4))
+
+
+def _cfg_dict():
+    return dict(_CFG)
+
 
 def _require_pure():
     if not (_HAS_CANDIDATES and _HAS_BUDGETS):
@@ -116,7 +126,7 @@ def _arch(repo, drive, name, *, sha=None, obytes=None, sbytes=None, key=None):
         orig_sha256=sha, orig_bytes=obytes, stored_bytes=sbytes, annex_key=key)
 
 
-def _input(*, selection, manifests, numcopies, drives, archived, cfg=(), ratio=RATIO):
+def _input(*, selection, manifests, numcopies, drives, archived, cfg=_CFG, ratio=RATIO):
     return candidates.PlannerInput(
         plan_id="ark",
         selection=tuple(selection),
@@ -229,10 +239,18 @@ def _scenario_unproven_hash_blocks_target():
 
 
 def _scenario_mismatch_and_size_block_target():
-    for label, kw in (("hashbad", dict(sha="f" * 64, obytes=100)), ("sizebad", dict(sha=HW, obytes=999))):
+    # (label, archived kwargs, manifest sha). The last case is the hashless branch: no upstream SHA plus a
+    # non-null archived orig_sha256 but the WRONG orig_bytes → zero reuse credit (the size gate fails), so
+    # the required row is unproven and blocks its target rather than being silently reused.
+    cases = (
+        ("hashbad", dict(sha="f" * 64, obytes=100), HW),
+        ("sizebad", dict(sha=HW, obytes=999), HW),
+        ("hashless_sizebad", dict(sha="a" * 64, obytes=999), None),
+    )
+    for label, kw, manifest_sha in cases:
         inp = _input(
             selection=["org/m"],
-            manifests=[("org/m", [_mf("a.safetensors", 100, HW)])],
+            manifests=[("org/m", [_mf("a.safetensors", 100, manifest_sha)])],
             numcopies=[("org/m", 1)],
             drives=[_drive("bad"), _drive("clean")],
             archived=[_arch("org/m", "bad", "a.safetensors", sbytes=100, **kw)],
@@ -332,6 +350,10 @@ def _scenario_protected_replica_pending_home():
     assert isinstance(rep[0].source, candidates.PendingHome)
     assert rep[0].source.requirement_id == "protected_home:org/m"
     assert rep[0].depends_on_requirement == "protected_home:org/m"
+    # With no exact source yet, the transfer cost is the deterministic ESTIMATE — a replica copies the
+    # stored bytes, so transfer equals the estimated durable budget (never zero, never a guessed exact
+    # size). Tied to the budget field rather than a hard-coded margin formula to stay robust.
+    assert rep[0].movement_cost.transfer_bytes == rep[0].budget.expected_durable > 0
 
 
 def _scenario_protected_replica_singular_exact_sources():
@@ -473,18 +495,20 @@ def test_contract_pure_no_io_boundary():
         params = set(inspect.signature(fn).parameters)
         assert "con" not in params and "connection" not in params, f"{fn.__name__} must take no DB connection"
     # Import/dependency boundary, checked at the source (catches BOTH `import X` and `from X import Y`):
-    # the pure module pulls in no SQLite/socket/DB/transport and never re-enters the impure
-    # reconcile/capacity layer (which would also be an import cycle).
+    # neither pure module pulls in SQLite/socket/DB/transport, reads global config (wishlist), or
+    # re-enters the impure reconcile/capacity layer (which would also be an import cycle). Banning
+    # wishlist proves the budget path takes config as data and never consults global configuration.
     banned = ("sqlite3", "socket", "modelark.fetch", "modelark.core.db",
-              "modelark.reconcile", "modelark.capacity")
-    imported = set()
-    for node in ast.walk(ast.parse(inspect.getsource(candidates))):
-        if isinstance(node, ast.Import):
-            imported.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imported.add(node.module)
-    offenders = sorted(m for m in imported if any(m == b or m.startswith(b + ".") for b in banned))
-    assert not offenders, f"pure candidates.py must not import {offenders}"
+              "modelark.reconcile", "modelark.capacity", "modelark.wishlist")
+    for module in (candidates, budgets):
+        imported = set()
+        for node in ast.walk(ast.parse(inspect.getsource(module))):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+        offenders = sorted(m for m in imported if any(m == b or m.startswith(b + ".") for b in banned))
+        assert not offenders, f"pure {module.__name__} must not import {offenders}"
     # Proportional runtime proof: a full run under a poisoned connection still succeeds.
     inp = _input(
         selection=["org/m"],
@@ -500,10 +524,40 @@ def test_contract_pure_no_io_boundary():
 def test_contract_shared_budget_seam_exposes_both_modes():
     _require_pure()
     assert hasattr(budgets, "FileBudget") and hasattr(budgets, "CandidateBudget")
-    assert candidates.CandidateBudget is budgets.CandidateBudget, "one budget truth shared with capacity"
-    fb = budgets.file_budget(_mf("a.safetensors", 100, HW), RATIO, {})
+    assert candidates.CandidateBudget is budgets.CandidateBudget, "one budget truth shared with candidates"
+    # gap #3: capacity must consume the SAME shared type, not a duplicate class/calculation.
+    assert capacity.FileBudget is budgets.FileBudget, "capacity must re-export budgets.FileBudget, not duplicate it"
+    # gap #1: the injected config is consumed (CODEC_WHOLE at 64 GB budget → output_cap == raw size).
+    fb = budgets.file_budget(_mf("a.safetensors", 100, HW), RATIO, _cfg_dict())
     assert fb.guaranteed_durable == 100 and fb.expected_durable == int(100 * RATIO * MARGIN)
-    assert hasattr(fb, "workspace_peak_guaranteed") and hasattr(fb, "workspace_peak_expected")
+    assert fb.workspace_peak_guaranteed == 100, "workspace must reflect the codec chosen from the injected cfg"
+    # gap #1: no invented defaults — a config missing the compress-gate keys must raise, not silently default.
+    raised = False
+    try:
+        budgets.file_budget(_mf("x.safetensors", 100, HW), RATIO, {})
+    except KeyError:
+        raised = True
+    assert raised, "the pure budget path must not invent compression defaults from an empty cfg"
+
+
+def test_contract_reconcile_plan_exposes_canonical_candidateset():
+    """gap #2 integration: the façade actually wires the pure core. reconcile_plan() exposes the
+    canonical CandidateSet (no pinned_target), so candidates.py cannot sit dormant while every current
+    test still passes. Uses the in-memory DB helpers below (resolved at call time)."""
+    _require_pure()
+    con = _mem()
+    _db_drive(con, "d1", cap=10**9)
+    _db_repo(con, "org/m", files=(
+        ("a.safetensors", 100, "safetensors", "bf16"),
+        ("b.safetensors", 100, "safetensors", "bf16")))
+    _db_archive(con, "org/m", "d1", ("a.safetensors", 100, 100, HW))   # proven partial → a candidate exists
+    result = reconcile.reconcile_plan(con, "ark")
+    assert isinstance(result.candidates, candidates.CandidateSet), \
+        "reconcile_plan() must expose the canonical CandidateSet — the pure core cannot stay dormant"
+    emitted = [c for _, cs in result.candidates.by_requirement for c in cs]
+    assert emitted, "expected a finish-in-place candidate for the unsatisfied requirement"
+    assert not any(hasattr(c, "pinned_target") for c in emitted), "façade candidates carry no pinned_target"
+    con.close()
 
 
 # --------------------------------------------------------------------------------------------------
