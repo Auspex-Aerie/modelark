@@ -1740,8 +1740,9 @@ def test_adapter_structural_unproven_provenance():
 def test_adapter_structural_requirement_exceeds_usable_max():
     con = _mem()
     _db_drive(con, "d0", capacity_bytes=1_000, free=50)
-    # Raw peak=10000; max_usable=100 → structural exceed-max (not compression-distorted).
-    _db_repo(con, "org/giant", files=(("shard.bin", 10_000, "aux", None),))
+    # Raw peak=10000 via GGUF (aux-only repos are rejected by archive policy; pure contracts use
+    # PlannerInput aux directly). max_usable=100 → structural exceed-max.
+    _db_repo(con, "org/giant", files=(("shard.gguf", 10_000, "gguf", "Q4_K_M"),))
     plan = _plan(con, {"d0": _evidence("d0", free=50, max_usable=100)})
     _assert_adapter_nonfeasible(plan, "REQUIREMENT_EXCEEDS_USABLE_MAX", diagnostics_override={
         "requirement_id": "primary:org/giant",
@@ -1779,9 +1780,10 @@ def test_adapter_infeasible_with_unknown_at_usable_max():
     con = _mem()
     for label in ("known", "unk0", "unk1"):
         _db_drive(con, label, capacity_bytes=1_000, free=0)
-    # Raw zero-workspace files so peak=8 fits max=10 individually; collective 24>20.
+    # Raw zero-workspace GGUF so peak=8 fits max=10 individually; collective 24>20.
+    # (DB path rejects aux-only; pure contracts inject aux via PlannerInput.)
     for i, size in enumerate((8, 8, 8)):
-        _db_repo(con, f"org/m{i}", files=(("f.bin", size, "aux", None),))
+        _db_repo(con, f"org/m{i}", files=(("f.gguf", size, "gguf", "Q4_0"),))
     evidence = {
         "known": _evidence("known", free=0, max_usable=5),
         "unk0": _evidence("unk0", free=0, executable=False, max_usable=10),
@@ -1803,8 +1805,9 @@ def test_adapter_packing_inconclusive_via_private_bounds_hook():
     con = _mem()
     _db_drive(con, "d0", capacity_bytes=100_000, free=100_000)
     _db_drive(con, "unk", capacity_bytes=100_000, free=0)
+    # GGUF raw (aux-only rejected by archive policy on the DB path).
     for i in range(8):
-        _db_repo(con, f"org/m{i}", files=(("f.bin", 10, "aux", None),))
+        _db_repo(con, f"org/m{i}", files=(("f.gguf", 10, "gguf", "Q4_0"),))
     evidence = {
         "d0": _evidence("d0", free=200, max_usable=9_000),
         "unk": _evidence("unk", free=0, executable=False, max_usable=9_000),
