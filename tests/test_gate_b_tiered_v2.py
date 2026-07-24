@@ -193,20 +193,28 @@ def _assert_metadata(result, *, capacity_mode, feasibility_limit=None, optimizat
     policy = getattr(result, "policy_version", None) or getattr(result, "placement_policy", None)
     assert policy == "tiered_v2", f"policy_version/placement_policy must be tiered_v2; got {policy!r}"
     # Bounds used must be recoverable (explicit values, not silent defaults).
+    # Prefer a nested bounds object; otherwise require explicit fields on the result.
+    # Never default getattr to the expected value — that would make the check a tautology.
     bounds = getattr(result, "bounds", None) or getattr(result, "bounds_used", None)
     if bounds is not None:
         fl = getattr(bounds, "feasibility_state_limit", None)
         ol = getattr(bounds, "optimization_state_limit", None)
-        if feasibility_limit is not None and fl is not None:
-            assert fl == feasibility_limit
-        if optimization_limit is not None and ol is not None:
-            assert ol == optimization_limit
     else:
-        # Alternate projection: explicit fields on the result
-        if feasibility_limit is not None:
-            assert getattr(result, "feasibility_state_limit", feasibility_limit) == feasibility_limit
-        if optimization_limit is not None:
-            assert getattr(result, "optimization_state_limit", optimization_limit) == optimization_limit
+        fl = getattr(result, "feasibility_state_limit", None) if hasattr(result, "feasibility_state_limit") else None
+        ol = getattr(result, "optimization_state_limit", None) if hasattr(result, "optimization_state_limit") else None
+        if feasibility_limit is not None or optimization_limit is not None:
+            assert fl is not None or ol is not None or hasattr(result, "feasibility_state_limit") or hasattr(
+                result, "optimization_state_limit"
+            ), (
+                "GateBResult/PlacementResult must expose bounds metadata "
+                "(.bounds / .bounds_used or .feasibility_state_limit / .optimization_state_limit)"
+            )
+    if feasibility_limit is not None:
+        assert fl is not None, "feasibility_state_limit missing from result bounds metadata"
+        assert fl == feasibility_limit, f"feasibility_state_limit: expected {feasibility_limit}, got {fl}"
+    if optimization_limit is not None:
+        assert ol is not None, "optimization_state_limit missing from result bounds metadata"
+        assert ol == optimization_limit, f"optimization_state_limit: expected {optimization_limit}, got {ol}"
 
 
 def _assert_no_executable_assignment(result):
@@ -592,46 +600,42 @@ def test_contract_failure_domain_vs_graph_dependency():
     _assert_no_executable_assignment(r)
 
     # Malformed: replica depends_on points at a missing requirement id → GRAPH_DEPENDENCY_INVARIANT.
-    # Construct via SolverInput that the pure core must detect if candidates carry a bad depends_on.
-    # If the pure core only sees CandidateSet from #36a (always well-formed), expose a dedicated
-    # validation path: gate_b must still reject a hand-crafted invariant break if the API allows
-    # injecting candidates. We require either validation on SolverInput or a documented constructor.
+    # Hand-craft a SolverInput with a missing independent_of target. gate_b (or an optional
+    # validate_solver_input helper) must classify it — not raise an unrelated construction error
+    # that we re-label. Do not wrap TypeError/AttributeError as a false graph-invariant miss.
     assert hasattr(placement, "SolverInput"), "need SolverInput"
-    graph, cset = _graph_cset(planner)
-    # Break an independent_of pointer on a copy of the graph if the API freezes graph from candidates;
-    # the contract is: when depends_on references a requirement_id not in desired, code is GRAPH_...
-    if hasattr(placement, "validate_solver_input") or True:
-        # Build a SolverInput; implementation must detect cycles/missing refs in graph.desired
-        # We synthesize by replacing graph with a minimal malformed one if types allow.
-        try:
-            bad_req = candidates.CopyRequirement(
-                requirement_id="protected_replica:org/bad",
-                repo_id="org/bad",
-                kind=candidates.RequirementKind.PROTECTED_REPLICA,
-                eligible_drives=("R1",),
-                independent_of="protected_home:org/missing",
-            )
-            bad_graph = candidates.RequirementGraph(desired=(bad_req,), requirement_set_hash="0" * 64)
-            empty_cset = candidates.CandidateSet(
-                satisfied=(), by_requirement=(), drift=(), blocked=())
-            bad_inp = placement.SolverInput(
-                graph=bad_graph,
-                candidates=empty_cset,
-                drives=planner.drives,
-                executable_budget=_budget_pairs({"H": 5_000, "R1": 5_000, "R2": 5_000}),
-                max_usable_for_epoch=_budget_pairs({"H": 9_000, "R1": 9_000, "R2": 9_000}),
-                capacity_mode="guaranteed",
-                policy_version="tiered_v2",
-                bounds=_bounds(50, 1),
-            )
-            r_bad = placement.gate_b(bad_inp)
-            assert _code(r_bad) == "GRAPH_DEPENDENCY_INVARIANT"
-            _assert_no_executable_assignment(r_bad)
-        except Exception as exc:  # noqa: BLE001 — production must implement this contract path
-            raise AssertionError(
-                "gate_b must classify missing depends_on references as GRAPH_DEPENDENCY_INVARIANT; "
-                f"construction/call failed with {type(exc).__name__}: {exc}"
-            ) from exc
+    bad_req = candidates.CopyRequirement(
+        requirement_id="protected_replica:org/bad",
+        repo_id="org/bad",
+        kind=candidates.RequirementKind.PROTECTED_REPLICA,
+        eligible_drives=("R1",),
+        independent_of="protected_home:org/missing",
+    )
+    bad_graph = candidates.RequirementGraph(desired=(bad_req,), requirement_set_hash="0" * 64)
+    empty_cset = candidates.CandidateSet(satisfied=(), by_requirement=(), drift=(), blocked=())
+    bad_inp = placement.SolverInput(
+        graph=bad_graph,
+        candidates=empty_cset,
+        drives=planner.drives,
+        executable_budget=_budget_pairs({"H": 5_000, "R1": 5_000, "R2": 5_000}),
+        max_usable_for_epoch=_budget_pairs({"H": 9_000, "R1": 9_000, "R2": 9_000}),
+        capacity_mode="guaranteed",
+        policy_version="tiered_v2",
+        bounds=_bounds(50, 1),
+    )
+    if hasattr(placement, "validate_solver_input"):
+        # Optional pure pre-check may raise or return the structural code; either is fine.
+        validated = placement.validate_solver_input(bad_inp)
+        if validated is not None and hasattr(validated, "code"):
+            assert _code(validated) == "GRAPH_DEPENDENCY_INVARIANT"
+            _assert_no_executable_assignment(validated)
+            return
+    r_bad = placement.gate_b(bad_inp)
+    assert _code(r_bad) == "GRAPH_DEPENDENCY_INVARIANT", (
+        f"gate_b must classify missing depends_on references as GRAPH_DEPENDENCY_INVARIANT; "
+        f"got {_code(r_bad)}"
+    )
+    _assert_no_executable_assignment(r_bad)
 
 
 def test_contract_partial_vs_fresh_no_pin_and_movement_preference():
@@ -1097,7 +1101,7 @@ def test_adapter_exposes_graded_gate_b_and_feasible_exclusivity():
     else:
         assert plan.feasible is False
         # Non-FEASIBLE must not expose an executable assignment as authority
-        assert not plan.tasks or code == "FEASIBLE", (
+        assert not plan.tasks, (
             "non-FEASIBLE plan_capacity result must not expose executable tasks")
     payload = plan.to_dict()
     assert payload.get("gate_b_code") == code
