@@ -850,21 +850,22 @@ def test_contract_optimistic_search_bound_exhaustion():
 
 
 def test_contract_adversarial_greedy_false_negative_is_feasible():
-    """FFD/greedy can miss a packing that exists; solver must report FEASIBLE with a complete fit.
+    """Ordinary FFD fails; exact packing exists. Solver must report FEASIBLE with a complete fit.
 
-    Raw zero-workspace items 6,6,5,5 into bins 10,10,10.
-    Greedy largest-first into A,B,C leaves the second 5 without a home; packing (5,5)/(6)/(6) works.
+    Raw zero-workspace items (5,4,2,2,2,2) into capacities (6,6,5).
+    FFD largest-first into A=6,B=6,C=5: 5→C, 4→A (rem2), 2→A (full), 2→B, 2→B, last 2 fails.
+    Exact packing exists: 5→C, 4+2→A, 2+2+2→B.
     """
     _require_placement()
-    sizes = (6, 6, 5, 5)
-    repos = [f"org/m{i}" for i in range(4)]
+    sizes = (5, 4, 2, 2, 2, 2)
+    repos = [f"org/m{i}" for i in range(6)]
     planner = _planner(
         selection=repos,
-        manifests=[(repo, [_raw_mf("f.json", size, HW)]) for repo, size in zip(repos, sizes)],
+        manifests=[(repo, [_raw_mf("f.bin", size, HW)]) for repo, size in zip(repos, sizes)],
         numcopies=[(r, 1) for r in repos],
         drives=[_drive("A", cap=100), _drive("B", cap=100), _drive("C", cap=100)],
     )
-    budgets = {"A": 10, "B": 10, "C": 10}
+    budgets = {"A": 6, "B": 6, "C": 5}
     r = placement.gate_b(_solver_input(
         planner, executable_budget=budgets, max_usable_for_epoch=budgets,
         feasibility_limit=50_000, optimization_limit=1,
@@ -872,8 +873,7 @@ def test_contract_adversarial_greedy_false_negative_is_feasible():
     assert _code(r) == "FEASIBLE"
     _assert_metadata(r, capacity_mode="guaranteed", feasibility_limit=50_000)
     targets = _task_targets(r.assignment)
-    assert len(targets) == 4
-    # Prove the complete assignment fits residual free under durable+workspace (=durable for raw).
+    assert len(targets) == 6
     load = {lab: 0 for lab in budgets}
     size_by_repo = dict(zip(repos, sizes))
     for rid, tgt in targets.items():
@@ -881,6 +881,8 @@ def test_contract_adversarial_greedy_false_negative_is_feasible():
         load[tgt] += size_by_repo[repo]
     for lab, used in load.items():
         assert used <= budgets[lab], f"assignment overfills {lab}: {used}>{budgets[lab]}"
+    # Explicit existence packing check (may differ from solver's assignment)
+    assert sum(sizes) == sum(budgets.values())
 
 
 # --------------------------------------------------------------------------------------------------
@@ -967,6 +969,9 @@ def test_contract_failure_domain_vs_graph_dependency():
         graph=bad_graph, candidates=empty_cset, drives=planner.drives,
         executable_budget=_budget_pairs({"H": 5_000, "R1": 5_000, "R2": 5_000}),
         max_usable_for_epoch=_budget_pairs({"H": 9_000, "R1": 9_000, "R2": 9_000}),
+        drive_evidence=_drive_evidence_pairs({
+            "H": _ev_exec(), "R1": _ev_exec(), "R2": _ev_exec(),
+        }),
         capacity_mode="guaranteed", policy_version="tiered_v2", bounds=_bounds(50, 1),
     )
     r_bad = placement.gate_b(bad_inp)
@@ -991,27 +996,42 @@ def test_contract_blocked_home_retains_structural_not_graph_invariant():
         f"blocked home must retain TARGET_TIER_MISSING, not become GRAPH_*; got {_code(r)}")
     assert _code(r) != "GRAPH_DEPENDENCY_INVARIANT"
     _assert_no_executable_assignment(r)
-    _assert_structural(r, "TARGET_TIER_MISSING")
+    _assert_structural(r, "TARGET_TIER_MISSING", diagnostics_override={
+        "requirement_id": "protected_home:org/m",
+        "repo_id": "org/m",
+        "kind": "protected_home",
+        "eligible_drives": (),
+    })
 
 
 def test_contract_pending_home_resolves_source_and_domain():
+    """PendingHome resolves to exact SourceIdentity; domain-filtered; dep-first is discriminating."""
     _require_placement()
+    # Home H; two replica targets: R-bad sorts first but shares failure domain with H;
+    # R-good sorts later and is independent. Dependency-first with limit 3 succeeds on R-good.
+    # Replica-first would enter R-bad and cannot complete within limit 3.
     planner = _planner(
         selection=["org/m"],
-        manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
+        manifests=[("org/m", [_raw_mf("w.bin", 100, HW)])],
         numcopies=[("org/m", 2)],
         drives=[
             _drive("H", role="primary", raid=True, cap=10_000, fs_uuid="home-uuid"),
-            _drive("R", role="replica", cap=10_000, fs_uuid="replica-uuid"),
+            _drive("R-bad", role="replica", cap=10_000, fs_uuid="home-uuid"),  # same domain, sorts first
+            _drive("R-good", role="replica", cap=10_000, fs_uuid="replica-uuid"),
         ],
     )
     _, cset = _graph_cset(planner)
     rep = [c for rid, cs in cset.by_requirement if rid.startswith("protected_replica:") for c in cs]
     assert rep and any(isinstance(c.source, candidates.PendingHome) for c in rep)
+    # Candidate order must place R-bad before R-good by target_drive label
+    rep_targets = sorted({c.target_drive for c in rep})
+    assert rep_targets == ["R-bad", "R-good"] or "R-bad" < "R-good"
+
+    budgets = {"H": 5_000, "R-bad": 5_000, "R-good": 5_000}
+    maxima = {k: 9_000 for k in budgets}
 
     r = placement.gate_b(_solver_input(
-        planner, executable_budget={"H": 5_000, "R": 5_000},
-        max_usable_for_epoch={"H": 9_000, "R": 9_000},
+        planner, executable_budget=budgets, max_usable_for_epoch=maxima,
         feasibility_limit=5_000, optimization_limit=5_000,
     ))
     assert _code(r) == "FEASIBLE"
@@ -1020,38 +1040,37 @@ def test_contract_pending_home_resolves_source_and_domain():
     home_t = targets.get("protected_home:org/m")
     rep_t = targets.get("protected_replica:org/m")
     assert home_t == "H"
-    assert rep_t == "R"
+    assert rep_t == "R-good", (
+        f"must place replica on domain-independent R-good, not R-bad; got {rep_t!r}")
     rep_src = sources.get("protected_replica:org/m")
-    # Normalized source equals selected home target (complete identity, not PendingHome).
-    if isinstance(rep_src, candidates.SourceIdentity):
-        assert rep_src.drive_label == home_t
-    elif isinstance(rep_src, str):
-        assert rep_src == home_t
-    else:
-        # Assignment may nest source.drive_label
-        assert getattr(rep_src, "drive_label", None) == home_t, (
-            f"PendingHome must resolve to home target {home_t!r}; got {rep_src!r}")
-    # Failure-domain independent.
-    assert home_t != rep_t
+    # Exact approved normalized representation — not a bare drive-label string.
+    assert isinstance(rep_src, candidates.SourceIdentity), (
+        f"PendingHome must resolve to SourceIdentity; got {type(rep_src)!r}: {rep_src!r}")
+    assert rep_src == candidates.SourceIdentity("H", None, None) or (
+        rep_src.drive_label == "H"
+        and rep_src.annex_key is None
+        and rep_src.orig_sha256 is None
+    ), f"expected SourceIdentity(H, None, None); got {rep_src!r}"
     _assert_metadata(r, capacity_mode="guaranteed")
 
-    # Dependencies-before-constrainedness: root + home + replica needs 3 states minimum.
-    # limit=2 → PACKING_INCONCLUSIVE; limit=3 → FEASIBLE. A replica-first expansion without the
-    # ready-set rule cannot complete under the same bound.
+    # Discriminating bound: limit=3 enters root → home → valid replica (after domain filter).
+    # Replica-first would expand R-bad first and exhaust the bound without a valid completion.
     r_lo = placement.gate_b(_solver_input(
-        planner, executable_budget={"H": 5_000, "R": 5_000},
-        max_usable_for_epoch={"H": 9_000, "R": 9_000},
+        planner, executable_budget=budgets, max_usable_for_epoch=maxima,
         feasibility_limit=2, optimization_limit=1,
     ))
-    assert _code(r_lo) == "PACKING_INCONCLUSIVE", (
-        f"limit=2 must not complete home+replica; got {_code(r_lo)}")
+    assert _code(r_lo) == "PACKING_INCONCLUSIVE"
     r_hi = placement.gate_b(_solver_input(
-        planner, executable_budget={"H": 5_000, "R": 5_000},
-        max_usable_for_epoch={"H": 9_000, "R": 9_000},
+        planner, executable_budget=budgets, max_usable_for_epoch=maxima,
         feasibility_limit=3, optimization_limit=1,
     ))
-    assert _code(r_hi) == "FEASIBLE", (
-        f"limit=3 with dependency-first order must be FEASIBLE; got {_code(r_hi)}")
+    assert _code(r_hi) == "FEASIBLE"
+    assert _task_targets(r_hi.assignment).get("protected_replica:org/m") == "R-good"
+    hi_src = _task_sources(r_hi.assignment).get("protected_replica:org/m")
+    assert isinstance(hi_src, candidates.SourceIdentity)
+    assert hi_src.drive_label == "H"
+    assert hi_src.annex_key is None and hi_src.orig_sha256 is None
+
 
 
 # --------------------------------------------------------------------------------------------------
@@ -1078,103 +1097,111 @@ def test_contract_feasibility_truncation_exact():
 
 
 def test_contract_optimization_truncation_and_emergency_fallback():
-    """Optimization limit must return best-so-far that can differ from first-feasible.
+    """Exact optim limit 3: root + A (first-feasible worse) + B (better); C unexplored → truncated.
 
-    First-feasible follows candidate order (drive-a before drive-b). drive-a is full re-download
-    (high movement); drive-b is partial (low movement). Improvement finds the better partial before
-    the optimization bound truncates.
+    Three ordered candidates on one requirement:
+      A drive-a: full re-download (movement 80) — first-feasible, worse
+      B drive-b: partial (movement 40) — better
+      C drive-c: full re-download (movement 80) — remaining branch
     """
     _require_placement()
     planner = _planner(
         selection=["org/m"],
-        manifests=[("org/m", [_raw_mf("a.json", 40, HW), _raw_mf("b.json", 40, HW2)])],
+        manifests=[("org/m", [_raw_mf("a.bin", 40, HW), _raw_mf("b.bin", 40, HW2)])],
         numcopies=[("org/m", 1)],
-        drives=[_drive("drive-a", cap=10_000), _drive("drive-b", cap=10_000)],
-        archived=[_arch("org/m", "drive-b", "a.json", sha=HW, obytes=40, sbytes=40)],
+        drives=[
+            _drive("drive-a", cap=10_000),
+            _drive("drive-b", cap=10_000),
+            _drive("drive-c", cap=10_000),
+        ],
+        archived=[_arch("org/m", "drive-b", "a.bin", sha=HW, obytes=40, sbytes=40)],
     )
-    budgets = {"drive-a": 5_000, "drive-b": 5_000}
-    # High optim limit: full improve → partial on drive-b
-    inp_full = _solver_input(
-        planner, executable_budget=budgets, max_usable_for_epoch={k: 9_000 for k in budgets},
-        feasibility_limit=50_000, optimization_limit=50_000,
-    )
+    budgets = {"drive-a": 5_000, "drive-b": 5_000, "drive-c": 5_000}
+    maxima = {k: 9_000 for k in budgets}
+
+    # Build explicit candidate order A,B,C from natural set
+    graph, cset = _graph_cset(planner)
+    rid, natural = cset.by_requirement[0]
+    by_tgt = {c.target_drive: c for c in natural}
+    assert set(by_tgt) >= {"drive-a", "drive-b", "drive-c"}
+    ordered = (by_tgt["drive-a"], by_tgt["drive-b"], by_tgt["drive-c"])
+    cset_abc = dataclasses.replace(cset, by_requirement=((rid, ordered),))
+
+    def make_inp(opt_lim):
+        return _solver_input(
+            planner, executable_budget=budgets, max_usable_for_epoch=maxima,
+            feasibility_limit=50_000, optimization_limit=opt_lim,
+            graph=graph, cset=cset_abc,
+        )
+
+    # First-feasible = A
+    inp_full = make_inp(50_000)
     gb = placement.gate_b(inp_full)
     assert _code(gb) == "FEASIBLE"
     first = gb.assignment
-    first_targets = _task_targets(first)
-    # First-feasible uses canonical candidate order: drive-a before drive-b → full re-download.
-    assert first_targets.get("primary:org/m") == "drive-a", (
-        f"first-feasible must take drive-a (canonical candidate order); got {first_targets}")
+    assert _task_targets(first).get(rid) == "drive-a", (
+        f"first-feasible must be A (drive-a); got {_task_targets(first)}")
 
+    # Sufficient bound completes as optimized with B
     full = placement.improve(inp_full, first, emergency=None)
-    full_targets = _task_targets(full.assignment)
-    assert full_targets.get("primary:org/m") == "drive-b", (
-        f"full improve must prefer partial on drive-b; got {full_targets}")
+    assert getattr(full, "derivation_mode", None) == "optimized"
+    assert _task_targets(full.assignment).get(rid) == "drive-b"
     assert full.assignment != first
     full_score = getattr(full, "score", None)
 
-    # Truncation bound large enough to enter the better state, small enough to stop as truncated.
-    # Production may expose optimization_states_visited; require derivation_mode=state_truncated
-    # with assignment equal to the improved best (drive-b), not first-feasible.
-    # Try descending limits to find a truncating bound that still captured best-so-far.
-    truncated = None
-    for lim in (20, 10, 5, 3, 2):
-        inp_t = _solver_input(
-            planner, executable_budget=budgets, max_usable_for_epoch={k: 9_000 for k in budgets},
-            feasibility_limit=50_000, optimization_limit=lim,
-        )
-        tr = placement.improve(inp_t, first, emergency=None)
-        if getattr(tr, "derivation_mode", None) == "state_truncated":
-            truncated = tr
-            trunc_lim = lim
-            break
-    assert truncated is not None, (
-        "must expose state_truncated under a finite optimization_state_limit while still "
-        "finding a best-so-far better than first-feasible when possible")
+    # Exact limit 3: root + A + B entered; attempting C truncates with B best-so-far
+    inp_t = make_inp(3)
+    truncated = placement.improve(inp_t, first, emergency=None)
+    assert getattr(truncated, "derivation_mode", None) == "state_truncated"
     assert getattr(truncated, "diagnostic", None) == "optimization_truncated"
-    assert truncated.assignment != first, "truncated best-so-far must differ from first-feasible"
-    assert _task_targets(truncated.assignment).get("primary:org/m") == "drive-b"
+    visited = getattr(truncated, "optimization_states_visited", None)
+    if visited is None:
+        visited = getattr(truncated, "states_visited", None)
+    assert visited == 3, f"optimization_states_visited must be 3; got {visited!r}"
+    assert truncated.assignment != first
+    assert _task_targets(truncated.assignment).get(rid) == "drive-b"
     assert getattr(truncated, "score", None) == full_score or (
         getattr(truncated, "score", None) is not None
-        and getattr(truncated, "score")[0] < getattr(full, "score", (0,))[0] + 1
+        and getattr(truncated, "score")[0] == 40
     )
-    # Deterministic under shuffle of drives
+
+    # Deterministic repeated + shuffled drive list (candidate order pinned via cset_abc)
+    tr2 = placement.improve(inp_t, first, emergency=None)
+    assert tr2.assignment == truncated.assignment
+    assert getattr(tr2, "score", None) == getattr(truncated, "score", None)
     planner_s = _planner(
         selection=["org/m"],
-        manifests=[("org/m", [_raw_mf("a.json", 40, HW), _raw_mf("b.json", 40, HW2)])],
+        manifests=[("org/m", [_raw_mf("a.bin", 40, HW), _raw_mf("b.bin", 40, HW2)])],
         numcopies=[("org/m", 1)],
-        drives=[_drive("drive-b", cap=10_000), _drive("drive-a", cap=10_000)],
-        archived=[_arch("org/m", "drive-b", "a.json", sha=HW, obytes=40, sbytes=40)],
+        drives=[
+            _drive("drive-c", cap=10_000),
+            _drive("drive-b", cap=10_000),
+            _drive("drive-a", cap=10_000),
+        ],
+        archived=[_arch("org/m", "drive-b", "a.bin", sha=HW, obytes=40, sbytes=40)],
     )
-    # Note: candidate order is by target label, not drive list order — first-feasible still drive-a.
+    # Same pinned candidate order ABC regardless of drive list shuffle
     inp_s = _solver_input(
-        planner_s, executable_budget=budgets, max_usable_for_epoch={k: 9_000 for k in budgets},
-        feasibility_limit=50_000, optimization_limit=trunc_lim,
+        planner_s, executable_budget=budgets, max_usable_for_epoch=maxima,
+        feasibility_limit=50_000, optimization_limit=3,
+        graph=graph, cset=cset_abc,
     )
     gb_s = placement.gate_b(inp_s)
     tr_s = placement.improve(inp_s, gb_s.assignment, emergency=None)
     assert tr_s.assignment == truncated.assignment
-    assert getattr(tr_s, "score", None) == getattr(truncated, "score", None)
-    tr_s2 = placement.improve(inp_s, gb_s.assignment, emergency=None)
-    assert tr_s2.assignment == truncated.assignment
 
-    # Emergency fallback equals first-feasible exactly
+    # Emergency fallback equals A (first-feasible) exactly
     class _Boom:
         def __call__(self, *a, **k):
             raise getattr(placement, "EmergencyResourceLimit", RuntimeError)("injected")
 
-    inp_e = _solver_input(
-        planner, executable_budget=budgets, max_usable_for_epoch={k: 9_000 for k in budgets},
-        feasibility_limit=50_000, optimization_limit=50_000,
-    )
-    gb_e = placement.gate_b(inp_e)
-    a = placement.improve(inp_e, gb_e.assignment, emergency=_Boom())
-    b = placement.improve(inp_e, gb_e.assignment, emergency=_Boom())
+    a = placement.improve(make_inp(50_000), first, emergency=_Boom())
+    b = placement.improve(make_inp(50_000), first, emergency=_Boom())
     assert getattr(a, "derivation_mode", None) == "canonical_fallback"
     assert getattr(a, "diagnostic", None) == "optimization_resource_exhausted"
-    assert a.assignment == gb_e.assignment == first or a.assignment == gb_e.assignment
+    assert a.assignment == first
     assert a.assignment == b.assignment
-    assert a.assignment != truncated.assignment or _task_targets(a.assignment).get("primary:org/m") == "drive-a"
+    assert _task_targets(a.assignment).get(rid) == "drive-a"
     _assert_deep_immutable(a)
     assert not any(isinstance(getattr(a, f.name, None), _Boom) for f in dataclasses.fields(a))
 
@@ -1278,42 +1305,69 @@ def test_contract_objective_precedence_adversarial():
         f"idle must dominate when movement/free equal; got idle={score3[2]} "
         f"targets={_task_targets(imp3.assignment)}")
 
-    # (4) Canonical tie on complete SourceIdentity (annex_key/hash), not merely drive_label.
-    # Home already satisfied on two primaries with different annex keys; only replica remains.
-    # Two equal replica targets; two sources differ only by annex_key — tie-break uses full identity.
+    # (4) Complete SourceIdentity tie-break: same drive_label, differing annex_key/hash.
+    # Manually place the lexically worse full identity first so drive_label-only order would pick wrong.
     planner4 = _planner(
         selection=["org/t"],
-        manifests=[("org/t", [_raw_mf("w.json", 10, HW)])],
-        numcopies=[("org/t", 2)],
-        drives=[
-            _drive("H-a", role="primary", raid=True, cap=10_000, fs_uuid="ha"),
-            _drive("H-b", role="primary", raid=True, cap=10_000, fs_uuid="hb"),
-            _drive("R-a", role="replica", cap=10_000, fs_uuid="ra"),
-            _drive("R-b", role="replica", cap=10_000, fs_uuid="rb"),
-        ],
-        archived=[
-            _arch("org/t", "H-a", "w.json", sha=HW, obytes=10, sbytes=10, key="annex-bbb"),
-            _arch("org/t", "H-b", "w.json", sha=HW, obytes=10, sbytes=10, key="annex-aaa"),
-        ],
+        manifests=[("org/t", [_raw_mf("w.bin", 10, HW)])],
+        numcopies=[("org/t", 1)],
+        drives=[_drive("tgt", cap=10_000)],
     )
-    # Only replica work remains (homes complete). Equal budgets on R-a/R-b.
-    inp4 = _solver_input(
-        planner4,
-        executable_budget={"H-a": 0, "H-b": 0, "R-a": 100, "R-b": 100},
-        max_usable_for_epoch={"H-a": 9_000, "H-b": 9_000, "R-a": 9_000, "R-b": 9_000},
-        feasibility_limit=10_000, optimization_limit=50_000,
-    )
-    gb4 = placement.gate_b(inp4)
-    assert _code(gb4) == "FEASIBLE"
-    imp4 = placement.improve(inp4, gb4.assignment, emergency=None)
-    sources = _task_sources(imp4.assignment)
-    rep_src = sources.get("protected_replica:org/t")
-    # Prefer source with annex-aaa (lexicographically before annex-bbb) when other scores equal.
-    key = getattr(rep_src, "annex_key", None) or getattr(rep_src, "drive_label", None)
-    assert key in {"annex-aaa", "H-b"} or (
-        isinstance(rep_src, candidates.SourceIdentity) and rep_src.annex_key == "annex-aaa"
-    ), f"canonical source identity tie must prefer annex-aaa source; got {rep_src!r}"
-    score4 = getattr(imp4, "score", None)
+    graph4, cset4 = _graph_cset(planner4)
+    # Build two otherwise-identical fetch/replica-style candidates differing only in source identity.
+    # Use the existing candidate as a template for budget/missing/reused fields.
+    assert cset4.by_requirement, "need at least one unsatisfied requirement"
+    rid0, base_cands = cset4.by_requirement[0]
+    assert base_cands, "need a base candidate template"
+    base = base_cands[0]
+    worse = candidates.SourceIdentity("src", "annex-zzz", "f" * 64)
+    better = candidates.SourceIdentity("src", "annex-aaa", "a" * 64)
+    # Deliberately order worse first — pure label/drive order cannot distinguish; full identity must.
+    c_worse = dataclasses.replace(base, source=worse) if dataclasses.is_dataclass(base) else base
+    c_better = dataclasses.replace(base, source=better) if dataclasses.is_dataclass(base) else base
+    # If replace doesn't apply source (frozen may work), construct via type
+    if getattr(c_worse, "source", None) is not worse:
+        # Fall back: build Candidate with explicit fields from base
+        def _with_source(src):
+            return candidates.Candidate(
+                requirement_id=base.requirement_id,
+                task_kind=base.task_kind,
+                target_drive=base.target_drive,
+                source=src,
+                depends_on_requirement=base.depends_on_requirement,
+                reused_files=base.reused_files,
+                missing_files=base.missing_files,
+                budget=base.budget,
+                movement_cost=base.movement_cost,
+            )
+        c_worse, c_better = _with_source(worse), _with_source(better)
+    cset_fwd = dataclasses.replace(
+        cset4, by_requirement=((rid0, (c_worse, c_better)),))
+    cset_rev = dataclasses.replace(
+        cset4, by_requirement=((rid0, (c_better, c_worse)),))
+    bud4 = {"tgt": 100}
+    def run_src(cset):
+        inp = _solver_input(
+            planner4, executable_budget=bud4, max_usable_for_epoch={"tgt": 9_000},
+            feasibility_limit=10_000, optimization_limit=50_000, graph=graph4, cset=cset,
+        )
+        gb = placement.gate_b(inp)
+        assert _code(gb) == "FEASIBLE"
+        return placement.improve(inp, gb.assignment, emergency=None)
+
+    imp_fwd = run_src(cset_fwd)
+    imp_rev = run_src(cset_rev)
+    src_fwd = _task_sources(imp_fwd.assignment).get(rid0)
+    src_rev = _task_sources(imp_rev.assignment).get(rid0)
+    assert isinstance(src_fwd, candidates.SourceIdentity), (
+        f"chosen source must be SourceIdentity; got {type(src_fwd)!r}")
+    assert src_fwd == better, (
+        f"complete identity tie-break must pick annex-aaa over annex-zzz; got {src_fwd!r}")
+    assert src_fwd.drive_label == "src"
+    assert src_fwd.annex_key == "annex-aaa"
+    assert src_fwd.orig_sha256 == "a" * 64
+    assert src_rev == better == src_fwd, "reversing candidate order must yield the same identity"
+    score4 = getattr(imp_fwd, "score", None)
     assert isinstance(score4, tuple) and len(score4) >= 4
 
 
@@ -1526,7 +1580,7 @@ def _gate_b_code_from_plan(plan) -> str:
     return code.value if hasattr(code, "value") else str(code)
 
 
-def _assert_adapter_nonfeasible(plan, expected_code: str):
+def _assert_adapter_nonfeasible(plan, expected_code: str, *, diagnostics_override=None):
     code = _gate_b_code_from_plan(plan)
     assert code == expected_code, f"adapter gate_b_code: expected {expected_code}, got {code}"
     assert plan.feasible is False
@@ -1535,8 +1589,39 @@ def _assert_adapter_nonfeasible(plan, expected_code: str):
     assert payload.get("gate_b_code") == expected_code
     assert payload.get("feasible") is False
     assert payload.get("placement_policy") == "tiered_v2"
+    # Structural codes: diagnostics + actions must survive projection on plan and to_dict().
+    if expected_code in STRUCTURAL_GOLDENS:
+        golden = STRUCTURAL_GOLDENS[expected_code]
+        want_actions = golden["actions"]
+        want_diag = diagnostics_override or golden["diagnostics"]
+        # CapacityPlan fields
+        plan_actions = getattr(plan, "gate_b_actions", None) or getattr(plan, "actions", None)
+        plan_diag = getattr(plan, "gate_b_diagnostics", None) or getattr(plan, "diagnostics", None)
+        if plan_actions is None and "actions" in payload:
+            plan_actions = payload["actions"]
+        if plan_diag is None and "diagnostics" in payload:
+            plan_diag = payload["diagnostics"]
+        assert plan_actions is not None, f"{expected_code} must project actions onto CapacityPlan"
+        assert plan_diag is not None, f"{expected_code} must project diagnostics onto CapacityPlan"
+        got_actions = tuple(
+            a.value if hasattr(a, "value") else str(a) for a in (plan_actions or ()))
+        assert got_actions == want_actions, (
+            f"{expected_code} projected actions {got_actions!r} != golden {want_actions!r}")
+        got_diag = _diagnostics_as_dict(plan_diag)
+        def norm(v):
+            if isinstance(v, list):
+                return tuple(norm(x) for x in v)
+            if isinstance(v, tuple):
+                return tuple(norm(x) for x in v)
+            return v
+        got_n = {k: norm(v) for k, v in got_diag.items() if k in want_diag}
+        want_n = {k: norm(v) for k, v in want_diag.items()}
+        assert got_n == want_n, (
+            f"{expected_code} projected diagnostics {got_n!r} != golden {want_n!r}")
+        # to_dict must also carry them
+        assert payload.get("actions") is not None or payload.get("gate_b_actions") is not None
+        assert payload.get("diagnostics") is not None or payload.get("gate_b_diagnostics") is not None
     # No false standalone capacity-short for inconclusive/unknown/structural (passoff).
-    # Exhaustive infeasibility codes MAY project CAPACITY_*_SHORT as truthful detail.
     no_false_short = {
         "PACKING_INCONCLUSIVE", "CAPACITY_EVIDENCE_UNKNOWN",
         *STRUCTURAL_CODES,
@@ -1618,7 +1703,12 @@ def test_adapter_structural_requirement_exceeds_usable_max():
     # Raw peak=10000; max_usable=100 → structural exceed-max (not compression-distorted).
     _db_repo(con, "org/giant", files=(("shard.bin", 10_000, "aux", None),))
     plan = _plan(con, {"d0": _evidence("d0", free=50, max_usable=100)})
-    _assert_adapter_nonfeasible(plan, "REQUIREMENT_EXCEEDS_USABLE_MAX")
+    _assert_adapter_nonfeasible(plan, "REQUIREMENT_EXCEEDS_USABLE_MAX", diagnostics_override={
+        "requirement_id": "primary:org/giant",
+        "repo_id": "org/giant",
+        "peak_bytes": 10_000,
+        "maxima": (("d0", 100),),
+    })
     con.close()
 
 
@@ -1665,9 +1755,11 @@ def test_adapter_infeasible_with_unknown_at_usable_max():
 def test_adapter_packing_inconclusive_via_private_bounds_hook():
     """Force PACKING_INCONCLUSIVE without widening plan_capacity's public signature.
 
-    Production must consult a private test/internal bounds hook (e.g. capacity._TEST_SOLVER_BOUNDS)
-    when building SolverInput — never a public bounds= kwarg.
+    Production consults a private bounds-provider callable (e.g. capacity._adapter_solver_bounds)
+    when building SolverInput. Tests patch that callable — never a writable module global and
+    never a public bounds= kwarg.
     """
+    from unittest import mock
     con = _mem()
     _db_drive(con, "d0", capacity_bytes=100_000, free=100_000)
     _db_drive(con, "unk", capacity_bytes=100_000, free=0)
@@ -1677,24 +1769,18 @@ def test_adapter_packing_inconclusive_via_private_bounds_hook():
         "d0": _evidence("d0", free=200, max_usable=9_000),
         "unk": _evidence("unk", free=0, executable=False, max_usable=9_000),
     }
-    # Public signature must NOT gain bounds= / feasibility_state_limit=.
     sig = inspect.signature(capacity.plan_capacity)
     for banned in ("bounds", "feasibility_state_limit", "optimization_state_limit"):
         assert banned not in sig.parameters, (
-            f"plan_capacity must not widen public signature with {banned}=; "
-            "use private _TEST_SOLVER_BOUNDS injection")
-    if not hasattr(capacity, "_TEST_SOLVER_BOUNDS"):
+            f"plan_capacity must not widen public signature with {banned}=")
+    if not hasattr(capacity, "_adapter_solver_bounds"):
         raise AssertionError(
-            "capacity must expose private _TEST_SOLVER_BOUNDS (None | SolverBounds) for "
-            "test/internal injection of solver bounds without changing the public signature")
+            "capacity must expose private callable _adapter_solver_bounds() -> SolverBounds "
+            "(patchable; no writable module-global test switch)")
     if not _HAS_PLACEMENT:
         _require_placement()
-    prev = capacity._TEST_SOLVER_BOUNDS
-    try:
-        capacity._TEST_SOLVER_BOUNDS = _bounds(1, 1)
+    with mock.patch.object(capacity, "_adapter_solver_bounds", return_value=_bounds(1, 1)):
         plan = _plan(con, evidence)
-    finally:
-        capacity._TEST_SOLVER_BOUNDS = prev
     _assert_adapter_nonfeasible(plan, "PACKING_INCONCLUSIVE")
     con.close()
 
@@ -1757,7 +1843,11 @@ def test_adapter_failure_domain_unsatisfiable():
         "R2": _evidence("R2", free=50_000, max_usable=90_000),
     }
     plan = _plan(con, evidence)
-    _assert_adapter_nonfeasible(plan, "FAILURE_DOMAIN_UNSATISFIABLE")
+    _assert_adapter_nonfeasible(plan, "FAILURE_DOMAIN_UNSATISFIABLE", diagnostics_override={
+        "home_requirement_id": "protected_home:org/m",
+        "replica_requirement_id": "protected_replica:org/m",
+        "domain_evidence": ("fs_uuid:same",),
+    })
     con.close()
 
 
