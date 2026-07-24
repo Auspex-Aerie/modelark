@@ -246,8 +246,11 @@ def _scenario_reuse_via_archived_hash_only():
     """No upstream manifest SHA (git-tracked blob): a non-null archived orig_sha256 + size binds reuse."""
     inp = _input(
         selection=["org/m"],
+        # A third un-archived file keeps the requirement INCOMPLETE, so both proven reused files are
+        # inspected on a finish-in-place candidate (not swallowed into a fully-satisfied requirement).
         manifests=[("org/m", [_mf("weights.safetensors", 100, HW),
-                              _mf("tokenizer.model", 20, None, fmt="aux", quant=None)])],
+                              _mf("tokenizer.model", 20, None, fmt="aux", quant=None),
+                              _mf("extra.safetensors", 50, HW2)])],
         numcopies=[("org/m", 1)],
         drives=[_drive("d1")],
         archived=[
@@ -257,6 +260,7 @@ def _scenario_reuse_via_archived_hash_only():
     )
     _, cset = _run(inp)
     c = _cands(cset, "primary:org/m")[0]
+    assert _missing_names(c) == {"extra.safetensors"}, "the un-archived file keeps a finish-in-place candidate"
     tok = next(f for f in c.reused_files if f.rfilename == "tokenizer.model")
     assert tok.proof_source == candidates.ProofSource.ARCHIVED_ORIG_SHA256 and tok.bound_hash == "a" * 64
     w = next(f for f in c.reused_files if f.rfilename == "weights.safetensors")
