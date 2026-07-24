@@ -363,13 +363,13 @@ def test_contract_shuffled_input_byte_equivalence():
 
     a_gb, a_pl = run(drives_n, "fwd")
     b_gb, b_pl = run(drives_s, "rev")
-    assert _code(a_gb) == _code(b_gb)
-    assert a_gb == b_gb or (
-        _code(a_gb) == _code(b_gb)
-        and getattr(a_gb, "assignment", None) == getattr(b_gb, "assignment", None)
-    ), "GateBResult must be byte/canonical-equivalent under shuffled drives/budget map order"
-    if a_pl is not None and b_pl is not None:
-        assert a_pl.assignment == b_pl.assignment, "improved assignment must be order-independent"
+    # Full-result canonicity (code, assignment, diagnostics, metadata) — not a weakened
+    # code-only or assignment-only fallback that would greenwash metadata drift.
+    assert a_gb == b_gb, (
+        "GateBResult must be fully byte/canonical-equivalent under shuffled drives/budget map order")
+    if a_pl is not None or b_pl is not None:
+        assert a_pl is not None and b_pl is not None
+        assert a_pl == b_pl, "PlacementResult must be fully order-independent (not assignment-only)"
 
 
 def test_contract_adversarial_greedy_false_negative_is_feasible():
@@ -881,13 +881,45 @@ def test_contract_objective_precedence_golden():
     # (1000,100) > (900,200) so free-space prefers small.
     assert _target_for("primary:", imp2.assignment) == "small", (
         "free-space vector must dominate idle: prefer assignment with better descending remaining-free")
-
-    # (3) Idle dominates canonical tie: equal movement and equal free vectors → fewer idle drives wins.
-    # Two drives, two equal items of size 50, each drive budget 50 — only one packing shape up to labels;
-    # use three drives with budgets that make free vectors equal for two different support sets.
-    # Contract fallback: score tuple second/third elements ordered so idle is third key.
-    assert isinstance(score, tuple) and len(score) >= 3, (
+    score2 = getattr(imp2, "score", None)
+    assert isinstance(score2, tuple) and len(score2) >= 3, (
         "score must be a lex tuple (movement, free_vector_or_key, idle_count, canonical...)")
+    assert score2[2] == 1, (
+        "idle is the third score component: one used + one unused candidate-target drive → idle=1")
+
+    # (3) Idle dominates canonical tie when movement and free-vector tie: fewer idle drives wins.
+    # Two equal tasks (size 50) and three equal drives (budget 50 each): only pairwise packing is
+    # feasible. Using two drives (idle=1) is mandatory; improve must expose idle=1 on a LIVE score
+    # from this scenario (not a reused score from scenario 1).
+    planner3 = _planner(
+        selection=["org/p", "org/q"],
+        manifests=[
+            ("org/p", [_mf("w.safetensors", 50, HW)]),
+            ("org/q", [_mf("w.safetensors", 50, HW2)]),
+        ],
+        numcopies=[("org/p", 1), ("org/q", 1)],
+        drives=[_drive("a", cap=10_000), _drive("b", cap=10_000), _drive("c", cap=10_000)],
+    )
+    inp3 = _solver_input(
+        planner3,
+        executable_budget={"a": 50, "b": 50, "c": 50},
+        max_usable_for_epoch={"a": 9_000, "b": 9_000, "c": 9_000},
+        feasibility_limit=10_000, optimization_limit=50_000,
+    )
+    gb3 = placement.gate_b(inp3)
+    assert _code(gb3) == "FEASIBLE"
+    imp3 = placement.improve(inp3, gb3.assignment, emergency=None)
+    score3 = getattr(imp3, "score", None)
+    assert isinstance(score3, tuple) and len(score3) >= 3
+    assert score3 is not score and score3 is not score2, "idle scenario must use its own score object"
+    assert score3[2] == 1, (
+        "idle_drive_count (score[2]) must be 1 when two of three candidate-target drives receive tasks")
+    # Movement is first; free-vector second; idle third — pin the ordering slots on every live score.
+    for live in (score, score2, score3):
+        assert isinstance(live, tuple) and len(live) >= 3
+        assert live[0] is not None  # movement
+        assert live[1] is not None  # free-space key / vector
+        assert isinstance(live[2], int) and live[2] >= 0  # idle count
 
 
 def test_contract_both_capacity_modes():
