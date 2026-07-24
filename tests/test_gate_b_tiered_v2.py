@@ -35,9 +35,12 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import importlib
 import inspect
+import pkgutil
 import sqlite3
 import time
+from pathlib import Path
 from types import MappingProxyType
 
 import _admission_compat
@@ -275,14 +278,26 @@ def test_contract_module_api_surface():
 def test_contract_pure_no_io_boundary():
     _require_placement()
     banned = {"sqlite3", "socket", "wishlist", "fetch", "reconcile", "db", "drive_fence", "admission"}
+    # Walk the module and, if it is a package, every submodule — getsource(package) alone would
+    # only see __init__.py and miss impure imports in sibling modules.
+    modules = [placement]
+    if getattr(placement, "__path__", None) is not None:
+        for modinfo in pkgutil.walk_packages(placement.__path__, placement.__name__ + "."):
+            modules.append(importlib.import_module(modinfo.name))
     names = set()
-    for node in ast.walk(ast.parse(inspect.getsource(placement))):
-        if isinstance(node, ast.Import):
-            names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            if node.module:
-                names.add(node.module)
-            names.update(alias.name for alias in node.names)
+    for mod in modules:
+        try:
+            source = inspect.getsource(mod)
+        except (OSError, TypeError):
+            path = Path(inspect.getfile(mod))
+            source = path.read_text(encoding="utf-8") if path.is_file() else ""
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                names.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    names.add(node.module)
+                names.update(alias.name for alias in node.names)
     offenders = sorted(n for n in names if banned & set(n.split(".")))
     assert not offenders, f"pure placement must not import {offenders}"
 
@@ -781,8 +796,9 @@ def test_contract_optimization_truncation_and_emergency_fallback():
     assert getattr(a, "diagnostic", None) == "optimization_resource_exhausted"
     assert a.assignment == gb2.assignment, "emergency must discard best-so-far and return first-feasible"
     assert a.assignment == b.assignment, "emergency fallback must be reproducible"
+    # isinstance(..., _Boom) — not type(_Boom) which is the metaclass `type` and never matches instances.
     assert not any(
-        isinstance(getattr(a, f.name, None), type(_Boom)) for f in dataclasses.fields(a)
+        isinstance(getattr(a, f.name, None), _Boom) for f in dataclasses.fields(a)
     ), "emergency monitor must not appear in PlacementResult"
 
 
