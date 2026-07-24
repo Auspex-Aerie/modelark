@@ -47,6 +47,7 @@ class FreeEvidence(str, Enum):
 class FailureCode(str, Enum):
     CAPACITY_DURABLE_SHORT = "CAPACITY_DURABLE_SHORT"
     CAPACITY_WORKSPACE_SHORT = "CAPACITY_WORKSPACE_SHORT"
+    CAPACITY_EVIDENCE_UNKNOWN = "CAPACITY_EVIDENCE_UNKNOWN"
     TARGET_DRIVE_CHANGED = "TARGET_DRIVE_CHANGED"
     TARGET_TIER_MISSING = "TARGET_TIER_MISSING"
     GRAPH_INVARIANT = "GRAPH_INVARIANT"
@@ -729,15 +730,16 @@ def _adapter_solver_bounds() -> placement.SolverBounds:
     | gate_b 10k first-feasible            | 101         | ~0.03 s     | root + 100  |
     | improve 10k @ optim=50_000           | 50_000 cap  | ~30 s       | truncated   |
     | improve 10k @ optim=5_000            | 5_000 cap   | ~2–3 s      | over 2 s budget |
-    | phase-2 1000×10 plan @ optim=1_500   | ≤1_500      | ~1.07–1.15 s| 3/3 local; ~40% headroom under 2.0 s |
+    | phase-2 plan_capacity alone @ 1_500  | ≤1_500      | ~1.16–1.19 s| solver window only |
+    | phase-2 reconcile+plan (asserted)    | —           | ~1.46–1.54 s| pytest budget 2.0 s covers this full window |
 
     Frozen production defaults (must match the return values below):
       feasibility_state_limit = 200_000  — headroom over easy first-feasible; matches Gate-1 scale
                                            fixture cap; adversarial multi-drive packing << 50k.
-      optimization_state_limit = 1_500   — keeps phase-2 plan_capacity under the 2.0 s budget with
-                                           CI headroom; returns best-so-far under state_truncated.
-                                           Full lex optimization of dense trees is intentionally
-                                           truncated. Do not ship 5_000: it breaches the 2 s budget.
+      optimization_state_limit = 1_500   — keeps phase-2 reconcile+plan under the 2.0 s budget
+                                           (~23–27% headroom on that full window; plan_capacity alone
+                                           is ~1.2 s). Returns best-so-far under state_truncated.
+                                           Do not ship 5_000: it breaches the 2 s budget.
     """
     return placement.SolverBounds(
         feasibility_state_limit=200_000,
@@ -980,10 +982,11 @@ def _unknown_evidence_failures(
     out: list[CapacityFailure] = []
     for drive in unknown:
         # Not CAPACITY_*_SHORT — Gate-1 forbids projecting CAPACITY_EVIDENCE_UNKNOWN as a
-        # proven capacity short alone. GRAPH_INVARIANT is the typed non-short envelope that
-        # still carries evidence_code for fail-closed admission callers (PR-04).
+        # proven capacity short alone. Primary taxonomy is FailureCode.CAPACITY_EVIDENCE_UNKNOWN
+        # (not GRAPH_INVARIANT). evidence_code is the admission code when present — never a
+        # silent or-default substitute for the FailureCode.
         out.append(CapacityFailure(
-            code=FailureCode.GRAPH_INVARIANT,
+            code=FailureCode.CAPACITY_EVIDENCE_UNKNOWN,
             capacity_mode=mode,
             requirement_id=rid,
             task_ids=(),
@@ -995,7 +998,7 @@ def _unknown_evidence_failures(
             workspace_bytes=0,
             shortfall_bytes=0,
             evidence=drive.free_evidence,
-            evidence_code=drive.evidence_code or "CAPACITY_EVIDENCE_UNKNOWN",
+            evidence_code=drive.evidence_code,
             actions=_actions_for(drive, ("mount_or_reconcile_drive", "retry_preview")),
         ))
     return tuple(out)
