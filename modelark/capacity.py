@@ -50,7 +50,11 @@ class FailureCode(str, Enum):
     CAPACITY_EVIDENCE_UNKNOWN = "CAPACITY_EVIDENCE_UNKNOWN"
     TARGET_DRIVE_CHANGED = "TARGET_DRIVE_CHANGED"
     TARGET_TIER_MISSING = "TARGET_TIER_MISSING"
-    GRAPH_INVARIANT = "GRAPH_INVARIANT"
+    UNPROVEN_PROVENANCE = "UNPROVEN_PROVENANCE"
+    REQUIREMENT_EXCEEDS_USABLE_MAX = "REQUIREMENT_EXCEEDS_USABLE_MAX"
+    FAILURE_DOMAIN_UNSATISFIABLE = "FAILURE_DOMAIN_UNSATISFIABLE"
+    GRAPH_DEPENDENCY_INVARIANT = "GRAPH_DEPENDENCY_INVARIANT"
+    GRAPH_INVARIANT = "GRAPH_INVARIANT"  # legacy envelope; prefer typed structural codes above
 
 
 @dataclass(frozen=True)
@@ -927,32 +931,69 @@ def _stale_target_failures(
     return failures
 
 
+# Gate-B structural code → FailureCode (1:1; never collapse non-graph codes into GRAPH_INVARIANT).
+_STRUCTURAL_FAILURE_CODES: dict[str, FailureCode] = {
+    "TARGET_TIER_MISSING": FailureCode.TARGET_TIER_MISSING,
+    "UNPROVEN_PROVENANCE": FailureCode.UNPROVEN_PROVENANCE,
+    "REQUIREMENT_EXCEEDS_USABLE_MAX": FailureCode.REQUIREMENT_EXCEEDS_USABLE_MAX,
+    "FAILURE_DOMAIN_UNSATISFIABLE": FailureCode.FAILURE_DOMAIN_UNSATISFIABLE,
+    "GRAPH_DEPENDENCY_INVARIANT": FailureCode.GRAPH_DEPENDENCY_INVARIANT,
+}
+
+
 def _structural_failure_projection(
     code: str,
     gate: placement.GateBResult,
     mode: CapacityMode,
     capacity_drives: Sequence[CapacityDrive],
 ) -> tuple[CapacityFailure, ...]:
-    """Project a Gate-B structural code onto one CapacityFailure for legacy library totals."""
+    """Project a Gate-B structural code onto one CapacityFailure for CLI/library operators.
+
+    FailureCode matches the structural ladder code. Drive lists are taken from the diagnostic
+    payload keys that pure gate_b actually emits (eligible_drives, drives, or maxima labels) —
+    no silent or-defaults that invent or drop known drives.
+    """
+    del capacity_drives  # reserved for future ledger correlation; projection is diagnostic-driven
     diag = gate.diagnostics if isinstance(gate.diagnostics, dict) else {}
-    rid = diag.get("requirement_id") or diag.get("replica_requirement_id") or diag.get("home_requirement_id")
-    actions = tuple(gate.actions) if gate.actions else ("inspect_integrity",)
-    # Map to the closest legacy FailureCode; structural detail lives in gate_b_* fields.
-    if code == "TARGET_TIER_MISSING":
-        fcode = FailureCode.TARGET_TIER_MISSING
+    if not isinstance(diag, dict):
+        diag = {}
+
+    if "requirement_id" in diag:
+        rid = diag["requirement_id"]
+    elif "replica_requirement_id" in diag:
+        rid = diag["replica_requirement_id"]
+    elif "home_requirement_id" in diag:
+        rid = diag["home_requirement_id"]
     else:
-        fcode = FailureCode.GRAPH_INVARIANT
-    eligible = diag.get("eligible_drives") or diag.get("drives") or ()
-    if isinstance(eligible, list):
-        eligible = tuple(eligible)
-    peak = int(diag.get("peak_bytes") or 0)
+        rid = None
+
+    if "eligible_drives" in diag:
+        raw_eligible = diag["eligible_drives"]
+    elif "drives" in diag:
+        raw_eligible = diag["drives"]
+    elif "maxima" in diag:
+        # REQUIREMENT_EXCEEDS_USABLE_MAX: maxima is ((drive, max_bytes), ...)
+        raw_eligible = tuple(lab for lab, _mx in diag["maxima"])
+    else:
+        raw_eligible = ()
+    if isinstance(raw_eligible, list):
+        eligible = tuple(raw_eligible)
+    else:
+        eligible = tuple(raw_eligible) if raw_eligible else ()
+
+    peak = int(diag["peak_bytes"]) if "peak_bytes" in diag else 0
+    actions = tuple(gate.actions) if gate.actions else ()
+    fcode = _STRUCTURAL_FAILURE_CODES.get(code)
+    if fcode is None:
+        raise ValueError(f"unmapped structural gate_b code for failure projection: {code!r}")
+
     return (CapacityFailure(
         code=fcode,
         capacity_mode=mode,
-        requirement_id=str(rid) if rid else None,
+        requirement_id=str(rid) if rid is not None else None,
         task_ids=(),
         target_tier=None,
-        eligible_drives=tuple(eligible) if eligible else (),
+        eligible_drives=eligible,
         required_bytes=peak,
         available_bytes=0,
         safety_floor_bytes=0,
