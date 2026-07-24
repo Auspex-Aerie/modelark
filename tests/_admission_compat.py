@@ -35,8 +35,12 @@ def _synth_one(con, label: str, now: str) -> capacity_evidence.Evidence:
         "SELECT coalesce(sum(stored_bytes),0) FROM archived WHERE drive_label=?", [label]).fetchone()[0]
     net = max(0, free - int(archived or 0))
     floor = capacity.safety_floor(cap, raid)
+    admissible = max(0, net - floor)
+    # optimistic_usable_max is post-floor epoch capacity — required by #38 Gate-B structural /
+    # sensitivity paths (None would force CAPACITY_EVIDENCE_UNKNOWN even for live free shortfalls).
     return capacity_evidence.Evidence(
-        kind="live", executable=True, admissible_free=max(0, net - floor), observed_free=net,
+        kind="live", executable=True, admissible_free=admissible, observed_free=net,
+        optimistic_usable_max=max(0, cap - floor),
         observed_at=now, identity_epoch=1)
 
 

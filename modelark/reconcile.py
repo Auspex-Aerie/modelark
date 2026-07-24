@@ -605,11 +605,14 @@ def shadow_report(
         {
             "requirement_id": requirement_id,
             "legacy": legacy_targets[requirement_id],
+            "tiered_v2": new_targets[requirement_id],
+            # One-release alias: pre-#38 comparison field name.
             "tiered_v1": new_targets[requirement_id],
         }
         for requirement_id in shared
         if legacy_targets[requirement_id] != new_targets[requirement_id]
     ]
+    new_only = sorted(new_targets.keys() - legacy_targets.keys())
     payload["placement_comparison"] = {
         "target_equivalent": (
             not legacy_duplicates
@@ -618,7 +621,8 @@ def shadow_report(
         ),
         "legacy_duplicate_requirements": legacy_duplicates,
         "legacy_only": sorted(legacy_targets.keys() - new_targets.keys()),
-        "tiered_v1_only": sorted(new_targets.keys() - legacy_targets.keys()),
+        "tiered_v2_only": new_only,
+        "tiered_v1_only": new_only,  # one-release alias
         "target_mismatches": target_mismatches,
         "normalization": "satisfied requirements removed only; targets are never rewritten",
     }
