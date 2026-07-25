@@ -497,18 +497,49 @@ def test_approve_does_not_call_optimizer_on_happy_path():
     assert _lifecycle(con, pid) == "approved"
 
 
+def _proposal_relevant_drive_labels(con, proposal_id) -> set[str]:
+    """RFC-002 proposal_drive_ids: exact target/source labels from stored assignment rows."""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(proposal_tasks)").fetchall()}
+    drive_cols = [c for c in ("target_drive", "source_drive", "satisfying_drive") if c in cols]
+    assert drive_cols, (
+        "proposal_tasks must expose target_drive/source_drive (or satisfying_drive) "
+        "so A6 can derive proposal-relevant fence keys")
+    labels: set[str] = set()
+    for col in drive_cols:
+        for (val,) in con.execute(
+                f"SELECT DISTINCT {col} FROM proposal_tasks "
+                f"WHERE proposal_id=? AND {col} IS NOT NULL",
+                [proposal_id]):
+            labels.add(val)
+    return labels
+
+
+def _fence_keys_for_labels(con, labels: set[str]) -> list[tuple]:
+    """Join drive labels to identity (fingerprint, epoch) keys used by hold_drives_sorted."""
+    keys = []
+    for label in labels:
+        row = con.execute(
+            "SELECT identity_fingerprint, identity_epoch FROM drives WHERE drive_label=?",
+            [label]).fetchone()
+        assert row is not None and row[0], f"drive {label} must have identity_fingerprint"
+        keys.append((row[0], int(row[1])))
+    return sorted(keys)
+
+
 def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx():
-    """A6: complete authority sequence via real fences + tests-only services/evidence seam.
+    """A6: fence proposal-relevant drives only (RFC proposal_drive_ids), not every plan member.
 
-    Order: controller → exact sorted {(d0 fingerprint, 1), (d1 fingerprint, 2)} →
-    fresh evidence (clock-tied observed_at) → BEGIN IMMEDIATE.
+    Fixture forces a two-copy assignment that genuinely references both d0 and d1 in stored
+    proposal_tasks. Expected fence keys are derived from those target/source labels joined to
+    identity/epoch — never assumed from plan membership alone (finding 37).
 
-    hold_drives_sorted sorts internally (callers may pass unsorted keys). Evidence is not
-    pre-built before approve; capture is observed through services so post-IMMEDIATE capture fails.
+    Order: controller → exact sorted proposal fence keys → fresh clock-tied evidence → BEGIN IMMEDIATE.
     """
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
+    # Two-copy requirement so the assignment must place work on both plan members.
+    con.execute("UPDATE models SET numcopies=2 WHERE repo_id='org/m'")
     fp_d0 = "f" * 64  # _seed_selection d0 fingerprint, epoch 1
     fp_d1 = "e" * 64
     con.execute(
@@ -522,11 +553,24 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
     draft = _create(prop, con)
     pid = _pid(draft)
 
+    # Derive relevant drives from the stored assignment — not from plan membership.
+    relevant_labels = _proposal_relevant_drive_labels(con, pid)
+    assert {"d0", "d1"} <= relevant_labels, (
+        f"two-copy fixture must store both d0 and d1 in proposal_tasks target/source; "
+        f"got {relevant_labels}")
+    expected_keys = _fence_keys_for_labels(con, relevant_labels)
+    assert expected_keys == sorted([(fp_d0, 1), (fp_d1, 2)]), expected_keys
+    # Epoch lookup for evidence provenance per label.
+    label_epochs = {
+        label: int(con.execute(
+            "SELECT identity_epoch FROM drives WHERE drive_label=?", [label]
+        ).fetchone()[0])
+        for label in relevant_labels
+    }
+
     import modelark.drive_fence as df
     from modelark import capacity_evidence
 
-    # Exact fence keys for the two plan drives (identity fingerprint, epoch).
-    expected_keys = sorted([(fp_d0, 1), (fp_d1, 2)])
     approval_now = "2026-07-25T12:34:56Z"
     order: list[str] = []
     acquire_order: list[tuple] = []
@@ -568,15 +612,13 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
             assert any(x.startswith("DRIVE:") for x in order), "evidence after drive fences"
             now = self.clock.now()
             assert now == approval_now
+            # Evidence only for proposal-relevant drives (not every plan member).
             self.last_evidence = {
-                "d0": capacity_evidence.Evidence(
+                label: capacity_evidence.Evidence(
                     kind="live", executable=True, admissible_free=10**12,
                     optimistic_usable_max=10**12, observed_free=10**12,
-                    observed_at=now, identity_epoch=1),
-                "d1": capacity_evidence.Evidence(
-                    kind="live", executable=True, admissible_free=10**12,
-                    optimistic_usable_max=10**12, observed_free=10**12,
-                    observed_at=now, identity_epoch=2),
+                    observed_at=now, identity_epoch=label_epochs[label])
+                for label in relevant_labels
             }
             return self.last_evidence
 
@@ -603,25 +645,24 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
     assert order and order[0] == "CONTROLLER", f"controller first; order={order}"
     drive_events = [x for x in order if x.startswith("DRIVE:")]
     assert drive_events == [f"DRIVE:{i}:{e}" for i, e in expected_keys], (
-        f"exact sorted fence keys required; expected {expected_keys}, "
+        f"exact sorted proposal fence keys required; expected {expected_keys}, "
         f"acquire_order={acquire_order}, drive_events={drive_events}")
     assert acquire_order == expected_keys, acquire_order
     assert "EVIDENCE" in order, (
         f"services.observe_exact_capacity must run during approve; order={order}")
     assert services.evidence_calls >= 1
     assert services.last_evidence is not None
-    for label, epoch in (("d0", 1), ("d1", 2)):
+    assert set(services.last_evidence) == relevant_labels
+    for label, epoch in label_epochs.items():
         ev = services.last_evidence[label]
         assert ev.observed_at == approval_now, (
             f"{label} observed_at must come from approval clock, got {ev.observed_at!r}")
         assert ev.identity_epoch == epoch
-    # Full authority sequence: controller → both drives → evidence.
-    assert (
-        order.index("CONTROLLER")
-        < order.index(drive_events[0])
-        < order.index(drive_events[-1])
-        < order.index("EVIDENCE")
-    ), order
+    # Full authority sequence: controller → proposal drives (sorted) → evidence.
+    assert order.index("CONTROLLER") < order.index(drive_events[0]), order
+    assert order.index(drive_events[-1]) < order.index("EVIDENCE"), order
+    if len(drive_events) > 1:
+        assert order.index(drive_events[0]) < order.index(drive_events[-1]), order
     assert any(e.startswith("BEGIN:") and "IMMEDIATE" in e for e in con.events), con.events
     # Evidence observed before IMMEDIATE: callback asserted !_in_immediate; TX still opened.
     begin_i = next(
