@@ -146,11 +146,13 @@ def _browser_flow() -> None:
             pg.wait_for_selector("#fillAdvisories .fadv.error")
             advisory = pg.inner_text("#fillAdvisories")
             assert "MANIFEST_POLICY" in advisory and "demo/pickle-only" in advisory
-            assert "CAPACITY_" in advisory
+            # #38 tiered_v2: structural exceed-max projects REQUIREMENT_EXCEEDS_USABLE_MAX (not
+            # a CAPACITY_*_SHORT proven free short, and not a CAPACITY_ string prefix).
+            assert "REQUIREMENT_EXCEEDS_USABLE_MAX" in advisory
             pg.wait_for_selector("#fillQueue .telq.blocked")
             blocked = pg.inner_text("#fillQueue")
             assert "demo/pickle-only" in blocked and "MANIFEST_POLICY" in blocked
-            assert "demo/replica-blocked" in blocked and "CAPACITY_" in blocked
+            assert "demo/replica-blocked" in blocked and "REQUIREMENT_EXCEEDS_USABLE_MAX" in blocked
             assert pg.locator("#fillQueue .telq.blocked").count() == 2
             fill_note = pg.inner_text("#fillNote")
             assert "1 to place" in fill_note and "2 blocked" in fill_note, fill_note
