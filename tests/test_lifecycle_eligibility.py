@@ -335,6 +335,52 @@ def test_matrix_excluded_raid_plus_plain_emits_plain_home_candidate():
     assert "protected_home:org/m" not in {b.requirement_id for b in cset.blocked}
 
 
+def test_matrix_complete_on_authorized_fallback_satisfies_home_and_sources_replica():
+    """Finding 15: complete copy on authorized plain fallback must satisfy home (not wrong_tier).
+
+    When the only active RAID primary is excluded, placement targets the plain primary. A verified
+    complete copy already on that plain fallback must satisfy protected-home, must not be
+    wrong_tier drift, and must be the replica's SourceIdentity (not PendingHome).
+    """
+    _require()
+    drives = [
+        _drive("raid-ex", role="primary", raid=True, cap=10**15,
+               lifecycle="active", eligibility="excluded", fs_uuid="raid"),
+        _drive("plain-en", role="primary", raid=False, cap=10**12,
+               lifecycle="active", eligibility="enabled", fs_uuid="plain"),
+        _drive("R", role="replica", lifecycle="active", eligibility="enabled",
+               fs_uuid="rep"),
+    ]
+    archived = [
+        _arch("org/m", "plain-en", "w.safetensors", sha=HW, obytes=100, sbytes=100, key="k-plain"),
+    ]
+    inp = _input(
+        selection=["org/m"],
+        manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
+        numcopies=[("org/m", 2)],
+        drives=drives,
+        archived=archived,
+    )
+    _, cset = _run(inp)
+    home_sat = _satisfied_drives(cset, "protected_home:org/m")
+    assert "plain-en" in home_sat, (
+        f"complete copy on authorized plain fallback must satisfy protected-home; sat={home_sat}")
+    assert _cands(cset, "protected_home:org/m") == ()
+    assert "protected_home:org/m" not in {b.requirement_id for b in cset.blocked}
+    home_drift = {
+        (d.drive_label, d.reason) for d in cset.drift if d.requirement_id == "protected_home:org/m"
+    }
+    assert ("plain-en", "wrong_tier") not in home_drift, (
+        f"authorized fallback complete must not be wrong_tier; drift={home_drift}")
+    rep = _cands(cset, "protected_replica:org/m")
+    assert rep, "replica still needs placement on R"
+    for c in rep:
+        assert c.target_drive == "R"
+        assert isinstance(c.source, candidates.SourceIdentity), (
+            f"replica source must be SourceIdentity from plain-en home, not {type(c.source).__name__}")
+        assert c.source.drive_label == "plain-en"
+
+
 def test_matrix_replica_sources_never_lost_or_retired():
     """Lost/retired proven copies never become SourceIdentity; active+excluded may."""
     _require()
