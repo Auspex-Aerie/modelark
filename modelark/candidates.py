@@ -188,9 +188,11 @@ def _is_satisfying(drive: DriveFact) -> bool:
 
 
 def _satisfaction_pool(req: CopyRequirement, by_label: dict[str, DriveFact]) -> tuple[str, ...]:
-    """Role-tier drives that may satisfy ``req`` — lifecycle-active only; eligibility unrestricted.
+    """Canonical satisfaction tier for ``req`` — lifecycle-active only; eligibility unrestricted.
 
     Placement targets remain ``req.eligible_drives`` (placeable-only from :func:`requirements`).
+    Protected-home mirrors placement policy shape: active RAID primaries when any exist, else the
+    single largest active primary (not every active primary).
     """
     order = sorted(by_label)
     active_primary = tuple(
@@ -205,8 +207,12 @@ def _satisfaction_pool(req: CopyRequirement, by_label: dict[str, DriveFact]) -> 
     if req.kind == RequirementKind.PRIMARY:
         return active_primary
     if req.kind == RequirementKind.PROTECTED_HOME:
-        # RAID homes when any active RAID primary exists; else any active primary (no-RAID fleet).
-        return active_raids if active_raids else active_primary
+        if active_raids:
+            return active_raids
+        if not active_primary:
+            return ()
+        # No-RAID fleet: only the largest active primary may satisfy protected-home.
+        return (sorted(active_primary, key=lambda lab: (-by_label[lab].capacity_bytes, lab))[0],)
     if req.kind == RequirementKind.PROTECTED_REPLICA:
         return active_replicas
     return ()
@@ -314,12 +320,15 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
         manifest = manifests[req.repo_id]
         # Placeable write targets (active+enabled, role-filtered by requirements).
         place_pool = set(req.eligible_drives)
-        # Satisfaction may also use active+excluded complete copies on the same role tier.
-        sat_pool = _satisfaction_pool(req, by_label)
+        # Canonical satisfaction tier (may include active+excluded; shape matches home policy).
+        sat_pool = set(_satisfaction_pool(req, by_label))
+        # Scan the union so placement targets are not omitted when they diverge from sat_pool
+        # (e.g. excluded RAID in sat_pool + plain placeable fallback in place_pool).
+        scan_labels = sorted(sat_pool | place_pool)
 
         complete: list[tuple[str, tuple[ReusableFile, ...]]] = []
         valid: list[tuple[str, tuple[ReusableFile, ...], tuple[archive_manifest.ManifestFile, ...]]] = []
-        for label in sat_pool:
+        for label in scan_labels:
             rows = archived.get((req.repo_id, label), {})
             reused: list[ReusableFile] = []
             missing: list[archive_manifest.ManifestFile] = []
@@ -344,11 +353,12 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
                 # Finish-in-place / fresh write targets must be placeable (active+enabled).
                 if label in place_pool:
                     valid.append((label, reused_t, tuple(sorted(missing, key=lambda item: item.rfilename))))
-            else:
+            elif label in sat_pool:
+                # Only the canonical satisfaction tier may satisfy (not mere placement targets).
                 complete.append((label, reused_t))
 
         # Wrong-tier: a proven-complete copy outside the satisfaction pool is drift, not relocation.
-        for label in sorted(known_labels - set(sat_pool)):
+        for label in sorted(known_labels - sat_pool):
             rows = archived.get((req.repo_id, label), {})
             if rows and all(_proof(mf, rows.get(mf.rfilename)) == "proven" for mf in manifest):
                 for mf in manifest:

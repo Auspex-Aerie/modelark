@@ -187,7 +187,7 @@ def placed_copies(con) -> dict[str, int]:
         "            GROUP BY f.repo_id), "
         "perdrive AS (SELECT a.repo_id, a.drive_label, count(*) n FROM archived a "
         "             JOIN drives d ON d.drive_label = a.drive_label "
-        "             WHERE coalesce(d.lifecycle,'active')='active' "
+        "             WHERE d.lifecycle='active' "
         "             GROUP BY a.repo_id, a.drive_label) "
         "SELECT pd.repo_id, count(*) FROM perdrive pd JOIN planned pl "
         "  ON pd.repo_id = pl.repo_id AND pd.n >= pl.n GROUP BY pd.repo_id").fetchall()

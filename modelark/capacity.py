@@ -846,6 +846,22 @@ def _project_assigned_tasks(
     return tuple(out)
 
 
+def _placeable_drive_labels(con, plan_id: str) -> frozenset[str]:
+    """State-only Gate-B revalidation: active+enabled plan members (no manifest/archive recapture).
+
+    Missing/malformed lifecycle or eligibility never coerce to placeable (#37 finding 14).
+    """
+    rows = con.execute(
+        "SELECT d.drive_label, d.lifecycle, d.eligibility "
+        "FROM plan_drives pd JOIN drives d USING(drive_label) WHERE pd.plan_id=?",
+        [plan_id],
+    ).fetchall()
+    return frozenset(
+        label for label, lifecycle, eligibility in rows
+        if lifecycle == "active" and eligibility == "enabled"
+    )
+
+
 def _build_solver_input(
     con,
     result: ReconcileResult,
@@ -856,15 +872,14 @@ def _build_solver_input(
 ) -> tuple[placement.SolverInput, tuple[CapacityDrive, ...], frozenset[str]]:
     """Shell: admission evidence → pure SolverInput (no floor recomputation).
 
-    Returns placeable drive labels re-read from the catalog at Gate-B time so a lifecycle/
+    Placeability is re-read with a state-only drive query at Gate-B time so a lifecycle/
     eligibility flip after reconcile capture fail-closes as TARGET_DRIVE_CHANGED (#37).
+    Drive facts for the pure solver come from the same light plan-membership reread (not a
+    full planner recapture of manifests/archives/config/ratios).
     """
     capacity_drives = inspect_drives(con, result.plan_id, evidence_by_drive=evidence_by_drive)
-    planner = reconcile.capture_planner_input(con, result.plan_id)
-    placeable = frozenset(
-        d.drive_label for d in planner.drives
-        if d.lifecycle == "active" and d.eligibility == "enabled"
-    )
+    drive_facts = reconcile._drive_facts(con, result.plan_id)
+    placeable = _placeable_drive_labels(con, result.plan_id)
     # Prefer the CandidateSet already on the reconcile result (same snapshot as the caller saw).
     graph = candidates.RequirementGraph(
         desired=tuple(result.requirements),
@@ -899,7 +914,7 @@ def _build_solver_input(
     inp = placement.SolverInput(
         graph=graph,
         candidates=result.candidates,
-        drives=planner.drives,
+        drives=drive_facts,
         executable_budget=tuple(executable),
         max_usable_for_epoch=tuple(maxima),
         drive_evidence=tuple(evidence_pairs),
@@ -919,8 +934,9 @@ def _stale_target_failures(
 ) -> list[CapacityFailure]:
     """Detect candidates whose targets left the plan or lost placeability between reconcile and placement.
 
-    A target that remains a plan member but is no longer active+enabled (lifecycle/eligibility race)
-    is treated as gone for new placement — fail-closed TARGET_DRIVE_CHANGED (#37).
+    **Any** captured candidate target that is no longer plan-member + active+enabled fail-closes the
+    requirement as TARGET_DRIVE_CHANGED — including multi-target races where another target remains
+    placeable (#37 finding 13). Do not strip the stale target and re-solve.
     """
     in_plan = {d.drive_label for d in capacity_drives}
     usable = placeable_labels if placeable_labels is not None else frozenset(in_plan)
@@ -930,9 +946,9 @@ def _stale_target_failures(
     for rid, cs in result.candidates.by_requirement:
         if not cs:
             continue
-        if any(c.target_drive in usable for c in cs):
+        # Fail closed if any captured target is no longer usable (not: if any remains usable).
+        if all(c.target_drive in usable for c in cs):
             continue
-        # Every remaining candidate target is gone or non-placeable → typed stale snapshot.
         is_replica = rid.startswith("protected_replica:")
         failures.append(CapacityFailure(
             code=FailureCode.TARGET_DRIVE_CHANGED,

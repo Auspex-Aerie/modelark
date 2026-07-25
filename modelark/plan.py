@@ -169,7 +169,7 @@ def bootstrap(con, plan_id=DEFAULT_PLAN) -> dict:
         create(con, plan_id, name="Ark")
     for row in con.execute(
         "SELECT drive_label FROM drives "
-        "WHERE coalesce(lifecycle,'active')='active' AND coalesce(eligibility,'enabled')='enabled' "
+        "WHERE lifecycle='active' AND eligibility='enabled' "
         "ORDER BY drive_label"
     ).fetchall():
         add_drive(con, plan_id, row[0])
@@ -201,8 +201,7 @@ def capacity(con, plan_id) -> int:
     for _, cap, raid in con.execute(
             f"SELECT drive_label, coalesce(capacity_bytes, free_bytes, 0), coalesce(raid_backed, false) "
             f"FROM drives WHERE drive_label IN ({ph}) "
-            f"AND coalesce(lifecycle,'active')='active' "
-            f"AND coalesce(eligibility,'enabled')='enabled'", labels).fetchall():
+            f"AND lifecycle='active' AND eligibility='enabled'", labels).fetchall():
         total += max(0, cap - _headroom(cap, bool(raid)))
     return total
 
