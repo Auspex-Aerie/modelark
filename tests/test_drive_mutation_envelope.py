@@ -82,7 +82,7 @@ def _catalog(tmp_path):
     db.DB_PATH = tmp_path / "catalog.sqlite"
     db.STATE_DIR = tmp_path / "state"
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 3, "fixture must be a v3 catalog"
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, "fixture must be at current schema version"
     try:
         yield con
     finally:

@@ -149,7 +149,7 @@ def test_shadow_selects_current_epoch_anchor_not_a_higher_old_epoch_generation(t
     db.CATALOG_DIR = tmp_path
     db.DB_PATH = tmp_path / "catalog.sqlite"
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 3, "fresh catalog must be v3 (Gate-1 red)"
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, "fresh catalog must be at current schema version"
     fp = "a" * 64
     con.execute(
         "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,identity_epoch,write_generation,"
@@ -182,8 +182,8 @@ def test_shadow_read_is_side_effect_free_and_all_unknown(tmp_path):
     db.CATALOG_DIR = tmp_path
     db.DB_PATH = tmp_path / "catalog.sqlite"
     con = db.connect()                                   # fresh catalog is v3 directly (no migration here)
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 3, \
-        "fresh catalog must be v3 (expected Gate-1 red)"
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, \
+        "fresh catalog must be at current schema version"
     con.execute("INSERT INTO drives(drive_label,capacity_bytes,free_bytes) VALUES('drive-00',1000,500)")
     con.execute("INSERT INTO drives(drive_label,capacity_bytes,free_bytes) VALUES('drive-01',1000,900)")
     before_free = con.execute("SELECT drive_label, free_bytes FROM drives ORDER BY 1").fetchall()
@@ -198,7 +198,7 @@ def test_shadow_read_is_side_effect_free_and_all_unknown(tmp_path):
     # legacy free_bytes is exposed ONLY as a diagnostic, never as executable/admissible free
     assert shadow["drive-00"].legacy_free_bytes == 500 and shadow["drive-01"].legacy_free_bytes == 900
     # diagnostic read: no admission input mutated, no evidence fabricated
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION
     assert con.execute("SELECT drive_label, free_bytes FROM drives ORDER BY 1").fetchall() == before_free
     assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
     assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0

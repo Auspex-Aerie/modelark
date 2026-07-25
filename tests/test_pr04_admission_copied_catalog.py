@@ -67,7 +67,7 @@ def _build_source(tmp_path):
         db.STATE_DIR = tmp_path / "state"
         con = db.connect()
         try:
-            assert con.execute("PRAGMA user_version").fetchone()[0] == 3, "fixture must be a v3 catalog"
+            assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, "fixture must be at current schema version"
             con.execute("INSERT INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
             con.execute("INSERT INTO drives(drive_label,capacity_bytes,free_bytes) "
                         "VALUES('drive-00',1000000,500000)")
