@@ -228,11 +228,91 @@ def _requirement_id(copy_i: int, nc: int, repo: str) -> str:
     return f"replica:{repo}"
 
 
+def _admissible_from_drive_row(drive_row: tuple) -> int:
+    """Safety-adjusted free for one plan-drive row (free − floor, never raw free)."""
+    free_b = int(drive_row[3] or 0)
+    fs_cap = int(drive_row[4] or 0)
+    raid = bool(drive_row[5])
+    floor = capacity.safety_floor(fs_cap, raid) if fs_cap else 0
+    return max(0, free_b - floor)
+
+
+def _task_charge(task: Mapping) -> int:
+    """Bytes charged against a target drive for one executable task.
+
+    Workspace peak is not yet modeled in this cut (0); charge is guaranteed durable only.
+    """
+    return int(task.get("guaranteed_durable") or 0) + int(task.get("workspace_peak") or 0)
+
+
+def _admissible_map_from_drives(drives: Sequence[tuple]) -> dict[str, int]:
+    return {d[0]: _admissible_from_drive_row(d) for d in drives}
+
+
+def _admissible_map_from_evidence(evidence_by_drive: Mapping[str, Any]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for label, ev in (evidence_by_drive or {}).items():
+        if ev is None:
+            continue
+        if hasattr(ev, "executable") and not ev.executable:
+            out[label] = 0
+            continue
+        free = getattr(ev, "admissible_free", None)
+        out[label] = int(free) if free is not None else 0
+    return out
+
+
+def joint_capacity_shortfall(
+    tasks: Sequence[Mapping],
+    remaining_by_drive: Mapping[str, int],
+) -> dict | None:
+    """Joint assignment check: charge executable tasks in stable order against remaining free.
+
+    Returns None if the whole assignment fits; otherwise a shortfall evidence dict.
+    Baseline-satisfied tasks do not charge capacity. Mutates a local copy of remaining only.
+    """
+    remaining = {k: int(v) for k, v in remaining_by_drive.items()}
+    ordered = sorted(
+        (t for t in tasks if (t.get("row_kind") or "") == "executable"),
+        key=lambda t: (int(t.get("order_key") or 0), t.get("requirement_id") or ""),
+    )
+    for t in ordered:
+        label = t.get("target_drive")
+        if not label:
+            return {
+                "reason": "missing_target",
+                "requirement_id": t.get("requirement_id"),
+            }
+        charge = _task_charge(t)
+        if charge <= 0:
+            continue
+        have = remaining.get(label)
+        if have is None:
+            return {
+                "reason": "unknown_drive",
+                "drive": label,
+                "requirement_id": t.get("requirement_id"),
+                "need": charge,
+            }
+        if charge > have:
+            return {
+                "reason": "capacity_overcommit",
+                "drive": label,
+                "requirement_id": t.get("requirement_id"),
+                "need": charge,
+                "remaining": have,
+            }
+        remaining[label] = have - charge
+    return None
+
+
 def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], list[dict], str]:
     """Build tasks/files and gate_b_code for the hypothetical post-mutation selection.
 
-    Baseline-satisfied rows bind only to plan-member drives that actually hold an archived
-    copy (never a round-robin stand-in). Remaining copies become executable placement work.
+    Joint model (preview ≡ approval authority):
+    - baseline only on complete archives on plan-member drives;
+    - distinct media per numcopies;
+    - safety-adjusted free depleted across the whole assignment (not per-task vs full free).
     """
     drives = _plan_drives(con, plan_id)
     repos = _selected_repos(con, mutation)
@@ -268,6 +348,8 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
 
     plan_labels = {d[0] for d in drives}
     drive_by_label = {d[0]: d for d in drives}
+    # Running remaining capacity — depleted only by executable placement charges.
+    remaining = _admissible_map_from_drives(drives)
 
     for repo in repos:
         nrow = con.execute(
@@ -300,6 +382,7 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
                 "identity_epoch": epoch,
             })
             used.add(label)
+            # Baseline does not charge remaining free.
 
         need = nc - len(satisfied)
         # Distinct unused plan drives only — durability requires failure-independent copies.
@@ -312,18 +395,28 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
             copy_i += 1
             order += 1
             rid = _requirement_id(copy_i, nc, repo)
-            if j < len(free_drives):
-                drive_row = free_drives[j]
-                label, epoch = drive_row[0], int(drive_row[1])
-                free_b, fs_cap, raid = int(drive_row[3] or 0), int(drive_row[4] or 0), bool(drive_row[5])
-                floor = capacity.safety_floor(fs_cap, raid) if fs_cap else 0
-                admissible = max(0, free_b - floor)
-                # Preview uses the same safety-adjusted boundary as approval evidence (Greptile).
-                if size and admissible < size:
+            label, epoch = None, None
+            if free_drives:
+                # Prefer a still-unused drive that still has joint remaining ≥ size.
+                pick = None
+                for d in free_drives:
+                    if remaining.get(d[0], 0) >= size:
+                        pick = d
+                        break
+                if pick is None:
+                    # No drive has residual capacity; still assign first free for diagnostic
+                    # rows, but mark the draft non-approvable.
+                    pick = free_drives[0]
                     gate = "INFEASIBLE"
+                free_drives.remove(pick)
+                label, epoch = pick[0], int(pick[1])
+                charge = size  # workspace_peak=0 in this cut
+                if charge > remaining.get(label, 0):
+                    gate = "INFEASIBLE"
+                else:
+                    remaining[label] = remaining.get(label, 0) - charge
             else:
-                # No distinct target left; still record the requirement without a reuse target.
-                label, epoch = None, None
+                gate = "INFEASIBLE"
             tasks.append({
                 "requirement_id": rid,
                 "row_kind": "executable",
@@ -337,6 +430,11 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
                 "identity_epoch": epoch,
             })
             _append_missing_files(con, files, rid, repo)
+
+    # Final joint pass (stable order) — catches any construction path that skipped remaining.
+    short = joint_capacity_shortfall(tasks, _admissible_map_from_drives(drives))
+    if short is not None:
+        gate = "INFEASIBLE"
     return tasks, files, gate
 
 
@@ -659,11 +757,20 @@ def _fence_keys(con, labels: Sequence[str]) -> list[tuple[str, int]]:
 # ---------------------------------------------------------------------------
 def validate_exact_assignment(con, proposal: Mapping,
                               evidence_by_drive: Mapping[str, Any] | None = None) -> None:
-    """Re-validate the stored assignment against current evidence; never re-optimize."""
+    """Re-validate the stored assignment as a joint plan against current evidence.
+
+    Never re-optimizes. Checks:
+    - distinct media per repo (numcopies durability);
+    - every executable has a target;
+    - non-executable evidence is refused;
+    - cumulative charges fit safety-adjusted admissible free (order_key order).
+    """
     evidence_by_drive = evidence_by_drive or {}
+    tasks = list(proposal.get("tasks") or ())
+
     # Distinct target/satisfying drives per repo: numcopies must not collapse onto one medium.
     by_repo: dict[str, list[str]] = {}
-    for t in proposal.get("tasks") or ():
+    for t in tasks:
         repo = t.get("repo_id") or ""
         label = t.get("target_drive") or t.get("satisfying_drive")
         if label:
@@ -674,7 +781,7 @@ def validate_exact_assignment(con, proposal: Mapping,
                           {"repo_id": repo, "reason": "duplicate_target_drives", "labels": labels},
                           ("preview_again",))
 
-    for t in proposal.get("tasks") or ():
+    for t in tasks:
         if t.get("row_kind") != "executable":
             continue
         label = t.get("target_drive")
@@ -685,12 +792,19 @@ def validate_exact_assignment(con, proposal: Mapping,
         if ev is not None and hasattr(ev, "executable") and not ev.executable:
             raise Refusal("EXACT_ASSIGNMENT_REJECTED", {"drive": label, "evidence": ev},
                           ("preview_again",))
-        if ev is not None and hasattr(ev, "admissible_free"):
-            need = int(t.get("guaranteed_durable") or 0)
-            if need and ev.admissible_free is not None and ev.admissible_free < need:
-                raise Refusal("EXACT_ASSIGNMENT_REJECTED",
-                              {"drive": label, "need": need, "free": ev.admissible_free},
-                              ("preview_again",))
+
+    # Joint remaining capacity across the full executable assignment (not pointwise full free).
+    remaining = _admissible_map_from_evidence(evidence_by_drive)
+    for t in tasks:
+        if t.get("row_kind") != "executable":
+            continue
+        label = t.get("target_drive")
+        if label and label not in remaining:
+            remaining[label] = 0  # no evidence → fail closed
+
+    short = joint_capacity_shortfall(tasks, remaining)
+    if short is not None:
+        raise Refusal("EXACT_ASSIGNMENT_REJECTED", short, ("preview_again",))
 
 
 revalidate_assignment_evidence = validate_exact_assignment
