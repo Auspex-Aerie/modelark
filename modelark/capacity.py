@@ -846,22 +846,6 @@ def _project_assigned_tasks(
     return tuple(out)
 
 
-def _placeable_drive_labels(con, plan_id: str) -> frozenset[str]:
-    """State-only Gate-B revalidation: active+enabled plan members (no manifest/archive recapture).
-
-    Missing/malformed lifecycle or eligibility never coerce to placeable (#37 finding 14).
-    """
-    rows = con.execute(
-        "SELECT d.drive_label, d.lifecycle, d.eligibility "
-        "FROM plan_drives pd JOIN drives d USING(drive_label) WHERE pd.plan_id=?",
-        [plan_id],
-    ).fetchall()
-    return frozenset(
-        label for label, lifecycle, eligibility in rows
-        if lifecycle == "active" and eligibility == "enabled"
-    )
-
-
 def _build_solver_input(
     con,
     result: ReconcileResult,
@@ -872,14 +856,16 @@ def _build_solver_input(
 ) -> tuple[placement.SolverInput, tuple[CapacityDrive, ...], frozenset[str]]:
     """Shell: admission evidence → pure SolverInput (no floor recomputation).
 
-    Placeability is re-read with a state-only drive query at Gate-B time so a lifecycle/
-    eligibility flip after reconcile capture fail-closes as TARGET_DRIVE_CHANGED (#37).
-    Drive facts for the pure solver come from the same light plan-membership reread (not a
-    full planner recapture of manifests/archives/config/ratios).
+    Placeability is derived from a single state-only ``_drive_facts`` reread at Gate-B time so a
+    lifecycle/eligibility flip after reconcile capture fail-closes as TARGET_DRIVE_CHANGED (#37).
+    Missing/malformed lifecycle or eligibility never coerce to placeable.
     """
     capacity_drives = inspect_drives(con, result.plan_id, evidence_by_drive=evidence_by_drive)
     drive_facts = reconcile._drive_facts(con, result.plan_id)
-    placeable = _placeable_drive_labels(con, result.plan_id)
+    placeable = frozenset(
+        d.drive_label for d in drive_facts
+        if d.lifecycle == "active" and d.eligibility == "enabled"
+    )
     # Prefer the CandidateSet already on the reconcile result (same snapshot as the caller saw).
     graph = candidates.RequirementGraph(
         desired=tuple(result.requirements),
