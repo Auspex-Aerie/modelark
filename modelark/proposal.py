@@ -253,18 +253,29 @@ def _admissible_from_drive_row(drive_row: tuple) -> int:
 
 
 def _repo_workspace_peak(con, repo_id: str) -> int:
-    """Peak transient workspace for one repo placement (no compression-config dependency).
+    """Peak transient workspace for one repo placement, aligned with execution budgets.
 
-    Only *compressible* catalog files need codec/workspace headroom (safetensors → compress path).
-    Raw-stored formats (gguf, onnx, aux, …) contribute durable bytes only — charging their full
-    size as workspace double-counts and falsely marks feasible placements INFEASIBLE.
-    Bound = largest safetensors file size (full-file staging upper bound).
+    Only safetensors (compress path) need codec workspace. Raw formats charge durable only.
+    Workspace = max codec output cap over safetensors files (same seam as ``budgets.file_budget``),
+    not full raw size (which over-rejects feasible placements).
     """
-    row = con.execute(
-        "SELECT coalesce(max(size_bytes), 0) FROM files "
-        "WHERE repo_id=? AND format='safetensors'",
-        [repo_id]).fetchone()
-    return int(row[0] or 0)
+    from modelark import compress, streamznn, wishlist
+
+    cfg = dict(wishlist.compression())
+    peak = 0
+    for size, in con.execute(
+            "SELECT size_bytes FROM files WHERE repo_id=? AND format='safetensors' "
+            "AND size_bytes IS NOT NULL AND size_bytes > 0",
+            [repo_id]):
+        size = int(size)
+        codec = compress.plan_codec(size, cfg)
+        if codec == compress.CODEC_RAW:
+            continue
+        cap = compress.codec_output_cap(
+            size, codec, stream_chunk_bytes=streamznn.DEFAULT_CHUNK)
+        if cap > peak:
+            peak = int(cap)
+    return peak
 
 
 def _admissible_map_from_drives(drives: Sequence[tuple]) -> dict[str, int]:
