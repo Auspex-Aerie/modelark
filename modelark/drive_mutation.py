@@ -117,7 +117,12 @@ def _advance_one(con, label, operation_code, captured=None):
 
 def begin_generation(con, label, operation_code):
     """Advance one drive's dirty generation in a single short transaction (both owner fields null)."""
-    return _immediate(con, lambda: _advance_one(con, label, operation_code))
+    def body():
+        gen = _advance_one(con, label, operation_code)
+        from modelark.proposal import bump_revision
+        bump_revision(con)
+        return gen
+    return _immediate(con, body)
 
 
 def _require_identity(observation, fingerprint, capacity, label):
@@ -145,8 +150,11 @@ def _publish_anchor_locked(con, label, identity_epoch, generation, observation, 
 
 def publish_clean_anchor(con, label, identity_epoch, generation, observation, now):
     """Publish one clean anchor in its own short transaction (single-drive/direct use)."""
-    return _immediate(
-        con, lambda: _publish_anchor_locked(con, label, identity_epoch, generation, observation, now))
+    def body():
+        _publish_anchor_locked(con, label, identity_epoch, generation, observation, now)
+        from modelark.proposal import bump_revision
+        bump_revision(con)
+    return _immediate(con, body)
 
 
 @contextmanager

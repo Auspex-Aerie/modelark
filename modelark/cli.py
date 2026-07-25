@@ -415,8 +415,14 @@ def cmd_plan(args):
 def cmd_protect(args):
     con = db.connect()
     try:
-        for rid in args.repo:
-            con.execute("UPDATE models SET numcopies=? WHERE repo_id=?", [args.numcopies, rid])
+        from modelark.proposal import GraphResult, graph_write
+
+        def op(c):
+            for rid in args.repo:
+                c.execute("UPDATE models SET numcopies=? WHERE repo_id=?", [args.numcopies, rid])
+            return GraphResult(proven_noop=False)
+
+        graph_write(con, op)
         total = con.execute("SELECT count(*) FROM models WHERE coalesce(numcopies,1) >= 2").fetchone()[0]
     finally:
         con.close()

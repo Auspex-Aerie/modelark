@@ -629,31 +629,38 @@ def upsert(con, table: str, row: dict, pk: list[str], touch: list[str] | None = 
     con.execute(sql, [row[c] for c in cols])
 
 
+def _replace_files_body(con, repo_id: str, rows: list[dict]) -> None:
+    """Unlocked file-row refresh body (caller owns the transaction)."""
+    for r in rows:
+        row = dict(r)
+        row["repo_id"] = repo_id
+        upsert(con, "files", row, pk=["repo_id", "rfilename"])
+    names = [r["rfilename"] for r in rows]
+    keep = ""
+    params: list[object] = [repo_id]
+    if names:
+        keep = f"AND rfilename NOT IN ({', '.join(['?'] * len(names))})"
+        params.extend(names)
+    con.execute(
+        "DELETE FROM files AS f WHERE repo_id=? " + keep + " "
+        "AND NOT EXISTS (SELECT 1 FROM archived a "
+        "                WHERE a.repo_id=f.repo_id AND a.rfilename=f.rfilename) "
+        "AND NOT EXISTS (SELECT 1 FROM replicas r "
+        "                WHERE r.repo_id=f.repo_id AND r.rfilename=f.rfilename)",
+        params,
+    )
+
+
 def replace_files(con, repo_id: str, rows: list[dict]) -> None:
-    """Refresh file rows for a repo in one transaction.
+    """Refresh file rows for a repo in one transaction (bumps planner_revision; PR-08 A3).
 
     Rediscovery may remove an upstream filename after ModelArk archived it. Such a row is durable
     archive provenance and must survive the refresh; unreferenced stale rows are removed normally.
     """
-    con.execute("BEGIN")
-    try:
-        for r in rows:
-            upsert(con, "files", r, pk=["repo_id", "rfilename"])
-        names = [r["rfilename"] for r in rows]
-        keep = ""
-        params: list[object] = [repo_id]
-        if names:
-            keep = f"AND rfilename NOT IN ({', '.join(['?'] * len(names))})"
-            params.extend(names)
-        con.execute(
-            "DELETE FROM files AS f WHERE repo_id=? " + keep + " "
-            "AND NOT EXISTS (SELECT 1 FROM archived a "
-            "                WHERE a.repo_id=f.repo_id AND a.rfilename=f.rfilename) "
-            "AND NOT EXISTS (SELECT 1 FROM replicas r "
-            "                WHERE r.repo_id=f.repo_id AND r.rfilename=f.rfilename)",
-            params,
-        )
-        con.execute("COMMIT")
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
+    from modelark.proposal import GraphResult, graph_write
+
+    def op(c):
+        _replace_files_body(c, repo_id, rows)
+        return GraphResult(proven_noop=False)
+
+    graph_write(con, op)
