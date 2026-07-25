@@ -82,7 +82,13 @@ CREATE TABLE IF NOT EXISTS drives (
                               CHECK (identity_fingerprint IS NULL
                                      OR length(identity_fingerprint) = 64),
     write_authority           VARCHAR NOT NULL DEFAULT 'unknown'
-                              CHECK (write_authority IN ('unknown','dedicated_local'))
+                              CHECK (write_authority IN ('unknown','dedicated_local')),
+    -- Catalog v4 (#37) orthogonal lifecycle × eligibility. Defaults active+enabled for new rows
+    -- and for migrated existing drives. Offline/mounted presence is not stored here.
+    lifecycle                 VARCHAR NOT NULL DEFAULT 'active'
+                              CHECK (lifecycle IN ('active','lost','retired')),
+    eligibility               VARCHAR NOT NULL DEFAULT 'enabled'
+                              CHECK (eligibility IN ('enabled','excluded'))
 );
 
 -- Which file lives on which drive (mirror of `git annex whereis`).
