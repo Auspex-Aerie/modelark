@@ -221,15 +221,17 @@ def test_baseline_certificate_binds_each_required_field_independently():
 
 
 def test_client_supplied_hash_or_blob_is_not_authority():
-    """Forged kwargs refused or stored hash independently recomputed via canonical serializer."""
+    """Forged kwargs refused, or forged draft matches an equivalent clean draft (finding 33).
+
+    Seeds drive identity fingerprint (A10). Does not require recompute_hash production API —
+    compares forged-input draft against a second clean draft under identical catalog facts.
+    """
     import sqlite3
     from modelark.core import db
 
     prop = _load_proposal()
-    can = _load_canonical()
     create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft", None)
     assert create is not None
-    hash_fn = _hash_fn(can)
 
     con = sqlite3.connect(":memory:", isolation_level=None)
     for stmt in db._statements(db.SCHEMA_PATH.read_text()):
@@ -248,11 +250,12 @@ def test_client_supplied_hash_or_blob_is_not_authority():
         "VALUES('org/m','model.safetensors',100,'safetensors','bf16',?)", ["1" * 64])
     con.execute(
         "INSERT INTO selection(repo_id,finalized_at) VALUES('org/m','2026-01-01')")
-    # Valid SQLite integer literal (not 10**12 expression inside SQL string).
+    # A10: identity fingerprint required on drive authority model.
     con.execute(
         "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
-        "lifecycle,eligibility,identity_epoch) VALUES('d0',?,?,?,?,?,?,?)",
-        [10**12, 10**12, "primary", 0, "active", "enabled", 1])
+        "lifecycle,eligibility,identity_epoch,identity_fingerprint) "
+        "VALUES('d0',?,?,?,?,?,?,?,?)",
+        [10**12, 10**12, "primary", 0, "active", "enabled", 1, "a" * 64])
     from modelark import plan
     plan.create(con, "ark", name="Ark")
     plan.add_drive(con, "ark", "d0")
@@ -260,42 +263,52 @@ def test_client_supplied_hash_or_blob_is_not_authority():
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
 
     forged = "f" * 64
+
+    def _hash_of(pid):
+        return con.execute(
+            "SELECT canonical_hash FROM placement_proposals WHERE proposal_id=?",
+            [pid]).fetchone()[0]
+
+    def _create_clean():
+        try:
+            return create(con, plan_id="ark", mutation=("adopt_current", ()))
+        except TypeError:
+            return create(con, "ark", ("adopt_current", ()))
+
+    # Clean draft establishes the authoritative hash for this catalog snapshot.
+    clean = _create_clean()
+    clean_pid = clean["proposal_id"] if isinstance(clean, dict) else clean
+    clean_hash = _hash_of(clean_pid)
+
+    # Reset to draft-free state for forged attempt: delete clean draft rows if allowed.
+    con.execute("DELETE FROM proposal_files WHERE proposal_id=?", [clean_pid])
+    con.execute("DELETE FROM proposal_tasks WHERE proposal_id=?", [clean_pid])
+    con.execute("DELETE FROM placement_proposals WHERE proposal_id=?", [clean_pid])
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+
     try:
-        draft = create(
+        forged_draft = create(
             con, plan_id="ark", mutation=("adopt_current", ()),
             canonical_hash=forged, serialized_proposal=b"FORGED",
             blob={"canonical_hash": forged})
     except TypeError:
-        # Signature rejects forged kwargs — create cleanly and verify independent recompute.
-        draft = create(con, plan_id="ark", mutation=("adopt_current", ()))
+        # No client kwargs accepted — recreate clean and prove hash matches clean_hash authority.
+        forged_draft = _create_clean()
+        pid = forged_draft["proposal_id"] if isinstance(forged_draft, dict) else forged_draft
+        assert _hash_of(pid) == clean_hash
+        assert _hash_of(pid) != forged
+        return
     except Exception as exc:
-        # Explicit refusal of forged authority is sufficient (finding 29).
         msg = str(exc).upper()
         assert any(k in msg for k in ("HASH", "BLOB", "AUTHORITY", "CLIENT", "REFUS")), exc
         return
 
-    pid = draft["proposal_id"] if isinstance(draft, dict) else draft
-    row = con.execute(
-        "SELECT * FROM placement_proposals WHERE proposal_id=?", [pid]).fetchone()
-    assert row is not None
-    cols = [r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()]
-    stored = dict(zip(cols, row))["canonical_hash"]
-    assert stored != forged, "must not persist client-forged canonical_hash"
-
-    # Independently recompute using the pure serializer + loaded normalized rows (no extra API).
-    load = getattr(prop, "load_proposal", None) or getattr(prop, "get_proposal", None)
-    if load is not None:
-        loaded = load(con, pid)
-        if isinstance(loaded, dict):
-            header = {k: loaded[k] for k in loaded if k not in ("tasks", "files")}
-            tasks = tuple(loaded.get("tasks") or ())
-            files = tuple(loaded.get("files") or ())
-        else:
-            header = {f: getattr(loaded, f) for f in dir(loaded)
-                      if not f.startswith("_") and f not in ("tasks", "files")}
-            tasks = tuple(getattr(loaded, "tasks", ()) or ())
-            files = tuple(getattr(loaded, "files", ()) or ())
-        assert hash_fn(header, tasks, files) == stored
+    pid = forged_draft["proposal_id"] if isinstance(forged_draft, dict) else forged_draft
+    stored = _hash_of(pid)
+    assert stored != forged, "must not persist client-forged hash"
+    # Must match equivalent clean draft under same catalog facts (not a different client-derived hash).
+    assert stored == clean_hash, (
+        f"forged-input draft hash {stored} must equal clean draft hash {clean_hash}")
 
 
 def test_serializer_version_change_changes_hash():

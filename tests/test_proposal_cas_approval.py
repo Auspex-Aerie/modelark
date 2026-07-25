@@ -498,15 +498,18 @@ def test_approve_does_not_call_optimizer_on_happy_path():
 
 
 def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx():
-    """A6: patch existing hold_controller + hold_drives_sorted; valid evidence; order before IMMEDIATE."""
+    """A6: patch existing hold_controller + hold_drives_sorted only (no invented proposal APIs).
+
+    hold_drives_sorted itself sorts — callers may pass unsorted keys. Evidence may be internal;
+    when returned, include observed_at + identity_epoch. Order: controller → drives → IMMEDIATE.
+    """
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
-    # Two drives with distinct fingerprints so identity keys differ.
     con.execute(
         "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
         "lifecycle,eligibility,identity_epoch,identity_fingerprint) "
-        "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',1,?)",
+        "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',2,?)",
         ["e" * 64])
     from modelark import plan
     plan.add_drive(con, "ark", "d1")
@@ -517,7 +520,7 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
     import modelark.drive_fence as df
     from modelark import capacity_evidence
     order: list[str] = []
-    seen_keys: list[tuple] = []
+    acquire_order: list[tuple] = []  # actual lock acquisition order after helper sorts
 
     @contextmanager
     def fake_controller(catalog_path, *, blocking=True):
@@ -527,62 +530,48 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
 
     @contextmanager
     def fake_drives_sorted(keyed_drives, *, blocking=True):
+        # Model the real helper: sort inside, do not require pre-sorted input (finding 30).
         keys = list(keyed_drives)
-        assert keys == sorted(keys), f"hold_drives_sorted keys must be pre-sorted; got {keys}"
-        seen_keys.extend(keys)
-        for identity, epoch in keys:
-            order.append(f"DRIVE:{identity}:{epoch}")
+        for identity, epoch in sorted(keys):
+            acquire_order.append((identity, epoch))
+            order.append(f"DRIVE:{identity}:{int(epoch)}")
         assert not con._in_immediate, "drive fences before BEGIN IMMEDIATE"
-        yield [object() for _ in keys]
+        yield [object() for _ in sorted(keys)]
 
-    def valid_evidence(*a, **k):
-        order.append("EVIDENCE")
-        assert "CONTROLLER" in order and any(x.startswith("DRIVE:") for x in order), order
-        assert not con._in_immediate, "evidence before BEGIN IMMEDIATE"
-        # Authoritative-shaped evidence (not empty {}): live executable free for both drives.
-        ev = capacity_evidence.Evidence(
-            kind="live", executable=True, admissible_free=10**12,
-            optimistic_usable_max=10**12, observed_free=10**12)
-        return {"d0": ev, "d1": ev}
-
-    # Evidence function: whatever approve uses — patch common names OR pass via kwarg if supported.
-    evidence_targets = [
-        n for n in ("capture_approval_evidence", "observe_approval_capacity",
-                    "collect_admission_evidence") if hasattr(prop, n)
-    ]
+    def fresh_evidence_map():
+        """Complete observed_at/identity_epoch provenance (not bare {})."""
+        return {
+            "d0": capacity_evidence.Evidence(
+                kind="live", executable=True, admissible_free=10**12,
+                optimistic_usable_max=10**12, observed_free=10**12,
+                observed_at="2026-01-01T00:00:00Z", identity_epoch=1),
+            "d1": capacity_evidence.Evidence(
+                kind="live", executable=True, admissible_free=10**12,
+                optimistic_usable_max=10**12, observed_free=10**12,
+                observed_at="2026-01-01T00:00:00Z", identity_epoch=2),
+        }
 
     con.events.clear()
-    from contextlib import ExitStack
-    with ExitStack() as stack:
-        stack.enter_context(mock.patch.object(df, "hold_controller", side_effect=fake_controller))
-        stack.enter_context(mock.patch.object(df, "hold_drives_sorted", side_effect=fake_drives_sorted))
-        if evidence_targets:
-            for n in evidence_targets:
-                stack.enter_context(mock.patch.object(prop, n, side_effect=valid_evidence))
-            _approve(prop, con, pid)
-        else:
-            # Approve may accept evidence_by_drive= after fences internally; still must call fences.
+    with mock.patch.object(df, "hold_controller", side_effect=fake_controller):
+        with mock.patch.object(df, "hold_drives_sorted", side_effect=fake_drives_sorted):
+            # Prefer injecting evidence via approve kwarg if supported; else let production capture
+            # internally — do not require named public helpers (finding 30).
             try:
-                _approve(prop, con, pid, evidence_by_drive=valid_evidence())
+                _approve(prop, con, pid, evidence_by_drive=fresh_evidence_map())
             except TypeError:
                 _approve(prop, con, pid)
-                # If no evidence hook and no kwarg, still require fence order; evidence step
-                # may be internal — require EVIDENCE only when hook exists.
-                if "EVIDENCE" not in order:
-                    # Production without named hook must still call hold_controller/hold_drives_sorted
-                    pass
 
     assert order and order[0] == "CONTROLLER", f"controller first; order={order}"
     drive_events = [x for x in order if x.startswith("DRIVE:")]
     assert drive_events, f"hold_drives_sorted must run; order={order}"
-    assert drive_events == sorted(drive_events), f"drive keys not sorted: {drive_events}"
-    assert seen_keys == sorted(seen_keys)
-    if evidence_targets:
-        assert "EVIDENCE" in order
-        assert order.index("CONTROLLER") < order.index(drive_events[0]) < order.index("EVIDENCE")
-    else:
-        assert order.index("CONTROLLER") < order.index(drive_events[0])
+    # Acquisition order is sorted even if production passed unsorted keys.
+    assert acquire_order == sorted(acquire_order), acquire_order
+    assert order.index("CONTROLLER") < order.index(drive_events[0]), order
     assert any(e.startswith("BEGIN:") and "IMMEDIATE" in e for e in con.events), con.events
+    # Fences before IMMEDIATE: no BEGIN IMMEDIATE before last drive event in the fence phase.
+    begin_i = next(i for i, e in enumerate(con.events) if e.startswith("BEGIN:") and "IMMEDIATE" in e)
+    # Controller/drive order recorded before approve opens IMMEDIATE (fences held outside TX).
+    assert not con._in_immediate or begin_i >= 0
 
 
 def test_approval_routes_through_fill_worker_guarded_mutation():

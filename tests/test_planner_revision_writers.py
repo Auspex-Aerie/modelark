@@ -127,17 +127,20 @@ def test_plan_create_membership_capacity_bootstrap_active(tmp_path):
 
 
 def test_discover_one_and_replace_files_bump(tmp_path):
-    """discover.discover_one with complete ModelInfo mock (fields for _model_row); no HF network."""
+    """discover.discover_one with complete ModelInfo mock including config/card_data (finding 31)."""
     con = _setup_catalog(tmp_path)
     _seed(con)
     from modelark import discover
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
     sib = SimpleNamespace(rfilename="model.safetensors", size=100, lfs=None)
+    card = SimpleNamespace(license="apache-2.0")
     info = SimpleNamespace(
         id="org/new",
         author="org",
         siblings=[sib],
-        cardData={},
+        card_data=card,          # discover._license_of / classify read card_data
+        cardData=card,           # tolerate either attr name from HF client
+        config={"architectures": ["LlamaForCausalLM"], "model_type": "llama"},
         downloads=10,
         downloads_all_time=100,
         likes=1,
@@ -155,7 +158,7 @@ def test_discover_one_and_replace_files_bump(tmp_path):
     before = _rev(con)
     status = discover.discover_one(api, con, "org/new")
     assert status == "ok", status
-    api.model_info.assert_called()  # no fallback to real network
+    api.model_info.assert_called_once()
     assert _rev(con) == before + 1, "discover_one catalog write must bump revision"
     rows = [{"rfilename": "model.safetensors", "size_bytes": 101, "format": "safetensors",
              "quant": "bf16", "sha256": "2" * 64}]
@@ -317,7 +320,7 @@ def test_hash_repair_apply_with_eligible_archived_row(tmp_path):
 
 
 def test_register_drive_with_real_physical_seams_mocked(tmp_path):
-    """Mock functions register actually calls (smart_baseline/_unchecked, mount, annex), not smart_check."""
+    """Patch _fs_uuid/_disk_bytes and other real register seams to concrete values (finding 31)."""
     names = _inv_names()
     assert any("register.register_drive" in n for n in names), names
     con = _setup_catalog(tmp_path)
@@ -325,6 +328,7 @@ def test_register_drive_with_real_physical_seams_mocked(tmp_path):
     from modelark import register
     mnt = tmp_path / "mnt"
     mnt.mkdir()
+    (tmp_path / "lib").mkdir(exist_ok=True)
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
     con.close()
     baseline = {
@@ -336,76 +340,59 @@ def test_register_drive_with_real_physical_seams_mocked(tmp_path):
         with mock.patch.object(register, "_unchecked_baseline", return_value=baseline):
             with mock.patch.object(register, "smart_baseline", return_value=baseline):
                 with mock.patch.object(register, "_transport", return_value="usb"):
-                    with mock.patch.object(register, "_mountpoint", return_value=str(mnt)):
-                        with mock.patch.object(register, "_mount", return_value=str(mnt)):
-                            with mock.patch.object(register, "ensure_library",
-                                                   return_value=tmp_path / "lib"):
-                                with mock.patch.object(register, "_is_annex", return_value=True):
-                                    with mock.patch.object(register, "_git",
-                                                           return_value="annex-uuid-new"):
-                                        with mock.patch.object(register, "_run"):
-                                            before = _rev(db.connect())
-                                            db.connect().close()
-                                            register.register_drive(
-                                                dev="/dev/null", label="d-reg",
-                                                mount=str(mnt), format_fs=None,
-                                                dry_run=False, skip_smart=True)
-                                            after = _rev(db.connect())
-                                            db.connect().close()
-                                            assert after == before + 1, (
-                                                f"register_drive must bump; {before}→{after}")
+                    with mock.patch.object(register, "_fs_uuid", return_value="fs-uuid-reg"):
+                        with mock.patch.object(register, "_disk_bytes", return_value=10**12):
+                            with mock.patch.object(register, "_mountpoint", return_value=str(mnt)):
+                                with mock.patch.object(register, "_mount", return_value=str(mnt)):
+                                    with mock.patch.object(register, "ensure_library",
+                                                           return_value=tmp_path / "lib"):
+                                        with mock.patch.object(register, "_is_annex",
+                                                               return_value=True):
+                                            with mock.patch.object(
+                                                    register, "_git",
+                                                    return_value="annex-uuid-new"):
+                                                before = _rev(db.connect())
+                                                db.connect().close()
+                                                register.register_drive(
+                                                    dev="/dev/null", label="d-reg",
+                                                    mount=str(mnt), format_fs=None,
+                                                    dry_run=False, skip_smart=True)
+                                                after = _rev(db.connect())
+                                                db.connect().close()
+                                                assert after == before + 1, (
+                                                    f"register_drive must bump; {before}→{after}")
 
 
-def test_archived_progress_via_fetch_write_context(tmp_path):
-    """Archived writes go through fetch's write context (ctx.write), not new proposal helpers."""
+def test_archived_progress_via_actual_fetch_runctx_write(tmp_path):
+    """Exercise real fetch.RunCtx.write() for archived insert/removal (finding 32).
+
+    After PR-08, RunCtx.write must route through graph_write so revision bumps. This test
+    must not invent a fake ctx that already calls graph_write.
+    """
     con = _setup_catalog(tmp_path)
     _seed(con)
     from modelark import fetch
-    # Inventory must claim fetch's archived write path.
     names = _inv_names()
-    assert any("fetch" in n.lower() for n in names), names
-
-    # Simulate the supported pattern fetch uses: ctx.write(lambda c: c.execute(INSERT archived…))
-    # Production must route that callback through graph_write so revision bumps.
-    prop = importlib.import_module("modelark.proposal")
-    gw = getattr(prop, "graph_write", None)
-    assert gw is not None
-
-    class _Ctx:
-        def __init__(self, c):
-            self.con = c
-
-        def write(self, fn):
-            # After PR-08, fetch write context must use graph_write.
-            return gw(self.con, lambda c: (fn(c), SimpleNamespace(proven_noop=False, value=None))[1]
-                      if False else _run_write(c, fn))
-
-    def _run_write(c, fn):
-        class R:
-            proven_noop = False
-            value = None
-
-        def op(con_):
-            fn(con_)
-            return R()
-
-        return gw(c, op)
+    assert any("fetch" in n.lower() and ("write" in n.lower() or "RunCtx" in n or "archived" in n.lower()
+               or n.endswith("fetch") or "fetch." in n) for n in names) or any(
+        "fetch" in n for n in names), names
 
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    ctx = fetch.RunCtx(con=con)
     before = _rev(con)
-    ctx = _Ctx(con)
-    # Exact SQL shape used by fetch for recording archived rows (progress).
     ctx.write(lambda c: c.execute(
         "INSERT INTO archived (repo_id, rfilename, drive_label, orig_bytes, stored_bytes, compressed) "
         "VALUES('org/m','model.safetensors','d0',100,100,0)"))
-    assert _rev(con) == before + 1, "fetch write-context archived INSERT must bump via graph_write"
+    assert _rev(con) == before + 1, (
+        "fetch.RunCtx.write archived INSERT must bump revision (wire RunCtx.write through graph_write)")
+    assert con.execute(
+        "SELECT count(*) FROM archived WHERE repo_id='org/m' AND drive_label='d0'"
+    ).fetchone()[0] == 1
     before = _rev(con)
     ctx.write(lambda c: c.execute(
         "DELETE FROM archived WHERE repo_id='org/m' AND drive_label='d0'"))
-    assert _rev(con) == before + 1, "fetch write-context archived DELETE must bump via graph_write"
-    # Also pin that fetch module is listed and that production fetch uses the same graph_write seam.
-    assert any("fetch" in n for n in names)
-    del fetch  # imported to assert module presence for inventory alignment
+    assert _rev(con) == before + 1, (
+        "fetch.RunCtx.write archived DELETE must bump revision")
     con.close()
 
 
