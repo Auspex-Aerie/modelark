@@ -35,8 +35,9 @@ def _hash_fn(can):
 
 
 def _base_header(can, **over):
+    # RFC-002 canonical payload excludes proposal_id (identity is the hash of planning fields).
+    # Including it would make independently created drafts with UUID ids hash-incompatible (finding 36).
     h = {
-        "proposal_id": "p1",
         "plan_id": "ark",
         "based_on_revision": 0,
         "mutation_kind": "adopt_current",
@@ -76,7 +77,8 @@ def _reference_canonical_digest(header, tasks, files) -> str:
     """
     import hashlib
     import json
-    skip = {"lifecycle", "created_at", "approved_at", "superseded_at"}
+    # RFC-002: lifecycle/audit timestamps and proposal_id are not reviewed planning identity.
+    skip = {"lifecycle", "created_at", "approved_at", "superseded_at", "proposal_id"}
     body = {
         "header": {k: header[k] for k in sorted(header) if k not in skip},
         "tasks": sorted(tasks, key=lambda t: (t["requirement_id"], t.get("order_key", 0))),
@@ -88,7 +90,8 @@ def _reference_canonical_digest(header, tasks, files) -> str:
 
 
 # Literal golden for the fixed payload in test_golden_vector_stable_digest (serializer_version="1").
-_GOLDEN_DIGEST = "2567d7b8ab7c7c4cfe1f7377e86ceb4a4054506058a649f195955b7b2770c457"
+# Payload excludes proposal_id (RFC-002); re-pinned after finding 36.
+_GOLDEN_DIGEST = "427254bc7a84de22b4c3ae054151d4ac0422a4faea81485e3712d9e532c122f7"
 
 
 def test_golden_vector_stable_digest():

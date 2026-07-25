@@ -134,6 +134,8 @@ def test_discover_one_and_replace_files_bump(tmp_path):
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
     sib = SimpleNamespace(rfilename="model.safetensors", size=100, lfs=None)
     card = SimpleNamespace(license="apache-2.0")
+    # formats.parse_params_b / repo_dtype_from_info access info.safetensors directly (finding 35).
+    safetensors = SimpleNamespace(total=7_000_000_000, parameters={"BF16": 7_000_000_000})
     info = SimpleNamespace(
         id="org/new",
         author="org",
@@ -141,6 +143,7 @@ def test_discover_one_and_replace_files_bump(tmp_path):
         card_data=card,          # discover._license_of / classify read card_data
         cardData=card,           # tolerate either attr name from HF client
         config={"architectures": ["LlamaForCausalLM"], "model_type": "llama"},
+        safetensors=safetensors,
         downloads=10,
         downloads_all_time=100,
         likes=1,

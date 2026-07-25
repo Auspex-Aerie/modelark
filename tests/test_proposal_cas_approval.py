@@ -498,19 +498,24 @@ def test_approve_does_not_call_optimizer_on_happy_path():
 
 
 def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx():
-    """A6: patch existing hold_controller + hold_drives_sorted only (no invented proposal APIs).
+    """A6: complete authority sequence via real fences + tests-only services/evidence seam.
 
-    hold_drives_sorted itself sorts — callers may pass unsorted keys. Evidence may be internal;
-    when returned, include observed_at + identity_epoch. Order: controller → drives → IMMEDIATE.
+    Order: controller → exact sorted {(d0 fingerprint, 1), (d1 fingerprint, 2)} →
+    fresh evidence (clock-tied observed_at) → BEGIN IMMEDIATE.
+
+    hold_drives_sorted sorts internally (callers may pass unsorted keys). Evidence is not
+    pre-built before approve; capture is observed through services so post-IMMEDIATE capture fails.
     """
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
+    fp_d0 = "f" * 64  # _seed_selection d0 fingerprint, epoch 1
+    fp_d1 = "e" * 64
     con.execute(
         "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
         "lifecycle,eligibility,identity_epoch,identity_fingerprint) "
         "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',2,?)",
-        ["e" * 64])
+        [fp_d1])
     from modelark import plan
     plan.add_drive(con, "ark", "d1")
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
@@ -519,8 +524,12 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
 
     import modelark.drive_fence as df
     from modelark import capacity_evidence
+
+    # Exact fence keys for the two plan drives (identity fingerprint, epoch).
+    expected_keys = sorted([(fp_d0, 1), (fp_d1, 2)])
+    approval_now = "2026-07-25T12:34:56Z"
     order: list[str] = []
-    acquire_order: list[tuple] = []  # actual lock acquisition order after helper sorts
+    acquire_order: list[tuple] = []
 
     @contextmanager
     def fake_controller(catalog_path, *, blocking=True):
@@ -530,48 +539,94 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
 
     @contextmanager
     def fake_drives_sorted(keyed_drives, *, blocking=True):
-        # Model the real helper: sort inside, do not require pre-sorted input (finding 30).
+        # Model the real helper: sort inside; do not require pre-sorted input.
         keys = list(keyed_drives)
         for identity, epoch in sorted(keys):
-            acquire_order.append((identity, epoch))
+            acquire_order.append((identity, int(epoch)))
             order.append(f"DRIVE:{identity}:{int(epoch)}")
         assert not con._in_immediate, "drive fences before BEGIN IMMEDIATE"
         yield [object() for _ in sorted(keys)]
 
-    def fresh_evidence_map():
-        """Complete observed_at/identity_epoch provenance (not bare {})."""
-        return {
-            "d0": capacity_evidence.Evidence(
-                kind="live", executable=True, admissible_free=10**12,
-                optimistic_usable_max=10**12, observed_free=10**12,
-                observed_at="2026-01-01T00:00:00Z", identity_epoch=1),
-            "d1": capacity_evidence.Evidence(
-                kind="live", executable=True, admissible_free=10**12,
-                optimistic_usable_max=10**12, observed_free=10**12,
-                observed_at="2026-01-01T00:00:00Z", identity_epoch=2),
-        }
+    class _TestClock:
+        def now(self):
+            return approval_now
+
+    class _TestServices:
+        """Tests-only inject (A6): clock + evidence capture observed during approve."""
+
+        def __init__(self):
+            self.clock = _TestClock()
+            self.evidence_calls = 0
+            self.last_evidence = None
+
+        def observe_exact_capacity(self, *a, **k):
+            """RFC-shaped capture: after fences, before BEGIN IMMEDIATE; observed_at from clock."""
+            self.evidence_calls += 1
+            order.append("EVIDENCE")
+            assert not con._in_immediate, "evidence capture must precede BEGIN IMMEDIATE"
+            assert "CONTROLLER" in order, "evidence after controller fence"
+            assert any(x.startswith("DRIVE:") for x in order), "evidence after drive fences"
+            now = self.clock.now()
+            assert now == approval_now
+            self.last_evidence = {
+                "d0": capacity_evidence.Evidence(
+                    kind="live", executable=True, admissible_free=10**12,
+                    optimistic_usable_max=10**12, observed_free=10**12,
+                    observed_at=now, identity_epoch=1),
+                "d1": capacity_evidence.Evidence(
+                    kind="live", executable=True, admissible_free=10**12,
+                    optimistic_usable_max=10**12, observed_free=10**12,
+                    observed_at=now, identity_epoch=2),
+            }
+            return self.last_evidence
+
+    services = _TestServices()
 
     con.events.clear()
     with mock.patch.object(df, "hold_controller", side_effect=fake_controller):
         with mock.patch.object(df, "hold_drives_sorted", side_effect=fake_drives_sorted):
-            # Prefer injecting evidence via approve kwarg if supported; else let production capture
-            # internally — do not require named public helpers (finding 30).
+            # Production approve accepts services= (RFC). Do not pre-build evidence_by_drive
+            # before fence acquisition — capture must run inside the services seam.
             try:
-                _approve(prop, con, pid, evidence_by_drive=fresh_evidence_map())
+                _approve(prop, con, pid, services=services)
             except TypeError:
-                _approve(prop, con, pid)
+                # Positional request + services per RFC approve_proposal(con, id, request, services).
+                approve = getattr(prop, "approve", None) or prop.approve_proposal
+                try:
+                    approve(con, pid, {}, services)
+                except TypeError as exc:
+                    raise AssertionError(
+                        "approve must accept services= (or request, services) for the "
+                        "tests-only A6 clock/evidence seam"
+                    ) from exc
 
     assert order and order[0] == "CONTROLLER", f"controller first; order={order}"
     drive_events = [x for x in order if x.startswith("DRIVE:")]
-    assert drive_events, f"hold_drives_sorted must run; order={order}"
-    # Acquisition order is sorted even if production passed unsorted keys.
-    assert acquire_order == sorted(acquire_order), acquire_order
-    assert order.index("CONTROLLER") < order.index(drive_events[0]), order
+    assert drive_events == [f"DRIVE:{i}:{e}" for i, e in expected_keys], (
+        f"exact sorted fence keys required; expected {expected_keys}, "
+        f"acquire_order={acquire_order}, drive_events={drive_events}")
+    assert acquire_order == expected_keys, acquire_order
+    assert "EVIDENCE" in order, (
+        f"services.observe_exact_capacity must run during approve; order={order}")
+    assert services.evidence_calls >= 1
+    assert services.last_evidence is not None
+    for label, epoch in (("d0", 1), ("d1", 2)):
+        ev = services.last_evidence[label]
+        assert ev.observed_at == approval_now, (
+            f"{label} observed_at must come from approval clock, got {ev.observed_at!r}")
+        assert ev.identity_epoch == epoch
+    # Full authority sequence: controller → both drives → evidence.
+    assert (
+        order.index("CONTROLLER")
+        < order.index(drive_events[0])
+        < order.index(drive_events[-1])
+        < order.index("EVIDENCE")
+    ), order
     assert any(e.startswith("BEGIN:") and "IMMEDIATE" in e for e in con.events), con.events
-    # Fences before IMMEDIATE: no BEGIN IMMEDIATE before last drive event in the fence phase.
-    begin_i = next(i for i, e in enumerate(con.events) if e.startswith("BEGIN:") and "IMMEDIATE" in e)
-    # Controller/drive order recorded before approve opens IMMEDIATE (fences held outside TX).
-    assert not con._in_immediate or begin_i >= 0
+    # Evidence observed before IMMEDIATE: callback asserted !_in_immediate; TX still opened.
+    begin_i = next(
+        i for i, e in enumerate(con.events) if e.startswith("BEGIN:") and "IMMEDIATE" in e)
+    assert begin_i >= 0
 
 
 def test_approval_routes_through_fill_worker_guarded_mutation():
