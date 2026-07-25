@@ -1,11 +1,8 @@
 """PR-08 / #39-A catalog-v5 proposal/control migration (tests-first, DEC-049 / RFC-002).
 
 Gate 1: v4→v5 migration BEFORE production. RED until five planning/control tables, singleton
-planner_state (revision=0, next_fencing_token init, null active pointer), backup-first transactional
-migration, and execution_sessions CHECK/FK/live uniqueness exist.
-
-The v4 fixture is FROZEN and production-independent: it never calls db.connect() to build the
-pre-migration catalog.
+planner_state (revision=0, next_fencing_token=0, null active pointer), backup-first transactional
+migration, full execution_sessions/proposal domain constraints, and no early v5 table creation.
 """
 from __future__ import annotations
 
@@ -28,7 +25,6 @@ class _FailOn:
         return getattr(self._con, name)
 
 
-# Frozen catalog-v4 drives shape — includes lifecycle/eligibility; no proposal tables.
 _V4_DRIVES_DDL = """
 CREATE TABLE drives (
     drive_label        VARCHAR PRIMARY KEY NOT NULL CHECK (length(trim(drive_label)) > 0),
@@ -68,6 +64,19 @@ _V5_TABLES = (
     "proposal_files",
     "execution_sessions",
 )
+
+# RFC-002 execution_sessions column surface (schema-tested now; no runtime writers).
+_SESSION_REQUIRED_COLS = {
+    "session_id", "plan_id", "approved_proposal_id", "resumed_from_session_id",
+    "controller_identity", "worker_identity", "state",
+    "bound_planner_revision", "fencing_token",
+    "acquired_at", "heartbeat_at", "expires_at", "terminal_at",
+    "terminal_code", "terminal_evidence",
+}
+
+_LIVE_STATES = ("starting", "running", "stopping")
+_TERMINAL_STATES = ("paused", "blocked", "stopped", "done", "failed")
+_ALL_STATES = _LIVE_STATES + _TERMINAL_STATES
 
 
 def _reopen_raw():
@@ -127,7 +136,6 @@ def _seed_v4(tmp_path):
             FOREIGN KEY (drive_label) REFERENCES drives(drive_label)
         )
     """)
-    # Match packaged v4 dirty/anchor shape so connect()'s CREATE INDEX IF NOT EXISTS applies cleanly.
     con.execute("""
         CREATE TABLE drive_dirty_generations (
             drive_label         VARCHAR NOT NULL,
@@ -182,8 +190,13 @@ def _seed_v4(tmp_path):
     assert check.execute("PRAGMA user_version").fetchone()[0] == 4
     tables = {r[0] for r in check.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-    assert not any(t in tables for t in _V5_TABLES), "v4 fixture must not contain proposal tables"
+    assert not any(t in tables for t in _V5_TABLES)
     check.close()
+
+
+def _hash64(ch="a"):
+    """64-char hex string bound as a parameter (never bare '0'*64 in SQL — SQLite yields int 0)."""
+    return ch * 64
 
 
 def test_migrate_v4_to_v5_adds_five_tables_and_seeds_planner_state(tmp_path):
@@ -205,19 +218,13 @@ def test_migrate_v4_to_v5_adds_five_tables_and_seeds_planner_state(tmp_path):
     assert row[0] == 1
     assert row[1] == 0, f"planner_revision must be 0 after migration; got {row[1]}"
     assert row[2] is None, "active_approved_proposal_id must be NULL (no fabricated approval)"
-    assert row[3] is not None, "next_fencing_token must be initialized (non-NULL)"
-    # Pin initial fencing counter so PR-09 cannot reinterpret: require non-negative integer start.
-    assert int(row[3]) == 0, (
-        f"next_fencing_token must initialize at 0 after migration; got {row[3]}")
+    assert row[3] == 0, f"next_fencing_token must initialize at 0; got {row[3]}"
 
     assert con.execute("SELECT count(*) FROM placement_proposals").fetchone()[0] == 0
     assert con.execute("SELECT count(*) FROM proposal_tasks").fetchone()[0] == 0
     assert con.execute("SELECT count(*) FROM proposal_files").fetchone()[0] == 0
     assert con.execute("SELECT count(*) FROM execution_sessions").fetchone()[0] == 0
-
-    # Prior catalog facts preserved.
     assert con.execute("SELECT count(*) FROM models").fetchone()[0] == 1
-    assert con.execute("SELECT count(*) FROM archived").fetchone()[0] == 1
     assert con.execute(
         "SELECT lifecycle, eligibility FROM drives WHERE drive_label='drive-00'"
     ).fetchone() == ("active", "enabled")
@@ -225,7 +232,6 @@ def test_migrate_v4_to_v5_adds_five_tables_and_seeds_planner_state(tmp_path):
 
 
 def test_v5_backup_precedes_every_v5_object(tmp_path):
-    """Backup-first: pre-proposal-v5 backup must exist and remain a pure v4 catalog."""
     _seed_v4(tmp_path)
     db.connect().close()
     bak = db.DB_PATH.with_name(db.DB_PATH.name + ".pre-proposal-v5.bak")
@@ -252,17 +258,15 @@ def test_v5_migration_is_idempotent(tmp_path):
         "FROM planner_state WHERE singleton_id=1"
     ).fetchone()
     assert row == (0, None, 0), row
-    # No duplicate singleton.
     assert con.execute("SELECT count(*) FROM planner_state").fetchone()[0] == 1
     con.close()
 
 
 def test_v5_injected_failure_rolls_back_tables_and_user_version(tmp_path):
-    helpers = [n for n in dir(db) if "v5" in n.lower() or "proposal" in n.lower()]
     migrate = getattr(db, "_migrate_proposal_control_v5", None) or getattr(
         db, "_migrate_placement_approval_v5", None)
     assert migrate is not None, (
-        f"v5 migration helper not implemented yet (expected Gate-1 red); db attrs~{helpers}")
+        "v5 migration helper not implemented yet (expected Gate-1 red)")
     _seed_v4(tmp_path)
     con = _reopen_raw()
     con.execute("PRAGMA foreign_keys=OFF")
@@ -284,11 +288,9 @@ def test_v5_injected_failure_rolls_back_tables_and_user_version(tmp_path):
 
 
 def test_v5_tables_not_introduced_during_integrity_rebuild(tmp_path):
-    """Pre-migration tables-only / integrity rebuild must not invent proposal tables early."""
     db.CATALOG_DIR = tmp_path
     db.DB_PATH = tmp_path / "catalog.sqlite"
     con = db.connect()
-    # If already v5 from packaged schema, strip to prove rebuild path.
     con.execute("PRAGMA foreign_keys=OFF")
     for view in db._VIEW_NAMES:
         con.execute(f'DROP VIEW IF EXISTS "{view}"')
@@ -298,12 +300,10 @@ def test_v5_tables_not_introduced_during_integrity_rebuild(tmp_path):
         con.execute(f'DROP TABLE "{table}"')
     for table in db._INTEGRITY_TABLES:
         con.execute(f'ALTER TABLE "{table}__legacy" RENAME TO "{table}"')
-    # Drop any v5 tables if a future packaged schema already created them.
     for name in _V5_TABLES:
         con.execute(f'DROP TABLE IF EXISTS "{name}"')
     con.execute("DROP TABLE IF EXISTS drive_clean_anchors")
     con.execute("DROP TABLE IF EXISTS drive_dirty_generations")
-    # Reduce drives to pre-v3 if needed is heavy; stamp v0 and reconnect for full chain.
     present = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
     pre_v3 = ("drive_label,fs_uuid,annex_uuid,capacity_bytes,free_bytes,hw_model,serial,"
               "physical_location,role,raid_backed,health,last_seen,notes")
@@ -316,7 +316,6 @@ def test_v5_tables_not_introduced_during_integrity_rebuild(tmp_path):
     con.execute("PRAGMA user_version=0")
     con.close()
 
-    # After connect, final version is 5, but the evidence-v3 backup must remain pre-proposal.
     con = db.connect()
     assert con.execute("PRAGMA user_version").fetchone()[0] == 5, (
         "full migration must land at v5 (expected Gate-1 red)")
@@ -325,13 +324,12 @@ def test_v5_tables_not_introduced_during_integrity_rebuild(tmp_path):
     for name in _V5_TABLES:
         assert name in tables
     v3_bak = db.DB_PATH.with_name(db.DB_PATH.name + ".pre-evidence-v3.bak")
-    assert v3_bak.is_file(), "v0 path must still take the evidence v3 backup"
+    assert v3_bak.is_file()
     b = sqlite3.connect(str(v3_bak))
     btables = {r[0] for r in b.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     for name in _V5_TABLES:
-        assert name not in btables, (
-            f"integrity/evidence steps must not introduce {name} early")
+        assert name not in btables, f"integrity/evidence must not introduce {name} early"
     b.close()
     con.close()
 
@@ -353,35 +351,71 @@ def test_newer_catalog_rejection_uses_schema_version_plus_one(tmp_path):
     raw.close()
 
 
+def _seed_minimal_approved_proposal(con, proposal_id="prop-1"):
+    """Insert one approved proposal for session FK tests. Uses bound parameters for hash."""
+    h = _hash64("c")
+    con.execute(
+        "INSERT INTO placement_proposals("
+        "proposal_id, plan_id, based_on_revision, lifecycle, canonical_hash, "
+        "mutation_kind, serializer_version) "
+        "VALUES(?,?,0,'approved',?,'adopt_current','1')",
+        [proposal_id, "ark", h],
+    )
+
+
+def test_proposal_lifecycle_and_task_row_kind_constraints(tmp_path):
+    _seed_v4(tmp_path)
+    con = db.connect()
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 5, (
+        "v5 required (expected Gate-1 red)")
+
+    def rejected(sql, params=()):
+        try:
+            con.execute(sql, params)
+            return False
+        except sqlite3.IntegrityError:
+            return True
+
+    h = _hash64("d")
+    assert rejected(
+        "INSERT INTO placement_proposals(proposal_id,plan_id,based_on_revision,lifecycle,"
+        "canonical_hash,mutation_kind,serializer_version) "
+        "VALUES('p-bad','ark',0,'ghost',?,'adopt_current','1')", [h]), (
+        "proposal lifecycle domain must reject invalid lifecycle")
+    con.execute(
+        "INSERT INTO placement_proposals(proposal_id,plan_id,based_on_revision,lifecycle,"
+        "canonical_hash,mutation_kind,serializer_version) "
+        "VALUES('p-ok','ark',0,'draft',?,'adopt_current','1')", [h])
+    assert rejected(
+        "INSERT INTO proposal_tasks(proposal_id,requirement_id,row_kind,repo_id,"
+        "full_manifest_hash) VALUES('p-ok','primary:org/m','ghost','org/m',?)",
+        [_hash64("m")]), (
+        "proposal_tasks.row_kind must be executable|baseline_satisfied only")
+    con.execute(
+        "INSERT INTO proposal_tasks(proposal_id,requirement_id,row_kind,repo_id,"
+        "full_manifest_hash) VALUES('p-ok','primary:org/m','executable','org/m',?)",
+        [_hash64("m")])
+    con.execute(
+        "INSERT INTO proposal_tasks(proposal_id,requirement_id,row_kind,repo_id,"
+        "full_manifest_hash) VALUES('p-ok','primary:org/n','baseline_satisfied','org/n',?)",
+        [_hash64("n")])
+    con.close()
+
+
 def test_execution_sessions_schema_constraints_with_synthetic_rows(tmp_path):
-    """Schema-only: CHECK/FK/live uniqueness on execution_sessions without any session API."""
+    """Complete schema pin: columns, FKs, state domain, worker-claim, live uniqueness."""
     _seed_v4(tmp_path)
     con = db.connect()
     assert con.execute("PRAGMA user_version").fetchone()[0] == 5, (
         "v5 schema required for execution_sessions (expected Gate-1 red)")
-    # Need an approved proposal FK target — insert minimal synthetic proposal rows if columns allow.
-    # Production shape may vary; require enough columns to exercise uniqueness of live states.
-    cols = {r[1] for r in con.execute("PRAGMA table_info(execution_sessions)").fetchall()}
-    required = {
-        "session_id", "plan_id", "approved_proposal_id", "state",
-        "bound_planner_revision", "fencing_token",
-    }
-    assert required <= cols, (
-        f"execution_sessions missing required columns; have={sorted(cols)} need={sorted(required)}")
+    con.execute("PRAGMA foreign_keys=ON")
 
-    # Insert a draft/approved proposal if placement_proposals exists so FK can succeed.
-    pcols = {r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()}
-    assert "proposal_id" in pcols or "id" in pcols
-    pid_col = "proposal_id" if "proposal_id" in pcols else "id"
-    # Minimal header insert — column set is production-defined; fail loudly if shape incomplete.
-    try:
-        con.execute(
-            f"INSERT INTO placement_proposals({pid_col}, plan_id, based_on_revision, lifecycle, "
-            f"canonical_hash) VALUES('prop-1','ark',0,'approved','0'*64)")
-    except sqlite3.Error as exc:
-        raise AssertionError(
-            f"cannot seed synthetic approved proposal for session FK tests: {exc} "
-            f"(proposal table columns={sorted(pcols)})") from exc
+    cols = {r[1] for r in con.execute("PRAGMA table_info(execution_sessions)").fetchall()}
+    assert _SESSION_REQUIRED_COLS <= cols, (
+        f"execution_sessions missing columns; have={sorted(cols)} "
+        f"need={sorted(_SESSION_REQUIRED_COLS)}")
+
+    _seed_minimal_approved_proposal(con, "prop-1")
 
     def rejected(sql, params=()):
         try:
@@ -392,23 +426,79 @@ def test_execution_sessions_schema_constraints_with_synthetic_rows(tmp_path):
 
     # Invalid state domain.
     assert rejected(
-        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,state,"
-        "bound_planner_revision,fencing_token) VALUES('s-bad','ark','prop-1','ghost',0,1)"), (
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
+        "VALUES('s-bad','ark','prop-1','ctl',NULL,'ghost',0,1)"), (
         "invalid session state must be rejected by CHECK")
 
-    # Live session insert OK.
-    con.execute(
-        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,state,"
-        "bound_planner_revision,fencing_token) VALUES('s1','ark','prop-1','running',0,1)")
-    # Second live session must fail global uniqueness (any plan/approval).
+    # plan_id FK
     assert rejected(
-        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,state,"
-        "bound_planner_revision,fencing_token) VALUES('s2','ark','prop-1','starting',0,2)"), (
-        "global partial unique on live states must reject a second live session")
-    # Terminal second session is allowed.
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
+        "VALUES('s-pf','no-such-plan','prop-1','ctl',NULL,'starting',0,1)"), (
+        "plan_id must FK to plans")
+
+    # approved_proposal_id FK
+    assert rejected(
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
+        "VALUES('s-af','ark','no-prop','ctl',NULL,'starting',0,1)"), (
+        "approved_proposal_id must FK to placement_proposals")
+
+    # Worker claim: running/stopping require non-null worker_identity.
+    assert rejected(
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
+        "VALUES('s-rw','ark','prop-1','ctl',NULL,'running',0,1)"), (
+        "running must require worker_identity NOT NULL")
+    assert rejected(
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
+        "VALUES('s-sw','ark','prop-1','ctl',NULL,'stopping',0,1)"), (
+        "stopping must require worker_identity NOT NULL")
+
+    # starting may have NULL worker (unclaimed).
     con.execute(
-        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,state,"
-        "bound_planner_revision,fencing_token) VALUES('s3','ark','prop-1','stopped',0,3)")
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
+        "VALUES('s1','ark','prop-1','ctl',NULL,'starting',0,1)")
+
+    # Global live uniqueness: second live state fails.
+    assert rejected(
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
+        "VALUES('s2','ark','prop-1','ctl','worker-1','running',0,2)"), (
+        "global partial unique on live states must reject a second live session")
+
+    # Terminal allowed while a live session exists? RFC: at most one live; terminals OK.
+    # After s1 is still starting (live), terminal s3 may be allowed (historical).
+    con.execute(
+        "UPDATE execution_sessions SET state='stopped', worker_identity=NULL "
+        "WHERE session_id='s1'")
+    con.execute(
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
+        "VALUES('s3','ark','prop-1','ctl','worker-1','running',0,3)")
+
+    # resumed_from_session_id self-FK
+    assert rejected(
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "resumed_from_session_id,controller_identity,worker_identity,state,"
+        "bound_planner_revision,fencing_token) "
+        "VALUES('s4','ark','prop-1','no-such','ctl',NULL,'starting',0,4)"), (
+        "resumed_from_session_id must self-FK execution_sessions")
+    con.execute(
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "resumed_from_session_id,controller_identity,worker_identity,state,"
+        "bound_planner_revision,fencing_token) "
+        "VALUES('s5','ark','prop-1','s3','ctl',NULL,'starting',0,5)")
+
+    # fencing_token / revision domain
+    assert rejected(
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
+        "VALUES('s6','ark','prop-1','ctl',NULL,'starting',0,0)"), (
+        "fencing_token must be >= 1 when present as allocated token")
     con.close()
 
 

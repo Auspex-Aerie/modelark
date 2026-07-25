@@ -1,7 +1,7 @@
 """PR-08 / #39-A proposal draft/approve CAS and adopt_current (tests-first, RFC-002).
 
-Gate 1 pins: preview solve outside BEGIN IMMEDIATE; publish TX only rechecks revision and persists
-rows; approval CAS failure modes; atomic rollback; no optimizer in commit; adopt_current.
+Gate 1: preview pure outside BEGIN IMMEDIATE (instrumented event log); full approval matrix;
+atomic rollback via mid-TX inject; adopt_current leaves selection unchanged.
 """
 from __future__ import annotations
 
@@ -12,22 +12,43 @@ from unittest import mock
 from modelark.core import db
 
 
+class _EventCon:
+    """Connection proxy with ordered event log for TX/solver ordering proofs."""
+
+    def __init__(self, con):
+        self._con = con
+        self.events: list[str] = []
+
+    def execute(self, sql, *args):
+        s = sql if isinstance(sql, str) else str(sql)
+        up = s.strip().upper()
+        if up.startswith("BEGIN"):
+            self.events.append(f"BEGIN:{up}")
+        elif up.startswith("COMMIT"):
+            self.events.append("COMMIT")
+        elif up.startswith("ROLLBACK"):
+            self.events.append("ROLLBACK")
+        return self._con.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
+
+
 def _mem():
-    con = sqlite3.connect(":memory:", isolation_level=None)
+    raw = sqlite3.connect(":memory:", isolation_level=None)
     for stmt in db._statements(db.SCHEMA_PATH.read_text()):
-        con.execute(stmt)
-    # Seed planner_state if packaged schema is already v5; otherwise tests fail on missing tables.
-    tables = {r[0] for r in con.execute(
+        raw.execute(stmt)
+    tables = {r[0] for r in raw.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     if "planner_state" not in tables:
         raise AssertionError(
             "packaged schema must define planner_state (v5) for in-memory contracts "
             "(expected Gate-1 red until schema.sql lands)")
-    if con.execute("SELECT count(*) FROM planner_state").fetchone()[0] == 0:
-        con.execute(
-            "INSERT INTO planner_state(singleton_id,planner_revision,active_approved_proposal_id,"
-            "next_fencing_token) VALUES(1,0,NULL,0)")
-    return con
+    if raw.execute("SELECT count(*) FROM planner_state").fetchone()[0] == 0:
+        raw.execute(
+            "INSERT INTO planner_state(singleton_id,planner_revision,"
+            "active_approved_proposal_id,next_fencing_token) VALUES(1,0,NULL,0)")
+    return _EventCon(raw)
 
 
 def _proposal():
@@ -37,6 +58,18 @@ def _proposal():
         except ModuleNotFoundError:
             continue
     raise AssertionError("modelark.proposal module required (expected Gate-1 red)")
+
+
+def _pid(draft):
+    if isinstance(draft, dict):
+        return draft["proposal_id"]
+    return draft
+
+
+def _lifecycle(con, proposal_id):
+    return con.execute(
+        "SELECT lifecycle FROM placement_proposals WHERE proposal_id=?",
+        [proposal_id]).fetchone()[0]
 
 
 def _seed_selection(con, repos=("org/m",)):
@@ -51,150 +84,146 @@ def _seed_selection(con, repos=("org/m",)):
             [repo])
     con.execute(
         "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
-        "lifecycle,eligibility,identity_epoch) VALUES('d0',10**12,10**12,'primary',0,"
-        "'active','enabled',1)")
+        "lifecycle,eligibility,identity_epoch,identity_fingerprint) "
+        "VALUES('d0',1000000000000,1000000000000,'primary',0,'active','enabled',1,?)",
+        ["f" * 64])
     from modelark import plan
-    plan.create(con, "ark", name="Ark")
-    plan.add_drive(con, "ark", "d0")
+    if plan.get(con, "ark") is None:
+        plan.create(con, "ark", name="Ark")
+    if "d0" not in plan.plan_drive_labels(con, "ark"):
+        plan.add_drive(con, "ark", "d0")
     plan.set_active(con, "ark")
+    # Reset revision after seed mutations once writers bump (production).
+    try:
+        con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    except sqlite3.Error:
+        pass
 
 
-def test_preview_solve_happens_outside_begin_immediate():
-    """Publish transaction must not run solver; solve occurs before BEGIN IMMEDIATE."""
+def _create(prop, con, mutation=("adopt_current", ())):
+    create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft")
+    try:
+        return create(con, plan_id="ark", mutation=mutation)
+    except TypeError:
+        return create(con, "ark", mutation)
+
+
+def _approve(prop, con, proposal_id):
+    approve = getattr(prop, "approve", None) or getattr(prop, "approve_proposal")
+    try:
+        return approve(con, proposal_id)
+    except TypeError:
+        return approve(con, proposal_id=proposal_id)
+
+
+def test_preview_pure_runs_before_any_begin_immediate():
+    """Ordered event log: pure preview must not BEGIN IMMEDIATE; publish may."""
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
-    begin_calls = []
-    real_execute = con.execute
-
-    def wrapped(sql, *args):
-        s = sql if isinstance(sql, str) else str(sql)
-        if "BEGIN" in s.upper():
-            begin_calls.append(s)
-        return real_execute(sql, *args)
-
-    create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft", None)
-    assert create is not None, "create_draft/preview_and_draft required (Gate-1 red)"
-
-    with mock.patch.object(con, "execute", side_effect=wrapped):
-        # Also spy placement if imported by proposal.
-        try:
-            from modelark import placement, capacity
-            with mock.patch.object(placement, "gate_b", wraps=getattr(placement, "gate_b", None)) as g, \
-                 mock.patch.object(capacity, "plan_capacity", wraps=getattr(capacity, "plan_capacity", None)) as p:
-                # Call may still fail if production incomplete; we care about ordering if it gets to TX.
-                try:
-                    create(con, plan_id="ark", mutation=("adopt_current", ()))
-                except Exception:
-                    pass
-                # If both solvers were called, each call must predate any BEGIN IMMEDIATE.
-                # When modules exist, assert gate_b was not called while a write TX is open.
-                del g, p
-        except Exception:
-            pass
-
-    # Stronger contract: create_draft must document/solve via a pure phase hook we can spy.
     assert hasattr(prop, "preview_pure") or hasattr(prop, "compute_draft_payload"), (
-        "proposal module must expose a pure preview/compute entry (preview_pure or "
-        "compute_draft_payload) so tests can prove it runs outside BEGIN IMMEDIATE")
+        "must expose preview_pure or compute_draft_payload")
+    assert hasattr(prop, "publish_draft") or hasattr(prop, "persist_draft"), (
+        "must expose publish_draft or persist_draft separate from pure preview")
 
     pure = getattr(prop, "preview_pure", None) or getattr(prop, "compute_draft_payload")
-    publish = getattr(prop, "publish_draft", None) or getattr(prop, "persist_draft", None)
-    assert publish is not None, (
-        "split pure preview from publish_draft/persist_draft required to prove TX boundary")
+    publish = getattr(prop, "publish_draft", None) or getattr(prop, "persist_draft")
 
-    # Pure phase must not open IMMEDIATE write TX.
-    begin_calls.clear()
+    con.events.clear()
     try:
-        pure(con, plan_id="ark", mutation=("adopt_current", ()))
+        payload = pure(con, plan_id="ark", mutation=("adopt_current", ()))
     except TypeError:
-        pure(con, "ark", ("adopt_current", ()))
-    for call in begin_calls:
-        assert "IMMEDIATE" not in call.upper(), (
-            f"pure preview must not BEGIN IMMEDIATE; saw {call!r}")
+        payload = pure(con, "ark", ("adopt_current", ()))
+    pure_events = list(con.events)
+    for ev in pure_events:
+        assert "IMMEDIATE" not in ev, (
+            f"pure preview must not BEGIN IMMEDIATE; events={pure_events}")
+
+    # Solver calls during pure phase are allowed; during publish TX they are not.
+    from modelark import placement, capacity
+    con.events.clear()
+    solve_during_tx = []
+
+    def track_gate(*a, **k):
+        if any(e.startswith("BEGIN") and "IMMEDIATE" in e for e in con.events):
+            solve_during_tx.append("gate_b")
+        return mock.DEFAULT
+
+    with mock.patch.object(placement, "gate_b", side_effect=track_gate):
+        with mock.patch.object(capacity, "plan_capacity", side_effect=track_gate):
+            try:
+                try:
+                    publish(con, payload)
+                except TypeError:
+                    publish(con, plan_id="ark", payload=payload)
+            except Exception:
+                pass
+    assert solve_during_tx == [], (
+        f"solver must not run inside BEGIN IMMEDIATE publish; saw {solve_during_tx} "
+        f"events={con.events}")
 
 
-def test_draft_persist_does_not_mutate_selection():
+def test_draft_persist_does_not_mutate_selection_or_revision():
     prop = _proposal()
     con = _mem()
     _seed_selection(con, repos=())
     before = list(con.execute("SELECT repo_id FROM selection ORDER BY 1").fetchall())
-    create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft")
-    # Draft adding a repo must not finalize selection until approve.
-    try:
-        create(con, plan_id="ark", mutation=("finalize", ("org/new",)))
-    except TypeError:
-        create(con, "ark", ("finalize", ("org/new",)))
+    before_rev = con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
+    draft = _create(prop, con, ("finalize", ("org/new",)))
+    pid = _pid(draft)
     after = list(con.execute("SELECT repo_id FROM selection ORDER BY 1").fetchall())
-    assert before == after, "draft creation must not change selection"
-    assert con.execute("SELECT count(*) FROM placement_proposals").fetchone()[0] >= 1
-    rev = con.execute("SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
-    assert rev == 0, "draft alone must not bump planner_revision"
+    assert before == after, "draft must not change selection"
+    after_rev = con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
+    assert after_rev == before_rev, "draft alone must not bump planner_revision"
+    assert _lifecycle(con, pid) == "draft"
 
 
 def test_persistence_reread_hash_equality():
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
-    create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft")
-    try:
-        draft = create(con, plan_id="ark", mutation=("adopt_current", ()))
-    except TypeError:
-        draft = create(con, "ark", ("adopt_current", ()))
-    pid = draft["proposal_id"] if isinstance(draft, dict) else draft
+    draft = _create(prop, con)
+    pid = _pid(draft)
     load = getattr(prop, "load_proposal", None) or getattr(prop, "get_proposal")
     loaded = load(con, pid)
     stored = loaded["canonical_hash"] if isinstance(loaded, dict) else loaded.canonical_hash
     recompute = getattr(prop, "recompute_hash", None) or getattr(prop, "hash_stored_proposal")
-    assert recompute(con, pid) == stored, "re-read normalized rows must recompute equal hash"
+    assert recompute(con, pid) == stored
 
 
-def test_approve_adopt_current_sets_pointer_and_bumps_revision():
+def test_approve_adopt_current_sets_pointer_bumps_revision_selection_unchanged():
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
-    create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft")
-    approve = getattr(prop, "approve", None) or getattr(prop, "approve_proposal")
-    try:
-        draft = create(con, plan_id="ark", mutation=("adopt_current", ()))
-    except TypeError:
-        draft = create(con, "ark", ("adopt_current", ()))
-    pid = draft["proposal_id"] if isinstance(draft, dict) else draft
-    try:
-        approve(con, pid)
-    except TypeError:
-        approve(con, proposal_id=pid)
+    before_sel = list(con.execute(
+        "SELECT repo_id, finalized_at FROM selection ORDER BY 1").fetchall())
+    draft = _create(prop, con, ("adopt_current", ()))
+    pid = _pid(draft)
+    _approve(prop, con, pid)
     state = con.execute(
         "SELECT planner_revision, active_approved_proposal_id FROM planner_state "
         "WHERE singleton_id=1"
     ).fetchone()
     assert state[0] == 1, f"first approval must advance revision 0→1; got {state[0]}"
     assert state[1] == pid
-    life = con.execute(
-        "SELECT lifecycle FROM placement_proposals WHERE proposal_id=? OR id=?",
-        [pid, pid]).fetchone()
-    assert life is not None and life[0] == "approved"
+    assert _lifecycle(con, pid) == "approved"
+    after_sel = list(con.execute(
+        "SELECT repo_id, finalized_at FROM selection ORDER BY 1").fetchall())
+    assert before_sel == after_sel, "adopt_current must leave selection unchanged"
 
 
-def test_cas_fails_on_stale_revision_without_partial_apply():
+def test_cas_stale_revision_refuses_without_partial_apply():
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
-    create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft")
-    approve = getattr(prop, "approve", None) or getattr(prop, "approve_proposal")
-    try:
-        draft = create(con, plan_id="ark", mutation=("adopt_current", ()))
-    except TypeError:
-        draft = create(con, "ark", ("adopt_current", ()))
-    pid = draft["proposal_id"] if isinstance(draft, dict) else draft
-    # Concurrent graph write bumps revision.
+    draft = _create(prop, con)
+    pid = _pid(draft)
     con.execute("UPDATE planner_state SET planner_revision=1 WHERE singleton_id=1")
     before_sel = list(con.execute("SELECT repo_id FROM selection ORDER BY 1").fetchall())
     try:
-        try:
-            approve(con, pid)
-        except TypeError:
-            approve(con, proposal_id=pid)
+        _approve(prop, con, pid)
         raise AssertionError("approve must refuse stale based_on_revision")
     except Exception as exc:
         msg = str(exc).upper()
@@ -203,151 +232,227 @@ def test_cas_fails_on_stale_revision_without_partial_apply():
     assert con.execute(
         "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
     ).fetchone()[0] is None
-    # Draft remains non-authoritative diagnostic (still draft).
-    life = con.execute(
-        "SELECT lifecycle FROM placement_proposals WHERE proposal_id=? OR id=?",
-        [pid, pid]).fetchone()[0]
-    assert life == "draft"
+    assert _lifecycle(con, pid) == "draft"
 
 
-def test_hash_mismatch_and_mutation_mismatch_refuse():
+def test_hash_mismatch_refuses():
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
-    create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft")
-    approve = getattr(prop, "approve", None) or getattr(prop, "approve_proposal")
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    con.execute(
+        "UPDATE placement_proposals SET canonical_hash=? WHERE proposal_id=?",
+        ["f" * 64, pid])
     try:
-        draft = create(con, plan_id="ark", mutation=("adopt_current", ()))
-    except TypeError:
-        draft = create(con, "ark", ("adopt_current", ()))
-    pid = draft["proposal_id"] if isinstance(draft, dict) else draft
-    # Corrupt stored hash.
-    try:
-        con.execute(
-            "UPDATE placement_proposals SET canonical_hash=? WHERE proposal_id=? OR id=?",
-            ["f" * 64, pid, pid])
-    except sqlite3.Error:
-        raise AssertionError("must be able to corrupt canonical_hash for integrity test")
-    try:
-        try:
-            approve(con, pid)
-        except TypeError:
-            approve(con, proposal_id=pid)
+        _approve(prop, con, pid)
         raise AssertionError("hash mismatch must refuse")
     except Exception as exc:
         assert "HASH" in str(exc).upper() or "MISMATCH" in str(exc).upper(), exc
 
 
+def test_mutation_mismatch_refuses():
+    """Stored mutation descriptor must match the approve-time request/context."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    draft = _create(prop, con, ("adopt_current", ()))
+    pid = _pid(draft)
+    # Corrupt stored mutation kind after draft.
+    con.execute(
+        "UPDATE placement_proposals SET mutation_kind=? WHERE proposal_id=?",
+        ["finalize", pid])
+    try:
+        _approve(prop, con, pid)
+        raise AssertionError("mutation mismatch must refuse")
+    except Exception as exc:
+        msg = str(exc).upper()
+        assert "MUTATION" in msg or "MISMATCH" in msg, exc
+    assert _lifecycle(con, pid) == "draft"
+    assert con.execute(
+        "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
+    ).fetchone()[0] is None
+
+
+def test_non_draft_refuses():
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    con.execute(
+        "UPDATE placement_proposals SET lifecycle='superseded' WHERE proposal_id=?", [pid])
+    try:
+        _approve(prop, con, pid)
+        raise AssertionError("non-draft must refuse")
+    except Exception as exc:
+        msg = str(exc).upper()
+        assert "NOT_DRAFT" in msg or "PROPOSAL_NOT_DRAFT" in msg or "DRAFT" in msg, exc
+
+
+def test_missed_revision_bump_still_blocked_by_semantic_recompute():
+    """Even if based_on_revision still matches, changed semantic inputs refuse."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    # Leave planner_revision at based_on value, but change selection/manifest facts.
+    con.execute(
+        "INSERT INTO models(repo_id,numcopies) VALUES('org/extra',1)")
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
+        "VALUES('org/extra','x.safetensors',50,'safetensors','bf16',?)", ["3" * 64])
+    con.execute(
+        "INSERT INTO selection(repo_id,finalized_at) VALUES('org/extra','2026-01-01')")
+    # Revision intentionally NOT bumped (missed writer) — semantic recompute must still refuse.
+    rev = con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
+    based = con.execute(
+        "SELECT based_on_revision FROM placement_proposals WHERE proposal_id=?",
+        [pid]).fetchone()[0]
+    assert rev == based, "fixture keeps revision matching based_on"
+    try:
+        _approve(prop, con, pid)
+        raise AssertionError("semantic input change must refuse even when revision matches")
+    except Exception as exc:
+        msg = str(exc).upper()
+        assert "INPUT" in msg or "SEMANTIC" in msg or "HASH" in msg or "CHANGED" in msg, exc
+    assert con.execute(
+        "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
+    ).fetchone()[0] is None
+
+
+def test_exact_assignment_rejection_does_not_call_optimizer():
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    from modelark import placement, capacity
+    # Force exact-assignment validation failure via evidence inject hook if present;
+    # otherwise shrink drive so assignment no longer fits while forbidding re-solve.
+    with mock.patch.object(placement, "improve", side_effect=AssertionError("no improve")):
+        with mock.patch.object(placement, "gate_b", side_effect=AssertionError("no gate_b")):
+            with mock.patch.object(capacity, "plan_capacity",
+                                   side_effect=AssertionError("no plan_capacity")):
+                # Invalidate exact target by removing drive membership after draft.
+                from modelark import plan
+                plan.remove_drive(con, "ark", "d0")
+                # Restore revision match if remove_drive bumped (production).
+                based = con.execute(
+                    "SELECT based_on_revision FROM placement_proposals WHERE proposal_id=?",
+                    [pid]).fetchone()[0]
+                con.execute(
+                    "UPDATE planner_state SET planner_revision=? WHERE singleton_id=1", [based])
+                try:
+                    _approve(prop, con, pid)
+                    raise AssertionError("exact assignment must reject when target gone")
+                except AssertionError as exc:
+                    if "no improve" in str(exc) or "no gate_b" in str(exc) or \
+                            "no plan_capacity" in str(exc):
+                        raise AssertionError(
+                            f"approve must not re-optimize on assignment failure: {exc}") from exc
+                    raise
+                except Exception as exc:
+                    msg = str(exc).upper()
+                    assert "ASSIGN" in msg or "TARGET" in msg or "FEASIB" in msg or \
+                        "EVIDENCE" in msg or "DRIVE" in msg, exc
+
+
 def test_non_feasible_draft_is_not_approved():
     prop = _proposal()
     con = _mem()
-    # No drives / no capacity → draft may exist but approve must refuse.
     con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/huge',1)")
     con.execute(
         "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
-        "VALUES('org/huge','w.safetensors',10**15,'safetensors','bf16')")
+        "VALUES('org/huge','w.safetensors',1000000000000000,'safetensors','bf16')")
     con.execute("INSERT INTO selection(repo_id,finalized_at) VALUES('org/huge','2026-01-01')")
     from modelark import plan
     plan.create(con, "ark", name="Ark")
     plan.set_active(con, "ark")
-    create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft")
-    approve = getattr(prop, "approve", None) or getattr(prop, "approve_proposal")
     try:
-        draft = create(con, plan_id="ark", mutation=("adopt_current", ()))
-    except TypeError:
-        draft = create(con, "ark", ("adopt_current", ()))
-    pid = draft["proposal_id"] if isinstance(draft, dict) else draft
-    # Draft row may record non-feasible Gate-B outcome.
+        con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    except sqlite3.Error:
+        pass
+    draft = _create(prop, con)
+    pid = _pid(draft)
     try:
-        try:
-            approve(con, pid)
-        except TypeError:
-            approve(con, proposal_id=pid)
-        # If approve returns a Refusal instead of raising:
+        _approve(prop, con, pid)
         raise AssertionError("non-feasible proposal must not become active approved")
     except AssertionError:
         raise
     except Exception as exc:
-        assert "FEASIBLE" in str(exc).upper() or "NOT_FEASIBLE" in str(exc).upper() or \
-            "INFEASIBLE" in str(exc).upper() or "REFUS" in str(exc).upper(), exc
+        assert any(k in str(exc).upper() for k in (
+            "FEASIBLE", "INFEASIBLE", "NOT_FEASIBLE", "REFUS")), exc
     assert con.execute(
         "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
     ).fetchone()[0] is None
 
 
-def test_approve_does_not_call_optimizer_or_plan_capacity():
-    prop = _proposal()
-    con = _mem()
-    _seed_selection(con)
-    create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft")
-    approve = getattr(prop, "approve", None) or getattr(prop, "approve_proposal")
-    try:
-        draft = create(con, plan_id="ark", mutation=("adopt_current", ()))
-    except TypeError:
-        draft = create(con, "ark", ("adopt_current", ()))
-    pid = draft["proposal_id"] if isinstance(draft, dict) else draft
-    from modelark import capacity, placement
-    with mock.patch.object(capacity, "plan_capacity", side_effect=AssertionError("no plan_capacity")):
-        with mock.patch.object(placement, "improve", side_effect=AssertionError("no improve")):
-            with mock.patch.object(placement, "gate_b", side_effect=AssertionError("no gate_b in approve")):
-                try:
-                    approve(con, pid)
-                except TypeError:
-                    approve(con, proposal_id=pid)
-                except AssertionError as exc:
-                    if "no plan_capacity" in str(exc) or "no improve" in str(exc) or "no gate_b" in str(exc):
-                        raise AssertionError(
-                            f"approve must not invoke solver/capacity: {exc}") from exc
-                    raise
-
-
-def test_exact_assignment_rejection_does_not_reoptimize():
-    prop = _proposal()
-    assert hasattr(prop, "approve") or hasattr(prop, "approve_proposal")
-    # Contract documentation pin: approve validates exact stored assignment only.
-    doc = (getattr(prop, "approve", None) or prop.approve_proposal).__doc__ or ""
-    assert "exact" in doc.lower() or "no optimizer" in doc.lower() or "re-solv" not in doc.lower()
-    # Runtime: improve must not be called on evidence failure — covered by solver spy above when
-    # production can construct an exact-assignment failure fixture; this pin keeps the API contract.
-
-
-def test_approval_failure_rolls_back_selection_lifecycle_pointer_revision():
+def test_approval_mid_transaction_failure_rolls_back_all_effects():
+    """Inject failure after mutation begins inside approve TX → full rollback."""
     prop = _proposal()
     con = _mem()
     _seed_selection(con, repos=())
-    create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft")
-    approve = getattr(prop, "approve", None) or getattr(prop, "approve_proposal")
-    # Draft a finalize mutation for a new repo.
     con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/x',1)")
     con.execute(
         "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
         "VALUES('org/x','model.safetensors',100,'safetensors','bf16')")
-    try:
-        draft = create(con, plan_id="ark", mutation=("finalize", ("org/x",)))
-    except TypeError:
-        draft = create(con, "ark", ("finalize", ("org/x",)))
-    pid = draft["proposal_id"] if isinstance(draft, dict) else draft
-    # Force failure mid-approve by bumping revision after draft.
-    con.execute("UPDATE planner_state SET planner_revision=9 WHERE singleton_id=1")
+    draft = _create(prop, con, ("finalize", ("org/x",)))
+    pid = _pid(draft)
+
+    # Instrument approve path: after first selection mutation SQL, raise.
+    real_execute = con._con.execute
+    mutated = {"n": 0}
+
+    def boom(sql, *args):
+        s = sql if isinstance(sql, str) else str(sql)
+        if "INSERT INTO selection" in s or "UPDATE selection" in s:
+            mutated["n"] += 1
+            if mutated["n"] >= 1:
+                # Let the mutation apply once then fail before commit — proxy raises after execute.
+                real_execute(sql, *args)
+                raise sqlite3.OperationalError("injected mid-approve failure")
+        return real_execute(sql, *args)
+
+    con._con.execute = boom  # type: ignore[method-assign]
     try:
         try:
-            approve(con, pid)
-        except TypeError:
-            approve(con, proposal_id=pid)
-    except Exception:
-        pass
+            _approve(prop, con, pid)
+        except Exception:
+            pass
+    finally:
+        con._con.execute = real_execute  # type: ignore[method-assign]
+
     assert con.execute(
         "SELECT count(*) FROM selection WHERE repo_id='org/x'").fetchone()[0] == 0, (
-        "failed approve must not leave selection half-applied")
+        "failed approve must roll back selection mutation")
     assert con.execute(
         "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
     ).fetchone()[0] is None
-    life = con.execute(
-        "SELECT lifecycle FROM placement_proposals WHERE proposal_id=? OR id=?",
-        [pid, pid]).fetchone()[0]
-    assert life == "draft"
-    # Revision may stay at the concurrent bump (9) but must not jump solely from a failed approve
-    # that applied selection — selection already checked empty.
+    assert _lifecycle(con, pid) == "draft"
+    # Revision must not land at approved-success value solely from failed TX.
+    # (May be 0 or concurrent; must not leave approved lifecycle.)
+
+
+def test_approve_does_not_call_optimizer_on_happy_path():
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    from modelark import capacity, placement
+    with mock.patch.object(capacity, "plan_capacity", side_effect=AssertionError("no plan_capacity")):
+        with mock.patch.object(placement, "improve", side_effect=AssertionError("no improve")):
+            with mock.patch.object(placement, "gate_b", side_effect=AssertionError("no gate_b")):
+                try:
+                    _approve(prop, con, pid)
+                except AssertionError as exc:
+                    if any(x in str(exc) for x in ("no plan_capacity", "no improve", "no gate_b")):
+                        raise AssertionError(
+                            f"approve must not invoke solver/capacity: {exc}") from exc
+                    raise
 
 
 def main():
