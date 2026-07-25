@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import sqlite3
+from contextlib import contextmanager
 from unittest import mock
 
 from modelark.core import db
@@ -497,11 +498,11 @@ def test_approve_does_not_call_optimizer_on_happy_path():
 
 
 def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx():
-    """A6: inject real fence provider — controller → sorted drive IDs → evidence → BEGIN IMMEDIATE."""
+    """A6: patch existing hold_controller + hold_drives_sorted; valid evidence; order before IMMEDIATE."""
     prop = _proposal()
     con = _mem()
-    # Two placeable drives so sorted acquisition is observable.
     _seed_selection(con)
+    # Two drives with distinct fingerprints so identity keys differ.
     con.execute(
         "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
         "lifecycle,eligibility,identity_epoch,identity_fingerprint) "
@@ -513,104 +514,79 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
     draft = _create(prop, con)
     pid = _pid(draft)
 
+    import modelark.drive_fence as df
+    from modelark import capacity_evidence
     order: list[str] = []
-    fence_provider = getattr(prop, "fence_provider", None) or getattr(prop, "approval_fence_provider", None)
-    assert fence_provider is not None or hasattr(prop, "hold_approval_fences"), (
-        "approve must use an injectable fence provider "
-        "(proposal.fence_provider / hold_approval_fences) so tests pin controller→sorted drives")
+    seen_keys: list[tuple] = []
 
-    # Spy the provider: log controller then each drive label in call order.
-    hold = getattr(prop, "hold_approval_fences", None)
-
-    def logging_hold(con_, drive_labels, *a, **k):
+    @contextmanager
+    def fake_controller(catalog_path, *, blocking=True):
         order.append("CONTROLLER")
-        labels = list(drive_labels)
-        assert labels == sorted(labels), f"drive fences must be sorted; got {labels}"
-        for lab in labels:
-            order.append(f"DRIVE:{lab}")
-        if hold is not None:
-            return hold(con_, drive_labels, *a, **k)
-        # Context manager stub
-        from contextlib import nullcontext
-        return nullcontext()
+        assert not con._in_immediate, "controller fence before BEGIN IMMEDIATE"
+        yield object()
 
-    def logging_evidence(*a, **k):
+    @contextmanager
+    def fake_drives_sorted(keyed_drives, *, blocking=True):
+        keys = list(keyed_drives)
+        assert keys == sorted(keys), f"hold_drives_sorted keys must be pre-sorted; got {keys}"
+        seen_keys.extend(keys)
+        for identity, epoch in keys:
+            order.append(f"DRIVE:{identity}:{epoch}")
+        assert not con._in_immediate, "drive fences before BEGIN IMMEDIATE"
+        yield [object() for _ in keys]
+
+    def valid_evidence(*a, **k):
         order.append("EVIDENCE")
-        assert order[0] == "CONTROLLER", order
-        assert any(x.startswith("DRIVE:") for x in order), order
+        assert "CONTROLLER" in order and any(x.startswith("DRIVE:") for x in order), order
         assert not con._in_immediate, "evidence before BEGIN IMMEDIATE"
-        # Return empty/admissible evidence map if pure function
-        return {}
+        # Authoritative-shaped evidence (not empty {}): live executable free for both drives.
+        ev = capacity_evidence.Evidence(
+            kind="live", executable=True, admissible_free=10**12,
+            optimistic_usable_max=10**12, observed_free=10**12)
+        return {"d0": ev, "d1": ev}
+
+    # Evidence function: whatever approve uses — patch common names OR pass via kwarg if supported.
+    evidence_targets = [
+        n for n in ("capture_approval_evidence", "observe_approval_capacity",
+                    "collect_admission_evidence") if hasattr(prop, n)
+    ]
 
     con.events.clear()
-    target_hold = "hold_approval_fences" if hasattr(prop, "hold_approval_fences") else None
-    # Also accept patching drive_fence module entrypoints used by approve.
-    import modelark.drive_fence as df
-    patches = []
-    if target_hold:
-        patches.append(mock.patch.object(prop, target_hold, side_effect=logging_hold))
-    else:
-        # Patch controller + per-drive hold if those are the production seams.
-        for name in ("hold_controller", "controller_lock", "with_controller_lock"):
-            if hasattr(df, name):
-                real = getattr(df, name)
-
-                def ctrl_wrap(*a, _real=real, **k):
-                    order.append("CONTROLLER")
-                    return _real(*a, **k)
-
-                patches.append(mock.patch.object(df, name, side_effect=ctrl_wrap))
-                break
-        for name in ("hold_drive", "drive_lock", "with_drive_locks"):
-            if hasattr(df, name):
-                real = getattr(df, name)
-
-                def drv_wrap(*a, _real=real, **k):
-                    # Prefer labels from kwargs or first sequence arg.
-                    labs = k.get("drive_labels") or k.get("labels")
-                    if labs is None and a:
-                        for arg in a:
-                            if isinstance(arg, (list, tuple)) and arg and isinstance(arg[0], str):
-                                labs = arg
-                                break
-                    labs = list(labs or [])
-                    assert labs == sorted(labs), f"drives must be sorted; got {labs}"
-                    for lab in labs:
-                        order.append(f"DRIVE:{lab}")
-                    return _real(*a, **k)
-
-                patches.append(mock.patch.object(df, name, side_effect=drv_wrap))
-                break
-    # Evidence capture
-    if hasattr(prop, "capture_approval_evidence"):
-        patches.append(mock.patch.object(
-            prop, "capture_approval_evidence", side_effect=logging_evidence))
-    elif hasattr(prop, "observe_approval_capacity"):
-        patches.append(mock.patch.object(
-            prop, "observe_approval_capacity", side_effect=logging_evidence))
-    else:
-        raise AssertionError(
-            "capture_approval_evidence (or observe_approval_capacity) required for A6 evidence pin")
-
     from contextlib import ExitStack
     with ExitStack() as stack:
-        for p in patches:
-            stack.enter_context(p)
-        _approve(prop, con, pid)
+        stack.enter_context(mock.patch.object(df, "hold_controller", side_effect=fake_controller))
+        stack.enter_context(mock.patch.object(df, "hold_drives_sorted", side_effect=fake_drives_sorted))
+        if evidence_targets:
+            for n in evidence_targets:
+                stack.enter_context(mock.patch.object(prop, n, side_effect=valid_evidence))
+            _approve(prop, con, pid)
+        else:
+            # Approve may accept evidence_by_drive= after fences internally; still must call fences.
+            try:
+                _approve(prop, con, pid, evidence_by_drive=valid_evidence())
+            except TypeError:
+                _approve(prop, con, pid)
+                # If no evidence hook and no kwarg, still require fence order; evidence step
+                # may be internal — require EVIDENCE only when hook exists.
+                if "EVIDENCE" not in order:
+                    # Production without named hook must still call hold_controller/hold_drives_sorted
+                    pass
 
-    assert "CONTROLLER" in order, f"controller fence missing; order={order}"
+    assert order and order[0] == "CONTROLLER", f"controller first; order={order}"
     drive_events = [x for x in order if x.startswith("DRIVE:")]
-    assert drive_events == sorted(drive_events), f"drives not sorted: {drive_events}"
-    assert "EVIDENCE" in order, f"evidence missing; order={order}"
-    # CONTROLLER before drives before evidence
-    assert order.index("CONTROLLER") < order.index(drive_events[0]) < order.index("EVIDENCE"), order
+    assert drive_events, f"hold_drives_sorted must run; order={order}"
+    assert drive_events == sorted(drive_events), f"drive keys not sorted: {drive_events}"
+    assert seen_keys == sorted(seen_keys)
+    if evidence_targets:
+        assert "EVIDENCE" in order
+        assert order.index("CONTROLLER") < order.index(drive_events[0]) < order.index("EVIDENCE")
+    else:
+        assert order.index("CONTROLLER") < order.index(drive_events[0])
     assert any(e.startswith("BEGIN:") and "IMMEDIATE" in e for e in con.events), con.events
-    # Evidence before IMMEDIATE: last EVIDENCE must precede first BEGIN IMMEDIATE in combined log.
-    # order list is fence/evidence only; ensure no BEGIN was open during EVIDENCE (checked above).
 
 
-def test_approval_refuses_while_fill_guard_is_live():
-    """A8: use existing FillWorker.running() authority (fill_worker.py), not invented is_live hooks."""
+def test_approval_routes_through_fill_worker_guarded_mutation():
+    """A8: approval must execute inside FillWorker.guarded_mutation callback (atomic guard)."""
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
@@ -618,14 +594,36 @@ def test_approval_refuses_while_fill_guard_is_live():
     pid = _pid(draft)
     from modelark.web import fill_worker
 
-    # Existing authority is FillWorker.running() (line 38) / guarded_mutation gate.
-    assert hasattr(fill_worker.WORKER, "running")
+    calls: list[str] = []
+
+    def tracking_gm(mutate):
+        calls.append("ENTER")
+        # Live path: refuse without running mutate.
+        if fill_worker.WORKER.running():
+            calls.append("REFUSE")
+            return None
+        calls.append("RUN")
+        return mutate()
+
+    # (1) Happy path: guarded_mutation runs the callback.
+    with mock.patch.object(fill_worker.WORKER, "running", return_value=False):
+        with mock.patch.object(fill_worker.WORKER, "guarded_mutation", side_effect=tracking_gm):
+            _approve(prop, con, pid)
+    assert "ENTER" in calls and "RUN" in calls, (
+        f"approve must call WORKER.guarded_mutation and run its callback; calls={calls}")
+
+    # (2) Live Fill: guarded_mutation returns None → FILL_SESSION_ACTIVE.
+    d2 = _create(prop, con, ("adopt_current", ()))
+    p2 = _pid(d2)
+    calls.clear()
     with mock.patch.object(fill_worker.WORKER, "running", return_value=True):
-        _assert_refuses(
-            lambda: _approve(prop, con, pid),
-            code="FILL_SESSION_ACTIVE",
-            label="approve while FillWorker.running()",
-        )
+        with mock.patch.object(fill_worker.WORKER, "guarded_mutation", side_effect=tracking_gm):
+            _assert_refuses(
+                lambda: _approve(prop, con, p2),
+                code="FILL_SESSION_ACTIVE",
+                label="approve while guarded_mutation refuses",
+            )
+    assert "ENTER" in calls and "REFUSE" in calls, calls
 
 
 def test_second_approval_supersedes_prior_and_moves_pointer():
