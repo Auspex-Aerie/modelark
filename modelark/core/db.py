@@ -93,6 +93,8 @@ _V3_EVIDENCE_TABLES = ("drive_dirty_generations", "drive_clean_anchors")
 # pre-v3 drive shape until the actual v3 transaction takes its own backup.
 _V3_DRIVE_COLUMN_NAMES = ("identity_epoch", "write_generation", "filesystem_capacity_bytes",
                           "identity_fingerprint", "write_authority")
+# v4 lifecycle/eligibility must not be pulled backward into the v0 integrity rebuild either.
+_V4_DRIVE_COLUMN_NAMES = ("lifecycle", "eligibility")
 
 
 def _apply_schema(con: sqlite3.Connection, tables_only: bool = False) -> None:
@@ -188,7 +190,8 @@ _INTEGRITY_TABLES = (
 _VIEW_NAMES = ("v_ui", "v_model_summary", "v_storage_by_drive")
 _INTEGRITY_SCHEMA_VERSION = 1
 _CAPACITY_MODE_SCHEMA_VERSION = 2
-_SCHEMA_VERSION = 3
+_CAPACITY_EVIDENCE_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4  # v4: drives.lifecycle + drives.eligibility (#37)
 
 
 def _validate_catalog_version(version: int, *, read_only: bool = False) -> None:
@@ -281,7 +284,9 @@ def _rebuild_integrity_tables(con: sqlite3.Connection) -> None:
             con.execute(f'DROP TABLE IF EXISTS "{new}"')
             # Preserve the pre-v3 drive shape: a v0/v1 rebuild must not introduce the catalog-v3
             # columns, so the later v2->v3 transaction takes a genuine pre-v3 backup.
-            exclude = _V3_DRIVE_COLUMN_NAMES if table == "drives" else ()
+            exclude = (
+                (_V3_DRIVE_COLUMN_NAMES + _V4_DRIVE_COLUMN_NAMES) if table == "drives" else ()
+            )
             con.execute(_canonical_table_sql(table, new, exclude=exclude))
             old_cols = {r[1] for r in con.execute(f'PRAGMA table_info("{table}")').fetchall()}
             new_cols = [r[1] for r in con.execute(f'PRAGMA table_info("{new}")').fetchall()]
@@ -418,7 +423,8 @@ def _migrate_capacity_evidence_v3(con, *, backup_existing: bool) -> None:
     failure leaves a pristine v2 catalog."""
     columns = {row[1] for row in con.execute('PRAGMA table_info("drives")').fetchall()}
     if "identity_epoch" in columns:
-        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")   # fresh/canonical drives already v3-shaped
+        # Already v3-shaped drives; stamp evidence version only (not latest schema).
+        con.execute(f"PRAGMA user_version={_CAPACITY_EVIDENCE_SCHEMA_VERSION}")
         return
     if con.execute("PRAGMA foreign_keys").fetchone()[0]:
         raise RuntimeError("Capacity-evidence migration requires foreign_keys=OFF")
@@ -435,13 +441,56 @@ def _migrate_capacity_evidence_v3(con, *, backup_existing: bool) -> None:
         if violations:
             raise RuntimeError(
                 f"Capacity-evidence migration produced foreign-key violations: {violations[:12]}")
-        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        con.execute(f"PRAGMA user_version={_CAPACITY_EVIDENCE_SCHEMA_VERSION}")
         con.execute("COMMIT")
     except Exception as exc:
         con.execute("ROLLBACK")
         if isinstance(exc, RuntimeError):
             raise
         raise RuntimeError(f"Cannot migrate catalog to v3 capacity evidence ({exc})") from exc
+
+
+# Catalog-v4 (#37) orthogonal lifecycle × eligibility on drives.
+_V4_DRIVE_COLUMNS = (
+    ("lifecycle",
+     "ALTER TABLE drives ADD COLUMN lifecycle VARCHAR NOT NULL DEFAULT 'active' "
+     "CHECK (lifecycle IN ('active','lost','retired'))"),
+    ("eligibility",
+     "ALTER TABLE drives ADD COLUMN eligibility VARCHAR NOT NULL DEFAULT 'enabled' "
+     "CHECK (eligibility IN ('enabled','excluded'))"),
+)
+
+
+def _migrate_lifecycle_eligibility_v4(con, *, backup_existing: bool) -> None:
+    """Backup-first, transactional, additive v3→v4: add lifecycle + eligibility with safe defaults.
+
+    Existing rows become exactly active+enabled via NOT NULL DEFAULT. No tombstone tables or
+    fabricated evidence. All DDL + user_version commit in one transaction.
+    """
+    columns = {row[1] for row in con.execute('PRAGMA table_info("drives")').fetchall()}
+    if "lifecycle" in columns and "eligibility" in columns:
+        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        return
+    if con.execute("PRAGMA foreign_keys").fetchone()[0]:
+        raise RuntimeError("Lifecycle/eligibility migration requires foreign_keys=OFF")
+    if backup_existing:
+        _backup_before_migration(con, "pre-lifecycle-v4")
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        for name, ddl in _V4_DRIVE_COLUMNS:
+            if name not in columns:
+                con.execute(ddl)
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(
+                f"Lifecycle/eligibility migration produced foreign-key violations: {violations[:12]}")
+        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        con.execute("COMMIT")
+    except Exception as exc:
+        con.execute("ROLLBACK")
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(f"Cannot migrate catalog to v4 lifecycle/eligibility ({exc})") from exc
 
 
 def _migrate(con, version: int, *, backup_existing: bool) -> None:
@@ -454,8 +503,11 @@ def _migrate(con, version: int, *, backup_existing: bool) -> None:
     if version < _CAPACITY_MODE_SCHEMA_VERSION:
         _migrate_capacity_mode_v2(con, backup_existing=backup_existing)
         version = _CAPACITY_MODE_SCHEMA_VERSION
-    if version < _SCHEMA_VERSION:
+    if version < _CAPACITY_EVIDENCE_SCHEMA_VERSION:
         _migrate_capacity_evidence_v3(con, backup_existing=backup_existing)
+        version = _CAPACITY_EVIDENCE_SCHEMA_VERSION
+    if version < _SCHEMA_VERSION:
+        _migrate_lifecycle_eligibility_v4(con, backup_existing=backup_existing)
         version = _SCHEMA_VERSION
     if version != _SCHEMA_VERSION:
         raise RuntimeError(f"Catalog migration stopped at v{version}, expected v{_SCHEMA_VERSION}")

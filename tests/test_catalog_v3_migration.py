@@ -101,8 +101,8 @@ def _reopen_raw():
 def test_migrate_v2_to_v3_adds_schema_and_preserves_rows(tmp_path):
     _seed_v2(tmp_path)
     con = db.connect()                                  # triggers the v2->v3 migration
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 3, \
-        "v2->v3 migration not implemented (expected Gate-1 red)"
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, \
+        "full migration chain must land at current schema version"
 
     dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
     assert {"identity_epoch", "write_generation", "filesystem_capacity_bytes",
@@ -135,8 +135,8 @@ def test_migration_is_idempotent(tmp_path):
     _seed_v2(tmp_path)
     db.connect().close()
     con = db.connect()                                  # second open must be a stable no-op
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 3, \
-        "v2->v3 migration not implemented (expected Gate-1 red)"
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, \
+        "full migration chain must land at current schema version"
     assert con.execute("SELECT count(*) FROM drive_dirty_generations").fetchone()[0] == 0
     assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
     dcols = [r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()]
@@ -196,8 +196,8 @@ def test_migration_aborts_on_foreign_key_violation(tmp_path):
 def test_v3_schema_constraint_matrix(tmp_path):
     _seed_v2(tmp_path)
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 3, \
-        "v3 schema not created (expected Gate-1 red)"
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, \
+        "full migration chain must land at current schema version"
 
     def rejected(sql, exc_types, contains=None):
         """A negative case: the statement must raise the SPECIFIC constraint error, so an unrelated

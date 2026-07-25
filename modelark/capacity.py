@@ -853,10 +853,19 @@ def _build_solver_input(
     mode: CapacityMode,
     evidence_by_drive: Mapping[str, capacity_evidence.Evidence] | None,
     bounds: placement.SolverBounds,
-) -> tuple[placement.SolverInput, tuple[CapacityDrive, ...]]:
-    """Shell: admission evidence → pure SolverInput (no floor recomputation)."""
+) -> tuple[placement.SolverInput, tuple[CapacityDrive, ...], frozenset[str]]:
+    """Shell: admission evidence → pure SolverInput (no floor recomputation).
+
+    Placeability is derived from a single state-only ``_drive_facts`` reread at Gate-B time so a
+    lifecycle/eligibility flip after reconcile capture fail-closes as TARGET_DRIVE_CHANGED (#37).
+    Missing/malformed lifecycle or eligibility never coerce to placeable.
+    """
     capacity_drives = inspect_drives(con, result.plan_id, evidence_by_drive=evidence_by_drive)
-    planner = reconcile.capture_planner_input(con, result.plan_id)
+    drive_facts = reconcile._drive_facts(con, result.plan_id)
+    placeable = frozenset(
+        d.drive_label for d in drive_facts
+        if d.lifecycle == "active" and d.eligibility == "enabled"
+    )
     # Prefer the CandidateSet already on the reconcile result (same snapshot as the caller saw).
     graph = candidates.RequirementGraph(
         desired=tuple(result.requirements),
@@ -891,7 +900,7 @@ def _build_solver_input(
     inp = placement.SolverInput(
         graph=graph,
         candidates=result.candidates,
-        drives=planner.drives,
+        drives=drive_facts,
         executable_budget=tuple(executable),
         max_usable_for_epoch=tuple(maxima),
         drive_evidence=tuple(evidence_pairs),
@@ -899,23 +908,33 @@ def _build_solver_input(
         policy_version=placement.POLICY_VERSION,
         bounds=bounds,
     )
-    return inp, capacity_drives
+    return inp, capacity_drives, placeable
 
 
 def _stale_target_failures(
     result: ReconcileResult,
     capacity_drives: Sequence[CapacityDrive],
     mode: CapacityMode,
+    *,
+    placeable_labels: frozenset[str] | None = None,
 ) -> list[CapacityFailure]:
-    """Detect candidates whose targets left the plan between reconcile and placement."""
+    """Detect candidates whose targets left the plan or lost placeability between reconcile and placement.
+
+    **Any** captured candidate target that is no longer plan-member + active+enabled fail-closes the
+    requirement as TARGET_DRIVE_CHANGED — including multi-target races where another target remains
+    placeable (#37 finding 13). Do not strip the stale target and re-solve.
+    """
     in_plan = {d.drive_label for d in capacity_drives}
+    usable = placeable_labels if placeable_labels is not None else frozenset(in_plan)
+    # Placement may only land on labels that are still plan members AND still placeable.
+    usable = frozenset(lab for lab in usable if lab in in_plan)
     failures: list[CapacityFailure] = []
     for rid, cs in result.candidates.by_requirement:
         if not cs:
             continue
-        if any(c.target_drive in in_plan for c in cs):
+        # Fail closed if any captured target is no longer usable (not: if any remains usable).
+        if all(c.target_drive in usable for c in cs):
             continue
-        # Every remaining candidate target is gone → typed stale snapshot.
         is_replica = rid.startswith("protected_replica:")
         failures.append(CapacityFailure(
             code=FailureCode.TARGET_DRIVE_CHANGED,
@@ -1138,7 +1157,7 @@ def plan_capacity(
     mode = mode_from_value(capacity_mode or CapacityMode.GUARANTEED)
 
     bounds = _adapter_solver_bounds()
-    solver_inp, capacity_drives = _build_solver_input(
+    solver_inp, capacity_drives, placeable_labels = _build_solver_input(
         con, result, mode=mode, evidence_by_drive=evidence_by_drive, bounds=bounds,
     )
 
@@ -1147,8 +1166,9 @@ def plan_capacity(
         if item.severity in {DiagnosticSeverity.BLOCKING, DiagnosticSeverity.ERROR}
     }))
 
-    # Stale snapshot: candidate targets left the plan after reconcile — typed failure, no solve.
-    stale = _stale_target_failures(result, capacity_drives, mode)
+    # Stale snapshot: candidate targets left the plan or lost placeability after reconcile.
+    stale = _stale_target_failures(
+        result, capacity_drives, mode, placeable_labels=placeable_labels)
     if stale:
         return CapacityPlan(
             mode=mode,

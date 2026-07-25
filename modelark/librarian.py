@@ -174,14 +174,21 @@ def placed_copies(con) -> dict[str, int]:
     """Per repo: how many drives hold a COMPLETE copy — ALL of the repo's planned files
     (safetensors + aux + gguf-when-no-safetensors, mirroring fetch.plan). Counting DISTINCT
     drives is too coarse (DEC-019): a drive with a half-fetched repo must NOT count toward
-    numcopies, or an interrupted copy would look 'done'."""
+    numcopies, or an interrupted copy would look 'done'.
+
+    #37: only **active** drives count (enabled or excluded). Lost/retired complete rows remain
+    in durable archived provenance but do not satisfy compatibility totals / queue completion.
+    """
     rows = con.execute(
         "WITH hasst AS (SELECT repo_id, max(CASE WHEN format='safetensors' THEN 1 ELSE 0 END) s "
         "               FROM files GROUP BY repo_id), "
         "planned AS (SELECT f.repo_id, count(*) n FROM files f JOIN hasst h USING(repo_id) "
         "            WHERE f.format IN ('safetensors','aux') OR (f.format='gguf' AND h.s=0) "
         "            GROUP BY f.repo_id), "
-        "perdrive AS (SELECT repo_id, drive_label, count(*) n FROM archived GROUP BY repo_id, drive_label) "
+        "perdrive AS (SELECT a.repo_id, a.drive_label, count(*) n FROM archived a "
+        "             JOIN drives d ON d.drive_label = a.drive_label "
+        "             WHERE d.lifecycle='active' "
+        "             GROUP BY a.repo_id, a.drive_label) "
         "SELECT pd.repo_id, count(*) FROM perdrive pd JOIN planned pl "
         "  ON pd.repo_id = pl.repo_id AND pd.n >= pl.n GROUP BY pd.repo_id").fetchall()
     return dict(rows)

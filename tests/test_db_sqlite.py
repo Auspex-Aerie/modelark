@@ -344,7 +344,9 @@ def test_v2_capacity_mode_migration_rolls_back_invalid_legacy_value(tmp_path):
 
 def test_newer_catalog_is_rejected_without_stamping_down(tmp_path):
     con = _fresh(tmp_path)
-    con.execute("PRAGMA user_version=4")             # a schema newer than this build (_SCHEMA_VERSION=3)
+    # Always one version ahead of the build — do not hard-code a frozen "v4" literal.
+    future = db._SCHEMA_VERSION + 1
+    con.execute(f"PRAGMA user_version={future}")
     con.close()
     before = db.DB_PATH.read_bytes()
     sidecars_before = {
@@ -357,7 +359,7 @@ def test_newer_catalog_is_rejected_without_stamping_down(tmp_path):
     except RuntimeError as exc:
         assert "newer than this ModelArk build" in str(exc), exc
     raw = sqlite3.connect(str(db.DB_PATH))
-    assert raw.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert raw.execute("PRAGMA user_version").fetchone()[0] == future
     raw.close()
     assert db.DB_PATH.read_bytes() == before
     assert {
