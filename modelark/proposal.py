@@ -315,6 +315,12 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
             if j < len(free_drives):
                 drive_row = free_drives[j]
                 label, epoch = drive_row[0], int(drive_row[1])
+                free_b, fs_cap, raid = int(drive_row[3] or 0), int(drive_row[4] or 0), bool(drive_row[5])
+                floor = capacity.safety_floor(fs_cap, raid) if fs_cap else 0
+                admissible = max(0, free_b - floor)
+                # Preview uses the same safety-adjusted boundary as approval evidence (Greptile).
+                if size and admissible < size:
+                    gate = "INFEASIBLE"
             else:
                 # No distinct target left; still record the requirement without a reuse target.
                 label, epoch = None, None
