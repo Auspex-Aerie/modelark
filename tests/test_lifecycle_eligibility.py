@@ -116,13 +116,15 @@ def _satisfied_drives(cset, rid):
 # Pure matrix — target eligibility (new placement)
 # --------------------------------------------------------------------------------------------------
 def test_matrix_new_placement_targets_active_enabled_only():
-    """Fresh placement candidates only on active+enabled; excluded/lost/retired never receive new work."""
+    """Fresh placement candidates only on active+enabled across the full 3×2 matrix."""
     _require()
     drives = [
         _drive("en", lifecycle="active", eligibility="enabled"),
         _drive("ex", lifecycle="active", eligibility="excluded"),
-        _drive("lost", lifecycle="lost", eligibility="enabled"),
-        _drive("ret", lifecycle="retired", eligibility="enabled"),
+        _drive("lost-en", lifecycle="lost", eligibility="enabled"),
+        _drive("lost-ex", lifecycle="lost", eligibility="excluded"),
+        _drive("ret-en", lifecycle="retired", eligibility="enabled"),
+        _drive("ret-ex", lifecycle="retired", eligibility="excluded"),
     ]
     inp = _input(
         selection=["org/m"],
@@ -137,18 +139,19 @@ def test_matrix_new_placement_targets_active_enabled_only():
 
 
 def test_matrix_verified_copy_satisfaction_active_including_excluded():
-    """A complete proven copy on active+excluded satisfies; lost/retired never do."""
+    """Complete proven copies: active (+enabled or +excluded) satisfy; lost/retired never do."""
     _require()
     drives = [
         _drive("ex", lifecycle="active", eligibility="excluded"),
-        _drive("lost", lifecycle="lost", eligibility="enabled"),
-        _drive("ret", lifecycle="retired", eligibility="enabled"),
+        _drive("lost-en", lifecycle="lost", eligibility="enabled"),
+        _drive("lost-ex", lifecycle="lost", eligibility="excluded"),
+        _drive("ret-en", lifecycle="retired", eligibility="enabled"),
+        _drive("ret-ex", lifecycle="retired", eligibility="excluded"),
         _drive("en", lifecycle="active", eligibility="enabled"),
     ]
     archived = [
-        _arch("org/m", "ex", "w.safetensors", sha=HW, obytes=100, sbytes=100),
-        _arch("org/m", "lost", "w.safetensors", sha=HW, obytes=100, sbytes=100),
-        _arch("org/m", "ret", "w.safetensors", sha=HW, obytes=100, sbytes=100),
+        _arch("org/m", lab, "w.safetensors", sha=HW, obytes=100, sbytes=100)
+        for lab in ("ex", "lost-en", "lost-ex", "ret-en", "ret-ex")
     ]
     inp = _input(
         selection=["org/m"],
@@ -160,13 +163,12 @@ def test_matrix_verified_copy_satisfaction_active_including_excluded():
     _, cset = _run(inp)
     sat = _satisfied_drives(cset, "primary:org/m")
     assert "ex" in sat, "active+excluded complete copy must still satisfy"
-    assert "lost" not in sat and "ret" not in sat
-    # No new placement on excluded when already satisfied; unsatisfied would only place on enabled.
-    assert _cands(cset, "primary:org/m") == () or "ex" not in _targets(_cands(cset, "primary:org/m"))
+    assert not (sat & {"lost-en", "lost-ex", "ret-en", "ret-ex"})
+    assert _cands(cset, "primary:org/m") == ()  # already satisfied; no new placement
 
 
-def test_matrix_partial_reuse_omits_lost_retired_targets():
-    """Finish-in-place / partial reuse candidates only on active drives (enabled or excluded)."""
+def test_matrix_partial_reuse_excludes_write_targets():
+    """Partial archives on excluded/lost are NOT finish-in-place write targets; only fresh enabled."""
     _require()
     drives = [
         _drive("ex", lifecycle="active", eligibility="excluded"),
@@ -188,29 +190,21 @@ def test_matrix_partial_reuse_omits_lost_retired_targets():
         archived=archived,
     )
     _, cset = _run(inp)
-    targets = _targets(_cands(cset, "primary:org/m"))
-    assert "lost" not in targets
-    # Partial on excluded may appear as finish-in-place alternative; fresh enabled always may.
-    assert "fresh" in targets
-    # If excluded partial is emitted, it must not be the only forced pin — both can exist.
-    if "ex" in targets:
-        assert "fresh" in targets
+    # New placement (including finish-in-place writes) only on active+enabled.
+    assert _targets(_cands(cset, "primary:org/m")) == {"fresh"}
 
 
-def test_matrix_protected_home_satisfaction_vs_placement_fallback():
-    """Active+excluded may satisfy home; fresh home placement only considers active+enabled."""
+def test_matrix_excluded_complete_home_satisfies_and_sources_replica():
+    """Active+excluded complete home satisfies and may be a replica SourceIdentity."""
     _require()
-    # Home complete on excluded RAID; replica still needs a domain-independent target.
     drives = [
         _drive("H-ex", role="primary", raid=True, lifecycle="active", eligibility="excluded",
                fs_uuid="home-uuid"),
-        _drive("H-en", role="primary", raid=True, lifecycle="active", eligibility="enabled",
-               fs_uuid="other-home"),
         _drive("R", role="replica", lifecycle="active", eligibility="enabled",
                fs_uuid="rep-uuid"),
     ]
     archived = [
-        _arch("org/m", "H-ex", "w.safetensors", sha=HW, obytes=100, sbytes=100, key="k"),
+        _arch("org/m", "H-ex", "w.safetensors", sha=HW, obytes=100, sbytes=100, key="annex-home"),
     ]
     inp = _input(
         selection=["org/m"],
@@ -219,40 +213,108 @@ def test_matrix_protected_home_satisfaction_vs_placement_fallback():
         drives=drives,
         archived=archived,
     )
-    graph, cset = _run(inp)
-    home_sat = _satisfied_drives(cset, "protected_home:org/m")
-    assert "H-ex" in home_sat, "excluded active home copy must satisfy protected_home"
-    # No new home placement on excluded; if home unsatisfied, only H-en.
-    home_place = _targets(_cands(cset, "protected_home:org/m"))
-    assert "H-ex" not in home_place
-    # Replica candidates must not source-place onto excluded for *new* work incorrectly —
-    # replica targets remain enabled replica tier.
+    _, cset = _run(inp)
+    assert "H-ex" in _satisfied_drives(cset, "protected_home:org/m")
     rep = _cands(cset, "protected_replica:org/m")
-    if rep:
-        assert all(c.target_drive == "R" for c in rep)
+    assert rep, "replica still needs placement on R"
+    assert {c.target_drive for c in rep} == {"R"}
+    # Proven home on excluded is a valid SourceIdentity for REPLICATE candidates.
+    for c in rep:
+        assert c.source is not None
+        assert not isinstance(c.source, candidates.PendingHome)
+        assert isinstance(c.source, candidates.SourceIdentity)
+        assert c.source.drive_label == "H-ex"
 
 
-def test_matrix_lost_retired_not_repair_sources_for_placement():
-    """Lost/retired drives do not contribute as placement targets even with partial archives."""
+def test_matrix_unsatisfied_home_targets_only_active_enabled():
+    """Unsatisfied protected home placement never targets excluded/lost/retired primaries."""
     _require()
     drives = [
-        _drive("lost", lifecycle="lost", eligibility="enabled"),
-        _drive("ret", lifecycle="retired", eligibility="enabled"),
-        _drive("ok", lifecycle="active", eligibility="enabled"),
-    ]
-    archived = [
-        _arch("org/m", "lost", "w.safetensors", sha=HW, obytes=50, sbytes=50),
-        _arch("org/m", "ret", "w.safetensors", sha=HW, obytes=50, sbytes=50),
+        _drive("H-ex", role="primary", raid=True, lifecycle="active", eligibility="excluded",
+               fs_uuid="ex-uuid"),
+        _drive("H-lost", role="primary", raid=True, lifecycle="lost", eligibility="enabled",
+               fs_uuid="lost-uuid"),
+        _drive("H-en", role="primary", raid=True, lifecycle="active", eligibility="enabled",
+               fs_uuid="en-uuid"),
+        _drive("R", role="replica", lifecycle="active", eligibility="enabled",
+               fs_uuid="rep-uuid"),
     ]
     inp = _input(
         selection=["org/m"],
         manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
-        numcopies=[("org/m", 1)],
+        numcopies=[("org/m", 2)],
+        drives=drives,
+        archived=(),
+    )
+    _, cset = _run(inp)
+    home_place = _targets(_cands(cset, "protected_home:org/m"))
+    assert home_place == {"H-en"}, f"fresh home only on active+enabled; got {home_place}"
+
+
+def test_matrix_no_raid_fallback_skips_excluded_largest_primary():
+    """No-RAID protected-home fallback must not select an excluded largest primary."""
+    _require()
+    drives = [
+        # Largest primary is excluded — fallback must skip it.
+        _drive("big-ex", role="primary", raid=False, cap=10**15,
+               lifecycle="active", eligibility="excluded", fs_uuid="big"),
+        _drive("small-en", role="primary", raid=False, cap=10**12,
+               lifecycle="active", eligibility="enabled", fs_uuid="small"),
+        _drive("R", role="replica", lifecycle="active", eligibility="enabled",
+               fs_uuid="rep"),
+    ]
+    inp = _input(
+        selection=["org/m"],
+        manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
+        numcopies=[("org/m", 2)],
+        drives=drives,
+        archived=(),
+    )
+    _, cset = _run(inp)
+    home_place = _targets(_cands(cset, "protected_home:org/m"))
+    assert home_place == {"small-en"}, (
+        f"no-RAID fallback must not choose excluded largest primary; got {home_place}")
+
+
+def test_matrix_replica_sources_never_lost_or_retired():
+    """Lost/retired proven copies never become SourceIdentity; active+excluded may."""
+    _require()
+    drives = [
+        _drive("H-ex", role="primary", raid=True, lifecycle="active", eligibility="excluded",
+               fs_uuid="hex"),
+        _drive("H-lost", role="primary", raid=True, lifecycle="lost", eligibility="enabled",
+               fs_uuid="hlost"),
+        _drive("H-ret", role="primary", raid=True, lifecycle="retired", eligibility="excluded",
+               fs_uuid="hret"),
+        _drive("R", role="replica", lifecycle="active", eligibility="enabled",
+               fs_uuid="rep"),
+    ]
+    archived = [
+        _arch("org/m", "H-ex", "w.safetensors", sha=HW, obytes=100, sbytes=100, key="k-ex"),
+        _arch("org/m", "H-lost", "w.safetensors", sha=HW, obytes=100, sbytes=100, key="k-lost"),
+        _arch("org/m", "H-ret", "w.safetensors", sha=HW, obytes=100, sbytes=100, key="k-ret"),
+    ]
+    inp = _input(
+        selection=["org/m"],
+        manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
+        numcopies=[("org/m", 2)],
         drives=drives,
         archived=archived,
     )
     _, cset = _run(inp)
-    assert _targets(_cands(cset, "primary:org/m")) == {"ok"}
+    # Home satisfied only by active copies (excluded ok).
+    home_sat = _satisfied_drives(cset, "protected_home:org/m")
+    assert "H-ex" in home_sat
+    assert "H-lost" not in home_sat and "H-ret" not in home_sat
+    rep = _cands(cset, "protected_replica:org/m")
+    assert rep
+    source_labels = set()
+    for c in rep:
+        assert c.target_drive == "R"
+        assert isinstance(c.source, candidates.SourceIdentity)
+        source_labels.add(c.source.drive_label)
+    assert "H-ex" in source_labels
+    assert "H-lost" not in source_labels and "H-ret" not in source_labels
 
 
 def test_matrix_shuffled_drive_order_deterministic():
@@ -278,6 +340,8 @@ def test_matrix_shuffled_drive_order_deterministic():
         ("z", "active", "enabled"),
         ("a", "active", "excluded"),
         ("m", "lost", "enabled"),
+        ("n", "lost", "excluded"),
+        ("r", "retired", "excluded"),
     ]
     b = list(reversed(a))
     g1, c1 = run(a)
@@ -332,11 +396,16 @@ def test_bootstrap_adds_only_missing_active_enabled():
     # Second call idempotent.
     plan.bootstrap(con, "ark")
     assert set(plan.plan_drive_labels(con, "ark")) == labels
-    # Never mutated drive axes.
-    rows = dict(con.execute("SELECT drive_label, lifecycle, eligibility FROM drives").fetchall())
+    # Never mutated drive axes (three-column SELECT → label → (lifecycle, eligibility)).
+    rows = {
+        label: (lifecycle, eligibility)
+        for label, lifecycle, eligibility in con.execute(
+            "SELECT drive_label, lifecycle, eligibility FROM drives")
+    }
     assert rows["en"] == ("active", "enabled")
     assert rows["ex"] == ("active", "excluded")
-    assert rows["lost"][0] == "lost" and rows["ret"][0] == "retired"
+    assert rows["lost"] == ("lost", "enabled")
+    assert rows["ret"] == ("retired", "enabled")
     assert out["plan_id"] == "ark"
 
 
@@ -371,22 +440,28 @@ def test_placed_copies_respects_lifecycle_not_lost_or_retired():
     for lab, lc, el in (
         ("ok", "active", "enabled"),
         ("ex", "active", "excluded"),
-        ("lost", "lost", "enabled"),
-        ("ret", "retired", "enabled"),
+        ("lost-en", "lost", "enabled"),
+        ("lost-ex", "lost", "excluded"),
+        ("ret-en", "retired", "enabled"),
+        ("ret-ex", "retired", "excluded"),
     ):
         _insert_drive(con, lab, lifecycle=lc, eligibility=el)
         con.execute(
             "INSERT INTO archived(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed) "
             "VALUES('org/m','model.safetensors',?,100,100,0)", [lab])
     counts = librarian.placed_copies(con)
-    # Active complete copies (enabled + excluded) count; lost/retired do not.
+    # Active complete copies (enabled + excluded) count; all lost/retired pairs do not.
     assert counts.get("org/m") == 2, (
         f"placed_copies must count only active complete drives; got {counts} "
         "(expected Gate-1 red until lifecycle join exists)")
 
 
 def test_queue_completion_agrees_with_canonical_satisfaction():
-    """Portal/queue complete-copy signal must not count lost/retired while pure candidates do not."""
+    """Lifecycle — not membership absence — must prevent lost-drive satisfaction.
+
+    Pre-seed historical plan membership so bootstrap does not simply omit the drive; the
+    catalog still sees the complete archived copy, but lifecycle forbids counting it.
+    """
     con = _mem()
     dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
     if not {"lifecycle", "eligibility"} <= dcols:
@@ -400,21 +475,23 @@ def test_queue_completion_agrees_with_canonical_satisfaction():
     con.execute(
         "INSERT INTO archived(repo_id,rfilename,drive_label,orig_sha256,orig_bytes,stored_bytes,compressed) "
         "VALUES('org/m','model.safetensors','lost',?,100,100,0)", [HW])
+    plan.create(con, "ark", name="Ark")
+    plan.add_drive(con, "ark", "lost")  # historical membership — still on the plan
     plan.bootstrap(con, "ark")
-    # Compatibility count
-    assert librarian.placed_copies(con).get("org/m", 0) == 0
-    # Canonical pure path (when capture includes lifecycle)
+    assert "lost" in plan.plan_drive_labels(con, "ark")
+    assert librarian.placed_copies(con).get("org/m", 0) == 0, (
+        "placed_copies must not count complete copies on lost drives")
     graph = reconcile.reconcile_plan(con, "ark")
     sat_ids = {s.requirement_id for s in graph.candidates.satisfied}
     assert "primary:org/m" not in sat_ids, (
-        "lost drive must not satisfy canonical requirement")
+        "lost drive must not satisfy canonical requirement even with plan membership")
 
 
 # --------------------------------------------------------------------------------------------------
 # Reconcile → Gate-B fail-closed on state change
 # --------------------------------------------------------------------------------------------------
 def test_reconcile_to_gate_b_fails_closed_when_drive_becomes_ineligible():
-    """If a drive loses eligibility/lifecycle between capture and capacity, no false FEASIBLE assign."""
+    """If a drive is retired after reconcile capture, plan_capacity must not assign tasks."""
     con = _mem()
     dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
     if not {"lifecycle", "eligibility"} <= dcols:
@@ -436,9 +513,16 @@ def test_reconcile_to_gate_b_fails_closed_when_drive_becomes_ineligible():
             optimistic_usable_max=10**9, observed_free=10**9),
     }
     result = capacity.plan_capacity(con, graph, evidence_by_drive=evidence)
-    assert result.feasible is False or not result.tasks, (
-        "state change to retired after reconcile must fail closed before assignment "
-        f"(gate={getattr(result, 'gate_b_code', None)} tasks={len(result.tasks)})")
+    assert result.feasible is False, (
+        f"retired post-reconcile must be non-feasible; gate={getattr(result, 'gate_b_code', None)}")
+    assert result.tasks == (), "must not expose executable tasks after fail-closed revalidation"
+    # Prefer typed fail-closed for membership/target invalidation after snapshot.
+    gate = getattr(result, "gate_b_code", None)
+    fail_codes = {
+        (f.code.value if hasattr(f.code, "value") else str(f.code)) for f in result.failures
+    }
+    assert gate == "TARGET_DRIVE_CHANGED" or "TARGET_DRIVE_CHANGED" in fail_codes, (
+        f"expected TARGET_DRIVE_CHANGED pin; gate={gate!r} failures={fail_codes}")
 
 
 # --------------------------------------------------------------------------------------------------
