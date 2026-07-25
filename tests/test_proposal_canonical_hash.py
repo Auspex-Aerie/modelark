@@ -169,6 +169,38 @@ def test_hash_stable_under_shuffled_task_and_file_order():
         header, tuple(reversed(tasks_a)), tuple(reversed(files_a)))
 
 
+def test_satisfying_drive_binds_in_shell_normalized_hash():
+    """Assignment-significant satisfying_drive must change the shell-normalized digest.
+
+    Greptile: dropping it from hash fields lets a post-draft rewrite of the satisfying
+    drive pass hash check while fencing/assignment follow the substituted drive.
+    """
+    prop = importlib.import_module("modelark.proposal")
+    can = _load_canonical()
+    hash_fn = _hash_fn(can)
+    header = _base_header(can)
+    base_task = {
+        "requirement_id": "primary:org/m",
+        "row_kind": "baseline_satisfied",
+        "repo_id": "org/m",
+        "target_drive": "d0",
+        "source_drive": None,
+        "satisfying_drive": "d0",
+        "full_manifest_hash": "c" * 64,
+        "order_key": 1,
+        "guaranteed_durable": 100,
+        "expected_durable": 100,
+        "identity_epoch": 1,
+    }
+    alt = dict(base_task, satisfying_drive="d1")
+    n0 = prop._normalize_tasks_for_hash([base_task])
+    n1 = prop._normalize_tasks_for_hash([alt])
+    assert n0[0]["satisfying_drive"] == "d0"
+    assert n1[0]["satisfying_drive"] == "d1"
+    assert hash_fn(header, n0, ()) != hash_fn(header, n1, ()), (
+        "satisfying_drive must bind the shell-normalized proposal hash")
+
+
 def test_baseline_certificate_binds_each_required_field_independently():
     """A10: requirement, full-manifest hash, drive label, fingerprint, epoch, each file field."""
     can = _load_canonical()

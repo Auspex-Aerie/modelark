@@ -693,6 +693,8 @@ get_proposal = load_proposal
 
 _TASK_HASH_FIELDS = (
     "requirement_id", "row_kind", "repo_id", "target_drive", "source_drive",
+    # satisfying_drive is assignment-significant for baseline_satisfied (fencing + exact check).
+    "satisfying_drive",
     "full_manifest_hash", "order_key", "guaranteed_durable", "expected_durable",
     "identity_epoch",
 )
