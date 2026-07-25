@@ -303,17 +303,22 @@ def test_newer_catalog_rejection_uses_schema_version_plus_one(tmp_path):
 
 
 def test_fresh_drive_insert_defaults_to_active_enabled(tmp_path):
-    """Schema defaults (and thus registration upserts that omit the columns) → exactly active+enabled.
+    """Fresh-install schema.sql defaults → exactly active+enabled (not merely v3→v4 ALTER defaults).
 
-    Does NOT pass lifecycle/eligibility in the INSERT — only the durable defaults may supply them.
+    Starts from a nonexistent catalog path so ``db.connect()`` bootstraps packaged schema, then
+    inserts a drive WITHOUT lifecycle/eligibility. Migration defaults are covered separately by
+    ``test_migrate_v3_to_v4_…``.
     """
-    _seed_v3(tmp_path)
-    con = db.connect()
+    db.CATALOG_DIR = tmp_path
+    db.DB_PATH = tmp_path / "catalog.sqlite"
+    assert not db.DB_PATH.exists(), "must start with no catalog file"
+    con = db.connect()  # fresh bootstrap of packaged schema
     assert con.execute("PRAGMA user_version").fetchone()[0] == 4, (
-        "v4 schema required for default pins (expected Gate-1 red)")
+        "fresh catalog must be v4 (expected Gate-1 red until packaged schema is v4)")
     dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
-    assert {"lifecycle", "eligibility"} <= dcols
-    # Omit the new columns entirely — registration-style minimal insert.
+    assert {"lifecycle", "eligibility"} <= dcols, (
+        "fresh schema.sql must define lifecycle and eligibility columns")
+    # Omit the new columns entirely — registration-style minimal insert relies on DEFAULT clauses.
     con.execute(
         "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed) "
         "VALUES('fresh-drive',2000,1500,'primary',0)")
@@ -321,10 +326,6 @@ def test_fresh_drive_insert_defaults_to_active_enabled(tmp_path):
         "SELECT lifecycle, eligibility FROM drives WHERE drive_label='fresh-drive'").fetchone()
     assert row == ("active", "enabled"), (
         f"fresh drive without explicit lifecycle/eligibility must default to active+enabled; got {row}")
-    # Migrated pre-existing row also still active+enabled.
-    assert con.execute(
-        "SELECT lifecycle, eligibility FROM drives WHERE drive_label='drive-00'"
-    ).fetchone() == ("active", "enabled")
     con.close()
 
 
