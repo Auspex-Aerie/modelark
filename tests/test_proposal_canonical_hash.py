@@ -68,11 +68,34 @@ def test_serializer_module_is_pure_and_versioned():
         assert "con" not in params, f"{name} must be pure (no con parameter)"
 
 
+def _reference_canonical_digest(header, tasks, files) -> str:
+    """Independent reference form for the Gate-1 golden (sort_keys JSON SHA-256).
+
+    Production ``proposal_hash`` must match this literal for the fixed payload below.
+    Serializer version field is part of the payload; lifecycle/audit fields excluded.
+    """
+    import hashlib
+    import json
+    skip = {"lifecycle", "created_at", "approved_at", "superseded_at"}
+    body = {
+        "header": {k: header[k] for k in sorted(header) if k not in skip},
+        "tasks": sorted(tasks, key=lambda t: (t["requirement_id"], t.get("order_key", 0))),
+        "files": sorted(files, key=lambda f: (f["requirement_id"], f["rfilename"])),
+    }
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    ).hexdigest()
+
+
+# Literal golden for the fixed payload in test_golden_vector_stable_digest (serializer_version="1").
+_GOLDEN_DIGEST = "2567d7b8ab7c7c4cfe1f7377e86ceb4a4054506058a649f195955b7b2770c457"
+
+
 def test_golden_vector_stable_digest():
-    """Pinned golden: fixed header/tasks/files → fixed 64-hex digest (Python-stable)."""
+    """Pinned golden: fixed payload → exact precomputed digest (not self-comparison)."""
     can = _load_canonical()
     hash_fn = _hash_fn(can)
-    header = _base_header(can)
+    header = _base_header(can, serializer_version="1")
     tasks = (
         {
             "requirement_id": "primary:org/m",
@@ -99,16 +122,11 @@ def test_golden_vector_stable_digest():
             "storage_action": "compress",
         },
     )
+    # Self-check reference form still equals the published literal.
+    assert _reference_canonical_digest(header, list(tasks), list(files)) == _GOLDEN_DIGEST
     digest = hash_fn(header, tasks, files)
-    assert isinstance(digest, str) and len(digest) == 64 and all(
-        c in "0123456789abcdef" for c in digest), digest
-    # Second call identical (golden stability).
-    assert hash_fn(header, tasks, files) == digest
-    # Production may publish GOLDEN_VECTORS; if present, match exactly.
-    goldens = getattr(can, "GOLDEN_VECTORS", None)
-    if goldens:
-        assert digest in goldens.values() or digest in goldens, (
-            f"digest {digest} must match published GOLDEN_VECTORS")
+    assert digest == _GOLDEN_DIGEST, (
+        f"production hash must match golden {_GOLDEN_DIGEST}; got {digest}")
 
 
 def test_hash_excludes_lifecycle_and_timestamps():

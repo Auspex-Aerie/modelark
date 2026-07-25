@@ -386,6 +386,9 @@ def test_proposal_lifecycle_and_task_row_kind_constraints(tmp_path):
         "INSERT INTO placement_proposals(proposal_id,plan_id,based_on_revision,lifecycle,"
         "canonical_hash,mutation_kind,serializer_version) "
         "VALUES('p-ok','ark',0,'draft',?,'adopt_current','1')", [h])
+    # Seed repos before task FK (if production binds repo_id → models).
+    con.execute("INSERT OR IGNORE INTO models(repo_id,numcopies) VALUES('org/m',1)")
+    con.execute("INSERT OR IGNORE INTO models(repo_id,numcopies) VALUES('org/n',1)")
     assert rejected(
         "INSERT INTO proposal_tasks(proposal_id,requirement_id,row_kind,repo_id,"
         "full_manifest_hash) VALUES('p-ok','primary:org/m','ghost','org/m',?)",
@@ -424,28 +427,25 @@ def test_execution_sessions_schema_constraints_with_synthetic_rows(tmp_path):
         except sqlite3.IntegrityError:
             return True
 
-    # Invalid state domain.
+    # --- Non-live constraint checks first (no live rows present) so uniqueness cannot mask FKs ---
     assert rejected(
         "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
         "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
         "VALUES('s-bad','ark','prop-1','ctl',NULL,'ghost',0,1)"), (
         "invalid session state must be rejected by CHECK")
 
-    # plan_id FK
     assert rejected(
         "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
         "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
-        "VALUES('s-pf','no-such-plan','prop-1','ctl',NULL,'starting',0,1)"), (
-        "plan_id must FK to plans")
+        "VALUES('s-pf','no-such-plan','prop-1','ctl',NULL,'stopped',0,1)"), (
+        "plan_id must FK to plans (terminal state so uniqueness cannot mask)")
 
-    # approved_proposal_id FK
     assert rejected(
         "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
         "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
-        "VALUES('s-af','ark','no-prop','ctl',NULL,'starting',0,1)"), (
+        "VALUES('s-af','ark','no-prop','ctl',NULL,'stopped',0,1)"), (
         "approved_proposal_id must FK to placement_proposals")
 
-    # Worker claim: running/stopping require non-null worker_identity.
     assert rejected(
         "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
         "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
@@ -457,48 +457,47 @@ def test_execution_sessions_schema_constraints_with_synthetic_rows(tmp_path):
         "VALUES('s-sw','ark','prop-1','ctl',NULL,'stopping',0,1)"), (
         "stopping must require worker_identity NOT NULL")
 
-    # starting may have NULL worker (unclaimed).
+    assert rejected(
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "resumed_from_session_id,controller_identity,worker_identity,state,"
+        "bound_planner_revision,fencing_token) "
+        "VALUES('s-rf','ark','prop-1','no-such','ctl',NULL,'stopped',0,1)"), (
+        "resumed_from_session_id must self-FK (terminal row; not live uniqueness)")
+
+    assert rejected(
+        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
+        "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
+        "VALUES('s-tok','ark','prop-1','ctl',NULL,'stopped',0,0)"), (
+        "fencing_token must be >= 1")
+
+    # --- Live uniqueness ---
     con.execute(
         "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
         "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
         "VALUES('s1','ark','prop-1','ctl',NULL,'starting',0,1)")
-
-    # Global live uniqueness: second live state fails.
     assert rejected(
         "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
         "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
         "VALUES('s2','ark','prop-1','ctl','worker-1','running',0,2)"), (
         "global partial unique on live states must reject a second live session")
 
-    # Terminal allowed while a live session exists? RFC: at most one live; terminals OK.
-    # After s1 is still starting (live), terminal s3 may be allowed (historical).
+    # Terminalize the only live row before further inserts that must succeed.
     con.execute(
         "UPDATE execution_sessions SET state='stopped', worker_identity=NULL "
         "WHERE session_id='s1'")
+    # Terminal history + one new live is fine.
     con.execute(
         "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
         "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
         "VALUES('s3','ark','prop-1','ctl','worker-1','running',0,3)")
-
-    # resumed_from_session_id self-FK
-    assert rejected(
-        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
-        "resumed_from_session_id,controller_identity,worker_identity,state,"
-        "bound_planner_revision,fencing_token) "
-        "VALUES('s4','ark','prop-1','no-such','ctl',NULL,'starting',0,4)"), (
-        "resumed_from_session_id must self-FK execution_sessions")
+    # Terminalize s3 before resume-lineage insert (must not leave two live).
+    con.execute(
+        "UPDATE execution_sessions SET state='stopped' WHERE session_id='s3'")
     con.execute(
         "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
         "resumed_from_session_id,controller_identity,worker_identity,state,"
         "bound_planner_revision,fencing_token) "
         "VALUES('s5','ark','prop-1','s3','ctl',NULL,'starting',0,5)")
-
-    # fencing_token / revision domain
-    assert rejected(
-        "INSERT INTO execution_sessions(session_id,plan_id,approved_proposal_id,"
-        "controller_identity,worker_identity,state,bound_planner_revision,fencing_token) "
-        "VALUES('s6','ark','prop-1','ctl',NULL,'starting',0,0)"), (
-        "fencing_token must be >= 1 when present as allocated token")
     con.close()
 
 
