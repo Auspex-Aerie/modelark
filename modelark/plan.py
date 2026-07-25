@@ -158,12 +158,20 @@ def plan_drive_labels(con, plan_id) -> list[str]:
 
 
 def bootstrap(con, plan_id=DEFAULT_PLAN) -> dict:
-    """Idempotent: ensure plan `ark` exists, owns every currently-registered drive, and is active if no
+    """Idempotent: ensure plan `ark` exists, owns every placeable registered drive, and is active if no
     plan is. Safe to call on every startup — creates nothing that exists, removes nothing. Called from
-    the portal serve() startup, the CLI `plan`/`library plan` commands, and registration (#34)."""
+    the portal serve() startup, the CLI `plan`/`library plan` commands, and registration (#34).
+
+    #37: only **missing active+enabled** drives are inserted into plan_drives. Existing membership
+    (including excluded/lost/retired historical rows) is preserved; axes are never mutated.
+    """
     if get(con, plan_id) is None:
         create(con, plan_id, name="Ark")
-    for row in con.execute("SELECT drive_label FROM drives").fetchall():
+    for row in con.execute(
+        "SELECT drive_label FROM drives "
+        "WHERE coalesce(lifecycle,'active')='active' AND coalesce(eligibility,'enabled')='enabled' "
+        "ORDER BY drive_label"
+    ).fetchall():
         add_drive(con, plan_id, row[0])
     if active(con) is None:
         set_active(con, plan_id)
@@ -179,8 +187,12 @@ def _headroom(cap: int, raid_backed: bool) -> int:
 
 
 def capacity(con, plan_id) -> int:
-    """Σ (capacity − headroom) over the plan's drives — the nominal fleet size the plan can fill. Uses
-    the registration capacity snapshot (stable), NOT live free (that is the per-model failsafe's job)."""
+    """Σ (capacity − headroom) over the plan's placeable drives — the nominal fleet size the plan can
+    fill. Uses the registration capacity snapshot (stable), NOT live free (per-model failsafe).
+
+    #37: only active+enabled plan members contribute. Excluded/lost/retired historical membership
+    does not inflate usable fleet capacity.
+    """
     labels = plan_drive_labels(con, plan_id)
     if not labels:
         return 0
@@ -188,7 +200,9 @@ def capacity(con, plan_id) -> int:
     total = 0
     for _, cap, raid in con.execute(
             f"SELECT drive_label, coalesce(capacity_bytes, free_bytes, 0), coalesce(raid_backed, false) "
-            f"FROM drives WHERE drive_label IN ({ph})", labels).fetchall():
+            f"FROM drives WHERE drive_label IN ({ph}) "
+            f"AND coalesce(lifecycle,'active')='active' "
+            f"AND coalesce(eligibility,'enabled')='enabled'", labels).fetchall():
         total += max(0, cap - _headroom(cap, bool(raid)))
     return total
 
