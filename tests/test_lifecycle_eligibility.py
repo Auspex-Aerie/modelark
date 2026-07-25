@@ -276,6 +276,65 @@ def test_matrix_no_raid_fallback_skips_excluded_largest_primary():
         f"no-RAID fallback must not choose excluded largest primary; got {home_place}")
 
 
+def test_matrix_no_raid_smaller_primary_complete_does_not_satisfy_home():
+    """Finding 12: no-RAID protected-home satisfaction is the largest primary only — not any primary."""
+    _require()
+    drives = [
+        _drive("big", role="primary", raid=False, cap=10**15,
+               lifecycle="active", eligibility="enabled", fs_uuid="big"),
+        _drive("small", role="primary", raid=False, cap=10**12,
+               lifecycle="active", eligibility="enabled", fs_uuid="small"),
+        _drive("R", role="replica", lifecycle="active", eligibility="enabled",
+               fs_uuid="rep"),
+    ]
+    archived = [
+        _arch("org/m", "small", "w.safetensors", sha=HW, obytes=100, sbytes=100),
+    ]
+    inp = _input(
+        selection=["org/m"],
+        manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
+        numcopies=[("org/m", 2)],
+        drives=drives,
+        archived=archived,
+    )
+    _, cset = _run(inp)
+    home_sat = _satisfied_drives(cset, "protected_home:org/m")
+    assert "small" not in home_sat, (
+        f"complete copy on smaller primary must not satisfy protected-home; sat={home_sat}")
+    assert "big" not in home_sat
+    # Unsatisfied home still places only on the canonical largest primary.
+    assert _targets(_cands(cset, "protected_home:org/m")) == {"big"}, (
+        f"home placement must target largest primary; got {_targets(_cands(cset, 'protected_home:org/m'))}")
+
+
+def test_matrix_excluded_raid_plus_plain_emits_plain_home_candidate():
+    """Finding 12: active+excluded RAID + placeable plain primary → plain is a home placement target."""
+    _require()
+    drives = [
+        _drive("raid-ex", role="primary", raid=True, cap=10**15,
+               lifecycle="active", eligibility="excluded", fs_uuid="raid"),
+        _drive("plain-en", role="primary", raid=False, cap=10**12,
+               lifecycle="active", eligibility="enabled", fs_uuid="plain"),
+        _drive("R", role="replica", lifecycle="active", eligibility="enabled",
+               fs_uuid="rep"),
+    ]
+    inp = _input(
+        selection=["org/m"],
+        manifests=[("org/m", [_mf("w.safetensors", 100, HW)])],
+        numcopies=[("org/m", 2)],
+        drives=drives,
+        archived=(),
+    )
+    graph, cset = _run(inp)
+    home_req = next(r for r in graph.desired if r.requirement_id == "protected_home:org/m")
+    assert home_req.eligible_drives == ("plain-en",), home_req.eligible_drives
+    home_place = _targets(_cands(cset, "protected_home:org/m"))
+    assert home_place == {"plain-en"}, (
+        f"plain primary must be the home candidate when RAID is excluded; got {home_place} "
+        f"blocked={cset.blocked}")
+    assert "protected_home:org/m" not in {b.requirement_id for b in cset.blocked}
+
+
 def test_matrix_replica_sources_never_lost_or_retired():
     """Lost/retired proven copies never become SourceIdentity; active+excluded may."""
     _require()
@@ -602,6 +661,54 @@ def test_reconcile_to_gate_b_fails_closed_when_drive_becomes_excluded():
     assert result.feasible is False, (
         f"excluded post-reconcile must be non-feasible; gate={getattr(result, 'gate_b_code', None)}")
     assert result.tasks == (), "must not place onto a drive that lost eligibility after capture"
+    gate = getattr(result, "gate_b_code", None)
+    fail_codes = {
+        (f.code.value if hasattr(f.code, "value") else str(f.code)) for f in result.failures
+    }
+    assert gate == "TARGET_DRIVE_CHANGED" or "TARGET_DRIVE_CHANGED" in fail_codes, (
+        f"expected TARGET_DRIVE_CHANGED pin; gate={gate!r} failures={fail_codes}")
+
+
+def test_reconcile_to_gate_b_fails_closed_when_one_of_multiple_targets_loses_eligibility():
+    """Finding 13: multi-target race — any captured target losing placeability fails closed.
+
+    Captured candidates target both a and b; excluding only a must not leave assignment on a
+    (or silently drop a and assign b). Full fail-closed before assignment.
+    """
+    con = _mem()
+    dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
+    if not {"lifecycle", "eligibility"} <= dcols:
+        raise AssertionError("v4 columns missing (expected Gate-1 red)")
+    con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/m',1)")
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+        "VALUES('org/m','model.safetensors',100,'safetensors','bf16')")
+    con.execute("INSERT INTO selection(repo_id,finalized_at) VALUES('org/m','2026-01-01')")
+    _insert_drive(con, "a", lifecycle="active", eligibility="enabled")
+    _insert_drive(con, "b", lifecycle="active", eligibility="enabled")
+    plan.bootstrap(con, "ark")
+    graph = reconcile.reconcile_plan(con, "ark")
+    targets = set()
+    for rid, cs in graph.candidates.by_requirement:
+        if rid == "primary:org/m":
+            targets = {c.target_drive for c in cs}
+    assert targets == {"a", "b"}, f"fixture must capture multi-target candidates; got {targets}"
+    # One of two targets loses eligibility after capture.
+    con.execute("UPDATE drives SET eligibility='excluded' WHERE drive_label='a'")
+    from modelark import capacity_evidence
+    evidence = {
+        lab: capacity_evidence.Evidence(
+            kind="live", executable=True, admissible_free=10**9,
+            optimistic_usable_max=10**9, observed_free=10**9)
+        for lab in ("a", "b")
+    }
+    result = capacity.plan_capacity(con, graph, evidence_by_drive=evidence)
+    assert result.feasible is False, (
+        f"partial placeability race must be non-feasible; gate={getattr(result, 'gate_b_code', None)} "
+        f"tasks={[t.target_drive for t in result.tasks]}")
+    assert result.tasks == (), (
+        f"must not assign after multi-target lifecycle/eligibility race; "
+        f"tasks={[t.target_drive for t in result.tasks]}")
     gate = getattr(result, "gate_b_code", None)
     fail_codes = {
         (f.code.value if hasattr(f.code, "value") else str(f.code)) for f in result.failures
