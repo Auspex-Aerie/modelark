@@ -124,15 +124,34 @@ def _create(prop, con, mutation=("adopt_current", ())):
         return create(con, "ark", mutation)
 
 
-def _approve(prop, con, proposal_id, **extra):
+def _approve(prop, con, proposal_id, *, mutation=None, **extra):
+    """Call approve with optional mutation. Never drop mutation on TypeError (finding 13)."""
     approve = getattr(prop, "approve", None) or getattr(prop, "approve_proposal")
+    kwargs = dict(extra)
+    if mutation is not None:
+        kwargs["mutation"] = mutation
+    # Prefer kwargs form; if TypeError, try positional mutation only when provided.
     try:
+        if mutation is not None:
+            return approve(con, proposal_id, mutation=mutation, **extra)
         return approve(con, proposal_id, **extra)
     except TypeError:
-        try:
-            return approve(con, proposal_id=proposal_id, **extra)
-        except TypeError:
-            return approve(con, proposal_id)
+        if mutation is not None:
+            return approve(con, proposal_id, mutation)
+        return approve(con, proposal_id=proposal_id, **extra)
+
+
+def _assert_refuses(call, *, must_contain, label):
+    """Require call to raise; a successful return is always a failure (finding 13)."""
+    try:
+        call()
+    except Exception as exc:
+        msg = str(exc).upper()
+        assert any(k in msg for k in must_contain), (
+            f"{label}: refusal message {exc!r} must contain one of {must_contain}")
+        return exc
+    else:
+        raise AssertionError(f"{label}: expected refusal, but call returned successfully")
 
 
 def test_preview_pure_runs_before_any_begin_immediate():
@@ -241,12 +260,11 @@ def test_cas_stale_revision_refuses_without_partial_apply():
     pid = _pid(draft)
     con.execute("UPDATE planner_state SET planner_revision=1 WHERE singleton_id=1")
     before_sel = list(con.execute("SELECT repo_id FROM selection ORDER BY 1").fetchall())
-    try:
-        _approve(prop, con, pid)
-        raise AssertionError("approve must refuse stale based_on_revision")
-    except Exception as exc:
-        msg = str(exc).upper()
-        assert "STALE" in msg or "PREVIEW_STALE" in msg or "REVISION" in msg, exc
+    _assert_refuses(
+        lambda: _approve(prop, con, pid),
+        must_contain=("STALE", "PREVIEW_STALE", "REVISION"),
+        label="stale revision",
+    )
     assert list(con.execute("SELECT repo_id FROM selection ORDER BY 1").fetchall()) == before_sel
     assert con.execute(
         "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
@@ -263,11 +281,11 @@ def test_hash_mismatch_refuses():
     con.execute(
         "UPDATE placement_proposals SET canonical_hash=? WHERE proposal_id=?",
         ["f" * 64, pid])
-    try:
-        _approve(prop, con, pid)
-        raise AssertionError("hash mismatch must refuse")
-    except Exception as exc:
-        assert "HASH" in str(exc).upper() or "MISMATCH" in str(exc).upper(), exc
+    _assert_refuses(
+        lambda: _approve(prop, con, pid),
+        must_contain=("HASH", "PROPOSAL_HASH_MISMATCH"),
+        label="hash mismatch",
+    )
 
 
 def test_mutation_mismatch_refuses():
@@ -280,25 +298,11 @@ def test_mutation_mismatch_refuses():
     stored_kind = con.execute(
         "SELECT mutation_kind FROM placement_proposals WHERE proposal_id=?",
         [pid]).fetchone()[0]
-    # Pass a different approval-time mutation without corrupting stored rows.
-    try:
-        _approve(prop, con, pid, mutation=("finalize", ("org/x",)))
-        raise AssertionError("mutation mismatch must refuse")
-    except TypeError:
-        # API may require positional mutation: approve(con, pid, mutation=...)
-        try:
-            approve = getattr(prop, "approve", None) or prop.approve_proposal
-            approve(con, pid, ("finalize", ("org/x",)))
-            raise AssertionError("mutation mismatch must refuse")
-        except AssertionError:
-            raise
-        except Exception as exc:
-            msg = str(exc).upper()
-            assert "MUTATION" in msg or "MISMATCH" in msg, exc
-    except Exception as exc:
-        msg = str(exc).upper()
-        assert "MUTATION" in msg or "MISMATCH" in msg, exc
-    # Stored row unchanged (not a hash-corruption test).
+    _assert_refuses(
+        lambda: _approve(prop, con, pid, mutation=("finalize", ("org/x",))),
+        must_contain=("MUTATION", "MUTATION_MISMATCH"),
+        label="mutation mismatch",
+    )
     assert con.execute(
         "SELECT mutation_kind FROM placement_proposals WHERE proposal_id=?",
         [pid]).fetchone()[0] == stored_kind
@@ -313,12 +317,11 @@ def test_non_draft_refuses():
     pid = _pid(draft)
     con.execute(
         "UPDATE placement_proposals SET lifecycle='superseded' WHERE proposal_id=?", [pid])
-    try:
-        _approve(prop, con, pid)
-        raise AssertionError("non-draft must refuse")
-    except Exception as exc:
-        msg = str(exc).upper()
-        assert "NOT_DRAFT" in msg or "PROPOSAL_NOT_DRAFT" in msg or "DRAFT" in msg, exc
+    _assert_refuses(
+        lambda: _approve(prop, con, pid),
+        must_contain=("NOT_DRAFT", "PROPOSAL_NOT_DRAFT"),
+        label="non-draft",
+    )
 
 
 def test_missed_revision_bump_still_blocked_by_semantic_recompute():
@@ -328,27 +331,23 @@ def test_missed_revision_bump_still_blocked_by_semantic_recompute():
     _seed_selection(con)
     draft = _create(prop, con)
     pid = _pid(draft)
-    # Leave planner_revision at based_on value, but change selection/manifest facts.
-    con.execute(
-        "INSERT INTO models(repo_id,numcopies) VALUES('org/extra',1)")
+    con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/extra',1)")
     con.execute(
         "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
         "VALUES('org/extra','x.safetensors',50,'safetensors','bf16',?)", ["3" * 64])
     con.execute(
         "INSERT INTO selection(repo_id,finalized_at) VALUES('org/extra','2026-01-01')")
-    # Revision intentionally NOT bumped (missed writer) — semantic recompute must still refuse.
     rev = con.execute(
         "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
     based = con.execute(
         "SELECT based_on_revision FROM placement_proposals WHERE proposal_id=?",
         [pid]).fetchone()[0]
     assert rev == based, "fixture keeps revision matching based_on"
-    try:
-        _approve(prop, con, pid)
-        raise AssertionError("semantic input change must refuse even when revision matches")
-    except Exception as exc:
-        msg = str(exc).upper()
-        assert "INPUT" in msg or "SEMANTIC" in msg or "HASH" in msg or "CHANGED" in msg, exc
+    _assert_refuses(
+        lambda: _approve(prop, con, pid),
+        must_contain=("INPUT", "SEMANTIC", "APPROVED_INPUT_CHANGED", "CHANGED"),
+        label="missed-revision semantic recompute",
+    )
     assert con.execute(
         "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
     ).fetchone()[0] is None
@@ -364,36 +363,37 @@ def test_exact_assignment_rejection_does_not_call_optimizer():
     from modelark import placement, capacity
 
     class ExactAssignmentRefusal(Exception):
-        pass
+        def __init__(self):
+            super().__init__("EXACT_ASSIGNMENT_REJECTED")
 
-    validate = getattr(prop, "validate_exact_assignment", None)
-    assert validate is not None or hasattr(prop, "revalidate_assignment_evidence"), (
-        "approve path must expose validate_exact_assignment (or revalidate_assignment_evidence) "
-        "for direct evidence inject without mutating selection/plan membership")
+    assert hasattr(prop, "validate_exact_assignment") or hasattr(
+        prop, "revalidate_assignment_evidence"), (
+        "approve path must expose validate_exact_assignment (or revalidate_assignment_evidence)")
 
-    target = getattr(prop, "validate_exact_assignment", None) or getattr(
-        prop, "revalidate_assignment_evidence")
+    target_name = "validate_exact_assignment" if hasattr(
+        prop, "validate_exact_assignment") else "revalidate_assignment_evidence"
 
     with mock.patch.object(placement, "improve", side_effect=AssertionError("no improve")):
         with mock.patch.object(placement, "gate_b", side_effect=AssertionError("no gate_b")):
             with mock.patch.object(capacity, "plan_capacity",
                                    side_effect=AssertionError("no plan_capacity")):
                 with mock.patch.object(
-                        prop, target.__name__,
-                        side_effect=ExactAssignmentRefusal("EXACT_ASSIGNMENT_REJECTED")):
+                        prop, target_name, side_effect=ExactAssignmentRefusal()):
                     try:
                         _approve(prop, con, pid)
-                        raise AssertionError("exact assignment refusal must surface")
+                    except ExactAssignmentRefusal:
+                        pass
                     except AssertionError as exc:
                         if any(x in str(exc) for x in ("no improve", "no gate_b", "no plan_capacity")):
                             raise AssertionError(
-                                f"approve must not re-optimize on assignment failure: {exc}") from exc
+                                f"approve must not re-optimize: {exc}") from exc
                         raise
-                    except ExactAssignmentRefusal:
-                        pass
                     except Exception as exc:
                         msg = str(exc).upper()
                         assert "ASSIGN" in msg or "EVIDENCE" in msg or "EXACT" in msg, exc
+                    else:
+                        raise AssertionError(
+                            "exact assignment refusal must surface (call returned successfully)")
     assert _lifecycle(con, pid) == "draft"
     assert con.execute(
         "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
@@ -417,14 +417,11 @@ def test_non_feasible_draft_is_not_approved():
         pass
     draft = _create(prop, con)
     pid = _pid(draft)
-    try:
-        _approve(prop, con, pid)
-        raise AssertionError("non-feasible proposal must not become active approved")
-    except AssertionError:
-        raise
-    except Exception as exc:
-        assert any(k in str(exc).upper() for k in (
-            "FEASIBLE", "INFEASIBLE", "NOT_FEASIBLE", "REFUS")), exc
+    _assert_refuses(
+        lambda: _approve(prop, con, pid),
+        must_contain=("FEASIBLE", "INFEASIBLE", "NOT_FEASIBLE", "PROPOSAL_NOT_FEASIBLE"),
+        label="non-feasible draft",
+    )
     assert con.execute(
         "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
     ).fetchone()[0] is None
@@ -478,13 +475,144 @@ def test_approve_does_not_call_optimizer_on_happy_path():
     with mock.patch.object(capacity, "plan_capacity", side_effect=AssertionError("no plan_capacity")):
         with mock.patch.object(placement, "improve", side_effect=AssertionError("no improve")):
             with mock.patch.object(placement, "gate_b", side_effect=AssertionError("no gate_b")):
-                try:
-                    _approve(prop, con, pid)
-                except AssertionError as exc:
-                    if any(x in str(exc) for x in ("no plan_capacity", "no improve", "no gate_b")):
-                        raise AssertionError(
-                            f"approve must not invoke solver/capacity: {exc}") from exc
-                    raise
+                _approve(prop, con, pid)
+    assert _lifecycle(con, pid) == "approved"
+
+
+def test_approval_acquires_sorted_fences_and_fresh_evidence_before_sqlite_tx():
+    """A6: controller + sorted drive fences; fresh evidence before BEGIN IMMEDIATE."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    assert hasattr(prop, "acquire_approval_fences"), (
+        "proposal.acquire_approval_fences required (sorted controller + drive fences; A6)")
+    assert hasattr(prop, "capture_approval_evidence"), (
+        "proposal.capture_approval_evidence required before short SQLite TX (A6)")
+
+    order: list[str] = []
+    real_acq = prop.acquire_approval_fences
+    real_ev = prop.capture_approval_evidence
+
+    def acq(*a, **k):
+        order.append("FENCES")
+        # Must not be inside IMMEDIATE yet.
+        assert not con._in_immediate, "fences must be acquired before BEGIN IMMEDIATE"
+        return real_acq(*a, **k)
+
+    def ev(*a, **k):
+        order.append("EVIDENCE")
+        assert "FENCES" in order, "evidence after fences"
+        assert not con._in_immediate, "evidence must be captured before BEGIN IMMEDIATE"
+        return real_ev(*a, **k)
+
+    con.events.clear()
+    with mock.patch.object(prop, "acquire_approval_fences", side_effect=acq):
+        with mock.patch.object(prop, "capture_approval_evidence", side_effect=ev):
+            _approve(prop, con, pid)
+    assert order == ["FENCES", "EVIDENCE"], f"expected FENCES then EVIDENCE; got {order}"
+    # First BEGIN IMMEDIATE for approve must follow evidence (events may include only approve TX).
+    begin_idxs = [i for i, e in enumerate(con.events) if e.startswith("BEGIN:") and "IMMEDIATE" in e]
+    assert begin_idxs, f"approve must BEGIN IMMEDIATE; events={con.events}"
+
+
+def test_approval_refuses_while_fill_guard_is_live():
+    """A8: no supported approval route bypasses the existing Fill guard."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    from modelark.web import fill_worker
+
+    # Production approve must consult process-local Fill liveness (not durable sessions).
+    live_attr = None
+    for name in ("is_live", "is_running", "blocks_graph_write"):
+        if hasattr(fill_worker.WORKER, name):
+            live_attr = name
+            break
+    assert live_attr is not None or hasattr(prop, "fill_guard_blocks_approval"), (
+        "Fill liveness hook required on WORKER or proposal.fill_guard_blocks_approval (A8)")
+
+    if hasattr(prop, "fill_guard_blocks_approval"):
+        with mock.patch.object(prop, "fill_guard_blocks_approval", return_value=True):
+            _assert_refuses(
+                lambda: _approve(prop, con, pid),
+                must_contain=("FILL_SESSION_ACTIVE",),
+                label="approve while Fill live",
+            )
+    else:
+        with mock.patch.object(fill_worker.WORKER, live_attr, return_value=True):
+            _assert_refuses(
+                lambda: _approve(prop, con, pid),
+                must_contain=("FILL_SESSION_ACTIVE",),
+                label="approve while Fill live",
+            )
+
+
+def test_second_approval_supersedes_prior_and_moves_pointer():
+    """A7-related: second approve supersedes prior approved proposal and moves singleton pointer."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    d1 = _create(prop, con, ("adopt_current", ()))
+    p1 = _pid(d1)
+    _approve(prop, con, p1)
+    assert con.execute(
+        "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
+    ).fetchone()[0] == p1
+    # Second draft+approve (e.g. after a no-op adopt again, or finalize no-op).
+    d2 = _create(prop, con, ("adopt_current", ()))
+    p2 = _pid(d2)
+    assert p2 != p1
+    _approve(prop, con, p2)
+    assert con.execute(
+        "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
+    ).fetchone()[0] == p2
+    assert _lifecycle(con, p1) == "superseded"
+    assert _lifecycle(con, p2) == "approved"
+
+
+def test_active_plan_switch_supersedes_clears_pointer_bumps_once():
+    """A7: real switch atomically supersedes approval, clears pointer, switches plan, bumps once."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    d1 = _create(prop, con)
+    p1 = _pid(d1)
+    _approve(prop, con, p1)
+    from modelark import plan
+    plan.create(con, "other", name="Other")
+    before_rev = con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
+    # Switch must go through plan.set_active (graph_write).
+    plan.set_active(con, "other")
+    state = con.execute(
+        "SELECT planner_revision, active_approved_proposal_id FROM planner_state "
+        "WHERE singleton_id=1").fetchone()
+    assert state[1] is None, "switch must clear active_approved_proposal_id"
+    assert _lifecycle(con, p1) == "superseded"
+    assert plan.active(con)["plan_id"] == "other"
+    assert state[0] == before_rev + 1, "exactly one revision bump for the switch transaction"
+    # Failure rolls back: inject fail mid-switch.
+    plan.create(con, "third", name="Third")
+    # Re-approve on other first
+    con.execute("UPDATE planner_state SET planner_revision=0, active_approved_proposal_id=NULL "
+                "WHERE singleton_id=1")
+    # No-op switch
+    before = (
+        con.execute("SELECT planner_revision, active_approved_proposal_id FROM planner_state "
+                    "WHERE singleton_id=1").fetchone(),
+        plan.active(con)["plan_id"],
+    )
+    plan.set_active(con, "other")
+    after = (
+        con.execute("SELECT planner_revision, active_approved_proposal_id FROM planner_state "
+                    "WHERE singleton_id=1").fetchone(),
+        plan.active(con)["plan_id"],
+    )
+    assert before == after, "no-op set_active must change nothing"
 
 
 def main():
