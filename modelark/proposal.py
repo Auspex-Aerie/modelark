@@ -238,13 +238,16 @@ def _admissible_from_drive_row(drive_row: tuple) -> int:
 
 
 def _repo_workspace_peak(con, repo_id: str) -> int:
-    """Conservative peak workspace for one repo placement without reading compression config.
+    """Peak transient workspace for one repo placement (no compression-config dependency).
 
-    Peak staging bound = largest catalog file size (a full-file workspace upper bound).
-    Durable bytes remain the sum of sizes; only durable permanently depletes free.
+    Only *compressible* catalog files need codec/workspace headroom (safetensors → compress path).
+    Raw-stored formats (gguf, onnx, aux, …) contribute durable bytes only — charging their full
+    size as workspace double-counts and falsely marks feasible placements INFEASIBLE.
+    Bound = largest safetensors file size (full-file staging upper bound).
     """
     row = con.execute(
-        "SELECT coalesce(max(size_bytes), 0) FROM files WHERE repo_id=?",
+        "SELECT coalesce(max(size_bytes), 0) FROM files "
+        "WHERE repo_id=? AND format='safetensors'",
         [repo_id]).fetchone()
     return int(row[0] or 0)
 
