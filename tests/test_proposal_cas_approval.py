@@ -125,33 +125,50 @@ def _create(prop, con, mutation=("adopt_current", ())):
 
 
 def _approve(prop, con, proposal_id, *, mutation=None, **extra):
-    """Call approve with optional mutation. Never drop mutation on TypeError (finding 13)."""
+    """Call approve. No silent TypeError retries that drop kwargs (finding 18)."""
     approve = getattr(prop, "approve", None) or getattr(prop, "approve_proposal")
-    kwargs = dict(extra)
     if mutation is not None:
-        kwargs["mutation"] = mutation
-    # Prefer kwargs form; if TypeError, try positional mutation only when provided.
-    try:
-        if mutation is not None:
-            return approve(con, proposal_id, mutation=mutation, **extra)
-        return approve(con, proposal_id, **extra)
-    except TypeError:
-        if mutation is not None:
-            return approve(con, proposal_id, mutation)
-        return approve(con, proposal_id=proposal_id, **extra)
+        return approve(con, proposal_id, mutation=mutation, **extra)
+    return approve(con, proposal_id, **extra)
 
 
-def _assert_refuses(call, *, must_contain, label):
-    """Require call to raise; a successful return is always a failure (finding 13)."""
+def _refusal_code(result) -> str | None:
+    """Extract typed refusal code from a returned Refusal/dict or raised exception."""
+    if result is None:
+        return None
+    if isinstance(result, dict):
+        return (result.get("code") or result.get("error") or "").upper() or None
+    code = getattr(result, "code", None)
+    if code is not None:
+        return str(getattr(code, "value", code)).upper()
+    return None
+
+
+def _assert_refuses(call, *, code: str, label: str):
+    """Accept returned typed refusal OR raised exception carrying the exact code (finding 18).
+
+    A bare successful return with no refusal is always a failure. Does not treat AssertionError
+    sentinels as production refusals.
+    """
+    want = code.upper()
     try:
-        call()
+        out = call()
+    except AssertionError:
+        raise
     except Exception as exc:
         msg = str(exc).upper()
-        assert any(k in msg for k in must_contain), (
-            f"{label}: refusal message {exc!r} must contain one of {must_contain}")
-        return exc
+        got = _refusal_code(exc)
+        if got == want or want in msg or f"CODE={want}" in msg or f"'{want}'" in msg:
+            return exc
+        raise AssertionError(
+            f"{label}: expected refusal code {want}, got exception {type(exc).__name__}: {exc}"
+        ) from exc
     else:
-        raise AssertionError(f"{label}: expected refusal, but call returned successfully")
+        got = _refusal_code(out)
+        if got == want:
+            return out
+        raise AssertionError(
+            f"{label}: expected refusal code {want}, but call returned successfully: {out!r}")
 
 
 def test_preview_pure_runs_before_any_begin_immediate():
@@ -262,7 +279,7 @@ def test_cas_stale_revision_refuses_without_partial_apply():
     before_sel = list(con.execute("SELECT repo_id FROM selection ORDER BY 1").fetchall())
     _assert_refuses(
         lambda: _approve(prop, con, pid),
-        must_contain=("STALE", "PREVIEW_STALE", "REVISION"),
+        code="PREVIEW_STALE",
         label="stale revision",
     )
     assert list(con.execute("SELECT repo_id FROM selection ORDER BY 1").fetchall()) == before_sel
@@ -283,7 +300,7 @@ def test_hash_mismatch_refuses():
         ["f" * 64, pid])
     _assert_refuses(
         lambda: _approve(prop, con, pid),
-        must_contain=("HASH", "PROPOSAL_HASH_MISMATCH"),
+        code="PROPOSAL_HASH_MISMATCH",
         label="hash mismatch",
     )
 
@@ -300,7 +317,7 @@ def test_mutation_mismatch_refuses():
         [pid]).fetchone()[0]
     _assert_refuses(
         lambda: _approve(prop, con, pid, mutation=("finalize", ("org/x",))),
-        must_contain=("MUTATION", "MUTATION_MISMATCH"),
+        code="MUTATION_MISMATCH",
         label="mutation mismatch",
     )
     assert con.execute(
@@ -319,7 +336,7 @@ def test_non_draft_refuses():
         "UPDATE placement_proposals SET lifecycle='superseded' WHERE proposal_id=?", [pid])
     _assert_refuses(
         lambda: _approve(prop, con, pid),
-        must_contain=("NOT_DRAFT", "PROPOSAL_NOT_DRAFT"),
+        code="PROPOSAL_NOT_DRAFT",
         label="non-draft",
     )
 
@@ -345,7 +362,7 @@ def test_missed_revision_bump_still_blocked_by_semantic_recompute():
     assert rev == based, "fixture keeps revision matching based_on"
     _assert_refuses(
         lambda: _approve(prop, con, pid),
-        must_contain=("INPUT", "SEMANTIC", "APPROVED_INPUT_CHANGED", "CHANGED"),
+        code="APPROVED_INPUT_CHANGED",
         label="missed-revision semantic recompute",
     )
     assert con.execute(
@@ -419,7 +436,7 @@ def test_non_feasible_draft_is_not_approved():
     pid = _pid(draft)
     _assert_refuses(
         lambda: _approve(prop, con, pid),
-        must_contain=("FEASIBLE", "INFEASIBLE", "NOT_FEASIBLE", "PROPOSAL_NOT_FEASIBLE"),
+        code="PROPOSAL_NOT_FEASIBLE",
         label="non-feasible draft",
     )
     assert con.execute(
@@ -479,46 +496,121 @@ def test_approve_does_not_call_optimizer_on_happy_path():
     assert _lifecycle(con, pid) == "approved"
 
 
-def test_approval_acquires_sorted_fences_and_fresh_evidence_before_sqlite_tx():
-    """A6: controller + sorted drive fences; fresh evidence before BEGIN IMMEDIATE."""
+def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx():
+    """A6: inject real fence provider — controller → sorted drive IDs → evidence → BEGIN IMMEDIATE."""
     prop = _proposal()
     con = _mem()
+    # Two placeable drives so sorted acquisition is observable.
     _seed_selection(con)
+    con.execute(
+        "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
+        "lifecycle,eligibility,identity_epoch,identity_fingerprint) "
+        "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',1,?)",
+        ["e" * 64])
+    from modelark import plan
+    plan.add_drive(con, "ark", "d1")
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
     draft = _create(prop, con)
     pid = _pid(draft)
-    assert hasattr(prop, "acquire_approval_fences"), (
-        "proposal.acquire_approval_fences required (sorted controller + drive fences; A6)")
-    assert hasattr(prop, "capture_approval_evidence"), (
-        "proposal.capture_approval_evidence required before short SQLite TX (A6)")
 
     order: list[str] = []
-    real_acq = prop.acquire_approval_fences
-    real_ev = prop.capture_approval_evidence
+    fence_provider = getattr(prop, "fence_provider", None) or getattr(prop, "approval_fence_provider", None)
+    assert fence_provider is not None or hasattr(prop, "hold_approval_fences"), (
+        "approve must use an injectable fence provider "
+        "(proposal.fence_provider / hold_approval_fences) so tests pin controller→sorted drives")
 
-    def acq(*a, **k):
-        order.append("FENCES")
-        # Must not be inside IMMEDIATE yet.
-        assert not con._in_immediate, "fences must be acquired before BEGIN IMMEDIATE"
-        return real_acq(*a, **k)
+    # Spy the provider: log controller then each drive label in call order.
+    hold = getattr(prop, "hold_approval_fences", None)
 
-    def ev(*a, **k):
+    def logging_hold(con_, drive_labels, *a, **k):
+        order.append("CONTROLLER")
+        labels = list(drive_labels)
+        assert labels == sorted(labels), f"drive fences must be sorted; got {labels}"
+        for lab in labels:
+            order.append(f"DRIVE:{lab}")
+        if hold is not None:
+            return hold(con_, drive_labels, *a, **k)
+        # Context manager stub
+        from contextlib import nullcontext
+        return nullcontext()
+
+    def logging_evidence(*a, **k):
         order.append("EVIDENCE")
-        assert "FENCES" in order, "evidence after fences"
-        assert not con._in_immediate, "evidence must be captured before BEGIN IMMEDIATE"
-        return real_ev(*a, **k)
+        assert order[0] == "CONTROLLER", order
+        assert any(x.startswith("DRIVE:") for x in order), order
+        assert not con._in_immediate, "evidence before BEGIN IMMEDIATE"
+        # Return empty/admissible evidence map if pure function
+        return {}
 
     con.events.clear()
-    with mock.patch.object(prop, "acquire_approval_fences", side_effect=acq):
-        with mock.patch.object(prop, "capture_approval_evidence", side_effect=ev):
-            _approve(prop, con, pid)
-    assert order == ["FENCES", "EVIDENCE"], f"expected FENCES then EVIDENCE; got {order}"
-    # First BEGIN IMMEDIATE for approve must follow evidence (events may include only approve TX).
-    begin_idxs = [i for i, e in enumerate(con.events) if e.startswith("BEGIN:") and "IMMEDIATE" in e]
-    assert begin_idxs, f"approve must BEGIN IMMEDIATE; events={con.events}"
+    target_hold = "hold_approval_fences" if hasattr(prop, "hold_approval_fences") else None
+    # Also accept patching drive_fence module entrypoints used by approve.
+    import modelark.drive_fence as df
+    patches = []
+    if target_hold:
+        patches.append(mock.patch.object(prop, target_hold, side_effect=logging_hold))
+    else:
+        # Patch controller + per-drive hold if those are the production seams.
+        for name in ("hold_controller", "controller_lock", "with_controller_lock"):
+            if hasattr(df, name):
+                real = getattr(df, name)
+
+                def ctrl_wrap(*a, _real=real, **k):
+                    order.append("CONTROLLER")
+                    return _real(*a, **k)
+
+                patches.append(mock.patch.object(df, name, side_effect=ctrl_wrap))
+                break
+        for name in ("hold_drive", "drive_lock", "with_drive_locks"):
+            if hasattr(df, name):
+                real = getattr(df, name)
+
+                def drv_wrap(*a, _real=real, **k):
+                    # Prefer labels from kwargs or first sequence arg.
+                    labs = k.get("drive_labels") or k.get("labels")
+                    if labs is None and a:
+                        for arg in a:
+                            if isinstance(arg, (list, tuple)) and arg and isinstance(arg[0], str):
+                                labs = arg
+                                break
+                    labs = list(labs or [])
+                    assert labs == sorted(labs), f"drives must be sorted; got {labs}"
+                    for lab in labs:
+                        order.append(f"DRIVE:{lab}")
+                    return _real(*a, **k)
+
+                patches.append(mock.patch.object(df, name, side_effect=drv_wrap))
+                break
+    # Evidence capture
+    if hasattr(prop, "capture_approval_evidence"):
+        patches.append(mock.patch.object(
+            prop, "capture_approval_evidence", side_effect=logging_evidence))
+    elif hasattr(prop, "observe_approval_capacity"):
+        patches.append(mock.patch.object(
+            prop, "observe_approval_capacity", side_effect=logging_evidence))
+    else:
+        raise AssertionError(
+            "capture_approval_evidence (or observe_approval_capacity) required for A6 evidence pin")
+
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        _approve(prop, con, pid)
+
+    assert "CONTROLLER" in order, f"controller fence missing; order={order}"
+    drive_events = [x for x in order if x.startswith("DRIVE:")]
+    assert drive_events == sorted(drive_events), f"drives not sorted: {drive_events}"
+    assert "EVIDENCE" in order, f"evidence missing; order={order}"
+    # CONTROLLER before drives before evidence
+    assert order.index("CONTROLLER") < order.index(drive_events[0]) < order.index("EVIDENCE"), order
+    assert any(e.startswith("BEGIN:") and "IMMEDIATE" in e for e in con.events), con.events
+    # Evidence before IMMEDIATE: last EVIDENCE must precede first BEGIN IMMEDIATE in combined log.
+    # order list is fence/evidence only; ensure no BEGIN was open during EVIDENCE (checked above).
 
 
 def test_approval_refuses_while_fill_guard_is_live():
-    """A8: no supported approval route bypasses the existing Fill guard."""
+    """A8: use existing FillWorker.running() authority (fill_worker.py), not invented is_live hooks."""
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
@@ -526,33 +618,18 @@ def test_approval_refuses_while_fill_guard_is_live():
     pid = _pid(draft)
     from modelark.web import fill_worker
 
-    # Production approve must consult process-local Fill liveness (not durable sessions).
-    live_attr = None
-    for name in ("is_live", "is_running", "blocks_graph_write"):
-        if hasattr(fill_worker.WORKER, name):
-            live_attr = name
-            break
-    assert live_attr is not None or hasattr(prop, "fill_guard_blocks_approval"), (
-        "Fill liveness hook required on WORKER or proposal.fill_guard_blocks_approval (A8)")
-
-    if hasattr(prop, "fill_guard_blocks_approval"):
-        with mock.patch.object(prop, "fill_guard_blocks_approval", return_value=True):
-            _assert_refuses(
-                lambda: _approve(prop, con, pid),
-                must_contain=("FILL_SESSION_ACTIVE",),
-                label="approve while Fill live",
-            )
-    else:
-        with mock.patch.object(fill_worker.WORKER, live_attr, return_value=True):
-            _assert_refuses(
-                lambda: _approve(prop, con, pid),
-                must_contain=("FILL_SESSION_ACTIVE",),
-                label="approve while Fill live",
-            )
+    # Existing authority is FillWorker.running() (line 38) / guarded_mutation gate.
+    assert hasattr(fill_worker.WORKER, "running")
+    with mock.patch.object(fill_worker.WORKER, "running", return_value=True):
+        _assert_refuses(
+            lambda: _approve(prop, con, pid),
+            code="FILL_SESSION_ACTIVE",
+            label="approve while FillWorker.running()",
+        )
 
 
 def test_second_approval_supersedes_prior_and_moves_pointer():
-    """A7-related: second approve supersedes prior approved proposal and moves singleton pointer."""
+    """Second approve supersedes prior approved proposal and moves singleton pointer."""
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
@@ -562,7 +639,6 @@ def test_second_approval_supersedes_prior_and_moves_pointer():
     assert con.execute(
         "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
     ).fetchone()[0] == p1
-    # Second draft+approve (e.g. after a no-op adopt again, or finalize no-op).
     d2 = _create(prop, con, ("adopt_current", ()))
     p2 = _pid(d2)
     assert p2 != p1
@@ -575,7 +651,7 @@ def test_second_approval_supersedes_prior_and_moves_pointer():
 
 
 def test_active_plan_switch_supersedes_clears_pointer_bumps_once():
-    """A7: real switch atomically supersedes approval, clears pointer, switches plan, bumps once."""
+    """A7: real switch supersedes approval, clears pointer, switches plan, bumps once."""
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
@@ -586,7 +662,6 @@ def test_active_plan_switch_supersedes_clears_pointer_bumps_once():
     plan.create(con, "other", name="Other")
     before_rev = con.execute(
         "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
-    # Switch must go through plan.set_active (graph_write).
     plan.set_active(con, "other")
     state = con.execute(
         "SELECT planner_revision, active_approved_proposal_id FROM planner_state "
@@ -594,25 +669,86 @@ def test_active_plan_switch_supersedes_clears_pointer_bumps_once():
     assert state[1] is None, "switch must clear active_approved_proposal_id"
     assert _lifecycle(con, p1) == "superseded"
     assert plan.active(con)["plan_id"] == "other"
-    assert state[0] == before_rev + 1, "exactly one revision bump for the switch transaction"
-    # Failure rolls back: inject fail mid-switch.
-    plan.create(con, "third", name="Third")
-    # Re-approve on other first
-    con.execute("UPDATE planner_state SET planner_revision=0, active_approved_proposal_id=NULL "
-                "WHERE singleton_id=1")
-    # No-op switch
+    assert state[0] == before_rev + 1, "exactly one revision bump"
+
+
+def test_active_plan_switch_mid_failure_rolls_back_all_axes():
+    """A7: inject failure mid-switch → plan, proposal lifecycle, pointer, revision all roll back."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    d1 = _create(prop, con)
+    p1 = _pid(d1)
+    _approve(prop, con, p1)
+    from modelark import plan
+    plan.create(con, "other", name="Other")
+    before = {
+        "rev": con.execute(
+            "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0],
+        "ptr": con.execute(
+            "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
+        ).fetchone()[0],
+        "life": _lifecycle(con, p1),
+        "active": plan.active(con)["plan_id"],
+    }
+    # Inject after first UPDATE in set_active (is_active=false for all).
+    real_execute = con.execute
+    fired = {"n": 0}
+
+    def boom(sql, *args):
+        s = sql if isinstance(sql, str) else str(sql)
+        if "UPDATE plans SET is_active" in s or "is_active=false" in s.lower():
+            fired["n"] += 1
+            if fired["n"] == 1:
+                real_execute(sql, *args)
+                raise sqlite3.OperationalError("injected mid-switch failure")
+        return real_execute(sql, *args)
+
+    con.execute = boom  # type: ignore[method-assign]
+    try:
+        try:
+            plan.set_active(con, "other")
+        except Exception:
+            pass
+    finally:
+        con.execute = real_execute  # type: ignore[method-assign]
+
+    assert fired["n"] >= 1, "injection must fire mid-switch"
+    assert plan.active(con)["plan_id"] == before["active"], "plan must roll back"
+    assert _lifecycle(con, p1) == before["life"], "proposal lifecycle must roll back"
+    assert con.execute(
+        "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
+    ).fetchone()[0] == before["ptr"], "pointer must roll back"
+    assert con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1"
+    ).fetchone()[0] == before["rev"], "revision must roll back"
+
+
+def test_noop_set_active_preserves_existing_approval_and_pointer():
+    """A7: no-op switch changes nothing — including an existing approval pointer."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    d1 = _create(prop, con)
+    p1 = _pid(d1)
+    _approve(prop, con, p1)
+    from modelark import plan
     before = (
-        con.execute("SELECT planner_revision, active_approved_proposal_id FROM planner_state "
-                    "WHERE singleton_id=1").fetchone(),
+        con.execute(
+            "SELECT planner_revision, active_approved_proposal_id FROM planner_state "
+            "WHERE singleton_id=1").fetchone(),
         plan.active(con)["plan_id"],
+        _lifecycle(con, p1),
     )
-    plan.set_active(con, "other")
+    plan.set_active(con, before[1])  # already active
     after = (
-        con.execute("SELECT planner_revision, active_approved_proposal_id FROM planner_state "
-                    "WHERE singleton_id=1").fetchone(),
+        con.execute(
+            "SELECT planner_revision, active_approved_proposal_id FROM planner_state "
+            "WHERE singleton_id=1").fetchone(),
         plan.active(con)["plan_id"],
+        _lifecycle(con, p1),
     )
-    assert before == after, "no-op set_active must change nothing"
+    assert before == after, "no-op must preserve revision, pointer, plan, and approval lifecycle"
 
 
 def main():

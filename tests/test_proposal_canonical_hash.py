@@ -221,24 +221,73 @@ def test_baseline_certificate_binds_each_required_field_independently():
 
 
 def test_client_supplied_hash_or_blob_is_not_authority():
-    """create_draft/approve must ignore or refuse client-supplied canonical_hash / serialized blob."""
+    """Exercise draft creation with forged hash/blob — must refuse or independently recompute (finding 24)."""
+    import sqlite3
+    from modelark.core import db
+
     prop = _load_proposal()
     create = getattr(prop, "create_draft", None) or getattr(prop, "preview_and_draft", None)
     assert create is not None
-    # Signature must not treat client hash as authority: either no such parameter, or explicit refuse.
-    sig = inspect.signature(create)
-    # Calling with a forged hash must not store that hash as the proposal identity.
-    # Production implements create against a real con; here we only pin the refuse contract helper.
-    refuse = getattr(prop, "refuse_client_blob", None) or getattr(prop, "assert_no_client_authority", None)
-    if "canonical_hash" in sig.parameters or "serialized" in sig.parameters or "blob" in sig.parameters:
-        assert refuse is not None or getattr(prop, "ACCEPT_CLIENT_BLOB", None) is False
-        # If parameters exist, calling with them must raise a typed refusal, not trust the value.
-        # Full DB path covered in CAS suite once modules exist; pin the flag now.
-        assert getattr(prop, "ACCEPT_CLIENT_BLOB", False) is False
-    else:
-        # Preferred: no client authority parameters at all.
-        assert "canonical_hash" not in sig.parameters
-        assert "serialized_proposal" not in sig.parameters
+
+    # Build a minimal in-memory v5 catalog for draft persistence.
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    for stmt in db._statements(db.SCHEMA_PATH.read_text()):
+        con.execute(stmt)
+    tables = {r[0] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "planner_state" not in tables:
+        raise AssertionError("v5 schema required (expected Gate-1 red)")
+    if con.execute("SELECT count(*) FROM planner_state").fetchone()[0] == 0:
+        con.execute(
+            "INSERT INTO planner_state(singleton_id,planner_revision,"
+            "active_approved_proposal_id,next_fencing_token) VALUES(1,0,NULL,0)")
+    con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/m',1)")
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
+        "VALUES('org/m','model.safetensors',100,'safetensors','bf16',?)", ["1" * 64])
+    con.execute(
+        "INSERT INTO selection(repo_id,finalized_at) VALUES('org/m','2026-01-01')")
+    con.execute(
+        "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
+        "lifecycle,eligibility,identity_epoch) VALUES('d0',10**12,10**12,'primary',0,"
+        "'active','enabled',1)")
+    from modelark import plan
+    plan.create(con, "ark", name="Ark")
+    plan.add_drive(con, "ark", "d0")
+    plan.set_active(con, "ark")
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+
+    forged = "f" * 64
+    # Attempt to pass forged hash/blob via kwargs (even if not in signature — **kwargs traps).
+    try:
+        draft = create(
+            con, plan_id="ark", mutation=("adopt_current", ()),
+            canonical_hash=forged, serialized_proposal=b"FORGED", blob={"canonical_hash": forged})
+    except TypeError:
+        try:
+            draft = create(con, "ark", ("adopt_current", ()),
+                           canonical_hash=forged, serialized=b"FORGED")
+        except TypeError:
+            # No kwargs accepted — still create normally and prove stored hash is recomputed.
+            draft = create(con, plan_id="ark", mutation=("adopt_current", ()))
+        except Exception as exc:
+            # Refusal of forged input is acceptable.
+            assert "HASH" in str(exc).upper() or "BLOB" in str(exc).upper() or \
+                "AUTHORITY" in str(exc).upper() or "CLIENT" in str(exc).upper(), exc
+            return
+    except Exception as exc:
+        assert "HASH" in str(exc).upper() or "BLOB" in str(exc).upper() or \
+            "AUTHORITY" in str(exc).upper() or "CLIENT" in str(exc).upper(), exc
+        return
+
+    pid = draft["proposal_id"] if isinstance(draft, dict) else draft
+    stored = con.execute(
+        "SELECT canonical_hash FROM placement_proposals WHERE proposal_id=?",
+        [pid]).fetchone()[0]
+    assert stored != forged, (
+        "stored canonical_hash must not equal client-forged value — recompute or refuse")
+    recompute = getattr(prop, "recompute_hash", None) or getattr(prop, "hash_stored_proposal")
+    assert recompute(con, pid) == stored, "stored hash must equal independent recompute"
 
 
 def test_serializer_version_change_changes_hash():
