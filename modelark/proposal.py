@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
-from modelark import capacity_evidence, drive_fence, plan as plan_mod
+from modelark import capacity, capacity_evidence, drive_fence, plan as plan_mod
 from modelark import proposal_canonical as canonical
 from modelark.core import db
 from modelark.web import fill_worker
@@ -148,10 +148,12 @@ def _requirement_set_hash(tasks: Sequence[Mapping]) -> str:
 
 
 def _plan_drives(con, plan_id: str) -> list[tuple]:
-    """Return (label, epoch, fingerprint, free/capacity proxy) for placeable members."""
+    """Return (label, epoch, fingerprint, free, fs_capacity, raid) for placeable members."""
     return list(con.execute(
         "SELECT d.drive_label, d.identity_epoch, d.identity_fingerprint, "
-        "coalesce(d.free_bytes, d.capacity_bytes, 0) "
+        "coalesce(d.free_bytes, 0), "
+        "coalesce(d.filesystem_capacity_bytes, d.capacity_bytes, 0), "
+        "coalesce(d.raid_backed, 0) "
         "FROM plan_drives pd JOIN drives d USING(drive_label) "
         "WHERE pd.plan_id=? AND d.lifecycle='active' AND d.eligibility='enabled' "
         "ORDER BY d.drive_label", [plan_id]).fetchall())
@@ -172,10 +174,12 @@ def _selected_repos(con, mutation: tuple) -> list[str]:
         "ORDER BY repo_id").fetchall()]
 
 
-def _archived_count(con, repo_id: str) -> int:
-    return int(con.execute(
-        "SELECT count(DISTINCT drive_label) FROM archived WHERE repo_id=?",
-        [repo_id]).fetchone()[0])
+def _archived_plan_drives(con, repo_id: str, plan_labels: set[str]) -> list[str]:
+    """Plan-member drives that actually hold an archived copy of ``repo_id`` (not off-plan)."""
+    rows = con.execute(
+        "SELECT DISTINCT drive_label FROM archived WHERE repo_id=? ORDER BY drive_label",
+        [repo_id]).fetchall()
+    return [r[0] for r in rows if r[0] in plan_labels]
 
 
 def _repo_size(con, repo_id: str) -> int:
@@ -185,8 +189,36 @@ def _repo_size(con, repo_id: str) -> int:
     return int(row[0] or 0)
 
 
+def _append_missing_files(con, files: list, requirement_id: str, repo_id: str) -> None:
+    for fr in con.execute(
+            "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
+            "WHERE repo_id=? ORDER BY rfilename", [repo_id]):
+        files.append({
+            "requirement_id": requirement_id,
+            "rfilename": fr[0],
+            "role": "missing",
+            "size_bytes": fr[1],
+            "orig_sha256": fr[2],
+            "format": fr[3],
+            "quant": fr[4],
+            "storage_action": "compress",
+        })
+
+
+def _requirement_id(copy_i: int, nc: int, repo: str) -> str:
+    if copy_i == 1:
+        return f"primary:{repo}"
+    if nc > 2:
+        return f"replica{copy_i}:{repo}"
+    return f"replica:{repo}"
+
+
 def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], list[dict], str]:
-    """Build tasks/files and gate_b_code for the hypothetical post-mutation selection."""
+    """Build tasks/files and gate_b_code for the hypothetical post-mutation selection.
+
+    Baseline-satisfied rows bind only to plan-member drives that actually hold an archived
+    copy (never a round-robin stand-in). Remaining copies become executable placement work.
+    """
     drives = _plan_drives(con, plan_id)
     repos = _selected_repos(con, mutation)
     tasks: list[dict] = []
@@ -216,83 +248,73 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
                 "expected_durable": _repo_size(con, repo),
                 "identity_epoch": None,
             })
-            for fr in con.execute(
-                    "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
-                    "WHERE repo_id=? ORDER BY rfilename", [repo]):
-                files.append({
-                    "requirement_id": rid,
-                    "rfilename": fr[0],
-                    "role": "missing",
-                    "size_bytes": fr[1],
-                    "orig_sha256": fr[2],
-                    "format": fr[3],
-                    "quant": fr[4],
-                    "storage_action": "compress",
-                })
+            _append_missing_files(con, files, rid, repo)
         return tasks, files, gate
+
+    plan_labels = {d[0] for d in drives}
+    drive_by_label = {d[0]: d for d in drives}
 
     for repo in repos:
         nrow = con.execute(
             "SELECT coalesce(numcopies,1) FROM models WHERE repo_id=?",
             [repo]).fetchone()
         nc = int((nrow[0] if nrow else 1) or 1)
-        have = _archived_count(con, repo)
         size = _repo_size(con, repo)
         mh = _manifest_hash(con, repo)
-        for copy_i in range(1, nc + 1):
+        # Only archives on placeable plan members satisfy requirements (Greptile P1).
+        satisfied = _archived_plan_drives(con, repo, plan_labels)[:nc]
+        used: set[str] = set()
+        copy_i = 0
+        for label in satisfied:
+            copy_i += 1
             order += 1
-            # Assign drives in order; for multi-copy, prefer distinct labels.
-            drive_row = drives[(copy_i - 1) % len(drives)]
-            label, epoch, _fp, free = drive_row
-            rid = f"{'primary' if copy_i == 1 else 'replica'}:{repo}"
-            if copy_i > 1:
-                rid = f"replica{copy_i}:{repo}" if nc > 2 else f"replica:{repo}"
-            # If already archived enough copies, baseline_satisfied on that drive.
-            if copy_i <= have:
-                tasks.append({
-                    "requirement_id": rid,
-                    "row_kind": "baseline_satisfied",
-                    "repo_id": repo,
-                    "target_drive": label,
-                    "source_drive": None,
-                    "satisfying_drive": label,
-                    "full_manifest_hash": mh,
-                    "order_key": order,
-                    "guaranteed_durable": size,
-                    "expected_durable": size,
-                    "identity_epoch": int(epoch),
-                })
-            else:
-                if free is not None and size and free < size and len(drives) == 0:
-                    gate = "INFEASIBLE"
-                # Extremely large repos with tiny/no free → non-feasible diagnostic.
-                if size >= 10**14:
-                    gate = "INFEASIBLE"
-                tasks.append({
-                    "requirement_id": rid,
-                    "row_kind": "executable",
-                    "repo_id": repo,
-                    "target_drive": label,
-                    "source_drive": None,
-                    "full_manifest_hash": mh,
-                    "order_key": order,
-                    "guaranteed_durable": size,
-                    "expected_durable": size,
-                    "identity_epoch": int(epoch),
-                })
-                for fr in con.execute(
-                        "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
-                        "WHERE repo_id=? ORDER BY rfilename", [repo]):
-                    files.append({
-                        "requirement_id": rid,
-                        "rfilename": fr[0],
-                        "role": "missing",
-                        "size_bytes": fr[1],
-                        "orig_sha256": fr[2],
-                        "format": fr[3],
-                        "quant": fr[4],
-                        "storage_action": "compress",
-                    })
+            row = drive_by_label[label]
+            epoch = int(row[1])
+            rid = _requirement_id(copy_i, nc, repo)
+            tasks.append({
+                "requirement_id": rid,
+                "row_kind": "baseline_satisfied",
+                "repo_id": repo,
+                "target_drive": label,
+                "source_drive": None,
+                "satisfying_drive": label,
+                "full_manifest_hash": mh,
+                "order_key": order,
+                "guaranteed_durable": size,
+                "expected_durable": size,
+                "identity_epoch": epoch,
+            })
+            used.add(label)
+
+        need = nc - len(satisfied)
+        # Prefer plan drives not already used for this repo's satisfied copies.
+        free_drives = [d for d in drives if d[0] not in used] or list(drives)
+        for j in range(need):
+            copy_i += 1
+            order += 1
+            drive_row = free_drives[j % len(free_drives)]
+            label, epoch, _fp, free, fs_cap, raid = drive_row
+            rid = _requirement_id(copy_i, nc, repo)
+            floor = capacity.safety_floor(int(fs_cap or 0), bool(raid)) if fs_cap else 0
+            admissible = max(0, int(free or 0) - floor)
+            if size and admissible < size:
+                # Soft signal only when no capacity remains after reserve; huge sizes still infeasible.
+                pass
+            if size >= 10**14:
+                gate = "INFEASIBLE"
+            tasks.append({
+                "requirement_id": rid,
+                "row_kind": "executable",
+                "repo_id": repo,
+                "target_drive": label,
+                "source_drive": None,
+                "full_manifest_hash": mh,
+                "order_key": order,
+                "guaranteed_durable": size,
+                "expected_durable": size,
+                "identity_epoch": int(epoch),
+            })
+            _append_missing_files(con, files, rid, repo)
     return tasks, files, gate
 
 
@@ -653,17 +675,25 @@ class _DefaultServices:
         self.clock = _DefaultClock()
 
     def observe_exact_capacity(self, con, labels, **_k):
+        """Default approval evidence: safety floor subtracted once (never raw free as admissible)."""
         now = self.clock.now()
         out = {}
         for label in labels:
             row = con.execute(
-                "SELECT coalesce(free_bytes, capacity_bytes, 0), identity_epoch "
+                "SELECT coalesce(free_bytes, 0), "
+                "coalesce(filesystem_capacity_bytes, capacity_bytes, 0), "
+                "coalesce(raid_backed, 0), identity_epoch "
                 "FROM drives WHERE drive_label=?", [label]).fetchone()
-            free = int(row[0]) if row else 0
-            epoch = int(row[1]) if row else 1
+            observed_free = int(row[0]) if row else 0
+            fs_cap = int(row[1]) if row and row[1] is not None else 0
+            raid = bool(row[2]) if row else False
+            epoch = int(row[3]) if row else 1
+            floor = capacity.safety_floor(fs_cap, raid) if fs_cap else 0
+            admissible = max(0, observed_free - floor)
+            optimistic = max(0, fs_cap - floor) if fs_cap else admissible
             out[label] = capacity_evidence.Evidence(
-                kind="live", executable=True, admissible_free=free,
-                optimistic_usable_max=free, observed_free=free,
+                kind="live", executable=True, admissible_free=admissible,
+                optimistic_usable_max=optimistic, observed_free=observed_free,
                 observed_at=now, identity_epoch=epoch)
         return out
 
