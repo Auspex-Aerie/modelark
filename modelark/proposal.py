@@ -148,7 +148,7 @@ def _requirement_set_hash(tasks: Sequence[Mapping]) -> str:
 
 
 def _plan_drives(con, plan_id: str) -> list[tuple]:
-    """Return (label, epoch, fingerprint, free, fs_capacity, raid) for placeable members."""
+    """Placeable plan members (active+enabled) for *new* executable assignment."""
     return list(con.execute(
         "SELECT d.drive_label, d.identity_epoch, d.identity_fingerprint, "
         "coalesce(d.free_bytes, 0), "
@@ -157,6 +157,21 @@ def _plan_drives(con, plan_id: str) -> list[tuple]:
         "FROM plan_drives pd JOIN drives d USING(drive_label) "
         "WHERE pd.plan_id=? AND d.lifecycle='active' AND d.eligibility='enabled' "
         "ORDER BY d.drive_label", [plan_id]).fetchall())
+
+
+def _plan_baseline_labels(con, plan_id: str) -> set[str]:
+    """Plan-member drives that may *satisfy* durability (complete archives).
+
+    Active members count even when eligibility is excluded — an existing complete
+    copy still satisfies numcopies; excluded only blocks *new* placement.
+    Lost/retired members do not satisfy.
+    """
+    return {
+        r[0] for r in con.execute(
+            "SELECT d.drive_label FROM plan_drives pd JOIN drives d USING(drive_label) "
+            "WHERE pd.plan_id=? AND d.lifecycle='active' ORDER BY d.drive_label",
+            [plan_id]).fetchall()
+    }
 
 
 def _selected_repos(con, mutation: tuple) -> list[str]:
@@ -359,8 +374,18 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
             _append_missing_files(con, files, rid, repo)
         return tasks, files, gate
 
-    plan_labels = {d[0] for d in drives}
+    placeable_labels = {d[0] for d in drives}
+    baseline_labels = _plan_baseline_labels(con, plan_id)
     drive_by_label = {d[0]: d for d in drives}
+    # Epoch lookup for baseline-only (excluded) members not in placeable rows.
+    for label in baseline_labels - placeable_labels:
+        row = con.execute(
+            "SELECT drive_label, identity_epoch, identity_fingerprint, "
+            "coalesce(free_bytes,0), coalesce(filesystem_capacity_bytes,capacity_bytes,0), "
+            "coalesce(raid_backed,0) FROM drives WHERE drive_label=?",
+            [label]).fetchone()
+        if row:
+            drive_by_label[label] = row
     # Running remaining capacity — depleted only by executable placement charges.
     remaining = _admissible_map_from_drives(drives)
 
@@ -372,8 +397,8 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
         size = _repo_size(con, repo)
         workspace = _repo_workspace_peak(con, repo)
         mh = _manifest_hash(con, repo)
-        # Complete archives on placeable plan members only (partial ≠ baseline-satisfied).
-        satisfied = _complete_archived_plan_drives(con, repo, plan_labels)[:nc]
+        # Complete archives on active plan members (enabled *or* excluded) satisfy durability.
+        satisfied = _complete_archived_plan_drives(con, repo, baseline_labels)[:nc]
         used: set[str] = set()
         copy_i = 0
         for label in satisfied:
@@ -400,7 +425,7 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
             # Baseline does not charge remaining free.
 
         need = nc - len(satisfied)
-        # Distinct unused plan drives only — durability requires failure-independent copies.
+        # New placement only on placeable (active+enabled) drives not already used for this repo.
         free_drives = [d for d in drives if d[0] not in used]
         if need > len(free_drives):
             gate = "INFEASIBLE"
