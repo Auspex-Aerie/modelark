@@ -174,12 +174,27 @@ def _selected_repos(con, mutation: tuple) -> list[str]:
         "ORDER BY repo_id").fetchall()]
 
 
-def _archived_plan_drives(con, repo_id: str, plan_labels: set[str]) -> list[str]:
-    """Plan-member drives that actually hold an archived copy of ``repo_id`` (not off-plan)."""
-    rows = con.execute(
-        "SELECT DISTINCT drive_label FROM archived WHERE repo_id=? ORDER BY drive_label",
-        [repo_id]).fetchall()
-    return [r[0] for r in rows if r[0] in plan_labels]
+def _complete_archived_plan_drives(con, repo_id: str, plan_labels: set[str]) -> list[str]:
+    """Plan-member drives holding a *complete* archived copy of every catalog file for ``repo_id``.
+
+    A partial archive (some but not all rfilenames) does not satisfy a durability copy.
+    """
+    needed = [r[0] for r in con.execute(
+        "SELECT rfilename FROM files WHERE repo_id=? ORDER BY rfilename", [repo_id]).fetchall()]
+    if not needed:
+        # No catalog files → treat any archived presence on a plan drive as complete.
+        rows = con.execute(
+            "SELECT DISTINCT drive_label FROM archived WHERE repo_id=? ORDER BY drive_label",
+            [repo_id]).fetchall()
+        return [r[0] for r in rows if r[0] in plan_labels]
+    complete = []
+    for label in sorted(plan_labels):
+        have = {r[0] for r in con.execute(
+            "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
+            [repo_id, label]).fetchall()}
+        if all(name in have for name in needed):
+            complete.append(label)
+    return complete
 
 
 def _repo_size(con, repo_id: str) -> int:
@@ -261,8 +276,8 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
         nc = int((nrow[0] if nrow else 1) or 1)
         size = _repo_size(con, repo)
         mh = _manifest_hash(con, repo)
-        # Only archives on placeable plan members satisfy requirements (Greptile P1).
-        satisfied = _archived_plan_drives(con, repo, plan_labels)[:nc]
+        # Complete archives on placeable plan members only (partial ≠ baseline-satisfied).
+        satisfied = _complete_archived_plan_drives(con, repo, plan_labels)[:nc]
         used: set[str] = set()
         copy_i = 0
         for label in satisfied:
@@ -287,21 +302,22 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
             used.add(label)
 
         need = nc - len(satisfied)
-        # Prefer plan drives not already used for this repo's satisfied copies.
-        free_drives = [d for d in drives if d[0] not in used] or list(drives)
+        # Distinct unused plan drives only — durability requires failure-independent copies.
+        free_drives = [d for d in drives if d[0] not in used]
+        if need > len(free_drives):
+            gate = "INFEASIBLE"
+        if size >= 10**14:
+            gate = "INFEASIBLE"
         for j in range(need):
             copy_i += 1
             order += 1
-            drive_row = free_drives[j % len(free_drives)]
-            label, epoch, _fp, free, fs_cap, raid = drive_row
             rid = _requirement_id(copy_i, nc, repo)
-            floor = capacity.safety_floor(int(fs_cap or 0), bool(raid)) if fs_cap else 0
-            admissible = max(0, int(free or 0) - floor)
-            if size and admissible < size:
-                # Soft signal only when no capacity remains after reserve; huge sizes still infeasible.
-                pass
-            if size >= 10**14:
-                gate = "INFEASIBLE"
+            if j < len(free_drives):
+                drive_row = free_drives[j]
+                label, epoch = drive_row[0], int(drive_row[1])
+            else:
+                # No distinct target left; still record the requirement without a reuse target.
+                label, epoch = None, None
             tasks.append({
                 "requirement_id": rid,
                 "row_kind": "executable",
@@ -312,7 +328,7 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
                 "order_key": order,
                 "guaranteed_durable": size,
                 "expected_durable": size,
-                "identity_epoch": int(epoch),
+                "identity_epoch": epoch,
             })
             _append_missing_files(con, files, rid, repo)
     return tasks, files, gate
@@ -639,6 +655,19 @@ def validate_exact_assignment(con, proposal: Mapping,
                               evidence_by_drive: Mapping[str, Any] | None = None) -> None:
     """Re-validate the stored assignment against current evidence; never re-optimize."""
     evidence_by_drive = evidence_by_drive or {}
+    # Distinct target/satisfying drives per repo: numcopies must not collapse onto one medium.
+    by_repo: dict[str, list[str]] = {}
+    for t in proposal.get("tasks") or ():
+        repo = t.get("repo_id") or ""
+        label = t.get("target_drive") or t.get("satisfying_drive")
+        if label:
+            by_repo.setdefault(repo, []).append(label)
+    for repo, labels in by_repo.items():
+        if len(labels) != len(set(labels)):
+            raise Refusal("EXACT_ASSIGNMENT_REJECTED",
+                          {"repo_id": repo, "reason": "duplicate_target_drives", "labels": labels},
+                          ("preview_again",))
+
     for t in proposal.get("tasks") or ():
         if t.get("row_kind") != "executable":
             continue
