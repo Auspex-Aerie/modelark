@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import math
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Mapping, Sequence
 
-from modelark import candidates, capacity_evidence, compress
+from modelark import candidates, capacity_evidence, compress, placement, reconcile
 from modelark.budgets import CandidateBudget, EXPECTED_MARGIN, FileBudget  # shared budget truth (#36a)
 from modelark.reconcile import (
     DiagnosticSeverity,
@@ -47,9 +47,14 @@ class FreeEvidence(str, Enum):
 class FailureCode(str, Enum):
     CAPACITY_DURABLE_SHORT = "CAPACITY_DURABLE_SHORT"
     CAPACITY_WORKSPACE_SHORT = "CAPACITY_WORKSPACE_SHORT"
+    CAPACITY_EVIDENCE_UNKNOWN = "CAPACITY_EVIDENCE_UNKNOWN"
     TARGET_DRIVE_CHANGED = "TARGET_DRIVE_CHANGED"
     TARGET_TIER_MISSING = "TARGET_TIER_MISSING"
-    GRAPH_INVARIANT = "GRAPH_INVARIANT"
+    UNPROVEN_PROVENANCE = "UNPROVEN_PROVENANCE"
+    REQUIREMENT_EXCEEDS_USABLE_MAX = "REQUIREMENT_EXCEEDS_USABLE_MAX"
+    FAILURE_DOMAIN_UNSATISFIABLE = "FAILURE_DOMAIN_UNSATISFIABLE"
+    GRAPH_DEPENDENCY_INVARIANT = "GRAPH_DEPENDENCY_INVARIANT"
+    GRAPH_INVARIANT = "GRAPH_INVARIANT"  # legacy envelope; prefer typed structural codes above
 
 
 @dataclass(frozen=True)
@@ -182,16 +187,36 @@ class CapacityPlan:
     unassigned_intents: tuple[WorkIntent, ...]
     ledgers: tuple[DriveLedger, ...]
     failures: tuple[CapacityFailure, ...]
+    # Graded Gate-B projection (#38 / tiered_v2). feasible is True only when gate_b_code == FEASIBLE.
+    gate_b_code: str = "FEASIBLE"
+    gate_b_diagnostics: object | None = None
+    gate_b_actions: tuple[str, ...] = ()
+    derivation_mode: str | None = None
+    solver_bound_version: str | None = None
 
     @property
     def feasible(self) -> bool:
-        return not self.blocking_diagnostics and not self.failures and not self.unassigned_intents
+        # Gate-B FEASIBLE is necessary but not sufficient: reconcile-level blocking diagnostics
+        # (e.g. MANIFEST_POLICY on a mixed cart) keep the plan non-executable even when the
+        # placeable subset packs. Gate-1 exclusivity still holds for pure packing outcomes
+        # (no blocking diagnostics / failures).
+        return (
+            self.gate_b_code == "FEASIBLE"
+            and not self.blocking_diagnostics
+            and not self.failures
+            and not self.unassigned_intents
+        )
 
     def to_dict(self) -> dict:
         return {
             "mode": self.mode.value,
             "placement_policy": self.placement_policy,
             "feasible": self.feasible,
+            "gate_b_code": self.gate_b_code,
+            "gate_b_diagnostics": self.gate_b_diagnostics,
+            "gate_b_actions": list(self.gate_b_actions),
+            "derivation_mode": self.derivation_mode,
+            "solver_bound_version": self.solver_bound_version,
             "batch_order": list(self.batch_order),
             "blocking_diagnostics": list(self.blocking_diagnostics),
             "tasks": [
@@ -698,6 +723,386 @@ def _legacy_placeables(cset, drive_by_label) -> list[_Placeable]:
     return placeables
 
 
+def _adapter_solver_bounds() -> placement.SolverBounds:
+    """Production solver bounds for the plan_capacity adapter (patchable; not a public kwarg).
+
+    Measured 2026-07-24 (local) on the Gate-1 10k-candidate scale fixture (100 requirements ×
+    100 drives = 10_000 candidates) and the phase-2 1000×10 characterization:
+
+    | phase / case                         | states      | wall time   | notes |
+    |--------------------------------------|-------------|-------------|-------|
+    | gate_b 10k first-feasible            | 101         | ~0.03 s     | root + 100  |
+    | improve 10k @ optim=50_000           | 50_000 cap  | ~30 s       | truncated   |
+    | improve 10k @ optim=5_000            | 5_000 cap   | ~2–3 s      | over 2 s budget |
+    | phase-2 plan_capacity alone @ 1_500  | ≤1_500      | ~1.16–1.19 s| solver window only |
+    | phase-2 reconcile+plan (asserted)    | —           | ~1.46–1.54 s| pytest budget 2.0 s covers this full window |
+
+    Frozen production defaults (must match the return values below):
+      feasibility_state_limit = 200_000  — headroom over easy first-feasible; matches Gate-1 scale
+                                           fixture cap; adversarial multi-drive packing << 50k.
+      optimization_state_limit = 1_500   — keeps phase-2 reconcile+plan under the 2.0 s budget
+                                           (~23–27% headroom on that full window; plan_capacity alone
+                                           is ~1.2 s). Returns best-so-far under state_truncated.
+                                           Do not ship 5_000: it breaches the 2 s budget.
+    """
+    return placement.SolverBounds(
+        feasibility_state_limit=200_000,
+        optimization_state_limit=1_500,
+    )
+
+
+def _diagnostics_for_serialize(diagnostics) -> object:
+    """Normalize Gate-B diagnostics into a JSON-friendly structure for CapacityPlan.to_dict()."""
+    if diagnostics is None:
+        return None
+    if isinstance(diagnostics, dict):
+        out = {}
+        for key, value in diagnostics.items():
+            if isinstance(value, tuple):
+                out[key] = list(value)
+            else:
+                out[key] = value
+        return out
+    return diagnostics
+
+
+def _match_candidate(
+    cset: candidates.CandidateSet,
+    task: placement.AssignmentTask,
+) -> candidates.Candidate | None:
+    """Locate the Candidate that produced an assignment task (target + resolved source)."""
+    for rid, cs in cset.by_requirement:
+        if rid != task.requirement_id:
+            continue
+        matches = [c for c in cs if c.target_drive == task.target_drive]
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        for c in matches:
+            src = c.source
+            if isinstance(src, candidates.SourceIdentity) and task.source is not None:
+                if (src.drive_label == task.source.drive_label
+                        and src.annex_key == task.source.annex_key
+                        and src.orig_sha256 == task.source.orig_sha256):
+                    return c
+            if isinstance(src, candidates.PendingHome) and task.source is not None:
+                # PendingHome was resolved to SourceIdentity(home, None, None)
+                if (task.source.drive_label is not None
+                        and task.source.annex_key is None
+                        and task.source.orig_sha256 is None):
+                    return c
+            if src is None and task.source is None:
+                return c
+        return matches[0]
+    return None
+
+
+def _project_assigned_tasks(
+    assignment: placement.CanonicalAssignment,
+    cset: candidates.CandidateSet,
+) -> tuple[AssignedTask, ...]:
+    """Project pure CanonicalAssignment tasks onto capacity AssignedTask / TaskBudget records."""
+    out: list[AssignedTask] = []
+    for task in assignment.tasks:
+        cand = _match_candidate(cset, task)
+        if cand is None:
+            # Satisfied requirements never appear in assignment; synthesize a minimal budget.
+            repo_id = task.requirement_id.split(":", 1)[1]
+            source_drive = task.source.drive_label if task.source is not None else None
+            budget = TaskBudget(
+                task_id=f"{task.task_kind.value}:{task.requirement_id}",
+                requirement_id=task.requirement_id,
+                repo_id=repo_id,
+                kind=task.task_kind,
+                target_drive=task.target_drive,
+                source_drive=source_drive,
+                missing_files=task.missing_files,
+                file_budgets=(),
+                guaranteed_durable=task.guaranteed_durable,
+                expected_durable=task.expected_durable,
+                workspace_peak_guaranteed=task.workspace_peak_guaranteed,
+                workspace_peak_expected=task.workspace_peak_expected,
+                evidence=task.budget_evidence,
+            )
+        else:
+            budget = _task_budget(cand)
+            if task.source is not None:
+                budget = replace(budget, source_drive=task.source.drive_label)
+            elif isinstance(cand.source, candidates.PendingHome):
+                # Resolved home source on the pure assignment
+                budget = replace(budget, source_drive=None)
+        out.append(AssignedTask(
+            task_id=budget.task_id,
+            requirement_id=task.requirement_id,
+            repo_id=budget.repo_id,
+            kind=task.task_kind,
+            target_drive=task.target_drive,
+            source_drive=budget.source_drive,
+            depends_on_requirement=task.depends_on_requirement,
+            budget=budget,
+        ))
+    out.sort(key=lambda item: (item.target_drive, item.kind.value, item.requirement_id))
+    return tuple(out)
+
+
+def _build_solver_input(
+    con,
+    result: ReconcileResult,
+    *,
+    mode: CapacityMode,
+    evidence_by_drive: Mapping[str, capacity_evidence.Evidence] | None,
+    bounds: placement.SolverBounds,
+) -> tuple[placement.SolverInput, tuple[CapacityDrive, ...]]:
+    """Shell: admission evidence → pure SolverInput (no floor recomputation)."""
+    capacity_drives = inspect_drives(con, result.plan_id, evidence_by_drive=evidence_by_drive)
+    planner = reconcile.capture_planner_input(con, result.plan_id)
+    # Prefer the CandidateSet already on the reconcile result (same snapshot as the caller saw).
+    graph = candidates.RequirementGraph(
+        desired=tuple(result.requirements),
+        requirement_set_hash="",
+    )
+    executable: list[tuple[str, int]] = []
+    maxima: list[tuple[str, int | None]] = []
+    evidence_pairs: list[tuple[str, placement.DriveEvidenceFact]] = []
+    for drive in capacity_drives:
+        ev = drive.evidence
+        free = int(ev.admissible_free) if ev.executable else 0
+        executable.append((drive.drive_label, free))
+        # Prefer admission-supplied optimistic max; for executable live/anchor evidence with a
+        # missing max, fall back to capacity − safety floor so known free shortfalls still
+        # classify as proven infeasible rather than CAPACITY_EVIDENCE_UNKNOWN.
+        mx = ev.optimistic_usable_max
+        if mx is None and ev.executable:
+            mx = max(0, int(drive.capacity_bytes) - int(drive.safety_floor))
+        maxima.append((drive.drive_label, mx))
+        evidence_pairs.append((
+            drive.drive_label,
+            placement.DriveEvidenceFact(
+                drive_label=drive.drive_label,
+                executable=bool(ev.executable),
+                kind=str(ev.kind),
+                code=ev.code,
+            ),
+        ))
+    executable.sort(key=lambda item: item[0])
+    maxima.sort(key=lambda item: item[0])
+    evidence_pairs.sort(key=lambda item: item[0])
+    inp = placement.SolverInput(
+        graph=graph,
+        candidates=result.candidates,
+        drives=planner.drives,
+        executable_budget=tuple(executable),
+        max_usable_for_epoch=tuple(maxima),
+        drive_evidence=tuple(evidence_pairs),
+        capacity_mode=mode.value,
+        policy_version=placement.POLICY_VERSION,
+        bounds=bounds,
+    )
+    return inp, capacity_drives
+
+
+def _stale_target_failures(
+    result: ReconcileResult,
+    capacity_drives: Sequence[CapacityDrive],
+    mode: CapacityMode,
+) -> list[CapacityFailure]:
+    """Detect candidates whose targets left the plan between reconcile and placement."""
+    in_plan = {d.drive_label for d in capacity_drives}
+    failures: list[CapacityFailure] = []
+    for rid, cs in result.candidates.by_requirement:
+        if not cs:
+            continue
+        if any(c.target_drive in in_plan for c in cs):
+            continue
+        # Every remaining candidate target is gone → typed stale snapshot.
+        is_replica = rid.startswith("protected_replica:")
+        failures.append(CapacityFailure(
+            code=FailureCode.TARGET_DRIVE_CHANGED,
+            capacity_mode=mode,
+            requirement_id=rid,
+            task_ids=(f"{'replicate' if is_replica else 'fetch'}:{rid}",),
+            target_tier=("replica" if is_replica else "primary"),
+            eligible_drives=tuple(sorted({c.target_drive for c in cs})),
+            required_bytes=0, available_bytes=0, safety_floor_bytes=0, workspace_bytes=0,
+            shortfall_bytes=0, evidence=None,
+            actions=("reconcile_plan", "restore_target_drive_to_plan"),
+        ))
+    return failures
+
+
+# Gate-B structural code → FailureCode (1:1; never collapse non-graph codes into GRAPH_INVARIANT).
+_STRUCTURAL_FAILURE_CODES: dict[str, FailureCode] = {
+    "TARGET_TIER_MISSING": FailureCode.TARGET_TIER_MISSING,
+    "UNPROVEN_PROVENANCE": FailureCode.UNPROVEN_PROVENANCE,
+    "REQUIREMENT_EXCEEDS_USABLE_MAX": FailureCode.REQUIREMENT_EXCEEDS_USABLE_MAX,
+    "FAILURE_DOMAIN_UNSATISFIABLE": FailureCode.FAILURE_DOMAIN_UNSATISFIABLE,
+    "GRAPH_DEPENDENCY_INVARIANT": FailureCode.GRAPH_DEPENDENCY_INVARIANT,
+}
+
+
+def _structural_failure_projection(
+    code: str,
+    gate: placement.GateBResult,
+    mode: CapacityMode,
+    capacity_drives: Sequence[CapacityDrive],
+) -> tuple[CapacityFailure, ...]:
+    """Project a Gate-B structural code onto one CapacityFailure for CLI/library operators.
+
+    FailureCode matches the structural ladder code. Drive lists are taken from the diagnostic
+    payload keys that pure gate_b actually emits (eligible_drives, drives, or maxima labels) —
+    no silent or-defaults that invent or drop known drives.
+    """
+    del capacity_drives  # reserved for future ledger correlation; projection is diagnostic-driven
+    diag = gate.diagnostics if isinstance(gate.diagnostics, dict) else {}
+    if not isinstance(diag, dict):
+        diag = {}
+
+    if "requirement_id" in diag:
+        rid = diag["requirement_id"]
+    elif "replica_requirement_id" in diag:
+        rid = diag["replica_requirement_id"]
+    elif "home_requirement_id" in diag:
+        rid = diag["home_requirement_id"]
+    else:
+        rid = None
+
+    if "eligible_drives" in diag:
+        raw_eligible = diag["eligible_drives"]
+    elif "drives" in diag:
+        raw_eligible = diag["drives"]
+    elif "maxima" in diag:
+        # REQUIREMENT_EXCEEDS_USABLE_MAX: maxima is ((drive, max_bytes), ...)
+        raw_eligible = tuple(lab for lab, _mx in diag["maxima"])
+    else:
+        raw_eligible = ()
+    if isinstance(raw_eligible, list):
+        eligible = tuple(raw_eligible)
+    else:
+        eligible = tuple(raw_eligible) if raw_eligible else ()
+
+    peak = int(diag["peak_bytes"]) if "peak_bytes" in diag else 0
+    actions = tuple(gate.actions) if gate.actions else ()
+    fcode = _STRUCTURAL_FAILURE_CODES.get(code)
+    if fcode is None:
+        raise ValueError(f"unmapped structural gate_b code for failure projection: {code!r}")
+
+    return (CapacityFailure(
+        code=fcode,
+        capacity_mode=mode,
+        requirement_id=str(rid) if rid is not None else None,
+        task_ids=(),
+        target_tier=None,
+        eligible_drives=eligible,
+        required_bytes=peak,
+        available_bytes=0,
+        safety_floor_bytes=0,
+        workspace_bytes=0,
+        shortfall_bytes=peak,
+        evidence=None,
+        actions=actions,
+    ),)
+
+
+def _unknown_evidence_failures(
+    capacity_drives: Sequence[CapacityDrive],
+    mode: CapacityMode,
+    solver_inp: placement.SolverInput,
+) -> tuple[CapacityFailure, ...]:
+    """Project fail-closed unknown evidence onto CapacityFailure rows (evidence_code preserved)."""
+    unknown = [d for d in capacity_drives if not d.evidence.executable]
+    if not unknown:
+        unknown = list(capacity_drives)
+    rid = None
+    for req_id, cs in solver_inp.candidates.by_requirement:
+        if cs:
+            rid = req_id
+            break
+    if rid is None and solver_inp.graph.desired:
+        rid = solver_inp.graph.desired[0].requirement_id
+    out: list[CapacityFailure] = []
+    for drive in unknown:
+        # Not CAPACITY_*_SHORT — Gate-1 forbids projecting CAPACITY_EVIDENCE_UNKNOWN as a
+        # proven capacity short alone. Primary taxonomy is FailureCode.CAPACITY_EVIDENCE_UNKNOWN
+        # (not GRAPH_INVARIANT). evidence_code is the admission code when present — never a
+        # silent or-default substitute for the FailureCode.
+        out.append(CapacityFailure(
+            code=FailureCode.CAPACITY_EVIDENCE_UNKNOWN,
+            capacity_mode=mode,
+            requirement_id=rid,
+            task_ids=(),
+            target_tier=_drive_tier(drive),
+            eligible_drives=(drive.drive_label,),
+            required_bytes=0,
+            available_bytes=0,
+            safety_floor_bytes=drive.safety_floor,
+            workspace_bytes=0,
+            shortfall_bytes=0,
+            evidence=drive.free_evidence,
+            evidence_code=drive.evidence_code,
+            actions=_actions_for(drive, ("mount_or_reconcile_drive", "retry_preview")),
+        ))
+    return tuple(out)
+
+
+def _capacity_short_failures(
+    solver_inp: placement.SolverInput,
+    capacity_drives: Sequence[CapacityDrive],
+    mode: CapacityMode,
+) -> tuple[CapacityFailure, ...]:
+    """Compatibility projection for proven known-budget infeasibility (not structural/unknown).
+
+    Surfaces a single root capacity-short failure from the tightest unsatisfied candidate set so
+    legacy callers that read ``failures[0].code`` still see CAPACITY_*_SHORT. Not used for
+    PACKING_INCONCLUSIVE / CAPACITY_EVIDENCE_UNKNOWN / structural codes.
+    """
+    drive_by = {d.drive_label: d for d in capacity_drives}
+    free_map = {k: v for k, v in solver_inp.executable_budget}
+    best: CapacityFailure | None = None
+    for rid, cs in solver_inp.candidates.by_requirement:
+        if not cs:
+            continue
+        # Prefer the candidate on the roomiest drive for the diagnostic envelope.
+        ranked = sorted(
+            cs,
+            key=lambda c: (-free_map.get(c.target_drive, 0), c.target_drive),
+        )
+        c = ranked[0]
+        drive = drive_by.get(c.target_drive)
+        if drive is None:
+            continue
+        durable = (c.budget.guaranteed_durable if mode == CapacityMode.GUARANTEED
+                   else c.budget.expected_durable)
+        workspace = (c.budget.workspace_peak_guaranteed if mode == CapacityMode.GUARANTEED
+                     else c.budget.workspace_peak_expected)
+        required = durable + workspace
+        available = free_map.get(c.target_drive, 0)
+        if required <= available:
+            continue
+        code = (FailureCode.CAPACITY_DURABLE_SHORT if durable > available
+                else FailureCode.CAPACITY_WORKSPACE_SHORT)
+        failure = CapacityFailure(
+            code=code,
+            capacity_mode=mode,
+            requirement_id=rid,
+            task_ids=(f"{c.task_kind.value}:{rid}",),
+            target_tier=_drive_tier(drive),
+            eligible_drives=tuple(sorted({x.target_drive for x in cs})),
+            required_bytes=required,
+            available_bytes=available,
+            safety_floor_bytes=drive.safety_floor,
+            workspace_bytes=workspace,
+            shortfall_bytes=required - available,
+            evidence=drive.free_evidence,
+            evidence_code=drive.evidence_code,
+            actions=_actions_for(drive, ("expand_eligible_tier", "trim_selection", "change_capacity_mode")),
+            blocked_by_requirement=c.depends_on_requirement,
+        )
+        if best is None or failure.shortfall_bytes > best.shortfall_bytes:
+            best = failure
+    return (best,) if best is not None else ()
+
+
 def plan_capacity(
     con,
     result: ReconcileResult,
@@ -707,11 +1112,13 @@ def plan_capacity(
     compression_cfg: Mapping[str, object] | None = None,
     provisioning: str | None = None,
 ) -> CapacityPlan:
-    """Materialize deterministic ``tiered_v1`` assignments and feasibility evidence over the CANONICAL
-    CandidateSet (``result.candidates``). This is the legacy placement adapter (removed at #38); it makes
-    the only placement choice before #38 and is not canonical authority. Usable free comes from
-    ``evidence_by_drive`` (the shared admission authority); a drive absent from it is fail-closed
-    ``unknown`` and contributes zero executable capacity (#35-C)."""
+    """Materialize deterministic ``tiered_v2`` assignments via pure Gate-B + improve (#38).
+
+    Outer signature is preserved. Usable free and optimistic maxima come from ``evidence_by_drive``
+    (shared admission authority); a drive absent from it is fail-closed ``unknown`` with zero
+    executable capacity (#35-C). Solver bounds come from the private :func:`_adapter_solver_bounds`
+    hook (patchable in tests; not a public kwarg).
+    """
     if compression_cfg is not None:
         # #36a: candidate budgets are captured during reconcile_plan() (from PlannerInput.compression_cfg),
         # so a codec config here would be a safety-affecting no-op. Reject it loudly rather than mislead.
@@ -729,198 +1136,92 @@ def plan_capacity(
             raise ValueError("capacity_mode and deprecated provisioning disagree")
         capacity_mode = legacy
     mode = mode_from_value(capacity_mode or CapacityMode.GUARANTEED)
-    drives = inspect_drives(con, result.plan_id, evidence_by_drive=evidence_by_drive)
-    drive_by_label = {item.drive_label: item for item in drives}
-    placement = _Placement(drives, mode)
-    failures: list[CapacityFailure] = []
-    unassigned: list[_Placeable] = []
 
-    placeables = _legacy_placeables(result.candidates, drive_by_label)
-    homes = [item for item in placeables
-             if item.kind == TaskKind.FETCH and item.requirement_id.startswith("protected_home:")]
-    bulk = [item for item in placeables
-            if item.kind == TaskKind.FETCH and item.requirement_id.startswith("primary:")]
-
-    # Protected partials remain pinned to their finish-in-place target. Other protected homes share the
-    # distinguished largest-usable eligible home, preserving the legacy single-home policy.
-    for item in sorted(homes, key=lambda p: p.requirement_id):
-        if item.finish_in_place:
-            target = item.finish_in_place
-        else:
-            target = sorted(
-                item.budgets_by_target,
-                key=lambda label: (-drive_by_label[label].usable_now,
-                                   -drive_by_label[label].capacity_bytes, label),
-            )[0]
-        placement.add(item, item.budgets_by_target[target])
-
-    # Durable partials are not repacked. Unpinned bulk uses RAID-first FFD, then largest primaries.
-    pinned_bulk = [item for item in bulk if item.finish_in_place]
-    free_bulk = [item for item in bulk if not item.finish_in_place]
-    for item in sorted(pinned_bulk, key=lambda p: p.requirement_id):
-        budget = item.budgets_by_target[item.finish_in_place]
-        if placement.fits(item.finish_in_place, budget):
-            placement.add(item, budget)
-        else:
-            unassigned.append(item)
-            failures.append(_failure_for_unassigned(item, [budget], placement))
-
-    primary_order = [item.drive_label for item in sorted(
-        (drive for drive in drives if drive.role == "primary"),
-        key=lambda drive: (0 if drive.raid_backed else 1, -drive.capacity_bytes, drive.drive_label),
-    )]
-    sized_bulk = []
-    for item in free_bulk:
-        ordered = [label for label in primary_order if label in item.budgets_by_target]
-        largest = max((item.budgets_by_target[label].durable_for(mode) for label in ordered), default=0)
-        sized_bulk.append((item, ordered, largest))
-    for item, ordered, _ in sorted(sized_bulk, key=lambda entry: (-entry[2], entry[0].requirement_id)):
-        chosen = next((label for label in ordered
-                       if placement.fits(label, item.budgets_by_target[label])), None)
-        if chosen:
-            placement.add(item, item.budgets_by_target[chosen])
-        else:
-            unassigned.append(item)
-            failures.append(_failure_for_unassigned(
-                item, [item.budgets_by_target[label] for label in ordered], placement))
-
-    replicas = [item for item in placeables if item.kind == TaskKind.REPLICATE]
-    pinned_replica = [item for item in replicas if item.finish_in_place]
-    free_replica = [item for item in replicas if not item.finish_in_place]
-    for item in sorted(pinned_replica, key=lambda p: p.requirement_id):
-        budget = item.budgets_by_target[item.finish_in_place]
-        if placement.fits(item.finish_in_place, budget):
-            placement.add(item, budget)
-        else:
-            unassigned.append(item)
-            failures.append(_failure_for_unassigned(item, [budget], placement))
-
-    replica_drives = sorted(
-        (drive for drive in drives if drive.role == "replica"),
-        key=lambda drive: (drive.capacity_bytes, drive.drive_label),
+    bounds = _adapter_solver_bounds()
+    solver_inp, capacity_drives = _build_solver_input(
+        con, result, mode=mode, evidence_by_drive=evidence_by_drive, bounds=bounds,
     )
-    # Prefer the smallest single target that can accept the complete remaining replica set.
-    group_target = None
-    for drive in replica_drives:
-        budgets = [item.budgets_by_target.get(drive.drive_label) for item in free_replica]
-        if all(budget is not None for budget in budgets):
-            durable, workspace = placement.totals(drive.drive_label)
-            durable += sum(budget.durable_for(mode) for budget in budgets if budget is not None)
-            workspace = max([workspace, *(budget.workspace_for(mode) for budget in budgets if budget is not None)])
-            if durable + workspace <= drive.usable_now:
-                group_target = drive.drive_label
-                break
-    if group_target:
-        for item in sorted(free_replica, key=lambda p: p.requirement_id):
-            placement.add(item, item.budgets_by_target[group_target])
-    else:
-        sized_replica = []
-        for item in free_replica:
-            ordered = [drive.drive_label for drive in replica_drives if drive.drive_label in item.budgets_by_target]
-            largest = max((item.budgets_by_target[label].durable_for(mode) for label in ordered), default=0)
-            sized_replica.append((item, ordered, largest))
-        for item, ordered, _ in sorted(sized_replica, key=lambda entry: (-entry[2], entry[0].requirement_id)):
-            chosen = next((label for label in ordered
-                           if placement.fits(label, item.budgets_by_target[label])), None)
-            if chosen:
-                placement.add(item, item.budgets_by_target[chosen])
-            else:
-                unassigned.append(item)
-                failures.append(_failure_for_unassigned(
-                    item, [item.budgets_by_target[label] for label in ordered], placement))
 
-    # A forced protected-home assignment can exceed its tier; report it after complete ledger math.
-    ledgers = _ledgers(drives, placement.tasks)
-    failed_requirements = {item.requirement_id for item in failures}
-    for ledger in ledgers:
-        required = ledger.required_peak(mode)
-        if required <= ledger.usable_now:
-            continue
-        tasks = [item for item in placement.tasks if item.target_drive == ledger.drive_label]
-        roots = [item for item in tasks if item.requirement_id not in failed_requirements]
-        if not roots:
-            continue
-        durable = (ledger.guaranteed_durable if mode == CapacityMode.GUARANTEED
-                   else ledger.expected_durable)
-        workspace = (ledger.workspace_peak_guaranteed if mode == CapacityMode.GUARANTEED
-                     else ledger.workspace_peak_expected)
-        code = (FailureCode.CAPACITY_DURABLE_SHORT if durable > ledger.usable_now
-                else FailureCode.CAPACITY_WORKSPACE_SHORT)
-        drive = drive_by_label[ledger.drive_label]
-        failures.append(CapacityFailure(
-            code=code,
-            capacity_mode=mode,
-            requirement_id=roots[0].requirement_id,
-            task_ids=tuple(item.task_id for item in roots),
-            target_tier=_drive_tier(drive),
-            eligible_drives=(ledger.drive_label,),
-            required_bytes=required,
-            available_bytes=ledger.usable_now,
-            safety_floor_bytes=ledger.safety_floor,
-            workspace_bytes=workspace,
-            shortfall_bytes=required - ledger.usable_now,
-            evidence=ledger.free_evidence,
-            evidence_code=ledger.evidence_code,
-            actions=_actions_for(drive, ("expand_eligible_tier", "trim_selection", "change_capacity_mode")),
-        ))
-        failed_requirements.update(item.requirement_id for item in roots)
+    blocking = tuple(sorted({
+        item.code for item in result.diagnostics
+        if item.severity in {DiagnosticSeverity.BLOCKING, DiagnosticSeverity.ERROR}
+    }))
 
-    # A dependent replica's failure is deduplicated when its home is the root cause — whether the home is
-    # a capacity failure here or a blocking reconcile diagnostic (e.g. an empty-eligible TARGET_TIER_MISSING
-    # home, which #36a surfaces as a diagnostic rather than a candidate/failure).
-    root_failures = {item.requirement_id for item in failures}
-    root_failures |= {
-        item.requirement_id for item in result.diagnostics
-        if item.requirement_id and item.severity in {DiagnosticSeverity.BLOCKING, DiagnosticSeverity.ERROR}
-    }
-    failures = [
-        item for item in failures
-        if not item.blocked_by_requirement or item.blocked_by_requirement not in root_failures
-    ]
+    # Stale snapshot: candidate targets left the plan after reconcile — typed failure, no solve.
+    stale = _stale_target_failures(result, capacity_drives, mode)
+    if stale:
+        return CapacityPlan(
+            mode=mode,
+            placement_policy="tiered_v2",
+            tasks=(),
+            batch_order=(),
+            blocking_diagnostics=blocking,
+            unassigned_intents=(),
+            ledgers=_ledgers(capacity_drives, ()),
+            failures=tuple(stale),
+            gate_b_code="INFEASIBLE_UNDER_ADMISSION_BUDGET",
+            gate_b_diagnostics={"reason": "target_drive_changed"},
+            gate_b_actions=("reconcile_plan", "restore_target_drive_to_plan"),
+            derivation_mode=None,
+            solver_bound_version=placement.SOLVER_BOUND_VERSION,
+        )
 
-    # Account for EVERY desired requirement (gap #1): exactly one of satisfied / assigned / unassigned /
-    # blocking. A requirement that had canonical candidates but whose targets all left the plan between
-    # reconcile_plan() and here is a typed stale-snapshot (TARGET_DRIVE_CHANGED); a requirement blocked at
-    # candidate time is already a blocking diagnostic. Anything else unaccounted is a graph defect.
-    accounted = (
-        {item.requirement_id for item in result.candidates.satisfied}
-        | {item.requirement_id for item in placement.tasks}
-        | {item.requirement_id for item in failures}
-        | {item.requirement_id for item in unassigned}          # failed to fit (failure may be dedup'd)
-        | {item.requirement_id for item in result.candidates.blocked}
-    )
-    had_candidates = {requirement_id for requirement_id, _ in result.candidates.by_requirement}
-    for requirement in result.requirements:
-        rid = requirement.requirement_id
-        if rid in accounted:
-            continue
-        stale = rid in had_candidates
-        is_replica = rid.startswith("protected_replica:")
-        failures.append(CapacityFailure(
-            code=FailureCode.TARGET_DRIVE_CHANGED if stale else FailureCode.GRAPH_INVARIANT,
-            capacity_mode=mode,
-            requirement_id=rid,
-            task_ids=(f"{'replicate' if is_replica else 'fetch'}:{rid}",),
-            target_tier=("replica" if is_replica else "primary"),
-            eligible_drives=requirement.eligible_drives,
-            required_bytes=0, available_bytes=0, safety_floor_bytes=0, workspace_bytes=0,
-            shortfall_bytes=0, evidence=None,
-            actions=(("reconcile_plan", "restore_target_drive_to_plan") if stale
-                     else ("inspect_integrity",)),
-        ))
+    gate = placement.gate_b(solver_inp)
+    diag = _diagnostics_for_serialize(gate.diagnostics)
+    actions = tuple(gate.actions) if gate.actions else ()
+    code = gate.code
 
-    placement.tasks.sort(key=lambda item: (item.target_drive, item.kind.value, item.requirement_id))
-    failures.sort(key=lambda item: (item.code.value, item.requirement_id or ""))
+    # gate_b_code is the pure Gate-B / structural ladder only — never a reconcile diagnostic
+    # (e.g. MANIFEST_POLICY). Reconcile blockers live on blocking_diagnostics; feasible already
+    # requires gate_b_code == FEASIBLE and not blocking_diagnostics (evidence levels stay separate).
+
+    if code != "FEASIBLE":
+        # Graded non-feasible: no executable tasks.
+        # - proven known-budget infeasibility → CAPACITY_*_SHORT compatibility projection
+        # - CAPACITY_EVIDENCE_UNKNOWN → typed unknown evidence on failures (fail-closed seam)
+        # - structural → one CapacityFailure row so library/CLI projections still see a root cause
+        # - packing-inconclusive → no false proven-short failures
+        failures: tuple[CapacityFailure, ...] = ()
+        if code == "INFEASIBLE_UNDER_ADMISSION_BUDGET":
+            failures = _capacity_short_failures(solver_inp, capacity_drives, mode)
+        elif code == "CAPACITY_EVIDENCE_UNKNOWN":
+            failures = _unknown_evidence_failures(capacity_drives, mode, solver_inp)
+        elif code in {
+            "TARGET_TIER_MISSING", "UNPROVEN_PROVENANCE", "REQUIREMENT_EXCEEDS_USABLE_MAX",
+            "FAILURE_DOMAIN_UNSATISFIABLE", "GRAPH_DEPENDENCY_INVARIANT",
+        }:
+            failures = _structural_failure_projection(code, gate, mode, capacity_drives)
+        return CapacityPlan(
+            mode=mode,
+            placement_policy="tiered_v2",
+            tasks=(),
+            batch_order=(),
+            blocking_diagnostics=blocking,
+            unassigned_intents=(),
+            ledgers=_ledgers(capacity_drives, ()),
+            failures=failures,
+            gate_b_code=code,
+            gate_b_diagnostics=diag,
+            gate_b_actions=actions,
+            derivation_mode=None,
+            solver_bound_version=gate.solver_bound_version,
+        )
+
+    # FEASIBLE → deterministic improve (emergency monitor is shell-owned; none here yet).
+    improved = placement.improve(solver_inp, gate.assignment, emergency=None)
+    tasks = _project_assigned_tasks(improved.assignment, result.candidates)
     return CapacityPlan(
         mode=mode,
-        placement_policy="tiered_v1",
-        tasks=tuple(placement.tasks),
-        batch_order=_batch_order(placement.tasks, result),
-        blocking_diagnostics=tuple(sorted({
-            item.code for item in result.diagnostics
-            if item.severity in {DiagnosticSeverity.BLOCKING, DiagnosticSeverity.ERROR}
-        })),
-        unassigned_intents=tuple(sorted(unassigned, key=lambda item: item.requirement_id)),
-        ledgers=ledgers,
-        failures=tuple(failures),
+        placement_policy="tiered_v2",
+        tasks=tasks,
+        batch_order=_batch_order(tasks, result),
+        blocking_diagnostics=blocking,
+        unassigned_intents=(),
+        ledgers=_ledgers(capacity_drives, tasks),
+        failures=(),
+        gate_b_code="FEASIBLE",
+        gate_b_diagnostics=None,
+        gate_b_actions=(),
+        derivation_mode=improved.derivation_mode,
+        solver_bound_version=improved.solver_bound_version,
     )

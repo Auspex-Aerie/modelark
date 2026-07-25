@@ -141,6 +141,11 @@ def test_manifest_policy_diagnostic_makes_shadow_capacity_infeasible():
     result = capacity.plan_capacity(con, graph)
     assert result.blocking_diagnostics == ("MANIFEST_POLICY",)
     assert not result.feasible
+    # Evidence levels stay separate: gate_b_code is the pure ladder (empty placeable set packs as
+    # FEASIBLE); MANIFEST_POLICY stays on blocking_diagnostics — never copied into gate_b_code.
+    assert result.gate_b_code == "FEASIBLE"
+    assert result.gate_b_code not in result.blocking_diagnostics
+    assert not result.tasks
 
 
 def test_workspace_short_is_distinct_from_durable_short():
@@ -259,7 +264,13 @@ def test_file_preflight_is_exact_at_workspace_boundary():
     assert failure.shortfall_bytes == 1
 
 
-def test_tiered_v1_is_deterministic_raid_first_and_smallest_replica():
+def test_tiered_v2_is_deterministic_and_lexicographic():
+    """#38: tiered_v2 replaces RAID-first FFD with deterministic Gate-B + lex improve.
+
+    Pins the exact assignment this fixture produces under movement ≻ free-vector ≻ idle ≻
+    canonical (lex objectives are proven in pure Gate-1 contracts; this freezes the adapter
+    projection for a multi-drive mixed home/bulk/replica plan).
+    """
     con = _mem()
     _drive(con, "raid", raid=True, capacity_bytes=4_000)
     _drive(con, "primary-big", capacity_bytes=3_000)
@@ -273,14 +284,18 @@ def test_tiered_v1_is_deterministic_raid_first_and_smallest_replica():
     first = capacity.plan_capacity(con, graph)
     second = capacity.plan_capacity(con, graph)
     assert first.to_dict() == second.to_dict()
+    assert first.placement_policy == "tiered_v2"
+    assert first.feasible and first.gate_b_code == "FEASIBLE"
+    assert first.derivation_mode == "optimized"
     targets = {item.requirement_id: item.target_drive for item in first.tasks}
-    assert targets["protected_home:org/protected"] == "raid"
-    assert targets["primary:org/bulk-a"] == "raid"
-    assert targets["primary:org/bulk-b"] == "raid"
-    assert targets["protected_replica:org/protected"] == "replica-small"
-    assert first.batch_order == ("raid", "replica-small")
-    shadow = reconcile.shadow_report(con, "ark")
-    assert shadow["placement_comparison"]["target_equivalent"] is True
+    # Exact pins (measured under tiered_v2 lex improve — not membership ranges).
+    assert targets == {
+        "protected_home:org/protected": "raid",
+        "protected_replica:org/protected": "replica-small",
+        "primary:org/bulk-a": "primary-small",
+        "primary:org/bulk-b": "primary-small",
+    }
+    assert first.batch_order == ("raid", "primary-small", "replica-small")
 
 
 def test_portal_shadow_explain_uses_dedicated_read_only_connection():
@@ -294,7 +309,7 @@ def test_portal_shadow_explain_uses_dedicated_read_only_connection():
         result = plan_api.shadow_explain()
     connect.assert_called_once_with(read_only=True)
     forbidden_lock.__enter__.assert_not_called()
-    assert result["capacity"]["placement_policy"] == "tiered_v1"
+    assert result["capacity"]["placement_policy"] == "tiered_v2"
 
 
 def test_portal_shadow_explain_returns_typed_phase2_error_and_closes_connection():
@@ -326,9 +341,12 @@ def test_shadow_comparison_never_normalizes_away_changed_target():
         report = reconcile.shadow_report(con, "ark")
     comparison = report["placement_comparison"]
     assert comparison["target_equivalent"] is False
+    # Exact mismatch row: legacy librarian forced wrong-primary; tiered_v2 places on raid.
+    # Both tiered_v2 (canonical) and tiered_v1 (one-release alias) keys are required.
     assert comparison["target_mismatches"] == [{
         "requirement_id": "primary:org/model",
         "legacy": "wrong-primary",
+        "tiered_v2": "raid",
         "tiered_v1": "raid",
     }]
 

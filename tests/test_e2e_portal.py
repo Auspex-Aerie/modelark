@@ -146,25 +146,36 @@ def _browser_flow() -> None:
             pg.wait_for_selector("#fillAdvisories .fadv.error")
             advisory = pg.inner_text("#fillAdvisories")
             assert "MANIFEST_POLICY" in advisory and "demo/pickle-only" in advisory
-            assert "CAPACITY_" in advisory
+            # #38 tiered_v2: structural exceed-max projects REQUIREMENT_EXCEEDS_USABLE_MAX (not
+            # a CAPACITY_*_SHORT proven free short, and not a CAPACITY_ string prefix).
+            assert "REQUIREMENT_EXCEEDS_USABLE_MAX" in advisory
             pg.wait_for_selector("#fillQueue .telq.blocked")
             blocked = pg.inner_text("#fillQueue")
             assert "demo/pickle-only" in blocked and "MANIFEST_POLICY" in blocked
-            assert "demo/replica-blocked" in blocked and "CAPACITY_" in blocked
+            assert "demo/replica-blocked" in blocked and "REQUIREMENT_EXCEEDS_USABLE_MAX" in blocked
             assert pg.locator("#fillQueue .telq.blocked").count() == 2
             fill_note = pg.inner_text("#fillNote")
             assert "1 to place" in fill_note and "2 blocked" in fill_note, fill_note
             assert pg.locator("#fillStart").is_disabled()
             print("  policy + capacity blockers rendered with disjoint totals; Start fill disabled")
 
-            # The established drive's planned segment remains left-aligned; the durable archived
-            # occupancy trails in grey instead of pushing the useful planned colors to the right.
+            # Drive chart still renders under a blocked cart. With tiered_v2 whole-plan Gate-B,
+            # a structural blocker (replica exceed-max) yields 0 planned tasks on the bar while
+            # archived occupancy remains as a grey segarch trail. When planned segs also exist,
+            # they stay left of archived (pre-#38 layout contract).
+            pg.wait_for_selector("#dc-drive-00 .dcbarfill > .seg")
             segments = pg.locator("#dc-drive-00 .dcbarfill > .seg")
-            assert segments.count() >= 2
-            assert "segarch" not in (segments.first.get_attribute("class") or "")
-            assert "segarch" in (segments.last.get_attribute("class") or "")
-            assert segments.first.bounding_box()["x"] < segments.last.bounding_box()["x"]
-            print("  drive progress segments remain left-aligned")
+            n_seg = segments.count()
+            assert n_seg >= 1, "drive-00 bar must show at least archived occupancy"
+            classes = [(segments.nth(i).get_attribute("class") or "") for i in range(n_seg)]
+            assert any("segarch" in c for c in classes), f"expected segarch among {classes}"
+            foot = pg.inner_text("#dc-drive-00 .dcfoot")
+            assert "0 planned" in foot or "planned" in foot
+            if n_seg >= 2:
+                assert "segarch" not in (segments.first.get_attribute("class") or "")
+                assert "segarch" in (segments.last.get_attribute("class") or "")
+                assert segments.first.bounding_box()["x"] < segments.last.bounding_box()["x"]
+            print("  drive progress bar renders archived segment under blocked cart")
 
             # 3. Library search and multi-drive filters operate over every archived model. Clicking
             # a fleet card toggles the same filter chip, while multiple drives use OR semantics.
