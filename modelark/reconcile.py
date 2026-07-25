@@ -224,7 +224,8 @@ def _drive_facts(con, plan_id: str) -> tuple[DriveFact, ...]:
         "SELECT d.drive_label,coalesce(d.role,'primary'),coalesce(d.raid_backed,0),"
         "coalesce(d.capacity_bytes,d.free_bytes,0),"
         "coalesce(d.filesystem_capacity_bytes,d.capacity_bytes,0),coalesce(d.identity_epoch,1),"
-        "d.fs_uuid,d.annex_uuid,d.serial "
+        "d.fs_uuid,d.annex_uuid,d.serial,"
+        "coalesce(d.lifecycle,'active'),coalesce(d.eligibility,'enabled') "
         "FROM plan_drives pd JOIN drives d USING(drive_label) WHERE pd.plan_id=? "
         "ORDER BY d.drive_label",
         [plan_id],
@@ -234,6 +235,7 @@ def _drive_facts(con, plan_id: str) -> tuple[DriveFact, ...]:
             drive_label=row[0], role=row[1], raid_backed=bool(row[2]),
             capacity_bytes=int(row[3] or 0), filesystem_capacity_bytes=int(row[4] or 0),
             identity_epoch=int(row[5] or 1), fs_uuid=row[6], annex_uuid=row[7], serial=row[8],
+            lifecycle=row[9], eligibility=row[10],
         )
         for row in rows
     )

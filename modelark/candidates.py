@@ -49,6 +49,9 @@ class DriveFact:
     fs_uuid: str | None = None
     annex_uuid: str | None = None
     serial: str | None = None
+    # Catalog v4 (#37): orthogonal durable axes. Defaults match schema migration safe defaults.
+    lifecycle: str = "active"       # active | lost | retired
+    eligibility: str = "enabled"    # enabled | excluded
 
 
 @dataclass(frozen=True)
@@ -172,17 +175,66 @@ class PlannerInput:
 
 
 # ------------------------------------------------------------------------------------------------
+# Lifecycle × eligibility helpers (#37)
+# ------------------------------------------------------------------------------------------------
+def _is_placeable(drive: DriveFact) -> bool:
+    """New placement / finish-in-place writes require active + enabled."""
+    return drive.lifecycle == "active" and drive.eligibility == "enabled"
+
+
+def _is_satisfying(drive: DriveFact) -> bool:
+    """Verified complete copies count on any active drive (enabled or excluded)."""
+    return drive.lifecycle == "active"
+
+
+def _satisfaction_pool(req: CopyRequirement, by_label: dict[str, DriveFact]) -> tuple[str, ...]:
+    """Role-tier drives that may satisfy ``req`` — lifecycle-active only; eligibility unrestricted.
+
+    Placement targets remain ``req.eligible_drives`` (placeable-only from :func:`requirements`).
+    """
+    order = sorted(by_label)
+    active_primary = tuple(
+        label for label in order
+        if by_label[label].role == "primary" and _is_satisfying(by_label[label])
+    )
+    active_raids = tuple(label for label in active_primary if by_label[label].raid_backed)
+    active_replicas = tuple(
+        label for label in order
+        if by_label[label].role == "replica" and _is_satisfying(by_label[label])
+    )
+    if req.kind == RequirementKind.PRIMARY:
+        return active_primary
+    if req.kind == RequirementKind.PROTECTED_HOME:
+        # RAID homes when any active RAID primary exists; else any active primary (no-RAID fleet).
+        return active_raids if active_raids else active_primary
+    if req.kind == RequirementKind.PROTECTED_REPLICA:
+        return active_replicas
+    return ()
+
+
+# ------------------------------------------------------------------------------------------------
 # Requirements
 # ------------------------------------------------------------------------------------------------
 def requirements(inp: PlannerInput) -> RequirementGraph:
     """Desired copy set: numcopies<2 → one primary copy; numcopies≥2 → a protected home plus an
     independent replica. Home eligibility is RAID-backed primaries, or (no-RAID fallback for this slice)
-    the single largest primary. Only repositories with a supported manifest yield requirements."""
+    the single largest primary. Only repositories with a supported manifest yield requirements.
+
+    ``eligible_drives`` lists **placeable** targets only (active+enabled). Satisfaction may still
+    use active+excluded complete copies via :func:`candidates` satisfaction pool.
+    """
     by_label = {d.drive_label: d for d in inp.drives}
     order = sorted(by_label)
-    primary = tuple(label for label in order if by_label[label].role == "primary")
+    # Fresh placement / fallback selection never targets non-placeable drives (#37).
+    primary = tuple(
+        label for label in order
+        if by_label[label].role == "primary" and _is_placeable(by_label[label])
+    )
     raids = tuple(label for label in primary if by_label[label].raid_backed)
-    replicas = tuple(label for label in order if by_label[label].role == "replica")
+    replicas = tuple(
+        label for label in order
+        if by_label[label].role == "replica" and _is_placeable(by_label[label])
+    )
     fallback: tuple[str, ...] = ()
     if not raids and primary:
         fallback = (sorted(primary, key=lambda label: (-by_label[label].capacity_bytes, label))[0],)
@@ -246,7 +298,8 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
     manifests = dict(inp.manifests)
     cfg = dict(inp.compression_cfg)
     ratio = inp.float_ratio
-    eligible_all = {d.drive_label for d in inp.drives}
+    by_label = {d.drive_label: d for d in inp.drives}
+    known_labels = set(by_label)
     archived: dict[tuple[str, str], dict[str, ArchivedFileFact]] = {}
     for row in inp.archived:
         archived.setdefault((row.repo_id, row.drive_label), {})[row.rfilename] = row
@@ -259,11 +312,14 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
 
     for req in graph.desired:
         manifest = manifests[req.repo_id]
-        eligible = req.eligible_drives
+        # Placeable write targets (active+enabled, role-filtered by requirements).
+        place_pool = set(req.eligible_drives)
+        # Satisfaction may also use active+excluded complete copies on the same role tier.
+        sat_pool = _satisfaction_pool(req, by_label)
 
         complete: list[tuple[str, tuple[ReusableFile, ...]]] = []
         valid: list[tuple[str, tuple[ReusableFile, ...], tuple[archive_manifest.ManifestFile, ...]]] = []
-        for label in eligible:
+        for label in sat_pool:
             rows = archived.get((req.repo_id, label), {})
             reused: list[ReusableFile] = []
             missing: list[archive_manifest.ManifestFile] = []
@@ -275,18 +331,24 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
                 elif verdict == "proven":
                     reused.append(_reusable(mf, rows[mf.rfilename]))
                 else:
-                    drift.append(DriftRow(req.requirement_id, label, mf.rfilename, "unproven_provenance"))
+                    # Unproven on a placeable target is drift + omit; on excluded/non-placeable,
+                    # still omit from satisfaction but only drift placeable overwrites.
+                    if label in place_pool:
+                        drift.append(DriftRow(
+                            req.requirement_id, label, mf.rfilename, "unproven_provenance"))
                     target_blocked = True
             if target_blocked:
-                continue                                   # target omitted — never overwrite an unproven row
+                continue                                   # never overwrite an unproven row
             reused_t = tuple(sorted(reused, key=lambda item: item.rfilename))
             if missing:
-                valid.append((label, reused_t, tuple(sorted(missing, key=lambda item: item.rfilename))))
+                # Finish-in-place / fresh write targets must be placeable (active+enabled).
+                if label in place_pool:
+                    valid.append((label, reused_t, tuple(sorted(missing, key=lambda item: item.rfilename))))
             else:
                 complete.append((label, reused_t))
 
-        # Wrong-tier: a proven-complete copy on a non-eligible drive is drift, not a relocation candidate.
-        for label in sorted(eligible_all - set(eligible)):
+        # Wrong-tier: a proven-complete copy outside the satisfaction pool is drift, not relocation.
+        for label in sorted(known_labels - set(sat_pool)):
             rows = archived.get((req.repo_id, label), {})
             if rows and all(_proof(mf, rows.get(mf.rfilename)) == "proven" for mf in manifest):
                 for mf in manifest:
@@ -301,7 +363,7 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
             continue
 
         cands: list[Candidate] = []
-        sources = _home_sources(req, reqs_by_id, manifest, archived) \
+        sources = _home_sources(req, reqs_by_id, manifest, archived, by_label) \
             if req.kind == RequirementKind.PROTECTED_REPLICA else ()
         for label, reused, missing in valid:
             if req.kind == RequirementKind.PROTECTED_REPLICA:
@@ -319,7 +381,7 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
         else:
             # No satisfying copy and no valid candidate: an eligible drive that produced no candidate did
             # so only because an unproven/mismatched required row omitted it. Account it as blocked.
-            reason = "no_eligible_tier" if not eligible else "all_targets_unproven"
+            reason = "no_eligible_tier" if not place_pool else "all_targets_unproven"
             blocked.append(BlockedRequirement(req.requirement_id, reason))
 
     satisfied.sort(key=lambda item: item.requirement_id)
@@ -329,12 +391,13 @@ def candidates(inp: PlannerInput, graph: RequirementGraph) -> CandidateSet:
     return CandidateSet(tuple(satisfied), tuple(by_requirement), tuple(drift), tuple(blocked))
 
 
-def _home_sources(req, reqs_by_id, manifest, archived) -> tuple[SourceIdentity, ...]:
+def _home_sources(req, reqs_by_id, manifest, archived, by_label) -> tuple[SourceIdentity, ...]:
+    """Replica SourceIdentity from active complete homes — includes active+excluded; never lost/retired."""
     home = reqs_by_id.get(req.independent_of)
     if home is None:
         return ()
     sources: list[SourceIdentity] = []
-    for label in home.eligible_drives:
+    for label in _satisfaction_pool(home, by_label):
         rows = archived.get((req.repo_id, label), {})
         if rows and all(_proof(mf, rows.get(mf.rfilename)) == "proven" for mf in manifest):
             key = orig = None
