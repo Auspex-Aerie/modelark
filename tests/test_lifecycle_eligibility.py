@@ -490,12 +490,72 @@ def test_queue_completion_agrees_with_canonical_satisfaction():
 # --------------------------------------------------------------------------------------------------
 # Reconcile → Gate-B fail-closed on state change
 # --------------------------------------------------------------------------------------------------
-def test_reconcile_to_gate_b_fails_closed_when_drive_becomes_ineligible():
-    """If a drive is retired after reconcile capture, plan_capacity must not assign tasks."""
+def test_drive_facts_capture_excluded_member_exactly():
+    """_drive_facts / reconcile capture eligibility+lifecycle; excluded complete copy satisfies,
+    but is never a fresh placement target."""
     con = _mem()
     dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
     if not {"lifecycle", "eligibility"} <= dcols:
         raise AssertionError("v4 columns missing (expected Gate-1 red)")
+    con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/m',1)")
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
+        "VALUES('org/m','model.safetensors',100,'safetensors','bf16',?)", [HW])
+    con.execute("INSERT INTO selection(repo_id,finalized_at) VALUES('org/m','2026-01-01')")
+    _insert_drive(con, "ex", lifecycle="active", eligibility="excluded")
+    _insert_drive(con, "en", lifecycle="active", eligibility="enabled")
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,orig_sha256,orig_bytes,stored_bytes,compressed) "
+        "VALUES('org/m','model.safetensors','ex',?,100,100,0)", [HW])
+    plan.create(con, "ark", name="Ark")
+    plan.add_drive(con, "ark", "ex")  # existing plan member
+    plan.add_drive(con, "ark", "en")
+    facts = reconcile._drive_facts(con, "ark")
+    by_label = {f.drive_label: f for f in facts}
+    assert "ex" in by_label and "en" in by_label
+    assert getattr(by_label["ex"], "lifecycle") == "active"
+    assert getattr(by_label["ex"], "eligibility") == "excluded"
+    assert getattr(by_label["en"], "lifecycle") == "active"
+    assert getattr(by_label["en"], "eligibility") == "enabled"
+    graph = reconcile.reconcile_plan(con, "ark")
+    sat = {s.requirement_id for s in graph.candidates.satisfied}
+    assert "primary:org/m" in sat, "active+excluded complete copy must satisfy via capture"
+    # No unsatisfied placement targeting the excluded member.
+    for rid, cs in graph.candidates.by_requirement:
+        assert "ex" not in {c.target_drive for c in cs}, (
+            f"{rid} must not place onto excluded drive; targets={[c.target_drive for c in cs]}")
+
+
+def test_plan_capacity_counts_only_active_enabled_members():
+    """plan.capacity() usable fleet must ignore excluded/lost/retired historical members."""
+    con = _mem()
+    dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
+    if not {"lifecycle", "eligibility"} <= dcols:
+        raise AssertionError("v4 columns missing (expected Gate-1 red)")
+    # Equal nominal capacity so the active+enabled subset is a clean fraction of the all-members sum.
+    for lab, lc, el in (
+        ("en", "active", "enabled"),
+        ("ex", "active", "excluded"),
+        ("lost", "lost", "enabled"),
+        ("ret", "retired", "enabled"),
+    ):
+        _insert_drive(con, lab, lifecycle=lc, eligibility=el)
+        con.execute(
+            "UPDATE drives SET capacity_bytes=1000, free_bytes=1000 WHERE drive_label=?", [lab])
+    plan.create(con, "ark", name="Ark")
+    for lab in ("en", "ex", "lost", "ret"):
+        plan.add_drive(con, "ark", lab)
+    usable = plan.capacity(con, "ark")
+    # Only "en" contributes: capacity 1000 − headroom(1000, False).
+    only_en = plan._headroom(1000, False)
+    expected = max(0, 1000 - only_en)
+    assert usable == expected, (
+        f"plan.capacity must count only active+enabled members; got {usable}, expected {expected} "
+        f"(all four members would be ~{4 * expected})")
+
+
+def _gate_b_post_capture_state_change(con, *, column: str, value: str):
+    """Shared race: capture reconcile, mutate drive state, plan_capacity must not assign."""
     con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/m',1)")
     con.execute(
         "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
@@ -504,19 +564,44 @@ def test_reconcile_to_gate_b_fails_closed_when_drive_becomes_ineligible():
     _insert_drive(con, "d0", lifecycle="active", eligibility="enabled")
     plan.bootstrap(con, "ark")
     graph = reconcile.reconcile_plan(con, "ark")
-    # Drive becomes retired after reconcile snapshot — revalidation must not place.
-    con.execute("UPDATE drives SET lifecycle='retired' WHERE drive_label='d0'")
+    con.execute(f"UPDATE drives SET {column}=? WHERE drive_label='d0'", [value])
     from modelark import capacity_evidence
     evidence = {
         "d0": capacity_evidence.Evidence(
             kind="live", executable=True, admissible_free=10**9,
             optimistic_usable_max=10**9, observed_free=10**9),
     }
-    result = capacity.plan_capacity(con, graph, evidence_by_drive=evidence)
+    return capacity.plan_capacity(con, graph, evidence_by_drive=evidence)
+
+
+def test_reconcile_to_gate_b_fails_closed_when_drive_is_retired():
+    """If a drive is retired after reconcile capture, plan_capacity must not assign tasks."""
+    con = _mem()
+    dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
+    if not {"lifecycle", "eligibility"} <= dcols:
+        raise AssertionError("v4 columns missing (expected Gate-1 red)")
+    result = _gate_b_post_capture_state_change(con, column="lifecycle", value="retired")
     assert result.feasible is False, (
         f"retired post-reconcile must be non-feasible; gate={getattr(result, 'gate_b_code', None)}")
     assert result.tasks == (), "must not expose executable tasks after fail-closed revalidation"
-    # Prefer typed fail-closed for membership/target invalidation after snapshot.
+    gate = getattr(result, "gate_b_code", None)
+    fail_codes = {
+        (f.code.value if hasattr(f.code, "value") else str(f.code)) for f in result.failures
+    }
+    assert gate == "TARGET_DRIVE_CHANGED" or "TARGET_DRIVE_CHANGED" in fail_codes, (
+        f"expected TARGET_DRIVE_CHANGED pin; gate={gate!r} failures={fail_codes}")
+
+
+def test_reconcile_to_gate_b_fails_closed_when_drive_becomes_excluded():
+    """Eligibility flip to excluded after capture must also fail closed (no new placement tasks)."""
+    con = _mem()
+    dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
+    if not {"lifecycle", "eligibility"} <= dcols:
+        raise AssertionError("v4 columns missing (expected Gate-1 red)")
+    result = _gate_b_post_capture_state_change(con, column="eligibility", value="excluded")
+    assert result.feasible is False, (
+        f"excluded post-reconcile must be non-feasible; gate={getattr(result, 'gate_b_code', None)}")
+    assert result.tasks == (), "must not place onto a drive that lost eligibility after capture"
     gate = getattr(result, "gate_b_code", None)
     fail_codes = {
         (f.code.value if hasattr(f.code, "value") else str(f.code)) for f in result.failures

@@ -302,6 +302,32 @@ def test_newer_catalog_rejection_uses_schema_version_plus_one(tmp_path):
     raw.close()
 
 
+def test_fresh_drive_insert_defaults_to_active_enabled(tmp_path):
+    """Schema defaults (and thus registration upserts that omit the columns) → exactly active+enabled.
+
+    Does NOT pass lifecycle/eligibility in the INSERT — only the durable defaults may supply them.
+    """
+    _seed_v3(tmp_path)
+    con = db.connect()
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 4, (
+        "v4 schema required for default pins (expected Gate-1 red)")
+    dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
+    assert {"lifecycle", "eligibility"} <= dcols
+    # Omit the new columns entirely — registration-style minimal insert.
+    con.execute(
+        "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed) "
+        "VALUES('fresh-drive',2000,1500,'primary',0)")
+    row = con.execute(
+        "SELECT lifecycle, eligibility FROM drives WHERE drive_label='fresh-drive'").fetchone()
+    assert row == ("active", "enabled"), (
+        f"fresh drive without explicit lifecycle/eligibility must default to active+enabled; got {row}")
+    # Migrated pre-existing row also still active+enabled.
+    assert con.execute(
+        "SELECT lifecycle, eligibility FROM drives WHERE drive_label='drive-00'"
+    ).fetchone() == ("active", "enabled")
+    con.close()
+
+
 def main():
     import inspect
     import tempfile
