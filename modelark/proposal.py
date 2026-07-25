@@ -189,13 +189,43 @@ def _selected_repos(con, mutation: tuple) -> list[str]:
         "ORDER BY repo_id").fetchall()]
 
 
-def _complete_archived_plan_drives(con, repo_id: str, plan_labels: set[str]) -> list[str]:
-    """Plan-member drives holding a *complete* archived copy of every catalog file for ``repo_id``.
+def _archived_matches_manifest(
+    *,
+    file_sha256: str | None,
+    file_size: int | None,
+    arch_sha256: str | None,
+    arch_bytes: int | None,
+) -> bool:
+    """Content-aware match of one archived row against the current files manifest.
 
-    A partial archive (some but not all rfilenames) does not satisfy a durability copy.
+    Filename presence alone is not enough: a same-name refresh of hash/size must not
+    count as a durable baseline copy of the *current* catalog content.
     """
-    needed = [r[0] for r in con.execute(
-        "SELECT rfilename FROM files WHERE repo_id=? ORDER BY rfilename", [repo_id]).fetchall()]
+    # Prefer hash identity when the catalog has one.
+    if file_sha256:
+        if not arch_sha256 or arch_sha256 != file_sha256:
+            return False
+    # Size must agree when both sides record it.
+    if file_size is not None and arch_bytes is not None:
+        if int(file_size) != int(arch_bytes):
+            return False
+    # Catalog size known but archive has no size *and* no hash proof → unproven.
+    if file_size is not None and arch_bytes is None and not (file_sha256 and arch_sha256):
+        return False
+    # Catalog hash known was already enforced above; no further identity required.
+    return True
+
+
+def _complete_archived_plan_drives(con, repo_id: str, plan_labels: set[str]) -> list[str]:
+    """Plan-member drives holding a *content-complete* archive of every current catalog file.
+
+    Requires every ``files`` row to have a matching ``archived`` row on that drive whose
+    durable identity agrees with the current manifest (orig_sha256 / orig_bytes vs
+    files.sha256 / size_bytes). Filename-only matches do not satisfy numcopies.
+    """
+    needed = list(con.execute(
+        "SELECT rfilename, size_bytes, sha256 FROM files WHERE repo_id=? ORDER BY rfilename",
+        [repo_id]).fetchall())
     if not needed:
         # No catalog files → treat any archived presence on a plan drive as complete.
         rows = con.execute(
@@ -204,10 +234,25 @@ def _complete_archived_plan_drives(con, repo_id: str, plan_labels: set[str]) -> 
         return [r[0] for r in rows if r[0] in plan_labels]
     complete = []
     for label in sorted(plan_labels):
-        have = {r[0] for r in con.execute(
-            "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
-            [repo_id, label]).fetchall()}
-        if all(name in have for name in needed):
+        rows = con.execute(
+            "SELECT rfilename, orig_bytes, orig_sha256 FROM archived "
+            "WHERE repo_id=? AND drive_label=?",
+            [repo_id, label]).fetchall()
+        by_name = {r[0]: (r[1], r[2]) for r in rows}
+        ok = True
+        for rfilename, size_bytes, sha256 in needed:
+            if rfilename not in by_name:
+                ok = False
+                break
+            arch_bytes, arch_sha = by_name[rfilename]
+            if not _archived_matches_manifest(
+                    file_sha256=sha256,
+                    file_size=int(size_bytes) if size_bytes is not None else None,
+                    arch_sha256=arch_sha,
+                    arch_bytes=int(arch_bytes) if arch_bytes is not None else None):
+                ok = False
+                break
+        if ok:
             complete.append(label)
     return complete
 
