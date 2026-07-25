@@ -237,12 +237,16 @@ def _admissible_from_drive_row(drive_row: tuple) -> int:
     return max(0, free_b - floor)
 
 
-def _task_charge(task: Mapping) -> int:
-    """Bytes charged against a target drive for one executable task.
+def _repo_workspace_peak(con, repo_id: str) -> int:
+    """Conservative peak workspace for one repo placement without reading compression config.
 
-    Workspace peak is not yet modeled in this cut (0); charge is guaranteed durable only.
+    Peak staging bound = largest catalog file size (a full-file workspace upper bound).
+    Durable bytes remain the sum of sizes; only durable permanently depletes free.
     """
-    return int(task.get("guaranteed_durable") or 0) + int(task.get("workspace_peak") or 0)
+    row = con.execute(
+        "SELECT coalesce(max(size_bytes), 0) FROM files WHERE repo_id=?",
+        [repo_id]).fetchone()
+    return int(row[0] or 0)
 
 
 def _admissible_map_from_drives(drives: Sequence[tuple]) -> dict[str, int]:
@@ -266,10 +270,14 @@ def joint_capacity_shortfall(
     tasks: Sequence[Mapping],
     remaining_by_drive: Mapping[str, int],
 ) -> dict | None:
-    """Joint assignment check: charge executable tasks in stable order against remaining free.
+    """Joint assignment check in stable order.
 
-    Returns None if the whole assignment fits; otherwise a shortfall evidence dict.
-    Baseline-satisfied tasks do not charge capacity. Mutates a local copy of remaining only.
+    For each executable task against current remaining free:
+      required_peak = guaranteed_durable + workspace_peak
+      if required_peak > remaining → shortfall
+      remaining -= guaranteed_durable   # workspace is transient; only durable depletes
+
+    Baseline-satisfied tasks do not charge. Returns None if the whole assignment fits.
     """
     remaining = {k: int(v) for k, v in remaining_by_drive.items()}
     ordered = sorted(
@@ -283,26 +291,28 @@ def joint_capacity_shortfall(
                 "reason": "missing_target",
                 "requirement_id": t.get("requirement_id"),
             }
-        charge = _task_charge(t)
-        if charge <= 0:
-            continue
+        durable = int(t.get("guaranteed_durable") or 0)
+        workspace = int(t.get("workspace_peak") or 0)
+        peak = durable + workspace
         have = remaining.get(label)
         if have is None:
             return {
                 "reason": "unknown_drive",
                 "drive": label,
                 "requirement_id": t.get("requirement_id"),
-                "need": charge,
+                "need": peak,
             }
-        if charge > have:
+        if peak > have:
             return {
                 "reason": "capacity_overcommit",
                 "drive": label,
                 "requirement_id": t.get("requirement_id"),
-                "need": charge,
+                "need": peak,
+                "durable": durable,
+                "workspace_peak": workspace,
                 "remaining": have,
             }
-        remaining[label] = have - charge
+        remaining[label] = have - durable
     return None
 
 
@@ -357,6 +367,7 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
             [repo]).fetchone()
         nc = int((nrow[0] if nrow else 1) or 1)
         size = _repo_size(con, repo)
+        workspace = _repo_workspace_peak(con, repo)
         mh = _manifest_hash(con, repo)
         # Complete archives on placeable plan members only (partial ≠ baseline-satisfied).
         satisfied = _complete_archived_plan_drives(con, repo, plan_labels)[:nc]
@@ -379,6 +390,7 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
                 "order_key": order,
                 "guaranteed_durable": size,
                 "expected_durable": size,
+                "workspace_peak": 0,
                 "identity_epoch": epoch,
             })
             used.add(label)
@@ -391,16 +403,17 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
             gate = "INFEASIBLE"
         if size >= 10**14:
             gate = "INFEASIBLE"
+        peak_need = size + workspace
         for j in range(need):
             copy_i += 1
             order += 1
             rid = _requirement_id(copy_i, nc, repo)
             label, epoch = None, None
             if free_drives:
-                # Prefer a still-unused drive that still has joint remaining ≥ size.
+                # Prefer a still-unused drive whose remaining free covers durable+workspace peak.
                 pick = None
                 for d in free_drives:
-                    if remaining.get(d[0], 0) >= size:
+                    if remaining.get(d[0], 0) >= peak_need:
                         pick = d
                         break
                 if pick is None:
@@ -410,11 +423,11 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
                     gate = "INFEASIBLE"
                 free_drives.remove(pick)
                 label, epoch = pick[0], int(pick[1])
-                charge = size  # workspace_peak=0 in this cut
-                if charge > remaining.get(label, 0):
+                have = remaining.get(label, 0)
+                if peak_need > have:
                     gate = "INFEASIBLE"
                 else:
-                    remaining[label] = remaining.get(label, 0) - charge
+                    remaining[label] = have - size  # workspace is transient
             else:
                 gate = "INFEASIBLE"
             tasks.append({
@@ -427,6 +440,7 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
                 "order_key": order,
                 "guaranteed_durable": size,
                 "expected_durable": size,
+                "workspace_peak": workspace,
                 "identity_epoch": epoch,
             })
             _append_missing_files(con, files, rid, repo)
@@ -766,7 +780,16 @@ def validate_exact_assignment(con, proposal: Mapping,
     - cumulative charges fit safety-adjusted admissible free (order_key order).
     """
     evidence_by_drive = evidence_by_drive or {}
-    tasks = list(proposal.get("tasks") or ())
+    # Enrich workspace_peak from catalog when not present on stored rows (column not required).
+    tasks = []
+    for raw in proposal.get("tasks") or ():
+        t = dict(raw)
+        if t.get("row_kind") == "executable" and t.get("repo_id"):
+            t["workspace_peak"] = int(
+                t.get("workspace_peak")
+                if t.get("workspace_peak") is not None
+                else _repo_workspace_peak(con, t["repo_id"]))
+        tasks.append(t)
 
     # Distinct target/satisfying drives per repo: numcopies must not collapse onto one medium.
     by_repo: dict[str, list[str]] = {}
