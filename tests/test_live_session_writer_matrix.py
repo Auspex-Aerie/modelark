@@ -1,8 +1,11 @@
-"""PR-09 Gate 1: complete A3 writer matrix while live + multi-process exclusion."""
+"""PR-09 Gate 1: complete A3 writer matrix while live + catalog/state-dir exclusion.
+
+No default-multiprocessing / fork / spawn in PR-09 contracts. Cold installed-CLI/portal
+subprocess smoke is Gate-2. Gate-1 uses independent SQLite connections and distinct
+state-directory service inputs with exact FILL_SESSION_ACTIVE.
+"""
 from __future__ import annotations
 
-import multiprocessing as mp
-import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -153,60 +156,55 @@ def test_complete_a3_writer_matrix_while_live(tmp_path):
             pass
 
 
-def _child_start(db_path: str, state_dir: str, q: mp.Queue):
-    try:
-        from modelark.core import db as core_db
-        import _pr09_gate1_fixtures as fx
-        core_db.CATALOG_DIR = Path(db_path).parent
-        core_db.DB_PATH = Path(db_path)
-        os.environ["MODELARK_STATE_DIR"] = state_dir
-        con = core_db.connect()
-        mod = fx.session_api()
-        row = con.execute(
-            "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
-        ).fetchone()
-        out = mod.start_session(con, row[0], None, fx.default_services())
-        code = fx.refusal_code(out)
-        if code == "FILL_SESSION_ACTIVE" or (
-                isinstance(out, BaseException) and "FILL_SESSION_ACTIVE" in str(out)):
-            q.put(("FILL_SESSION_ACTIVE",))
-        elif fx.is_refusal(out):
-            q.put(("other_refusal", code))
-        else:
-            q.put(("started", str(out)))
-        con.close()
-    except Exception as exc:
-        code = getattr(exc, "code", None)
-        if str(code) == "FILL_SESSION_ACTIVE" or "FILL_SESSION_ACTIVE" in str(exc):
-            q.put(("FILL_SESSION_ACTIVE",))
-        else:
-            q.put(("error", f"{type(exc).__name__}:{exc}"))
+def test_same_catalog_independent_connections_different_state_dirs():
+    """Gate-1 exclusion: two independent connections + distinct state_dir inputs.
 
+    No multiprocessing. Live session on connection A must make start_session on
+    connection B refuse with exact FILL_SESSION_ACTIVE even when state directories differ.
+    Cold multi-process smoke is Gate-2 (installed CLI/portal), not PR-09 Gate-1.
+    """
+    import sqlite3
+    from modelark.core import db as core_db
 
-def test_same_catalog_different_state_dirs_process_exclusion(tmp_path):
-    catalog_dir = tmp_path / "shared"
-    catalog_dir.mkdir()
-    prev_dir, prev_path = db.CATALOG_DIR, db.DB_PATH
-    try:
-        db.CATALOG_DIR = catalog_dir
-        db.DB_PATH = catalog_dir / "catalog.sqlite"
-        con = db.connect()
-        f.seed_plan_selection(con, repos=("org/a",))
-        con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
-        _p, pid, _ = f.create_and_approve(con)
-        _start_live(con, pid)
+    # Shared on-disk catalog; two independent Connection objects (not shared memory).
+    with __import__("tempfile").TemporaryDirectory() as td:
+        catalog = Path(td) / "catalog.sqlite"
+        # Build catalog via schema apply (not process-global db.DB_PATH mutation for peers).
+        con_a = sqlite3.connect(str(catalog), isolation_level=None)
+        for stmt in core_db._statements(core_db.SCHEMA_PATH.read_text()):
+            con_a.execute(stmt)
+        if con_a.execute(
+                "SELECT count(*) FROM planner_state WHERE singleton_id=1").fetchone()[0] == 0:
+            con_a.execute(
+                "INSERT INTO planner_state(singleton_id,planner_revision,"
+                "active_approved_proposal_id,next_fencing_token) VALUES(1,0,NULL,0)")
+        f.seed_plan_selection(con_a, repos=("org/a",))
+        con_a.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+        _p, pid, _ = f.create_and_approve(con_a)
 
-        state_b = tmp_path / "state-b"
+        state_a = Path(td) / "state-a"
+        state_b = Path(td) / "state-b"
+        state_a.mkdir()
         state_b.mkdir()
-        q: mp.Queue = mp.Queue()
-        proc = mp.Process(target=_child_start, args=(str(db.DB_PATH), str(state_b), q))
-        proc.start()
-        proc.join(timeout=60)
-        assert proc.exitcode == 0, f"child exit {proc.exitcode}"
-        msg = q.get(timeout=5)
-        assert msg[0] == "FILL_SESSION_ACTIVE", (
-            f"child must refuse FILL_SESSION_ACTIVE, not arbitrary error: {msg}")
-        con.close()
-    finally:
-        db.CATALOG_DIR = prev_dir
-        db.DB_PATH = prev_path
+        svc_a = f.default_services()
+        svc_a.state_dir = str(state_a)
+        svc_b = f.default_services()
+        svc_b.state_dir = str(state_b)
+        # Distinct controller identities simulate two portals on one catalog.
+        svc_a.worker = SimpleNamespace(identity="worker-a", claim=lambda **k: None)
+        svc_b.worker = SimpleNamespace(identity="worker-b", claim=lambda **k: None)
+
+        mod = f.session_api()
+        f.require_success(
+            mod.start_session(con_a, pid, None, svc_a),
+            label="start on connection A / state-a",
+        )
+
+        con_b = sqlite3.connect(str(catalog), isolation_level=None)
+        f.assert_refuses(
+            lambda: mod.start_session(con_b, pid, None, svc_b),
+            code="FILL_SESSION_ACTIVE",
+            label="connection B / state-b must see live session on same catalog",
+        )
+        con_b.close()
+        con_a.close()

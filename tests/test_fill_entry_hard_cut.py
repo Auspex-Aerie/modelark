@@ -1,4 +1,9 @@
-"""PR-09 Gate 1: hard Fill entry cut — each surface must call unified service once."""
+"""PR-09 Gate 1: hard Fill entry cut — adapter wiring only (no fork/spawn).
+
+Each surface adapter (CLI, portal, systemd resume, second-portal adapter) must
+invoke the unified start_fill / enter_execution exactly once. Cold installed
+CLI/portal subprocess smoke is Gate-2 — not a PR-09 multiprocessing contract.
+"""
 from __future__ import annotations
 
 import argparse
@@ -29,13 +34,12 @@ def _start_name(umod):
     return "start_fill" if hasattr(umod, "start_fill") else "enter_execution"
 
 
-def test_cli_fill_invokes_unified_service_once():
+def test_cli_adapter_invokes_unified_service_once():
     umod = _unified_mod()
     name = _start_name(umod)
     cli = importlib.import_module("modelark.cli")
     with mock.patch.object(umod, name) as spy:
         spy.return_value = {"ok": True}
-        # Prefer explicit CLI adapter; else cmd_fill / parser fill action
         adapter = getattr(cli, "start_fill_via_service", None) or getattr(
             umod, "cli_start_fill", None)
         if callable(adapter):
@@ -45,71 +49,94 @@ def test_cli_fill_invokes_unified_service_once():
                 plan_id="ark", max_24h_gb=0, guided=True, repos=None)
             cli.cmd_fill(args)
         else:
-            raise AssertionError("CLI fill entry cmd_fill or start_fill_via_service required")
+            raise AssertionError(
+                "CLI adapter cmd_fill or start_fill_via_service required")
         assert spy.call_count == 1, (
-            f"CLI must call unified {name} exactly once; got {spy.call_count}")
+            f"CLI adapter must call unified {name} exactly once; got {spy.call_count}")
 
 
-def test_portal_systemd_and_second_portal_each_call_unified_once(tmp_path):
+def test_portal_adapter_invokes_unified_service_once():
     umod = _unified_mod()
     name = _start_name(umod)
     fill_api = importlib.import_module("modelark.web.fill_api")
-    server = importlib.import_module("modelark.web.server")
+    assert callable(fill_api.start), "fill_api.start required"
+    with mock.patch.object(umod, name) as spy:
+        spy.return_value = {"ok": True}
+        fill_api.start({})
+        assert spy.call_count == 1, (
+            f"portal fill_api.start must call unified {name} once; got {spy.call_count}")
 
-    # Surfaces must bind to the unified symbol (same function or thin wrapper calling it).
+
+def test_systemd_resume_adapter_invokes_unified_service_once():
+    umod = _unified_mod()
+    name = _start_name(umod)
+    server = importlib.import_module("modelark.web.server")
     resume = getattr(server, "auto_resume_fill", None)
     assert callable(resume), "server.auto_resume_fill required for systemd resume hard-cut"
-    assert callable(fill_api.start), "fill_api.start required"
-
-    marker = tmp_path / "unified_calls.txt"
-    if marker.exists():
-        marker.unlink()
-
-    def capture(*a, **k):
-        with open(marker, "a", encoding="utf-8") as fh:
-            fh.write("call\n")
-        return {"ok": True, "via": "unified"}
-
-    with mock.patch.object(umod, name, side_effect=capture):
-        # Portal (this process)
-        fill_api.start({})
-        # Systemd resume (this process, distinct adapter)
+    with mock.patch.object(umod, name) as spy:
+        spy.return_value = {"ok": True}
         resume({})
-        # Second portal: real child process must also invoke unified start
-        import multiprocessing as mp
+        assert spy.call_count == 1, (
+            f"systemd auto_resume_fill must call unified {name} once; got {spy.call_count}")
 
-        def second_portal(q, marker_path, mod_name, start_name):
-            try:
-                import importlib as il
-                from unittest import mock as child_mock
-                um = il.import_module(mod_name)
-                fa = il.import_module("modelark.web.fill_api")
 
-                def child_capture(*a, **k):
-                    with open(marker_path, "a", encoding="utf-8") as fh:
-                        fh.write("call\n")
-                    return {"ok": True}
+def test_second_portal_adapter_invokes_unified_service_once():
+    """Second portal is a second *adapter entry*, not a fork/spawn process.
 
-                with child_mock.patch.object(um, start_name, side_effect=child_capture):
-                    fa.start({})
-                q.put("ok")
-            except Exception as exc:
-                q.put(f"err:{type(exc).__name__}:{exc}")
+    Production may export second_portal_start_fill or re-export the same portal
+    adapter under an explicit multi-portal entry name. Gate-2 owns cold subprocess
+    smoke of a second installed portal process.
+    """
+    umod = _unified_mod()
+    name = _start_name(umod)
+    adapter = (
+        getattr(umod, "second_portal_start_fill", None)
+        or getattr(umod, "portal_start_fill", None)
+    )
+    fill_api = importlib.import_module("modelark.web.fill_api")
+    if not callable(adapter):
+        # Accept explicit multi-portal binding: second portal uses same fill_api.start
+        # only if production documents FILL_ENTRYPOINTS includes second_portal → start_fill.
+        entries = getattr(umod, "FILL_ENTRYPOINTS", None) or getattr(
+            umod, "fill_entrypoints", None)
+        assert entries is not None, (
+            "export FILL_ENTRYPOINTS including second_portal, or second_portal_start_fill")
+        names = {str(k).lower() for k in (
+            entries.keys() if isinstance(entries, dict) else entries)}
+        assert any("second" in n or "portal" in n for n in names), names
+        adapter = fill_api.start
+    with mock.patch.object(umod, name) as spy:
+        spy.return_value = {"ok": True}
+        adapter({})
+        assert spy.call_count == 1, (
+            f"second-portal adapter must call unified {name} once; got {spy.call_count}")
 
-        q = mp.Queue()
-        proc = mp.Process(
-            target=second_portal,
-            args=(q, str(marker), umod.__name__, name))
-        proc.start()
-        proc.join(timeout=60)
-        assert proc.exitcode == 0, proc.exitcode
-        child_status = q.get(timeout=5)
-        assert child_status == "ok", f"second portal process failed: {child_status}"
 
-    lines = marker.read_text().splitlines() if marker.exists() else []
-    assert len(lines) == 3, (
-        f"expected 1 unified call each for portal, systemd, second-portal process; "
-        f"got {len(lines)} marker lines")
+def test_all_surface_adapters_share_same_unified_target():
+    """Adapter wiring pin: every surface resolves to one unified callable (in-process)."""
+    umod = _unified_mod()
+    name = _start_name(umod)
+    unified = getattr(umod, name)
+    server = importlib.import_module("modelark.web.server")
+    resume = getattr(server, "auto_resume_fill", None)
+    assert callable(resume)
+    # Production may wrap; require FILL_ENTRYPOINTS map or identity of underlying target
+    entries = getattr(umod, "FILL_ENTRYPOINTS", None) or getattr(umod, "ENTRYPOINT_ADAPTERS", None)
+    assert entries is not None, (
+        "export FILL_ENTRYPOINTS / ENTRYPOINT_ADAPTERS mapping "
+        "cli|portal|systemd|second_portal → unified start (expected Gate-1 red)")
+    mapping = entries if isinstance(entries, dict) else {}
+    required = {"cli", "portal", "systemd"}
+    keys = {str(k).lower() for k in mapping}
+    missing = [r for r in required if not any(r in k for k in keys)]
+    assert not missing, f"FILL_ENTRYPOINTS missing {missing}; have={sorted(keys)}"
+    # All mapped callables must be the unified start (or name equal)
+    for key, target in mapping.items():
+        if not callable(target):
+            continue
+        assert target is unified or getattr(target, "__name__", "") in (
+            name, "start_fill", "enter_execution", "start"), (
+            f"entrypoint {key} must target unified {name}; got {target!r}")
 
 
 def test_fill_execute_routes_through_service_without_optimizer():
