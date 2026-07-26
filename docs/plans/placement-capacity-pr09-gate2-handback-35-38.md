@@ -1,11 +1,11 @@
 # PR-09 Gate-2 handback — findings 35–38 remediation
 
-**Date:** 2026-07-26  
-**Status:** Gate 2 remediation complete — **not accepted**. Gate 3 **not authorized**.  
-**Parent (withheld tip):** `490bf0135b14a5a08823c90daf371f46c8f8fb0c`  
-**Prior code tip:** `e3530667f96d2fcb2a7fef14e4d2455210f84bfd`  
-**Accepted previously:** findings 33–34  
-**Draft PR:** https://github.com/Auspex-Aerie/modelark/pull/54  
+**Date:** 2026-07-26
+**Status:** Gate 2 remediation complete — **not accepted**. Gate 3 **not authorized**.
+**Parent (withheld tip):** `490bf0135b14a5a08823c90daf371f46c8f8fb0c`
+**Prior code tip:** `e3530667f96d2fcb2a7fef14e4d2455210f84bfd`
+**Accepted previously:** findings 33–34
+**Draft PR:** https://github.com/Auspex-Aerie/modelark/pull/54
 **Branch:** `fix/placement-capacity-pr09-execution-projection`
 
 ---
@@ -64,5 +64,5 @@ Note: task counts (494 total) match RFC-001 requirement count (494). Baseline vs
 
 ## Explicit stop
 
-Do **not** mark ready, merge, begin Gate 3, choose fork/spawn, or begin PR-10.  
+Do **not** mark ready, merge, begin Gate 3, choose fork/spawn, or begin PR-10.
 Await human Gate-2 re-review of the new tip after this commit.

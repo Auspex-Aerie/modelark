@@ -205,25 +205,27 @@ require_frozen_config = get_frozen_execution_config
 def _compression_from_ctx(ctx: RunCtx | None) -> dict:
     """Resolve DEC-022 compression gate config from frozen ExecutionConfig when present.
 
-    Finding 35: once ExecutionConfig is frozen on the RunCtx, never reread wishlist.
-    CLI/plain-fetch without a freeze still reads wishlist once per run.
+    Finding 35: once any ExecutionConfig freeze is attached to the RunCtx, transport
+    never rereads wishlist — including incomplete/malformed frozen mappings. Only the
+    CLI/plain-fetch path (no freeze object) may call wishlist.compression().
     """
     frozen = getattr(ctx, "execution_config", None) if ctx is not None else None
-    values = getattr(frozen, "values", None) if frozen is not None else None
-    if isinstance(values, Mapping) and "compression" in values:
-        frozen_comp = values.get("compression")
-        if isinstance(frozen_comp, Mapping):
-            # Use only the frozen mapping (plus safe operational defaults that are
-            # themselves fixed literals — never a live wishlist reread).
-            base = {
-                "max_compress_ram_gb": 4.0,
-                "stream_compress": True,
-                "threads": 1,
-            }
-            base.update(dict(frozen_comp))
-            return base
-        if frozen_comp is not None:
-            return dict(frozen_comp) if isinstance(frozen_comp, dict) else {"value": frozen_comp}
+    if frozen is not None:
+        # Literal operational defaults only — never wishlist.
+        base = {
+            "max_compress_ram_gb": 4.0,
+            "stream_compress": True,
+            "threads": 1,
+        }
+        values = getattr(frozen, "values", None)
+        if isinstance(values, Mapping):
+            frozen_comp = values.get("compression")
+            if isinstance(frozen_comp, Mapping):
+                base.update(dict(frozen_comp))
+            elif frozen_comp is not None and not isinstance(frozen_comp, Mapping):
+                # Malformed freeze: still no global reread; keep literal defaults.
+                pass
+        return base
     return wishlist.compression()
 
 

@@ -193,24 +193,22 @@ def start_session(con, proposal_id, predecessor_id, services):
                 "APPROVED_INPUT_CHANGED",
                 {"reason": "execution_config_mismatch"},
                 ("preview_again",))
+        # Finding 35: execution_config_hash is required. NULL/empty binding refuses start
+        # and forces a fresh preview/approval — no field-by-field legacy soft path.
         stored_cfg_hash = proposal.get("execution_config_hash")
         if not stored_cfg_hash:
-            # One-release read of the mistaken ecfg: derivation_mode binding (Gate-2 remediation).
+            # One-release read of the mistaken ecfg: derivation_mode binding only.
             dm = proposal.get("derivation_mode") or ""
             if isinstance(dm, str) and dm.startswith("ecfg:") and len(dm) == len("ecfg:") + 64:
                 stored_cfg_hash = dm[len("ecfg:"):]
-        if stored_cfg_hash is None:
-            # Legacy proposals without config binding: still check capacity_mode field.
-            for field in ("capacity_mode", "policy_version", "solver_version"):
-                prop_v = proposal.get(field)
-                cur_v = (frozen.values or {}).get(field)
-                if prop_v is not None and cur_v is not None and str(prop_v) != str(cur_v):
-                    return Refusal(
-                        "APPROVED_INPUT_CHANGED",
-                        {"reason": "execution_config_field", "field": field,
-                         "approved": prop_v, "current": cur_v},
-                        ("preview_again",))
-        elif frozen.canonical_hash != str(stored_cfg_hash):
+        if not stored_cfg_hash or len(str(stored_cfg_hash)) != 64:
+            return Refusal(
+                "APPROVED_INPUT_CHANGED",
+                {"reason": "execution_config_unbound",
+                 "proposal_id": proposal_id,
+                 "execution_config_hash": stored_cfg_hash},
+                ("preview_again",))
+        if frozen.canonical_hash != str(stored_cfg_hash):
             return Refusal(
                 "APPROVED_INPUT_CHANGED",
                 {"reason": "execution_config_hash",

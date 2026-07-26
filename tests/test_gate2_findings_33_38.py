@@ -156,15 +156,47 @@ def test_finding_35_transport_uses_frozen_compression(monkeypatch):
     })
     ctx = fetch_mod.RunCtx(con=f.mem_con(), execution_config=frozen)
 
-    # Hostile global: different threads / ram
-    monkeypatch.setattr(
-        "modelark.wishlist.compression",
-        lambda: {"max_compress_ram_gb": 99.0, "stream_compress": False, "threads": 1},
-    )
+    def _hostile():
+        raise RuntimeError("HOSTILE_GLOBAL_REREAD")
+
+    monkeypatch.setattr("modelark.wishlist.compression", _hostile)
     got = fetch_mod._compression_from_ctx(ctx)
     assert got["threads"] == 7
     assert got["max_compress_ram_gb"] == 1.5
     assert got["stream_compress"] is True
+
+
+def test_finding_35_incomplete_freeze_never_rereads_wishlist(monkeypatch):
+    """Even incomplete frozen mappings must not fall back to wishlist."""
+    from modelark import fetch as fetch_mod
+
+    # Freeze present but missing compression key entirely.
+    frozen = SimpleNamespace(values={"capacity_mode": "guaranteed"}, canonical_hash="x" * 64)
+    ctx = fetch_mod.RunCtx(con=f.mem_con(), execution_config=frozen)
+
+    def _hostile():
+        raise RuntimeError("HOSTILE_GLOBAL_REREAD")
+
+    monkeypatch.setattr("modelark.wishlist.compression", _hostile)
+    got = fetch_mod._compression_from_ctx(ctx)
+    assert got["threads"] == 1  # literal default
+    assert got["max_compress_ram_gb"] == 4.0
+
+
+def test_finding_35_null_execution_config_hash_refuses_start():
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    _p, pid, _ = f.create_and_approve(con)
+    con.execute(
+        "UPDATE placement_proposals SET execution_config_hash=NULL WHERE proposal_id=?",
+        [pid])
+    sess = f.session_api()
+    f.assert_refuses(
+        lambda: sess.start_session(con, pid, None, f.default_services()),
+        code="APPROVED_INPUT_CHANGED",
+        label="null_config_binding_start",
+    )
 
 
 def test_finding_35_derivation_mode_not_ecfg_hash():
@@ -359,6 +391,35 @@ def test_finding_37_null_archive_identity_not_satisfied():
         con, projection, proposal_files=proposal_files)
     assert units, "null archive identity must leave work unit"
     assert "model.safetensors" in units[0].missing_files
+
+
+def test_finding_37_stale_replica_source_identity_not_ready():
+    """Mismatched source orig_sha256 must not promote waiting_dependency to ready."""
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    # Source has archive but wrong content identity
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','model.safetensors','d0',0,100,100,?)",
+        ["9" * 64])
+    projection = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d1",
+        source_drive="d0", requirement_id="replica:org/a",
+        schedule_state="waiting_dependency", order_key=1,
+        guaranteed_durable=100, expected_durable=100,
+    ),))
+    proposal_files = [{
+        "requirement_id": "replica:org/a", "rfilename": "model.safetensors",
+        "size_bytes": 100, "orig_sha256": "1" * 64, "format": "safetensors", "quant": "bf16",
+    }]
+    units = fill_mod._projection_work_units(
+        con, projection, proposal_files=proposal_files, require_proposal_files=True)
+    assert units
+    assert units[0].schedule_state == "waiting_dependency", (
+        f"stale_source_schedule: {units[0].schedule_state}")
+    assert units[0].kind is None
 
 
 def test_finding_37_thrown_refresh_fails_closed():

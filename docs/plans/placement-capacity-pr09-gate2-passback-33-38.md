@@ -12,7 +12,7 @@
 |------|--------|
 | PR | [#54](https://github.com/Auspex-Aerie/modelark/pull/54) (draft, open — **not merged**) |
 | Branch | `fix/placement-capacity-pr09-execution-projection` |
-| **Code tip to re-review** | `e3530667f96d2fcb2a7fef14e4d2455210f84bfd` |
+| **Code tip to re-review** | `00ba101cd704b6d855debbdc568f53e6b19f070f` (superseded; see passback-35-38 for latest) |
 | Remediation commit | `52322ded7fe3595b600e0d2e74c4e32703cfb975` |
 | Prior withheld head | `d88d1b1b312bf600c2af389763fbe4e29f217b62` |
 | Implementer handback | `docs/plans/placement-capacity-pr09-gate2-handback-33-38.md` |
@@ -80,6 +80,6 @@ Production: `drive_mutation.py`, `execution_session.py`, `proposal.py`, `fetch.p
 
 ## Requested reviewer action
 
-Re-review code tip **`e353066`** against findings **33–38** and RFC-002 / DEC-049.
+Re-review code tip **`00ba101`** (see F35–38 passback for successor tip) against findings **33–38** and RFC-002 / DEC-049.
 Automation is green; human Gate-2 acceptance is still required.
 **Do not merge or start Gate 3** from this passback.

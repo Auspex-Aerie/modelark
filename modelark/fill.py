@@ -535,6 +535,32 @@ def _proj_field(t, name, default=None):
     return getattr(t, name, default)
 
 
+def _source_files_content_ready(con, repo_id, source_drive, proposal_files_for_req) -> bool:
+    """True only when every approved file has matching content identity on source.
+
+    Finding 37: archive row presence alone is insufficient for replica readiness.
+    """
+    if not proposal_files_for_req or not source_drive:
+        return False
+    for pf in proposal_files_for_req:
+        rfilename = pf.get("rfilename") if isinstance(pf, dict) else getattr(pf, "rfilename", None)
+        want = pf.get("orig_sha256") if isinstance(pf, dict) else getattr(pf, "orig_sha256", None)
+        if not rfilename:
+            return False
+        arch = con.execute(
+            "SELECT orig_sha256 FROM archived WHERE repo_id=? AND rfilename=? AND drive_label=?",
+            [repo_id, rfilename, source_drive]).fetchone()
+        if arch is None:
+            return False
+        if want:
+            if arch[0] is None or str(arch[0]) != str(want):
+                return False
+        elif arch[0] is None:
+            # Approved file has no hash but archive also null — not content-proven.
+            return False
+    return True
+
+
 def _projection_work_units(con, projection, repo_scope=None, proposal_files=None,
                            *, require_proposal_files=True):
     """Convert frozen projection tasks into drain units.
@@ -570,13 +596,23 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
         source = _proj_field(t, "source_drive")
         rid = _proj_field(t, "requirement_id") or f"primary:{repo}"
         schedule = _proj_field(t, "schedule_state") or "ready"
-        # Re-evaluate waiting_dependency from catalog: when source is durable, become ready.
+        # Re-evaluate waiting_dependency: source must prove content identity against
+        # approved proposal_files (finding 37) — mere archive row presence is not enough.
         if schedule == "waiting_dependency" and source:
-            src_ok = con.execute(
-                "SELECT 1 FROM archived WHERE repo_id=? AND drive_label=? LIMIT 1",
-                [repo, source]).fetchone()
-            if src_ok:
-                schedule = "ready"
+            prop_for_src = by_req.get(rid) or []
+            if require_proposal_files and not prop_for_src:
+                # Stay waiting / later refuse on file authority — do not promote.
+                pass
+            elif prop_for_src:
+                if _source_files_content_ready(con, repo, source, prop_for_src):
+                    schedule = "ready"
+            else:
+                # Characterization path without approval: presence only.
+                src_ok = con.execute(
+                    "SELECT 1 FROM archived WHERE repo_id=? AND drive_label=? LIMIT 1",
+                    [repo, source]).fetchone()
+                if src_ok:
+                    schedule = "ready"
         if schedule == "parked_gated":
             units.append(SimpleNamespace(
                 requirement_id=rid, repo_id=repo, target_drive=target,
@@ -642,6 +678,21 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
         if not missing and file_rows:
             continue  # fully satisfied on approved target — shrink out
         kind = TaskKind.REPLICATE if source else TaskKind.FETCH
+        # Finding 37: replica execution requires source content identity vs proposal_files.
+        if (
+            kind == TaskKind.REPLICATE
+            and require_proposal_files
+            and source
+            and not _source_files_content_ready(con, repo, source, by_req.get(rid) or [])
+        ):
+            units.append(SimpleNamespace(
+                requirement_id=rid, repo_id=repo, target_drive=target,
+                source_drive=source, kind=None,
+                schedule_state="waiting_dependency",
+                order_key=int(_proj_field(t, "order_key") or 0),
+                missing_files=(), file_rows=(),
+            ))
+            continue
         from modelark.budgets import FileBudget
         file_budgets = []
         for fr in file_rows:

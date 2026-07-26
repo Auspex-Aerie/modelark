@@ -615,14 +615,18 @@ def count_projection_refresh_calls(scenario) -> dict:
 
 
 def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
-    """Call fill._refresh_projection at typed batch/event boundaries on a real session.
+    """Instrument refresh by running the real drain path (finding 38).
 
-    Counts only go through ``fill._refresh_projection`` (finding 38). Events:
-    initial is start_session's project_pure (not a refresh); subsequent batch/event
-    boundaries invoke the executor refresh seam.
+    Must invoke ``fill._drain_projection`` / ``fill.execute`` so batch-boundary
+    refreshes go through production dispatch — never invent event names and call
+    ``_refresh_projection`` directly.
     """
+    from unittest import mock
     from modelark import fill as fill_mod
+    from modelark import fetch as fetch_mod
     from modelark import execution_session as esess
+    from modelark.execution_config import hash_config
+    from modelark.proposal import _DefaultServices, load_proposal
 
     path = Path(sqlite_path)
     fill_mod.reset_projection_refresh_call_count()
@@ -634,86 +638,140 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
                 "ACCEPTANCE_FIXTURE_INVALID",
                 {"reason": "missing_approved_proposal_for_refresh_measure"}, ())
         pid = proposal.get("proposal_id")
+        # Match frozen config to the approved binding when present.
+        cfg_hash = proposal.get("execution_config_hash")
+        compression = {
+            "max_compress_ram_gb": 4.0, "stream_compress": True, "threads": 1,
+        }
+        cfg_values = {
+            "capacity_mode": proposal.get("capacity_mode") or "guaranteed",
+            "policy_version": proposal.get("policy_version") or "1",
+            "solver_version": proposal.get("solver_version") or "1",
+            "compression": compression,
+            "numcopies_default": 1,
+        }
+        # Prefer exact hash match by aligning compression until hash equals binding.
+        if cfg_hash and hash_config(cfg_values) != str(cfg_hash):
+            # Try common draft compression shapes used at approve time.
+            for trial in (
+                {},
+                {"enabled": True, "codec": "streamznn", "level": 3},
+                compression,
+            ):
+                trial_cfg = dict(cfg_values, compression=trial)
+                if hash_config(trial_cfg) == str(cfg_hash):
+                    cfg_values = trial_cfg
+                    break
+
         services = SimpleNamespace(
             clock=SimpleNamespace(now=lambda: "2026-01-01T00:00:00Z"),
-            config=SimpleNamespace(read_graph_affecting_config=lambda: {
-                "capacity_mode": proposal.get("capacity_mode") or "guaranteed",
-                "policy_version": proposal.get("policy_version") or "1",
-                "solver_version": proposal.get("solver_version") or "1",
-                "compression": {},
-                "numcopies_default": 1,
-            }),
+            config=SimpleNamespace(read_graph_affecting_config=lambda: dict(cfg_values)),
             controller_flock=SimpleNamespace(
                 hold=lambda: __import__("contextlib").nullcontext()),
             drive_fences=SimpleNamespace(
                 hold_all_sorted=lambda ids: __import__("contextlib").nullcontext()),
             worker=SimpleNamespace(identity="bench-worker"),
             lease_ttl=3600,
-            observe_exact_capacity=None,
+            observe_exact_capacity=_DefaultServices().observe_exact_capacity,
+            auto_claim_worker=True,
         )
-        # Prefer production-like capacity observer when available.
-        try:
-            from modelark.proposal import _DefaultServices
-            services.observe_exact_capacity = _DefaultServices().observe_exact_capacity
-        except Exception:
-            pass
-        # Config values must match proposal binding when present.
-        cfg_hash = proposal.get("execution_config_hash")
-        if cfg_hash:
-            # Re-read current frozen values via proposal fields so start accepts.
-            services.config = SimpleNamespace(read_graph_affecting_config=lambda: {
-                "capacity_mode": proposal.get("capacity_mode") or "guaranteed",
-                "policy_version": proposal.get("policy_version") or "1",
-                "solver_version": proposal.get("solver_version") or "1",
-                "compression": {"max_compress_ram_gb": 4.0, "stream_compress": True,
-                                "threads": 1},
-                "numcopies_default": 1,
-            })
         out = esess.start_session(con, pid, None, services)
-        if isinstance(out, Refusal) or out is None:
-            # Cannot start (config/projection) — still exercise the refresh seam
-            # with a SessionStart-shaped object bound to the approved proposal.
+        if isinstance(out, Refusal):
+            # Fall back: build SessionStart from stored proposal + frozen config so
+            # drain still runs with approval authority.
+            prop = load_proposal(con, pid)
+            from modelark.execution_config import ExecutionConfig
+            frozen = ExecutionConfig.from_values(cfg_values)
+            # Ensure session row for heartbeat
+            sid = "bench-refresh-session"
+            con.execute("DELETE FROM execution_sessions WHERE session_id=?", [sid])
+            try:
+                con.execute(
+                    "INSERT INTO execution_sessions("
+                    "session_id,plan_id,approved_proposal_id,controller_identity,"
+                    "worker_identity,state,bound_planner_revision,fencing_token,expires_at) "
+                    "VALUES(?,?,?,'ctrl','bench-worker','running',0,1,'2099-01-01T00:00:00Z')",
+                    [sid, prop.get("plan_id") or "ark", pid])
+            except Exception:
+                pass
             session = SimpleNamespace(
-                session_id="bench-refresh",
-                approved_proposal_id=pid,
-                fencing_token=1,
-                state="running",
+                session_id=sid, approved_proposal_id=pid, fencing_token=1,
+                state="running", worker_identity="bench-worker",
+                plan_id=prop.get("plan_id") or "ark",
             )
             out = SimpleNamespace(
                 session=session,
-                projection=SimpleNamespace(tasks=tuple(proposal.get("tasks") or ())),
-                execution_config=SimpleNamespace(
-                    values=services.config.read_graph_affecting_config(),
-                    canonical_hash=cfg_hash or "0" * 64),
-                _proposal=proposal,
+                projection=SimpleNamespace(
+                    tasks=tuple(prop.get("tasks") or ()),
+                    projection_hash=prop.get("requirement_set_hash"),
+                ),
+                execution_config=frozen,
+                _proposal=prop,
+                _proposal_files=list(prop.get("files") or ()),
                 _config_reader=services.config,
                 _observe_exact_capacity=services.observe_exact_capacity,
             )
         else:
-            out._proposal = proposal
+            out._proposal = proposal if isinstance(proposal, dict) else load_proposal(con, pid)
+            out._proposal_files = list((out._proposal or {}).get("files") or ())
             out._config_reader = services.config
             out._observe_exact_capacity = services.observe_exact_capacity
 
-        events = (
-            "batch_complete", "batch_complete", "batch_complete",
-            "dirty_clean", "capacity_evidence", "gated_park",
+        # Real drain: mock transport only; refresh must come from batch boundaries.
+        batches_done = {"n": 0}
+
+        def fake_run(**kwargs):
+            batches_done["n"] += 1
+            repos = list(kwargs.get("repos") or [])
+            return {
+                "stored_repos": repos, "failed_repos": [],
+                "capacity_failure": None, "terminal_failure": None,
+                "terminal_repo": None, "throttled": False, "stopped": False,
+                "drive_unwritable": False, "gated_repos": [], "gated_retry": None,
+            }
+
+        def fake_replica(tasks, ctx=None):
+            batches_done["n"] += 1
+            return {
+                "deferred": False, "source_offline": False,
+                "deferred_targets": [], "copied_targets": [],
+                "copied_files": len(tasks or ()), "failed": [],
+            }
+
+        # Stop after a few production batch cycles so measurement stays bounded.
+        def should_stop():
+            return int(fill_mod.projection_refresh_call_count()) >= 3 or batches_done["n"] >= 4
+
+        ctx = fetch_mod.RunCtx(
+            con=con,
+            should_stop=should_stop,
+            check_hf_auth=False,
+            session_id=getattr(out.session, "session_id", None),
+            fencing_token=getattr(out.session, "fencing_token", None),
+            execution_config=getattr(out, "execution_config", None),
         )
-        ctx = SimpleNamespace(con=con, lock=__import__("contextlib").nullcontext())
-        for _ev in events:
-            try:
-                fill_mod._refresh_projection(ctx, out)
-            except Refusal:
-                # Typed refusal still counts as a refresh invocation at the seam.
-                pass
-            except Exception:
-                pass
+        with mock.patch.object(fill_mod.fetch, "run", side_effect=fake_run), \
+                mock.patch.object(fill_mod.fetch, "run_replica_tasks", side_effect=fake_replica), \
+                mock.patch.object(fill_mod, "_await_drive", return_value=True), \
+                mock.patch.object(fill_mod, "_mounted", return_value=(True, True)):
+            fill_mod._drain_projection(
+                ctx, out,
+                plan_id=getattr(out.session, "plan_id", None) or "ark",
+                max_24h_gb=0,
+                repo_scope=None,
+                guided=False,
+                poll_secs=0.01,
+                child_fds=(),
+            )
         calls = int(fill_mod.projection_refresh_call_count())
         return {
             "calls": calls,
-            "events": events,
-            "budget": 1 + len(events),  # start projection + event refreshes
-            "source": "fill._refresh_projection",
-            "breakdown": {"batch_and_typed_events": len(events), "refresh_calls": calls},
+            "transport_batches": int(batches_done["n"]),
+            "source": "fill._drain_projection",
+            "breakdown": {
+                "drain_refresh_calls": calls,
+                "transport_batches": int(batches_done["n"]),
+            },
         }
     finally:
         con.close()
