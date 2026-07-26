@@ -3,7 +3,7 @@
 **Date:** 2026-07-26  
 **Status:** Gate 2 **remediation complete — not accepted**. Gate 3 **not authorized**.  
 **Withheld tip:** `bd5f7fd`  
-**Remediation tip:** see `git rev-parse HEAD` on branch after push (this file updated in same commit)  
+**Remediation tip:** `34829db03d3c0e16b559b382df43596dfc22f86b`  
 **Draft PR:** https://github.com/Auspex-Aerie/modelark/pull/54  
 **Phase branch:** `fix/placement-capacity-pr09-execution-projection`  
 **Base:** `bc33a0664d3e65e20c6843b0a9d5b1204d15502a`  
