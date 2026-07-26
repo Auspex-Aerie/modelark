@@ -306,6 +306,9 @@ CREATE TABLE IF NOT EXISTS placement_proposals (
     solver_version         VARCHAR NOT NULL DEFAULT '1',
     gate_b_code            VARCHAR NOT NULL DEFAULT 'FEASIBLE',
     derivation_mode        VARCHAR,
+    -- Graph-affecting execution-config binding (PR-09 / B7). Separate from derivation_mode.
+    execution_config_hash  VARCHAR CHECK (execution_config_hash IS NULL
+                                          OR length(execution_config_hash) = 64),
     created_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     approved_at            TIMESTAMP,
     superseded_at          TIMESTAMP,

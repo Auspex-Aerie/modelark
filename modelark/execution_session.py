@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
@@ -22,8 +23,25 @@ resumable_states = RESUMABLE_STATES
 
 # In-process child fence registry for tests/recovery (not multi-process).
 _CHILD_FENCE_HELD: dict[str, bool] = {}
-# Depth counter so bump_revision allows session_write while live.
+
+# Connection-scoped session_write authority (finding 34). Never process-global depth:
+# an authorized write on catalog A must not authorize catalog B.
+# Value: (id(con), session_id, fencing_token).
+_SESSION_WRITE_AUTH: ContextVar[tuple[int, str, int] | None] = ContextVar(
+    "modelark_session_write_auth", default=None)
+
+# Compatibility alias for callers that still inspect depth (always 0 or 1 via helper).
 _SESSION_WRITE_DEPTH = 0
+
+
+def session_write_authorized(con) -> bool:
+    """True only when the active session_write authority matches this connection."""
+    auth = _SESSION_WRITE_AUTH.get()
+    return auth is not None and auth[0] == id(con)
+
+
+def _set_session_write_auth(con, session_id: str, fencing_token: int) -> Token:
+    return _SESSION_WRITE_AUTH.set((id(con), str(session_id), int(fencing_token)))
 
 
 def live_session_exists(con) -> bool:
@@ -162,6 +180,7 @@ def start_session(con, proposal_id, predecessor_id, services):
                 ("preview_again",))
 
         # Config binding: unbound / pre-PR09, or drift vs stored complete config hash.
+        # Prefer dedicated execution_config_hash; never repurpose derivation_mode (finding 35).
         sem = proposal.get("semantic_input_hash")
         if not sem or sem == "UNBOUND_PRE_PR09" or (
                 isinstance(sem, str) and len(sem) != 64 and not str(sem).startswith("cfg:")):
@@ -174,13 +193,14 @@ def start_session(con, proposal_id, predecessor_id, services):
                 "APPROVED_INPUT_CHANGED",
                 {"reason": "execution_config_mismatch"},
                 ("preview_again",))
-        # Complete graph-affecting config hash persisted at draft as derivation_mode=ecfg:<hash>.
-        dm = proposal.get("derivation_mode") or ""
-        stored_cfg_hash = None
-        if isinstance(dm, str) and dm.startswith("ecfg:") and len(dm) == len("ecfg:") + 64:
-            stored_cfg_hash = dm[len("ecfg:"):]
+        stored_cfg_hash = proposal.get("execution_config_hash")
+        if not stored_cfg_hash:
+            # One-release read of the mistaken ecfg: derivation_mode binding (Gate-2 remediation).
+            dm = proposal.get("derivation_mode") or ""
+            if isinstance(dm, str) and dm.startswith("ecfg:") and len(dm) == len("ecfg:") + 64:
+                stored_cfg_hash = dm[len("ecfg:"):]
         if stored_cfg_hash is None:
-            # Legacy proposals without ecfg binding: still check capacity_mode field.
+            # Legacy proposals without config binding: still check capacity_mode field.
             for field in ("capacity_mode", "policy_version", "solver_version"):
                 prop_v = proposal.get(field)
                 cur_v = (frozen.values or {}).get(field)
@@ -190,7 +210,7 @@ def start_session(con, proposal_id, predecessor_id, services):
                         {"reason": "execution_config_field", "field": field,
                          "approved": prop_v, "current": cur_v},
                         ("preview_again",))
-        elif frozen.canonical_hash != stored_cfg_hash:
+        elif frozen.canonical_hash != str(stored_cfg_hash):
             return Refusal(
                 "APPROVED_INPUT_CHANGED",
                 {"reason": "execution_config_hash",
@@ -444,9 +464,11 @@ def claim_worker(con, *, session_id, fencing_token, worker_identity, controller_
 transition_to_running = claim_worker
 
 
-def heartbeat(con, *, session_id, fencing_token):
+def heartbeat(con, *, session_id, fencing_token, lease_ttl=None, services=None):
+    """Renew heartbeat_at and lease expires_at under token/state CAS (finding 36)."""
     row = con.execute(
-        "SELECT state, fencing_token FROM execution_sessions WHERE session_id=?",
+        "SELECT state, fencing_token, worker_identity FROM execution_sessions "
+        "WHERE session_id=?",
         [session_id]).fetchone()
     if not row:
         raise Refusal("SESSION_NOT_FOUND", {"session_id": session_id}, ())
@@ -455,9 +477,15 @@ def heartbeat(con, *, session_id, fencing_token):
     if row[0] not in ("running", "stopping"):
         raise Refusal("SESSION_STATE_INVALID", {"state": row[0]},
                       ("claim_worker_first",))
-    con.execute(
-        "UPDATE execution_sessions SET heartbeat_at=CURRENT_TIMESTAMP "
-        "WHERE session_id=?", [session_id])
+    ttl = int(lease_ttl if lease_ttl is not None else (
+        getattr(services, "lease_ttl", None) if services is not None else None) or 3600)
+    expires_at = _expiry_iso(services or SimpleNamespace(), ttl)
+    cur = con.execute(
+        "UPDATE execution_sessions SET heartbeat_at=CURRENT_TIMESTAMP, expires_at=? "
+        "WHERE session_id=? AND fencing_token=? AND state IN ('running','stopping')",
+        [expires_at, session_id, int(fencing_token)])
+    if getattr(cur, "rowcount", None) == 0:
+        raise Refusal("SESSION_TOKEN_MISMATCH", {"session_id": session_id}, ())
     return load_session(con, session_id)
 
 
@@ -465,6 +493,7 @@ session_heartbeat = heartbeat
 
 
 def terminalize(con, *, session_id, fencing_token, state, terminal_code=None):
+    """Terminalize under token CAS; clear heartbeat_at and expires_at (finding 36)."""
     row = con.execute(
         "SELECT state, fencing_token FROM execution_sessions WHERE session_id=?",
         [session_id]).fetchone()
@@ -480,10 +509,17 @@ def terminalize(con, *, session_id, fencing_token, state, terminal_code=None):
         # Already terminal — cannot go back to running
         if state in LIVE_STATES:
             raise Refusal("SESSION_TERMINAL_IMMUTABLE", {"state": row[0]}, ())
-    con.execute(
+    cur = con.execute(
         "UPDATE execution_sessions SET state=?, terminal_code=?, "
-        "terminal_at=CURRENT_TIMESTAMP WHERE session_id=? AND fencing_token=?",
-        [state, terminal_code, session_id, fencing_token])
+        "terminal_at=CURRENT_TIMESTAMP, heartbeat_at=NULL, expires_at=NULL "
+        "WHERE session_id=? AND fencing_token=? AND state IN "
+        "('starting','running','stopping')",
+        [state, terminal_code, session_id, int(fencing_token)])
+    if getattr(cur, "rowcount", None) == 0 and row[0] in LIVE_STATES:
+        # Token/state race — never fall back to a tokenless update.
+        raise Refusal(
+            "SESSION_TOKEN_MISMATCH",
+            {"session_id": session_id, "reason": "terminalize_cas_failed"}, ())
     return load_session(con, session_id)
 
 
@@ -491,6 +527,7 @@ mark_terminal = terminalize
 
 
 def session_write(con, session_id, fencing_token, operation: Callable):
+    """Authorized graph write while a session is live (connection-scoped authority)."""
     global _SESSION_WRITE_DEPTH
     row = con.execute(
         "SELECT state, fencing_token, bound_planner_revision FROM execution_sessions "
@@ -501,30 +538,34 @@ def session_write(con, session_id, fencing_token, operation: Callable):
         raise Refusal("SESSION_TOKEN_MISMATCH", {"session_id": session_id}, ())
     if row[0] not in LIVE_STATES:
         raise Refusal("SESSION_STATE_INVALID", {"state": row[0]}, ())
-    con.execute("BEGIN IMMEDIATE")
-    _SESSION_WRITE_DEPTH += 1
+    auth_token = _set_session_write_auth(con, session_id, fencing_token)
+    _SESSION_WRITE_DEPTH = 1
     try:
-        # Re-check token inside TX
-        row2 = con.execute(
-            "SELECT fencing_token, state FROM execution_sessions WHERE session_id=?",
-            [session_id]).fetchone()
-        if not row2 or int(row2[0]) != int(fencing_token):
-            raise Refusal("SESSION_TOKEN_MISMATCH", {"session_id": session_id}, ())
-        result = operation(con)
-        new_rev = bump_revision(con)
-        con.execute(
-            "UPDATE execution_sessions SET bound_planner_revision=? WHERE session_id=?",
-            [new_rev, session_id])
-        con.execute("COMMIT")
-        return result
-    except BaseException:
+        con.execute("BEGIN IMMEDIATE")
         try:
-            con.execute("ROLLBACK")
-        except Exception:
-            pass
-        raise
+            # Re-check token inside TX
+            row2 = con.execute(
+                "SELECT fencing_token, state FROM execution_sessions WHERE session_id=?",
+                [session_id]).fetchone()
+            if not row2 or int(row2[0]) != int(fencing_token) or row2[1] not in LIVE_STATES:
+                raise Refusal("SESSION_TOKEN_MISMATCH", {"session_id": session_id}, ())
+            result = operation(con)
+            new_rev = bump_revision(con)
+            con.execute(
+                "UPDATE execution_sessions SET bound_planner_revision=? "
+                "WHERE session_id=? AND fencing_token=?",
+                [new_rev, session_id, int(fencing_token)])
+            con.execute("COMMIT")
+            return result
+        except BaseException:
+            try:
+                con.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
     finally:
-        _SESSION_WRITE_DEPTH = max(0, _SESSION_WRITE_DEPTH - 1)
+        _SESSION_WRITE_AUTH.reset(auth_token)
+        _SESSION_WRITE_DEPTH = 0
 
 
 def refresh_session_config(session_start, services):

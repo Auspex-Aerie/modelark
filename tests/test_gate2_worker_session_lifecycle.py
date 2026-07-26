@@ -97,11 +97,16 @@ def test_compression_config_drift_refuses_start():
     f.seed_plan_selection(con, repos=("org/a",))
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
     _p, pid, loaded = f.create_and_approve(con)
-    # Ensure derivation_mode has ecfg binding (from draft)
-    dm = con.execute(
-        "SELECT derivation_mode FROM placement_proposals WHERE proposal_id=?",
+    # Finding 35: config binding is execution_config_hash; derivation_mode is placement audit.
+    row = con.execute(
+        "SELECT derivation_mode, execution_config_hash FROM placement_proposals "
+        "WHERE proposal_id=?",
         [pid]).fetchone()
-    assert dm and dm[0] and str(dm[0]).startswith("ecfg:"), dm
+    assert row is not None, pid
+    dm, cfg_hash = row[0], row[1]
+    assert dm in (None, "optimized", "state_truncated", "canonical_fallback") or (
+        isinstance(dm, str) and not str(dm).startswith("ecfg:")), dm
+    assert cfg_hash and len(str(cfg_hash)) == 64, cfg_hash
     services = f.default_services()
     services.config = SimpleNamespace(
         read_graph_affecting_config=lambda: {

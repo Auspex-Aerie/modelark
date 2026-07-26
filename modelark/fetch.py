@@ -164,6 +164,8 @@ class RunCtx:
     # PR-09: authorized live session for worker catalog writes (session_write path).
     session_id: str | None = None
     fencing_token: int | None = None
+    # Frozen ExecutionConfig from SessionStart (finding 35) — transport must not reread globals.
+    execution_config: Any = None
 
     def q1(self, sql: str, params: list | None = None):
         with self.lock:
@@ -198,6 +200,25 @@ def get_frozen_execution_config(session_start):
 
 
 require_frozen_config = get_frozen_execution_config
+
+
+def _compression_from_ctx(ctx: RunCtx | None) -> dict:
+    """Resolve DEC-022 compression gate config from frozen ExecutionConfig when present.
+
+    Finding 35: mid-session global wishlist edits must not alter codec behavior for a
+    live Fill. CLI/plain-fetch without a freeze still reads wishlist once per run.
+    """
+    frozen = getattr(ctx, "execution_config", None) if ctx is not None else None
+    values = getattr(frozen, "values", None) if frozen is not None else None
+    if isinstance(values, Mapping) and values.get("compression") is not None:
+        # Merge frozen graph-affecting compression over operational defaults so
+        # transport keys (threads, max_compress_ram_gb, …) remain complete.
+        base = dict(wishlist.compression())
+        frozen_comp = values.get("compression")
+        if isinstance(frozen_comp, Mapping):
+            base.update(dict(frozen_comp))
+        return base
+    return wishlist.compression()
 
 
 def finalized(con) -> list[str]:
@@ -987,7 +1008,8 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
             print(f"WARNING: {dest} is not a git-annex repo — storing verified files raw, "
                   f"not annex-tracked. (Run drive registration to enable annex.)")
         cap = (max_24h_gb or 0) * 1e9
-        compress_cfg = wishlist.compression()       # DEC-022 codec gate config (loaded once per run)
+        # Finding 35: prefer frozen SessionStart config; never reread wishlist mid-session.
+        compress_cfg = _compression_from_ctx(ctx)
 
         # RFC-002 / DEC-049 physical-mutation envelope: fence this drive, commit the dirty generation
         # before any staging/download/publish, hold the drive fence across the whole batch, reconcile
@@ -1003,7 +1025,10 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
         try:
             with drive_mutation.drive_mutation(
                     con, [drive_label], "fill", observe=_observe, reconcile=_reconcile,
-                    now=datetime.now(timezone.utc).isoformat(sep=" ")) as _writer:
+                    now=datetime.now(timezone.utc).isoformat(sep=" "),
+                    session_id=getattr(ctx, "session_id", None),
+                    fencing_token=getattr(ctx, "fencing_token", None),
+            ) as _writer:
                 for k, rid in enumerate(ids):
                     if ctx.should_stop():
                         break

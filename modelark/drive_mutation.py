@@ -95,10 +95,14 @@ def _generation_is_clean(con, label, epoch, generation, fingerprint, capacity, a
     return anchor is not None and anchor == (epoch, fingerprint, capacity, authority)
 
 
-def _advance_one(con, label, operation_code, captured=None):
+def _advance_one(con, label, operation_code, captured=None,
+                 *, owner_session_id=None, owner_fencing_token=None):
     """Guarded dirty-generation advance for one drive, within the caller's transaction. When
     ``captured`` (the epoch/fingerprint the drive locks were derived from) is given, revalidate the
-    current identity right before dirtying: a lifecycle change since capture is refused."""
+    current identity right before dirtying: a lifecycle change since capture is refused.
+
+    Session-owned Fill mutations populate both owner fields; operator mutations leave both null.
+    """
     epoch, generation, fingerprint, capacity, authority = _drive_facts(con, label)
     if captured is not None and (epoch, fingerprint) != (captured[0], captured[2]):
         raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
@@ -108,9 +112,22 @@ def _advance_one(con, label, operation_code, captured=None):
         new_generation = generation + 1
     else:
         raise DriveMutationRefused("DIRTY_GENERATION_CONFLICT", drive=label)
-    con.execute("INSERT INTO drive_dirty_generations"
-                "(drive_label,identity_epoch,generation,operation_code) VALUES(?,?,?,?)",
-                [label, epoch, new_generation, operation_code])
+    if (owner_session_id is None) != (owner_fencing_token is None):
+        raise DriveMutationRefused(
+            "DIRTY_OWNER_PAIR_REQUIRED", drive=label,
+            owner_session_id=owner_session_id, owner_fencing_token=owner_fencing_token)
+    if owner_session_id is not None:
+        con.execute(
+            "INSERT INTO drive_dirty_generations"
+            "(drive_label,identity_epoch,generation,operation_code,"
+            "owner_session_id,owner_fencing_token) VALUES(?,?,?,?,?,?)",
+            [label, epoch, new_generation, operation_code,
+             owner_session_id, int(owner_fencing_token)])
+    else:
+        con.execute(
+            "INSERT INTO drive_dirty_generations"
+            "(drive_label,identity_epoch,generation,operation_code) VALUES(?,?,?,?)",
+            [label, epoch, new_generation, operation_code])
     con.execute("UPDATE drives SET write_generation=? WHERE drive_label=?", [new_generation, label])
     return new_generation
 
@@ -189,12 +206,39 @@ def publish_clean_anchor(con, label, identity_epoch=None, generation=None,
     return _immediate(con, body)
 
 
+def _require_live_session_token(con, session_id, fencing_token):
+    """Validate live session token inside a short TX boundary (finding 33)."""
+    from modelark.proposal import Refusal
+    row = con.execute(
+        "SELECT state, fencing_token FROM execution_sessions WHERE session_id=?",
+        [session_id]).fetchone()
+    if not row:
+        raise Refusal("SESSION_NOT_FOUND", {"session_id": session_id}, ())
+    if int(row[1]) != int(fencing_token):
+        raise Refusal("SESSION_TOKEN_MISMATCH", {"session_id": session_id}, ())
+    if row[0] not in ("starting", "running", "stopping"):
+        raise Refusal("SESSION_STATE_INVALID", {"state": row[0]}, ())
+
+
 @contextmanager
-def drive_mutation(con, drive_labels, operation_code, *, observe, reconcile, now, blocking=True):
+def drive_mutation(
+    con, drive_labels, operation_code, *, observe, reconcile, now, blocking=True,
+    session_id=None, fencing_token=None,
+):
     """Fence, dirty, run ``body``, reconcile the touched set, and publish a fresh clean anchor for
     every drive. ``observe(label) -> Observation`` is the fenced identity/free reader; ``reconcile(
     label, paths, keys)`` reconciles the generation's touched set. Yields a writer with
-    ``record_touched(label, paths=…, keys=…)``."""
+    ``record_touched(label, paths=…, keys=…)``.
+
+    When ``session_id``/``fencing_token`` are supplied (Fill worker path), dirty and clean-anchor
+    transactions route through ``session_write`` and populate dirty-generation owner fields. Operator
+    mutations leave owner fields null and remain excluded while a live session exists.
+    """
+    session_owned = session_id is not None and fencing_token is not None
+    if (session_id is None) != (fencing_token is None):
+        raise DriveMutationRefused(
+            "DIRTY_OWNER_PAIR_REQUIRED",
+            session_id=session_id, fencing_token=fencing_token)
     try:
         # The sorted drive fences span the whole mutation (body -> reconcile -> anchor). The controller
         # fence is held ONLY long enough to capture facts under it, acquire the drive fences, prove
@@ -214,16 +258,31 @@ def drive_mutation(con, drive_labels, operation_code, *, observe, reconcile, now
                 for label, (_epoch, _gen, fingerprint, capacity, _auth) in facts.items():
                     _require_identity(observe(label), fingerprint, capacity, label)
                 # atomic dirty-generation advance across all drives, revalidating captured identity
-                def _dirty_tx():
+                owner_sid = str(session_id) if session_owned else None
+                owner_tok = int(fencing_token) if session_owned else None
+
+                def _dirty_body(c):
+                    if session_owned:
+                        _require_live_session_token(c, owner_sid, owner_tok)
                     out = {
-                        label: _advance_one(con, label, operation_code, facts[label])
+                        label: _advance_one(
+                            c, label, operation_code, facts[label],
+                            owner_session_id=owner_sid,
+                            owner_fencing_token=owner_tok)
                         for label in drive_labels
                     }
-                    # A3: envelope dirty-advance is a graph-affecting write (not only direct wrappers).
-                    from modelark.proposal import bump_revision
-                    bump_revision(con)
+                    if not session_owned:
+                        # Operator path: bump inside this TX. Session path: session_write bumps.
+                        from modelark.proposal import bump_revision
+                        bump_revision(c)
                     return out
-                captured = _immediate(con, _dirty_tx)
+
+                if session_owned:
+                    from modelark.execution_session import session_write
+                    captured = session_write(
+                        con, owner_sid, owner_tok, _dirty_body)
+                else:
+                    captured = _immediate(con, lambda: _dirty_body(con))
             # controller released here; the drive fences remain held for the body below
             writer = _Writer([handle.fileno() for handle in handles])
             yield writer
@@ -237,15 +296,21 @@ def drive_mutation(con, drive_labels, operation_code, *, observe, reconcile, now
                 _require_identity(observation, fingerprint, capacity, label)
                 candidates[label] = observation
 
-            def _anchor_tx():
+            def _anchor_body(c):
+                if session_owned:
+                    _require_live_session_token(c, owner_sid, owner_tok)
                 for label in drive_labels:
                     _publish_anchor_locked(
-                        con, label, facts[label][0], captured[label],
+                        c, label, facts[label][0], captured[label],
                         candidates[label], now)
-                # A3: clean-anchor publish path also bumps inside the envelope transaction.
-                from modelark.proposal import bump_revision
-                bump_revision(con)
+                if not session_owned:
+                    from modelark.proposal import bump_revision
+                    bump_revision(c)
 
-            _immediate(con, _anchor_tx)
+            if session_owned:
+                from modelark.execution_session import session_write
+                session_write(con, owner_sid, owner_tok, _anchor_body)
+            else:
+                _immediate(con, lambda: _anchor_body(con))
     except drive_fence.FenceUnavailable as exc:
         raise DriveMutationRefused("DRIVE_FENCE_UNAVAILABLE", **exc.evidence) from exc

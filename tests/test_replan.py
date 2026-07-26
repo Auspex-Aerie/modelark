@@ -116,18 +116,56 @@ def _install_replan_session_bridge():
     built from catalog (not plan_capacity). fill.execute drains that projection only.
 
     Applied under both pytest and the CI ``python tests/test_replan.py`` script runner.
+    Inserts a durable live session row so heartbeat/terminalize CAS paths remain real.
     """
     from modelark import execution_service
 
     def _fake_start_fill(**kw):
         con = kw.get("con")
         proj = _bridge_projection_from_catalog(con) if con is not None else types.SimpleNamespace(tasks=())
+        sid = "replan-bridge"
+        token = 1
+        proposal_id = "replan-bridge-proposal"
+        if con is not None:
+            try:
+                # Ensure planner_state exists for token/revision bookkeeping.
+                if con.execute(
+                        "SELECT 1 FROM planner_state WHERE singleton_id=1").fetchone() is None:
+                    con.execute(
+                        "INSERT INTO planner_state(singleton_id,planner_revision,"
+                        "active_approved_proposal_id,next_fencing_token) VALUES(1,0,NULL,1)")
+                # Minimal approved proposal so execution_sessions FK is satisfied.
+                if con.execute(
+                        "SELECT 1 FROM placement_proposals WHERE proposal_id=?",
+                        [proposal_id]).fetchone() is None:
+                    con.execute(
+                        "INSERT INTO placement_proposals("
+                        "proposal_id,plan_id,based_on_revision,lifecycle,canonical_hash,"
+                        "mutation_kind,mutation_args_json,serializer_version,"
+                        "capacity_mode,policy_version,solver_version,gate_b_code,"
+                        "semantic_input_hash) "
+                        "VALUES(?,?,0,'approved',?,'adopt_current','[]','1',"
+                        "'guaranteed','1','1','FEASIBLE',?)",
+                        [proposal_id, "ark", "a" * 64, "b" * 64])
+                con.execute("DELETE FROM execution_sessions WHERE session_id=?", [sid])
+                con.execute(
+                    "INSERT INTO execution_sessions("
+                    "session_id,plan_id,approved_proposal_id,controller_identity,"
+                    "worker_identity,state,bound_planner_revision,fencing_token,expires_at) "
+                    "VALUES(?,?,?,'ctrl-replan','worker-replan','running',0,?,"
+                    "'2099-01-01T00:00:00Z')",
+                    [sid, "ark", proposal_id, token])
+            except Exception:
+                # Pre-v5 fixtures: leave synthetic session only.
+                proposal_id = None
         return types.SimpleNamespace(
             session=types.SimpleNamespace(
-                session_id="replan-bridge",
+                session_id=sid,
                 state="running",
-                fencing_token=1,
+                fencing_token=token,
                 controller_identity="ctrl-replan",
+                # Keep None so fixed-map drain skips approval-bound projection refresh.
+                approved_proposal_id=None,
             ),
             projection=proj,
             execution_config=None,

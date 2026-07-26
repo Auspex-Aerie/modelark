@@ -354,6 +354,10 @@ def execute(
             # Do NOT take a second set of session-level drive locks — the physical
             # mutation envelope already holds drive fences and exposes child FDs.
             ctx.stats["child_fence_fds"] = ()
+        # Finding 35: carry frozen ExecutionConfig into transport (no global reread).
+        frozen_cfg = getattr(session_start, "execution_config", None) if session_start else None
+        if frozen_cfg is not None:
+            ctx.execution_config = frozen_cfg
 
         result = _drain_projection(
             ctx, session_start,
@@ -366,12 +370,16 @@ def execute(
         )
         return result
     finally:
-        # Terminalize live session + release any session child markers (finding 32).
+        # Terminalize live session + release any session child markers (finding 32/36).
         if session is not None and getattr(ctx, "con", None) is not None:
             try:
                 _terminalize_session_outcome(ctx.con, session, result)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Never tokenless-update; surface failure on the result when possible.
+                if isinstance(result, dict):
+                    result["terminalize_error"] = str(
+                        getattr(exc, "code", None) or exc)[:200]
+                    result.setdefault("ok", False)
             try:
                 erec.release_child_fences(session.session_id)
             except Exception:
@@ -379,8 +387,13 @@ def execute(
 
 
 def _terminalize_session_outcome(con, session, result) -> None:
-    """Map execute terminal dict → session state and mark_terminal with fencing token."""
+    """Map execute terminal dict → session state and mark_terminal with fencing token.
+
+    Finding 36: never replace a failed token CAS with a tokenless UPDATE. Surface the
+    failure so the outer path can record a recoverable terminalization defect.
+    """
     from modelark import execution_session as esess
+    from modelark.proposal import Refusal
     if session is None:
         return
     # Reload — claim may have updated state.
@@ -411,38 +424,68 @@ def _terminalize_session_outcome(con, session, result) -> None:
         esess.terminalize(
             con, session_id=session.session_id, fencing_token=token,
             state=state, terminal_code=str(code)[:64] if code else None)
-    except Exception:
-        # Best-effort: force failed if token/state race
-        try:
-            con.execute(
-                "UPDATE execution_sessions SET state='failed', "
-                "terminal_code=?, terminal_at=CURRENT_TIMESTAMP "
-                "WHERE session_id=? AND state IN ('starting','running','stopping')",
-                [str(code or "TERMINALIZE_FAILED")[:64], session.session_id])
-        except Exception:
-            pass
+    except Refusal:
+        # Preserve typed CAS failure; do not tokenless-update.
+        raise
+    except Exception as exc:
+        # Integrity/unexpected path — re-raise so caller can fail closed.
+        raise Refusal(
+            "SESSION_TERMINALIZE_FAILED",
+            {"session_id": session.session_id, "error": str(exc)[:200]},
+            ("inspect_session",)) from exc
 
 
+# Instrumented batch/event refresh counter for B12 acceptance (finding 38).
+_PROJECTION_REFRESH_CALLS = 0
+
+
+def projection_refresh_call_count() -> int:
+    return int(_PROJECTION_REFRESH_CALLS)
+
+
+def reset_projection_refresh_call_count() -> None:
+    global _PROJECTION_REFRESH_CALLS
+    _PROJECTION_REFRESH_CALLS = 0
 
 
 def _refresh_projection(ctx, session_start, *, plan_id=None):
-    """Re-run project_pure against current catalog facts (constrained refresh)."""
+    """Re-run project_pure against current catalog facts (constrained refresh).
+
+    Finding 37: propagate typed projection/config/evidence refusals — never convert
+    them to None and continue on a stale projection.
+    """
+    global _PROJECTION_REFRESH_CALLS
     from modelark import execution_projection as eproj, execution_session as esess
     from modelark.proposal import load_proposal, Refusal
+    _PROJECTION_REFRESH_CALLS += 1
     session = getattr(session_start, "session", None)
     if session is None:
-        return None
+        raise Refusal(
+            "APPROVAL_PROJECTION_MISSING",
+            {"reason": "session_missing_on_refresh"},
+            ("start_fill",))
     try:
         proposal = getattr(session_start, "_proposal", None) or load_proposal(
             ctx.con, session.approved_proposal_id)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise Refusal(
+            "APPROVED_INPUT_CHANGED",
+            {"reason": "proposal_load_failed", "error": str(exc)[:200]},
+            ("preview_again",)) from exc
+    if not proposal:
+        raise Refusal(
+            "APPROVAL_MISSING",
+            {"proposal_id": getattr(session, "approved_proposal_id", None)},
+            ("preview_again",))
     relevant = esess._proposal_drive_ids(proposal)
+    # Compare frozen config hash at the projection boundary only (finding 35/37).
+    frozen = getattr(session_start, "execution_config", None)
     services = SimpleNamespace(
         observe_exact_capacity=None,
-        config=SimpleNamespace(read_graph_affecting_config=lambda: {}),
+        config=SimpleNamespace(
+            read_graph_affecting_config=lambda: dict(getattr(frozen, "values", None) or {})),
     )
-    cfg = getattr(getattr(session_start, "execution_config", None), "values", None) or {}
+    cfg = getattr(frozen, "values", None) or {}
     current_input, current_graph = esess._catalog_projection_bundle(
         ctx.con, proposal, relevant, services, cfg)
     parked = set()
@@ -450,7 +493,7 @@ def _refresh_projection(ctx, session_start, *, plan_id=None):
         proposal, current_input, current_graph,
         SimpleNamespace(parked_gated_repos=frozenset(parked)))
     if isinstance(out, Refusal):
-        return None
+        raise out
     return out
 
 
@@ -540,10 +583,29 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
             if not arch:
                 missing.append(rfilename)
         if not missing and file_rows:
-            continue  # fully satisfied on approved target — shrink out
+            # Content-aware durable satisfaction: require non-null identity when present.
+            # Null archive identity does not count as satisfaction (finding 37).
+            null_identity = False
+            if target:
+                for fr in file_rows:
+                    arch_id = con.execute(
+                        "SELECT orig_sha256 FROM archived WHERE repo_id=? AND rfilename=? "
+                        "AND drive_label=?",
+                        [repo, fr.rfilename, target]).fetchone()
+                    if arch_id is not None and arch_id[0] is None and fr.sha256:
+                        null_identity = True
+                        break
+            if not null_identity:
+                continue  # fully satisfied on approved target — shrink out
+            # Fall through: treat null-identity rows as still missing work.
+            missing = [fr.rfilename for fr in file_rows]
         if not file_rows:
-            # No approved or catalog file authority — skip rather than invent paths.
-            continue
+            # Finding 37: fail closed when approved file authority is absent.
+            from modelark.proposal import Refusal
+            raise Refusal(
+                "APPROVED_INPUT_CHANGED",
+                {"reason": "missing_file_authority", "requirement_id": rid, "repo_id": repo},
+                ("preview_again",))
         kind = TaskKind.REPLICATE if source else TaskKind.FETCH
         from modelark.budgets import FileBudget
         file_budgets = []
@@ -882,32 +944,75 @@ def _drain_projection(
                 )
 
         pinned_drive = None
-        # Heartbeat while running (finding 32).
+        # Heartbeat while running (finding 32/36) — fail closed on required heartbeat failure.
         if session is not None:
+            from modelark import execution_session as esess
+            from modelark.proposal import Refusal
             try:
-                from modelark import execution_session as esess
                 esess.heartbeat(
                     ctx.con,
                     session_id=session.session_id,
                     fencing_token=int(session.fencing_token),
                 )
-            except Exception:
-                pass
-        # Constrained projection refresh at batch boundary (B8).
+            except Refusal as exc:
+                return _terminal(
+                    "failed", f"session heartbeat refused: {exc.code}",
+                    code=str(exc.code),
+                    evidence=getattr(exc, "evidence", None),
+                    actions=list(getattr(exc, "actions", ()) or ()) or ["inspect_session"],
+                )
+            except Exception as exc:
+                return _terminal(
+                    "failed", f"session heartbeat failed: {exc}",
+                    code="SESSION_HEARTBEAT_FAILED",
+                    evidence={"session_id": session.session_id},
+                    actions=["inspect_session"],
+                )
+        # Constrained projection refresh at batch boundary (B8 / finding 37) — fail closed
+        # when an approved proposal is bound. Characterization bridges without an approval
+        # keep the fixed start projection and re-derive work units only.
+        from modelark.proposal import Refusal as _Refusal
+        has_approval = bool(getattr(session, "approved_proposal_id", None)) if session else False
+        if has_approval:
+            try:
+                refreshed = _refresh_projection(ctx, session_start, plan_id=pid)
+            except _Refusal as exc:
+                return _terminal(
+                    "failed", f"projection refresh refused: {exc.code}",
+                    code=str(exc.code),
+                    evidence=getattr(exc, "evidence", None),
+                    actions=list(getattr(exc, "actions", ()) or ()) or ["preview_again"],
+                )
+            except Exception as exc:
+                return _terminal(
+                    "failed", f"projection refresh failed: {exc}",
+                    code="PROJECTION_REFRESH_FAILED",
+                    evidence={"error": str(exc)[:200]},
+                    actions=["preview_again", "inspect_session"],
+                )
+            if refreshed is None:
+                return _terminal(
+                    "failed", "projection refresh returned no authority",
+                    code="APPROVED_INPUT_CHANGED",
+                    actions=["preview_again"],
+                )
+            session_start.projection = refreshed
+            projection = refreshed
         try:
-            refreshed = _refresh_projection(ctx, session_start, plan_id=pid)
-            if refreshed is not None:
-                session_start.projection = refreshed
-                projection = refreshed
-                with ctx.lock:
-                    remaining = _projection_work_units(
-                        ctx.con, projection, repo_scope,
-                        proposal_files=proposal_files)
-                batch_order = []
-                for u in remaining:
-                    if u.target_drive and u.target_drive not in batch_order:
-                        batch_order.append(u.target_drive)
-        except Exception:
-            pass
+            with ctx.lock:
+                remaining = _projection_work_units(
+                    ctx.con, projection, repo_scope,
+                    proposal_files=proposal_files)
+        except _Refusal as exc:
+            return _terminal(
+                "failed", f"projection work units refused: {exc.code}",
+                code=str(exc.code),
+                evidence=getattr(exc, "evidence", None),
+                actions=list(getattr(exc, "actions", ()) or ()) or ["preview_again"],
+            )
+        batch_order = []
+        for u in remaining:
+            if u.target_drive and u.target_drive not in batch_order:
+                batch_order.append(u.target_drive)
 
     return _stop_terminal()
