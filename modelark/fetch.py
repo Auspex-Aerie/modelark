@@ -167,8 +167,15 @@ class RunCtx:
             return self.con.execute(sql, params if params is not None else []).fetchone()
 
     def write(self, fn: Callable[[Any], Any]):
+        """Catalog write under planner_revision discipline (PR-08 A3 / fetch archived path)."""
         with self.lock:
-            return fn(self.con)
+            from modelark.proposal import GraphResult, graph_write
+
+            def op(c):
+                value = fn(c)
+                return GraphResult(proven_noop=False, value=value)
+
+            return graph_write(self.con, op).value
 
 
 def finalized(con) -> list[str]:

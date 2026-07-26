@@ -90,6 +90,13 @@ def _mem():
     con = sqlite3.connect(":memory:", isolation_level=None)
     for stmt in db._statements(db.SCHEMA_PATH.read_text()):
         con.execute(stmt)
+    # Finding 44 / A3: schema DDL creates planner_state but does not seed the
+    # singleton; graph_write → bump_revision requires it (v5 migration seeds it).
+    if con.execute(
+            "SELECT count(*) FROM planner_state WHERE singleton_id=1").fetchone()[0] == 0:
+        con.execute(
+            "INSERT INTO planner_state(singleton_id,planner_revision,"
+            "active_approved_proposal_id,next_fencing_token) VALUES(1,0,NULL,0)")
     return con
 
 
@@ -476,7 +483,18 @@ def test_fetch_run_bails_on_dead_drive_midbatch(tmp_path):
     def boom(ctx, rid, dest, label, annex, cfg, **kw):
         calls["n"] += 1
         raise RuntimeError("write failed: I/O error")
-    ctx = fetch.RunCtx(con=object(), on_progress=events.append)
+    import sqlite3
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    # Finding 44: graph_write requires planner_state — seed minimal v5 singleton.
+    con.execute(
+        "CREATE TABLE planner_state(singleton_id INTEGER PRIMARY KEY, "
+        "planner_revision INTEGER NOT NULL DEFAULT 0, "
+        "active_approved_proposal_id VARCHAR, next_fencing_token INTEGER NOT NULL DEFAULT 0, "
+        "updated_at TIMESTAMP)")
+    con.execute(
+        "INSERT INTO planner_state(singleton_id,planner_revision,next_fencing_token) "
+        "VALUES(1,0,0)")
+    ctx = fetch.RunCtx(con=con, on_progress=events.append)
     with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
          mock.patch.object(fetch.register, "archive_path", side_effect=lambda con, l: tmp_path), \
          mock.patch.object(fetch, "_is_annex", side_effect=lambda d: False), \
@@ -502,7 +520,17 @@ def test_fetch_run_stops_on_midrun_unauthorized_without_repo_churn(tmp_path):
         response = httpx.Response(401, request=httpx.Request("GET", "https://huggingface.co"))
         raise HfHubHTTPError("unauthorized", response=response)
 
-    ctx = fetch.RunCtx(con=object())
+    import sqlite3
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    con.execute(
+        "CREATE TABLE planner_state(singleton_id INTEGER PRIMARY KEY, "
+        "planner_revision INTEGER NOT NULL DEFAULT 0, "
+        "active_approved_proposal_id VARCHAR, next_fencing_token INTEGER NOT NULL DEFAULT 0, "
+        "updated_at TIMESTAMP)")
+    con.execute(
+        "INSERT INTO planner_state(singleton_id,planner_revision,next_fencing_token) "
+        "VALUES(1,0,0)")
+    ctx = fetch.RunCtx(con=con)
     with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
          mock.patch.object(fetch.register, "archive_path", return_value=tmp_path), \
          mock.patch.object(fetch, "_is_annex", return_value=False), \
@@ -603,8 +631,18 @@ def test_plan_capacity_stop_compression_aware(tmp_path):
 
 def test_run_replica_defers_on_offline_source(tmp_path):
     # A dead/read-only source → deferred + awaiting-drive, NO per-repo copy churn (INC-009).
+    import sqlite3
     events = []
-    ctx = fetch.RunCtx(con=object(), on_progress=events.append)
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    con.execute(
+        "CREATE TABLE planner_state(singleton_id INTEGER PRIMARY KEY, "
+        "planner_revision INTEGER NOT NULL DEFAULT 0, "
+        "active_approved_proposal_id VARCHAR, next_fencing_token INTEGER NOT NULL DEFAULT 0, "
+        "updated_at TIMESTAMP)")
+    con.execute(
+        "INSERT INTO planner_state(singleton_id,planner_revision,next_fencing_token) "
+        "VALUES(1,0,0)")
+    ctx = fetch.RunCtx(con=con, on_progress=events.append)
     with mock.patch.object(fetch.register, "archive_path",
                            side_effect=lambda con, l: (tmp_path if l == "drive-04" else tmp_path / "gone")), \
          mock.patch.object(fetch, "_dest_writable", side_effect=lambda p: "gone" not in str(p)):

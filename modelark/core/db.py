@@ -107,6 +107,9 @@ def _apply_schema(con: sqlite3.Connection, tables_only: bool = False) -> None:
         # owns them transactionally, and the final (non-tables-only) pass creates them idempotently.
         if tables_only and any(t in stmt for t in _V3_EVIDENCE_TABLES):
             continue
+        # Same rule for v5 proposal-control tables (backup-first v4→v5 migration owns them).
+        if tables_only and any(t in stmt for t in _V5_PROPOSAL_TABLES):
+            continue
         con.execute(stmt)
 
 
@@ -191,7 +194,19 @@ _VIEW_NAMES = ("v_ui", "v_model_summary", "v_storage_by_drive")
 _INTEGRITY_SCHEMA_VERSION = 1
 _CAPACITY_MODE_SCHEMA_VERSION = 2
 _CAPACITY_EVIDENCE_SCHEMA_VERSION = 3
-_SCHEMA_VERSION = 4  # v4: drives.lifecycle + drives.eligibility (#37)
+_LIFECYCLE_ELIGIBILITY_SCHEMA_VERSION = 4  # v4: drives.lifecycle + drives.eligibility (#37)
+_PROPOSAL_CONTROL_SCHEMA_VERSION = 5  # v5: planner_state + proposals + execution_sessions (#39-A)
+_SCHEMA_VERSION = 5
+
+# v5 proposal-control tables: never created during the pre-migration tables-only pass so
+# backup-first v4→v5 owns them transactionally (same class of bug as early v3 evidence tables).
+_V5_PROPOSAL_TABLES = (
+    "planner_state",
+    "placement_proposals",
+    "proposal_tasks",
+    "proposal_files",
+    "execution_sessions",
+)
 
 
 def _validate_catalog_version(version: int, *, read_only: bool = False) -> None:
@@ -469,7 +484,7 @@ def _migrate_lifecycle_eligibility_v4(con, *, backup_existing: bool) -> None:
     """
     columns = {row[1] for row in con.execute('PRAGMA table_info("drives")').fetchall()}
     if "lifecycle" in columns and "eligibility" in columns:
-        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        con.execute(f"PRAGMA user_version={_LIFECYCLE_ELIGIBILITY_SCHEMA_VERSION}")
         return
     if con.execute("PRAGMA foreign_keys").fetchone()[0]:
         raise RuntimeError("Lifecycle/eligibility migration requires foreign_keys=OFF")
@@ -484,13 +499,71 @@ def _migrate_lifecycle_eligibility_v4(con, *, backup_existing: bool) -> None:
         if violations:
             raise RuntimeError(
                 f"Lifecycle/eligibility migration produced foreign-key violations: {violations[:12]}")
-        con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+        con.execute(f"PRAGMA user_version={_LIFECYCLE_ELIGIBILITY_SCHEMA_VERSION}")
         con.execute("COMMIT")
     except Exception as exc:
         con.execute("ROLLBACK")
         if isinstance(exc, RuntimeError):
             raise
         raise RuntimeError(f"Cannot migrate catalog to v4 lifecycle/eligibility ({exc})") from exc
+
+
+def _v5_object_ddl() -> list[str]:
+    """v5 proposal-control tables and indexes taken from the packaged schema (single-sourced)."""
+    wanted = []
+    for stmt in _statements(SCHEMA_PATH.read_text()):
+        head = stmt.strip().upper()
+        if not head.startswith(("CREATE TABLE", "CREATE INDEX", "CREATE UNIQUE INDEX")):
+            continue
+        if any(table in stmt for table in _V5_PROPOSAL_TABLES):
+            wanted.append(stmt)
+    return wanted
+
+
+def _migrate_proposal_control_v5(con, *, backup_existing: bool) -> None:
+    """Backup-first, transactional v4→v5: five planning/control tables + planner_state seed.
+
+    No fabricated proposals or approvals. planner_revision=0, next_fencing_token=0,
+    active_approved_proposal_id=NULL. Backup label is pre-proposal-v5 (Gate-1 contract).
+    """
+    tables = {r[0] for r in con.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if "planner_state" in tables and "placement_proposals" in tables:
+        # Already shaped; ensure singleton seed and stamp v5.
+        if con.execute("SELECT count(*) FROM planner_state WHERE singleton_id=1").fetchone()[0] == 0:
+            con.execute(
+                "INSERT INTO planner_state(singleton_id,planner_revision,"
+                "active_approved_proposal_id,next_fencing_token) VALUES(1,0,NULL,0)")
+        con.execute(f"PRAGMA user_version={_PROPOSAL_CONTROL_SCHEMA_VERSION}")
+        return
+    if con.execute("PRAGMA foreign_keys").fetchone()[0]:
+        raise RuntimeError("Proposal-control migration requires foreign_keys=OFF")
+    if backup_existing:
+        _backup_before_migration(con, "pre-proposal-v5")  # strictly before any v5 object
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        for stmt in _v5_object_ddl():
+            con.execute(stmt)
+        # Seed singleton: revision 0, null active pointer, fencing token 0 (A1 / A2).
+        if con.execute("SELECT count(*) FROM planner_state WHERE singleton_id=1").fetchone()[0] == 0:
+            con.execute(
+                "INSERT INTO planner_state(singleton_id,planner_revision,"
+                "active_approved_proposal_id,next_fencing_token) VALUES(1,0,NULL,0)")
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError(
+                f"Proposal-control migration produced foreign-key violations: {violations[:12]}")
+        con.execute(f"PRAGMA user_version={_PROPOSAL_CONTROL_SCHEMA_VERSION}")
+        con.execute("COMMIT")
+    except Exception as exc:
+        con.execute("ROLLBACK")
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(f"Cannot migrate catalog to v5 proposal control ({exc})") from exc
+
+
+# Public alias for Gate-1 injected-failure contracts.
+_migrate_placement_approval_v5 = _migrate_proposal_control_v5
 
 
 def _migrate(con, version: int, *, backup_existing: bool) -> None:
@@ -506,9 +579,12 @@ def _migrate(con, version: int, *, backup_existing: bool) -> None:
     if version < _CAPACITY_EVIDENCE_SCHEMA_VERSION:
         _migrate_capacity_evidence_v3(con, backup_existing=backup_existing)
         version = _CAPACITY_EVIDENCE_SCHEMA_VERSION
-    if version < _SCHEMA_VERSION:
+    if version < _LIFECYCLE_ELIGIBILITY_SCHEMA_VERSION:
         _migrate_lifecycle_eligibility_v4(con, backup_existing=backup_existing)
-        version = _SCHEMA_VERSION
+        version = _LIFECYCLE_ELIGIBILITY_SCHEMA_VERSION
+    if version < _PROPOSAL_CONTROL_SCHEMA_VERSION:
+        _migrate_proposal_control_v5(con, backup_existing=backup_existing)
+        version = _PROPOSAL_CONTROL_SCHEMA_VERSION
     if version != _SCHEMA_VERSION:
         raise RuntimeError(f"Catalog migration stopped at v{version}, expected v{_SCHEMA_VERSION}")
 
@@ -553,31 +629,38 @@ def upsert(con, table: str, row: dict, pk: list[str], touch: list[str] | None = 
     con.execute(sql, [row[c] for c in cols])
 
 
+def _replace_files_body(con, repo_id: str, rows: list[dict]) -> None:
+    """Unlocked file-row refresh body (caller owns the transaction)."""
+    for r in rows:
+        row = dict(r)
+        row["repo_id"] = repo_id
+        upsert(con, "files", row, pk=["repo_id", "rfilename"])
+    names = [r["rfilename"] for r in rows]
+    keep = ""
+    params: list[object] = [repo_id]
+    if names:
+        keep = f"AND rfilename NOT IN ({', '.join(['?'] * len(names))})"
+        params.extend(names)
+    con.execute(
+        "DELETE FROM files AS f WHERE repo_id=? " + keep + " "
+        "AND NOT EXISTS (SELECT 1 FROM archived a "
+        "                WHERE a.repo_id=f.repo_id AND a.rfilename=f.rfilename) "
+        "AND NOT EXISTS (SELECT 1 FROM replicas r "
+        "                WHERE r.repo_id=f.repo_id AND r.rfilename=f.rfilename)",
+        params,
+    )
+
+
 def replace_files(con, repo_id: str, rows: list[dict]) -> None:
-    """Refresh file rows for a repo in one transaction.
+    """Refresh file rows for a repo in one transaction (bumps planner_revision; PR-08 A3).
 
     Rediscovery may remove an upstream filename after ModelArk archived it. Such a row is durable
     archive provenance and must survive the refresh; unreferenced stale rows are removed normally.
     """
-    con.execute("BEGIN")
-    try:
-        for r in rows:
-            upsert(con, "files", r, pk=["repo_id", "rfilename"])
-        names = [r["rfilename"] for r in rows]
-        keep = ""
-        params: list[object] = [repo_id]
-        if names:
-            keep = f"AND rfilename NOT IN ({', '.join(['?'] * len(names))})"
-            params.extend(names)
-        con.execute(
-            "DELETE FROM files AS f WHERE repo_id=? " + keep + " "
-            "AND NOT EXISTS (SELECT 1 FROM archived a "
-            "                WHERE a.repo_id=f.repo_id AND a.rfilename=f.rfilename) "
-            "AND NOT EXISTS (SELECT 1 FROM replicas r "
-            "                WHERE r.repo_id=f.repo_id AND r.rfilename=f.rfilename)",
-            params,
-        )
-        con.execute("COMMIT")
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
+    from modelark.proposal import GraphResult, graph_write
+
+    def op(c):
+        _replace_files_body(c, repo_id, rows)
+        return GraphResult(proven_noop=False)
+
+    graph_write(con, op)

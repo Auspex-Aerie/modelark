@@ -260,6 +260,8 @@ def _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now, a
                         [p_epoch, final.capacity, final.fingerprint, label])
             gen = dm._advance_one(con, label, "bootstrap")           # generation 0 -> 1
             dm._publish_anchor_locked(con, label, p_epoch, gen, obs, now)
+            from modelark.proposal import bump_revision
+            bump_revision(con)
             return gen
         return Reconciliation("bootstrapped", p_epoch, dm._immediate(con, _body), final.free)
 
@@ -275,8 +277,24 @@ def _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now, a
                         [new_epoch, final.capacity, final.fingerprint, label])   # persist the NEW fingerprint
             gen = dm._advance_one(con, label, "epoch")               # 0 -> 1 under the new epoch
             dm._publish_anchor_locked(con, label, new_epoch, gen, obs, now)
+            from modelark.proposal import bump_revision
+            bump_revision(con)
             return gen
         return Reconciliation("epoch_advanced", new_epoch, dm._immediate(con, _body), final.free)
+
+    if p_gen == 0:
+        # Identity known but never dirty-advanced (generation 0 has no anchor namespace): open gen 1.
+        _require_complete_inventory(con, label, dest)
+        final = _final_observation(con, label, ev)
+        obs = final.observation()
+
+        def _body0():
+            gen = dm._advance_one(con, label, "reconcile")
+            dm._publish_anchor_locked(con, label, p_epoch, gen, obs, now)
+            from modelark.proposal import bump_revision
+            bump_revision(con)
+            return gen
+        return Reconciliation("refreshed", p_epoch, dm._immediate(con, _body0), final.free)
 
     if not dm._generation_is_clean(con, label, p_epoch, p_gen, p_fp, p_cap, "dedicated_local"):
         # (B) sessionless dirty recovery — republish THIS generation's anchor (session-attributed = #39)
@@ -305,6 +323,8 @@ def _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now, a
     def _body():
         gen = dm._advance_one(con, label, op)                        # clean -> generation + 1
         dm._publish_anchor_locked(con, label, p_epoch, gen, obs, now)
+        from modelark.proposal import bump_revision
+        bump_revision(con)
         return gen
     return Reconciliation("drift_accepted" if drifted else "refreshed", p_epoch,
                           dm._immediate(con, _body), final.free)

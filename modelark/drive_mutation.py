@@ -117,7 +117,12 @@ def _advance_one(con, label, operation_code, captured=None):
 
 def begin_generation(con, label, operation_code):
     """Advance one drive's dirty generation in a single short transaction (both owner fields null)."""
-    return _immediate(con, lambda: _advance_one(con, label, operation_code))
+    def body():
+        gen = _advance_one(con, label, operation_code)
+        from modelark.proposal import bump_revision
+        bump_revision(con)
+        return gen
+    return _immediate(con, body)
 
 
 def _require_identity(observation, fingerprint, capacity, label):
@@ -145,8 +150,11 @@ def _publish_anchor_locked(con, label, identity_epoch, generation, observation, 
 
 def publish_clean_anchor(con, label, identity_epoch, generation, observation, now):
     """Publish one clean anchor in its own short transaction (single-drive/direct use)."""
-    return _immediate(
-        con, lambda: _publish_anchor_locked(con, label, identity_epoch, generation, observation, now))
+    def body():
+        _publish_anchor_locked(con, label, identity_epoch, generation, observation, now)
+        from modelark.proposal import bump_revision
+        bump_revision(con)
+    return _immediate(con, body)
 
 
 @contextmanager
@@ -174,9 +182,16 @@ def drive_mutation(con, drive_labels, operation_code, *, observe, reconcile, now
                 for label, (_epoch, _gen, fingerprint, capacity, _auth) in facts.items():
                     _require_identity(observe(label), fingerprint, capacity, label)
                 # atomic dirty-generation advance across all drives, revalidating captured identity
-                captured = _immediate(con, lambda: {
-                    label: _advance_one(con, label, operation_code, facts[label])
-                    for label in drive_labels})
+                def _dirty_tx():
+                    out = {
+                        label: _advance_one(con, label, operation_code, facts[label])
+                        for label in drive_labels
+                    }
+                    # A3: envelope dirty-advance is a graph-affecting write (not only direct wrappers).
+                    from modelark.proposal import bump_revision
+                    bump_revision(con)
+                    return out
+                captured = _immediate(con, _dirty_tx)
             # controller released here; the drive fences remain held for the body below
             writer = _Writer([handle.fileno() for handle in handles])
             yield writer
@@ -189,9 +204,16 @@ def drive_mutation(con, drive_labels, operation_code, *, observe, reconcile, now
                 observation = observe(label)
                 _require_identity(observation, fingerprint, capacity, label)
                 candidates[label] = observation
-            _immediate(con, lambda: [
-                _publish_anchor_locked(con, label, facts[label][0], captured[label],
-                                       candidates[label], now)
-                for label in drive_labels])
+
+            def _anchor_tx():
+                for label in drive_labels:
+                    _publish_anchor_locked(
+                        con, label, facts[label][0], captured[label],
+                        candidates[label], now)
+                # A3: clean-anchor publish path also bumps inside the envelope transaction.
+                from modelark.proposal import bump_revision
+                bump_revision(con)
+
+            _immediate(con, _anchor_tx)
     except drive_fence.FenceUnavailable as exc:
         raise DriveMutationRefused("DRIVE_FENCE_UNAVAILABLE", **exc.evidence) from exc

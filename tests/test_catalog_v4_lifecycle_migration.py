@@ -147,8 +147,8 @@ def _seed_v3(tmp_path):
 def test_migrate_v3_to_v4_adds_lifecycle_eligibility_and_preserves_rows(tmp_path):
     _seed_v3(tmp_path)
     con = db.connect()  # must run v3→v4 migration once implemented
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 4, (
-        "v3→v4 lifecycle/eligibility migration not implemented (expected Gate-1 red)")
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
+        f"connect must migrate through v4 to current schema v{db._SCHEMA_VERSION}")
 
     dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
     assert {"lifecycle", "eligibility"} <= dcols
@@ -179,8 +179,8 @@ def test_v4_migration_is_idempotent(tmp_path):
     _seed_v3(tmp_path)
     db.connect().close()
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 4, (
-        "v3→v4 migration not implemented (expected Gate-1 red)")
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
+        f"idempotent path must land at current schema v{db._SCHEMA_VERSION}")
     dcols = [r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()]
     assert len(dcols) == len(set(dcols)), "no duplicate columns from a second migration"
     row = con.execute(
@@ -215,8 +215,8 @@ def test_v4_injected_failure_rolls_back_columns_and_user_version(tmp_path):
 def test_v4_domain_and_not_null_constraints(tmp_path):
     _seed_v3(tmp_path)
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 4, (
-        "v4 schema not created (expected Gate-1 red)")
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
+        f"v4 columns must exist under current schema v{db._SCHEMA_VERSION}")
 
     def rejected(sql):
         try:
@@ -267,8 +267,8 @@ def test_v0_to_v4_does_not_introduce_lifecycle_columns_during_integrity_rebuild(
     con.close()
 
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 4, (
-        "full migration must land at v4 (expected Gate-1 red until v4 exists)")
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
+        f"full migration must land at current schema v{db._SCHEMA_VERSION}")
     dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
     assert {"lifecycle", "eligibility"} <= dcols
     row = con.execute(
@@ -313,8 +313,8 @@ def test_fresh_drive_insert_defaults_to_active_enabled(tmp_path):
     db.DB_PATH = tmp_path / "catalog.sqlite"
     assert not db.DB_PATH.exists(), "must start with no catalog file"
     con = db.connect()  # fresh bootstrap of packaged schema
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 4, (
-        "fresh catalog must be v4 (expected Gate-1 red until packaged schema is v4)")
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
+        f"fresh catalog must be at current schema v{db._SCHEMA_VERSION}")
     dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
     assert {"lifecycle", "eligibility"} <= dcols, (
         "fresh schema.sql must define lifecycle and eligibility columns")

@@ -430,25 +430,47 @@ def register_drive(dev: str, label: str, mount: str | None = None,
     du = shutil.disk_usage(mp)
     con = db.connect()
     try:
-        db.upsert(con, "drives", {
-            "drive_label": label,
-            "fs_uuid": _fs_uuid(dev) or None,
-            "annex_uuid": annex_uuid or None,
-            "capacity_bytes": _disk_bytes(dev) or du.total,
-            "free_bytes": du.free,
-            "hw_model": base["model"] or None,
-            "serial": base["serial"] or None,
-            "physical_location": location,
-            "role": role,
-            "raid_backed": raid_backed,
-            "health": base["verdict"],
-            "last_seen": datetime.now(),
-            "notes": base.get("note") or (
-                f"SMART baseline: realloc={base['reallocated']} "
-                f"pending={base['pending']} offline_unc={base['offline_uncorrectable']} "
-                f"poh={base['power_on_hours']}h passed={base['smart_passed']}"),
-        }, pk=["drive_label"])
-        plan_id = _add_to_active_plan(con, label)       # #34: the drive joins the active plan's fixed set
+        from modelark.proposal import GraphResult, graph_write
+
+        def op(c):
+            db.upsert(c, "drives", {
+                "drive_label": label,
+                "fs_uuid": _fs_uuid(dev) or None,
+                "annex_uuid": annex_uuid or None,
+                "capacity_bytes": _disk_bytes(dev) or du.total,
+                "free_bytes": du.free,
+                "hw_model": base["model"] or None,
+                "serial": base["serial"] or None,
+                "physical_location": location,
+                "role": role,
+                "raid_backed": raid_backed,
+                "health": base["verdict"],
+                "last_seen": datetime.now(),
+                "notes": base.get("note") or (
+                    f"SMART baseline: realloc={base['reallocated']} "
+                    f"pending={base['pending']} offline_unc={base['offline_uncorrectable']} "
+                    f"poh={base['power_on_hours']}h passed={base['smart_passed']}"),
+            }, pk=["drive_label"])
+            # Membership without nested graph_write (single revision bump for registration).
+            from modelark import plan as plan_mod
+            ap = plan_mod.active(c)
+            if ap is None:
+                if plan_mod.get(c, plan_mod.DEFAULT_PLAN) is None:
+                    db.upsert(c, "plans", {
+                        "plan_id": plan_mod.DEFAULT_PLAN, "name": "Ark",
+                        "annex_root": str(ensure_library(None)),
+                        "capacity_mode": "guaranteed", "status": "active", "notes": None,
+                    }, pk=["plan_id"])
+                c.execute("UPDATE plans SET is_active=false")
+                c.execute("UPDATE plans SET is_active=true WHERE plan_id=?",
+                          [plan_mod.DEFAULT_PLAN])
+                ap = plan_mod.get(c, plan_mod.DEFAULT_PLAN)
+            db.upsert(c, "plan_drives",
+                      {"plan_id": ap["plan_id"], "drive_label": label},
+                      pk=["plan_id", "drive_label"])
+            return GraphResult(proven_noop=False, value=ap["plan_id"])
+
+        plan_id = graph_write(con, op).value
     finally:
         con.close()
 

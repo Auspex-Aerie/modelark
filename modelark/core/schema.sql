@@ -255,6 +255,133 @@ CREATE TRIGGER IF NOT EXISTS drive_clean_anchors_no_delete
 BEFORE DELETE ON drive_clean_anchors
 BEGIN SELECT RAISE(ABORT, 'drive_clean_anchors is append-only'); END;
 
+-- Catalog v5 (#39-A / RFC-002): proposal control plane. planner_state is the singleton CAS root;
+-- placement_proposals + children hold immutable planning identity (hash only); execution_sessions
+-- is DDL-only in this cut (no runtime writers) but constraints are enforced for synthetic rows.
+CREATE TABLE IF NOT EXISTS planner_state (
+    singleton_id                INTEGER PRIMARY KEY NOT NULL CHECK (singleton_id = 1),
+    planner_revision            INTEGER NOT NULL DEFAULT 0 CHECK (planner_revision >= 0),
+    active_approved_proposal_id VARCHAR,
+    next_fencing_token          INTEGER NOT NULL DEFAULT 0 CHECK (next_fencing_token >= 0),
+    updated_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+-- Fresh packaged schema must seed the CAS singleton (same as v4→v5 migration).
+-- Schema-only test fixtures and first-boot catalogs need revision=0 / fencing token=0.
+INSERT OR IGNORE INTO planner_state(
+    singleton_id, planner_revision, active_approved_proposal_id, next_fencing_token
+) VALUES (1, 0, NULL, 0);
+
+CREATE TABLE IF NOT EXISTS placement_proposals (
+    proposal_id            VARCHAR PRIMARY KEY NOT NULL CHECK (length(trim(proposal_id)) > 0),
+    plan_id                VARCHAR NOT NULL,
+    based_on_revision      INTEGER NOT NULL CHECK (based_on_revision >= 0),
+    lifecycle              VARCHAR NOT NULL DEFAULT 'draft'
+                           CHECK (lifecycle IN ('draft','approved','superseded')),
+    canonical_hash         VARCHAR NOT NULL CHECK (length(canonical_hash) = 64),
+    mutation_kind          VARCHAR NOT NULL,
+    mutation_args_json     TEXT NOT NULL DEFAULT '[]',
+    serializer_version     VARCHAR NOT NULL,
+    requirement_set_hash   VARCHAR CHECK (requirement_set_hash IS NULL
+                                          OR length(requirement_set_hash) = 64),
+    semantic_input_hash    VARCHAR CHECK (semantic_input_hash IS NULL
+                                          OR length(semantic_input_hash) = 64),
+    selection_before_hash  VARCHAR CHECK (selection_before_hash IS NULL
+                                          OR length(selection_before_hash) = 64),
+    selection_after_hash   VARCHAR CHECK (selection_after_hash IS NULL
+                                          OR length(selection_after_hash) = 64),
+    capacity_mode          VARCHAR NOT NULL DEFAULT 'guaranteed'
+                           CHECK (capacity_mode IN ('guaranteed','compression_aware')),
+    policy_version         VARCHAR NOT NULL DEFAULT '1',
+    solver_version         VARCHAR NOT NULL DEFAULT '1',
+    gate_b_code            VARCHAR NOT NULL DEFAULT 'FEASIBLE',
+    derivation_mode        VARCHAR,
+    created_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    approved_at            TIMESTAMP,
+    superseded_at          TIMESTAMP,
+    FOREIGN KEY (plan_id) REFERENCES plans(plan_id) ON UPDATE CASCADE ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS proposal_tasks (
+    proposal_id            VARCHAR NOT NULL,
+    requirement_id         VARCHAR NOT NULL,
+    row_kind               VARCHAR NOT NULL
+                           CHECK (row_kind IN ('executable','baseline_satisfied')),
+    repo_id                VARCHAR NOT NULL,
+    target_drive           VARCHAR,
+    source_drive           VARCHAR,
+    satisfying_drive       VARCHAR,
+    full_manifest_hash     VARCHAR NOT NULL CHECK (length(full_manifest_hash) = 64),
+    order_key              INTEGER NOT NULL DEFAULT 0,
+    guaranteed_durable     BIGINT,
+    expected_durable       BIGINT,
+    identity_epoch         INTEGER,
+    baseline_certificate   VARCHAR,
+    PRIMARY KEY (proposal_id, requirement_id),
+    FOREIGN KEY (proposal_id) REFERENCES placement_proposals(proposal_id)
+        ON UPDATE CASCADE ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS proposal_files (
+    proposal_id     VARCHAR NOT NULL,
+    requirement_id  VARCHAR NOT NULL,
+    rfilename       VARCHAR NOT NULL,
+    role            VARCHAR NOT NULL DEFAULT 'missing',
+    size_bytes      BIGINT,
+    orig_sha256     VARCHAR,
+    format          VARCHAR,
+    quant           VARCHAR,
+    storage_action  VARCHAR,
+    PRIMARY KEY (proposal_id, requirement_id, rfilename),
+    FOREIGN KEY (proposal_id, requirement_id)
+        REFERENCES proposal_tasks(proposal_id, requirement_id)
+        ON UPDATE CASCADE ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS execution_sessions (
+    session_id              VARCHAR PRIMARY KEY NOT NULL CHECK (length(trim(session_id)) > 0),
+    plan_id                 VARCHAR NOT NULL,
+    approved_proposal_id    VARCHAR NOT NULL,
+    resumed_from_session_id VARCHAR,
+    controller_identity     VARCHAR NOT NULL,
+    worker_identity         VARCHAR,
+    state                   VARCHAR NOT NULL
+                            CHECK (state IN ('starting','running','stopping',
+                                             'paused','blocked','stopped','done','failed')),
+    bound_planner_revision  INTEGER NOT NULL CHECK (bound_planner_revision >= 0),
+    fencing_token           INTEGER NOT NULL CHECK (fencing_token >= 1),
+    acquired_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    heartbeat_at            TIMESTAMP,
+    expires_at              TIMESTAMP,
+    terminal_at             TIMESTAMP,
+    terminal_code           VARCHAR,
+    terminal_evidence       TEXT,
+    FOREIGN KEY (plan_id) REFERENCES plans(plan_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (approved_proposal_id) REFERENCES placement_proposals(proposal_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    FOREIGN KEY (resumed_from_session_id) REFERENCES execution_sessions(session_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CHECK (
+        (state NOT IN ('running','stopping'))
+        OR (worker_identity IS NOT NULL AND length(trim(worker_identity)) > 0)
+    )
+);
+
+-- Global: at most one live session across the catalog (RFC-002 / A2).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_sessions_one_live
+    ON execution_sessions((1)) WHERE state IN ('starting','running','stopping');
+
+CREATE INDEX IF NOT EXISTS idx_placement_proposals_plan
+    ON placement_proposals(plan_id, lifecycle);
+CREATE INDEX IF NOT EXISTS idx_proposal_tasks_proposal
+    ON proposal_tasks(proposal_id);
+CREATE INDEX IF NOT EXISTS idx_proposal_files_proposal
+    ON proposal_files(proposal_id);
+
+-- FK from planner_state active pointer (deferred until placement_proposals exists).
+-- SQLite cannot ADD CONSTRAINT; enforce via application + optional trigger is out of scope.
+-- Active pointer NULL is always valid; non-null must reference a proposal row (validated in shell).
+
 -- Foreign-key child indexes keep parent updates/deletes and integrity checks bounded.
 CREATE INDEX IF NOT EXISTS idx_files_repo ON files(repo_id);
 CREATE INDEX IF NOT EXISTS idx_replicas_drive ON replicas(drive_label);

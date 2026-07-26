@@ -403,6 +403,8 @@ def repair_hashes(
                     f"on {repair['drive_label']}"
                 )
             applied += 1
+        from modelark.proposal import bump_revision
+        bump_revision(con)
         con.execute("COMMIT")
     except BaseException:
         con.execute("ROLLBACK")
