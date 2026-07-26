@@ -194,33 +194,9 @@ def start_session(con, proposal_id, predecessor_id, services):
                      "got": predecessor.approved_proposal_id},
                     ("start_or_preview",))
 
-        # Minimal projection for start
-        drives = {
-            label: SimpleNamespace(
-                lifecycle="active", eligibility="enabled",
-                identity_epoch=1, identity_fingerprint="f" * 64, offline=False)
-            for label in relevant or ("d0",)
-        }
-        current_input = SimpleNamespace(
-            manifests={t.get("repo_id"): t.get("full_manifest_hash")
-                       for t in proposal.get("tasks") or ()},
-            archived={},
-            drives=drives,
-            observed_ratio={},
-            evidence={
-                label: SimpleNamespace(kind="offline", executable=True, admissible_free=10**12)
-                for label in drives
-            },
-            file_hash_evidence={},
-            semantic_hashes=SimpleNamespace(
-                execution_invariants=proposal.get("semantic_input_hash")),
-            certificates={},
-            execution_config=current_config,
-        )
-        current_graph = SimpleNamespace(
-            requirement_ids=[t.get("requirement_id") for t in proposal.get("tasks") or ()],
-            requirement_set_hash=proposal.get("requirement_set_hash"),
-        )
+        # Current input / graph from catalog facts (not fabricated drive identities).
+        current_input, current_graph = _catalog_projection_bundle(
+            con, proposal, relevant, services, current_config)
         projected = eproj.project_pure(
             proposal, current_input, current_graph,
             SimpleNamespace(parked_gated_repos=frozenset()))
@@ -230,7 +206,6 @@ def start_session(con, proposal_id, predecessor_id, services):
         token = allocate_next_fencing_token(con)
         if predecessor is not None:
             token = max(token, int(predecessor.fencing_token) + 1)
-            # Ensure next_fencing_token advances past predecessor
             con.execute(
                 "UPDATE planner_state SET next_fencing_token=? WHERE singleton_id=1 "
                 "AND next_fencing_token < ?",
@@ -238,12 +213,17 @@ def start_session(con, proposal_id, predecessor_id, services):
 
         bound_rev = planner_revision(con)
         sid = str(uuid.uuid4())
-        controller = getattr(getattr(services, "worker", None), "identity", None) or "controller"
-        # Prefer explicit controller on services
-        controller = getattr(services, "controller_identity", controller)
-        if hasattr(services, "worker") and getattr(services.worker, "identity", None):
-            # controller distinct at insert; worker null until claim
-            pass
+        controller = getattr(services, "controller_identity", None) or (
+            f"controller-{getattr(getattr(services, 'worker', None), 'identity', 'local')}")
+        worker = getattr(services, "worker", None)
+        worker_id = getattr(worker, "identity", None)
+        # Controller and worker must be distinct identities when both known.
+        if worker_id and str(worker_id) == str(controller):
+            controller = f"controller-{controller}"
+
+        lease_ttl = int(getattr(services, "lease_ttl", None) or 3600)
+        expires_at = _expiry_iso(services, lease_ttl)
+
         con.execute(
             "INSERT INTO execution_sessions("
             "session_id,plan_id,approved_proposal_id,resumed_from_session_id,"
@@ -254,7 +234,7 @@ def start_session(con, proposal_id, predecessor_id, services):
                 predecessor.session_id if predecessor else None,
                 str(controller),
                 bound_rev, token,
-                None,
+                expires_at,
             ])
         session = SimpleNamespace(
             session_id=sid,
@@ -266,8 +246,107 @@ def start_session(con, proposal_id, predecessor_id, services):
             state="starting",
             bound_planner_revision=bound_rev,
             fencing_token=token,
+            expires_at=expires_at,
         )
+        # Optional auto-claim (production execute path sets services.auto_claim_worker).
+        # Gate-1 lifecycle tests claim separately after start (state must remain starting).
+        if worker_id and getattr(services, "auto_claim_worker", False):
+            claim_worker(
+                con, session_id=sid, fencing_token=token,
+                worker_identity=str(worker_id),
+                controller_identity=str(controller))
+            session = load_session(con, sid) or session
         return SessionStart(session=session, projection=projected, execution_config=frozen)
+
+
+def _expiry_iso(services, lease_ttl: int) -> str:
+    """Lease expiry as ISO-8601 UTC from services.clock (real clock in production)."""
+    from datetime import datetime, timedelta, timezone
+    now_s = None
+    clock = getattr(services, "clock", None)
+    if clock is not None and callable(getattr(clock, "now", None)):
+        now_s = clock.now()
+    if isinstance(now_s, str) and now_s:
+        try:
+            # Accept "...Z" or naive ISO
+            base = datetime.fromisoformat(now_s.replace("Z", "+00:00"))
+        except ValueError:
+            base = datetime.now(timezone.utc)
+    else:
+        base = datetime.now(timezone.utc)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
+    return (base + timedelta(seconds=int(lease_ttl))).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _catalog_projection_bundle(con, proposal, relevant, services, current_config):
+    """Build current_input / current_graph from catalog rows + capacity evidence."""
+    drives = {}
+    for label in relevant:
+        row = con.execute(
+            "SELECT lifecycle, eligibility, identity_epoch, identity_fingerprint "
+            "FROM drives WHERE drive_label=?", [label]).fetchone()
+        if row:
+            drives[label] = SimpleNamespace(
+                lifecycle=row[0] or "active",
+                eligibility=row[1] or "enabled",
+                identity_epoch=int(row[2] or 1),
+                identity_fingerprint=row[3] or ("0" * 64),
+                offline=False,
+            )
+        else:
+            drives[label] = SimpleNamespace(
+                lifecycle="active", eligibility="enabled",
+                identity_epoch=1, identity_fingerprint="0" * 64, offline=True)
+
+    archived = {}
+    for r in con.execute(
+            "SELECT repo_id, rfilename, drive_label, orig_sha256, stored_bytes, orig_bytes "
+            "FROM archived"):
+        archived[(r[0], r[1], r[2])] = {
+            "orig_sha256": r[3], "stored_bytes": r[4], "orig_bytes": r[5],
+        }
+
+    evidence = {}
+    observe = getattr(services, "observe_exact_capacity", None)
+    if callable(observe) and relevant:
+        try:
+            evidence = observe(con, list(relevant)) or {}
+        except Refusal:
+            raise
+        except Exception:
+            evidence = {}
+    if not evidence:
+        for label, d in drives.items():
+            evidence[label] = SimpleNamespace(
+                kind="offline", executable=(not getattr(d, "offline", False)),
+                admissible_free=10**12)
+
+    manifests = {
+        t.get("repo_id"): t.get("full_manifest_hash")
+        for t in (proposal.get("tasks") or ()) if t.get("repo_id")
+    }
+    current_input = SimpleNamespace(
+        manifests=manifests,
+        archived=archived,
+        drives=drives,
+        observed_ratio={},
+        evidence=evidence,
+        file_hash_evidence={},
+        semantic_hashes=SimpleNamespace(
+            execution_invariants=proposal.get("semantic_input_hash")),
+        certificates={
+            t["requirement_id"]: t.get("baseline_certificate")
+            for t in (proposal.get("tasks") or ())
+            if t.get("row_kind") == "baseline_satisfied"
+        },
+        execution_config=current_config,
+    )
+    current_graph = SimpleNamespace(
+        requirement_ids=[t.get("requirement_id") for t in proposal.get("tasks") or ()],
+        requirement_set_hash=proposal.get("requirement_set_hash"),
+    )
+    return current_input, current_graph
 
 
 def claim_worker(con, *, session_id, fencing_token, worker_identity, controller_identity=None):

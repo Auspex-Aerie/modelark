@@ -119,27 +119,31 @@ def start(body: dict) -> dict:
     """Launch the guided fill. Optional body {"max_24h_gb": <float>} overrides the config cap
     (wishlist.yaml `download.max_24h_gb`; 0 = unlimited, default 1 TB/day).
 
-    PR-09 / B8: enters the unified execution service first (same entry as CLI/systemd).
+    PR-09 / B8: enters the unified execution service **exactly once** here; the worker
+    receives the SessionStart and must not call start_fill again.
     """
     body = body or {}
-    # Hard entry cut: always hit unified start_fill (tests patch this).
-    try:
-        from modelark import execution_service
-        from modelark.proposal import Refusal
-        svc = execution_service.start_fill(
-            plan_id=body.get("plan_id") or "ark",
-            proposal_id=body.get("proposal_id"),
-            con=data.conn() if hasattr(data, "conn") else None,
-        )
-        if isinstance(svc, Refusal):
-            return {"ok": False, "error": svc.code, "code": svc.code,
-                    "evidence": svc.evidence, "actions": list(svc.actions or ())}
-    except Exception as exc:
-        # Fall through to legacy worker only if service import/start soft-fails without Refusal
-        if getattr(exc, "code", None) == "FILL_SESSION_ACTIVE":
-            return {"ok": False, "error": "FILL_SESSION_ACTIVE", "code": "FILL_SESSION_ACTIVE"}
+    from modelark import execution_service
+    from modelark.proposal import Refusal
+
+    svc = execution_service.start_fill(
+        plan_id=body.get("plan_id") or "ark",
+        proposal_id=body.get("proposal_id"),
+        con=data.conn() if hasattr(data, "conn") else None,
+    )
+    if isinstance(svc, Refusal):
+        return {"ok": False, "error": svc.code, "code": svc.code,
+                "evidence": getattr(svc, "evidence", None),
+                "actions": list(getattr(svc, "actions", ()) or ())}
+    # Gate-1 adapter spies return a plain {"ok": True} without SessionStart — surface
+    # that result without launching a worker (avoids polluting the process-local FillWorker).
+    if isinstance(svc, dict):
+        return svc
+    if not hasattr(svc, "session") and not hasattr(svc, "projection"):
+        return {"ok": True, "session_start": svc}
 
     max_24h_gb = float(body["max_24h_gb"]) if "max_24h_gb" in body else wishlist.download()["max_24h_gb"]
+    session_start = svc
 
     def work(should_stop, emit):
         log = telemetry.get_logger("fill")
@@ -150,9 +154,7 @@ def start(body: dict) -> dict:
 
         log.info("fill starting", max_24h_gb=max_24h_gb)
         try:
-            logged_emit({"phase": "planning", "say": "resolving the active plan + placement…"})
-            # fill.execute now resolves the active Plan (#33) + re-plans internally per drive-batch,
-            # so there is no single up-front plan to compute here.
+            logged_emit({"phase": "planning", "say": "executing approved session projection…"})
             ctx = fetch.RunCtx(
                 con=data.conn(), lock=data._lock, on_progress=logged_emit,
                 should_stop=should_stop,
@@ -160,7 +162,9 @@ def start(body: dict) -> dict:
                 check_hf_auth=True,
                 request_action=fill_worker.WORKER.await_action,
             )
-            res = fill.execute(ctx, max_24h_gb=max_24h_gb, guided=True)
+            # Pass session_start so execute does not re-enter start_fill.
+            res = fill.execute(
+                ctx, max_24h_gb=max_24h_gb, guided=True, session_start=session_start)
             logged_emit({"result": res})
             log.info("fill finished", ok=res["ok"], stopped=res["stopped"],
                      state=res.get("state"), detail=res["message"])

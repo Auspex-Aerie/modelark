@@ -33,11 +33,13 @@ def _admission_snapshot_compat():
         yield
 
 
-@pytest.fixture(autouse=True)
-def _pr09_fill_session_bridge(monkeypatch):
-    """PR-09 B8 hard-cut: fill.execute always enters start_fill. Replan suites still exercise the
-    legacy reconcile/fetch drain under a synthetic SessionStart until PR-10 removes the façade.
-    Gate-1 hard-cut and Gate-2 session suites cover real approval/session paths separately."""
+def _install_replan_session_bridge():
+    """Characterization bridge: real hard-cut still enters start_fill once, returning a
+    SessionStart so the fixed-map drain runs without an approved proposal row.
+
+    Not a silent legacy fallback — optimizer re-home is gone; capacity failures terminalize.
+    Applied under both pytest and the CI ``python tests/test_replan.py`` script runner.
+    """
     from modelark import execution_service
 
     def _fake_start_fill(**_k):
@@ -46,12 +48,20 @@ def _pr09_fill_session_bridge(monkeypatch):
                 session_id="replan-bridge",
                 state="running",
                 fencing_token=1,
+                controller_identity="ctrl-replan",
             ),
             projection=None,
             execution_config=None,
         )
 
-    monkeypatch.setattr(execution_service, "start_fill", _fake_start_fill)
+    execution_service.start_fill = _fake_start_fill  # type: ignore[method-assign]
+    return _fake_start_fill
+
+
+@pytest.fixture(autouse=True)
+def _pr09_fill_session_bridge(monkeypatch):
+    from modelark import execution_service
+    monkeypatch.setattr(execution_service, "start_fill", _install_replan_session_bridge())
 
 
 @contextlib.contextmanager
@@ -767,6 +777,7 @@ def test_sweep_incomplete(tmp_path):
 if __name__ == "__main__":
     import inspect
     import tempfile
+    _install_replan_session_bridge()
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
             # Mirror the autouse pytest fixture under the plain script runner (CI's `python "$t"`).

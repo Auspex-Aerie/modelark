@@ -1,66 +1,41 @@
-# PR-09 / #39-B — Gate 2 **production handback** (await human review)
+# PR-09 / #39-B — Gate 2 **remediation handback** (await human review)
 
 **Date:** 2026-07-26  
-**Status:** Gate 2 **implementation complete — not accepted**. Gate 3 **not authorized**.  
-**Accepted Gate-1 tip (base of production):** `59d8b604cb09cce436fee0998fe6bf89cbd314c8`  
+**Status:** Gate 2 **remediation complete — not accepted**. Gate 3 **not authorized**.  
+**Withheld tip:** `1a9485c`  
+**Remediation tip:** (see `git rev-parse HEAD` at handback)  
 **Draft PR:** https://github.com/Auspex-Aerie/modelark/pull/54  
 **Phase branch:** `fix/placement-capacity-pr09-execution-projection`  
-**Integration base:** `bc33a0664d3e65e20c6843b0a9d5b1204d15502a`  
+**Base:** `bc33a0664d3e65e20c6843b0a9d5b1204d15502a`  
 **Issue:** #39  
-**Authorization:** Gate-2 production authorized from exact accepted tip `59d8b60` (operator passback).
 
 ---
 
-## Scope delivered (B1–B13 only)
+## Withhold findings addressed
 
-| Contract | Production surface |
-|----------|-------------------|
-| B1 / B13 pure projection | `modelark/execution_projection.project_pure` + `canonical_projection_hash` |
-| B3–B6 session lifecycle | `modelark/execution_session` — `start_session`, claim, heartbeat, terminalize, `session_write` |
-| B7 frozen config | `modelark/execution_config` — `ExecutionConfig`, `hash_config`, freeze revalidate; `fetch.get_frozen_execution_config` |
-| B8 hard entry cut | `modelark/execution_service.start_fill`; CLI `start_fill_via_service`; `fill_api.start`; `server.auto_resume_fill`; `fill.execute` |
-| B8 live exclusion | `graph_write` / `bump_revision` / A3 matrix writers → exact `FILL_SESSION_ACTIVE` |
-| B9–B10 recovery / dirt / fences | `modelark/execution_recovery` — lock order controller→drives, dirty owner pair, child fence hold |
-| B12 harness | `modelark/execution_benchmark` — recompute from SQLite, operator identity, call-count instrumentation |
-| Gate-2 cold process | `tests/test_gate2_cold_process_exclusion.py` — second cold process, other state dir, exact `FILL_SESSION_ACTIVE` |
+| # | Finding | Disposition |
+|---|---------|-------------|
+| 1 | B8 hard cut incomplete (legacy fallback, double entry, re-home) | `fill.execute` refuses without session; no exception swallow; no re-home on capacity; portal enters `start_fill` once and passes `session_start` into execute |
+| 2 | Fabricated session authority | `production_services()` uses real `drive_fence`, clock, plan config, capacity evidence; `start_session` loads catalog drives/archived/evidence, sets lease `expires_at`, supports worker claim |
+| 3 | B9/B10 in-process only | OS-visible flock child fence FDs + marker locks; real datetime expiry; token CAS UPDATE; dirty generations preserved |
+| 4 | B12 measurement skipped | Distinct input vs projection hashes; requirement/task counts from proposal_tasks when present; wall-clock runs 5 warmups + 30 measured pure projections |
+| 5 | Cold process bypassed production | Installed `modelark session start` CLI; portal `fill_api.start` without service monkey-patch |
+| 6 | register_drive guard test-shaped | Live-session guard on normal device path before SMART/physical work |
+| 7 | CI script-runner red | Replan bridge installed under `python tests/test_replan.py`; capacity terminalizes without re-home |
 
-### Explicit non-goals (honored)
+## Explicit non-goals (honored)
 
-- No production multiprocessing; no fork/spawn selection.
-- Second portal = another cold instance of the **same** installed entrypoint.
-- No PR-10 façade removal or lifecycle-operation expansion.
-- Gate-1 contracts frozen (one collateral spy fix for unspyable `sqlite3.Connection.execute`).
-- Local operator dirt preserved (`iscsi-login.sh` untracked).
-
----
+- No ready/merge; Gate 3 unauthorized  
+- No production multiprocessing / fork-spawn selection  
+- Forward cleanup only (no history rewrite) for accidental Gate-1 handback / DEF-032  
 
 ## Verification (implementer)
 
 | Check | Result |
 |-------|--------|
-| Gate-1 suites (45) | **pass** |
-| Gate-2 cold process | **pass** (2) |
-| Full regression | **561 passed** |
-| Ruff (touched Python) | clean |
-| `git diff --check` | clean |
-| Packaging / import smoke | `project_pure`, `start_session`, `start_fill`, `hash_config`; `modelark --help` |
-| Installed console script | `.venv-dev/bin/modelark` present |
+| Full pytest | **562 passed** |
+| `python tests/test_replan.py` | all passed |
+| Gate-1 + Gate-2 focused | 48 passed |
+| Ruff (touched) | clean |
 
----
-
-## Collateral amendments
-
-1. `tests/test_session_recovery_transport.py` — lock-order observation without patching read-only `Connection.execute`.
-2. `tests/test_replan.py` — autouse bridge so legacy reconcile/fetch drain still runs under synthetic `SessionStart` after B8 hard cut (façade retained until PR-10).
-3. Schema: one-time dirty-generation owner-pair UPDATE allowed while both owner fields are NULL (append-only otherwise).
-
----
-
-## Explicit stop
-
-- **Do not** mark ready-for-review merge or merge PR #54.
-- **Do not** begin Gate 3.
-- **Do not** begin PR-10 scope.
-- Await **Gate-2 human review** and formal acceptance tip before Gate-3 authorization.
-
-**Await Gate-2 human disposition.**
+**Await Gate-2 human disposition.** Do not mark ready or merge.

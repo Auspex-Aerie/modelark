@@ -287,30 +287,44 @@ def execute(
     repo_scope: list[str] | None = None,
     guided: bool = False,
     poll_secs: float = 3.0,
+    session_start=None,
 ) -> dict:
-    """Execute the reconciled graph without persisting scheduler completion state.
+    """Execute the approved fixed projection only (PR-09 / B8 hard cut).
 
-    PR-09 / B8: routes through the unified execution service first (hard entry cut).
-    Does not call the placement optimizer; legacy reconcile remains behind the
-    session-approved fixed map once a session is acquired.
+    Enters unified ``start_fill`` at most once unless ``session_start`` is already
+    provided (portal synchronous start). Never swallows exceptions into a legacy
+    optimizer path. Capacity exhaustion does not re-home off the approved map.
     """
-    # Unified service entry (tests patch modelark.execution_service.start_fill).
-    try:
-        from modelark import execution_service
+    from modelark import execution_service
+    from modelark.proposal import Refusal
+
+    if session_start is None:
         svc_out = execution_service.start_fill(
             plan_id=plan_id or "ark", con=getattr(ctx, "con", None))
-        from modelark.proposal import Refusal
         if isinstance(svc_out, Refusal):
             return {
                 "ok": False, "stopped": False, "state": "blocked",
                 "message": str(svc_out), "code": svc_out.code,
-                "evidence": svc_out.evidence, "actions": list(svc_out.actions or ()),
+                "evidence": getattr(svc_out, "evidence", None),
+                "actions": list(getattr(svc_out, "actions", ()) or ()),
                 "failed": [],
             }
-    except Exception:
-        # If service cannot start (no approval), still surface refusal path for hard-cut.
-        # Tests assert start_fill was called; continue only when session acquired.
-        pass
+        session_start = svc_out
+
+    # Claim worker when session is still starting (production authority).
+    session = getattr(session_start, "session", None)
+    if session is not None and getattr(session, "state", None) == "starting":
+        from modelark import execution_session as esess
+        try:
+            esess.claim_worker(
+                ctx.con,
+                session_id=session.session_id,
+                fencing_token=session.fencing_token,
+                worker_identity=f"worker-fill-{os.getpid()}",
+                controller_identity=getattr(session, "controller_identity", "controller"),
+            )
+        except Exception:
+            pass
 
     ctx.stats["t0"] = time.monotonic()
     ctx.stats.setdefault("by_drive", {})
@@ -506,10 +520,18 @@ def execute(
                     evidence={"max_24h_gb": max_24h_gb}, actions=["wait_for_window", "start_fill"],
                 )
             if outcome["capacity_failure"] is not None:
-                # Reconcile immediately.  If no alternative target is feasible the next loop emits
-                # plan-capacity-stop; otherwise deterministic placement re-homes the stale task.
-                pinned_drive = None
-                continue
+                # Fixed approved map (B8): never re-home. Terminalize on the approved target.
+                state = "plan-capacity-stop" if made_progress else "blocked"
+                return _terminal(
+                    state,
+                    "approved target capacity exhausted; re-home requires a new approval",
+                    code="PLAN_CAPACITY_STOP",
+                    gate="B",
+                    evidence=(outcome["capacity_failure"]
+                              if isinstance(outcome["capacity_failure"], dict)
+                              else {"drive": pinned_drive}),
+                    actions=["preview_again", "add_capacity"],
+                )
             for item in outcome.get("gated_repos", []):
                 deferred_gated.add(item["repo"])
             for repo_id in outcome["failed_repos"]:
@@ -525,8 +547,14 @@ def execute(
             if outcome.get("gated_retry"):
                 continue
             if outcome["drive_unwritable"]:
-                pinned_drive = None
-                continue
+                return _terminal(
+                    "paused" if made_progress else "blocked",
+                    f"approved target drive {pinned_drive} is not writable",
+                    code="DRIVE_UNWRITABLE",
+                    gate="A",
+                    evidence={"drive": pinned_drive},
+                    actions=["mount_or_reseat_drive", "resume_same_approval"],
+                )
 
         if replica_tasks:
             ctx.on_progress({

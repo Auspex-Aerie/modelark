@@ -364,15 +364,20 @@ def register_drive(dev, label=None, mount: str | None = None,
     PR-09: when the first argument is a catalog connection (writer-matrix shape), refuse
     while a live execution session exists before any physical work.
     """
+    from modelark.execution_session import require_no_live_session
+
     # Matrix / catalog-connection form: register_drive(con, "d-new", path=...).
     if hasattr(dev, "execute") and callable(getattr(dev, "execute")):
-        from modelark.execution_session import require_no_live_session
         require_no_live_session(dev)
         # Live session refused above; remaining path still needs a real device string.
         raise TypeError(
             "register_drive requires a device path when no live session blocks the call")
+
+    # Normal device path: refuse while a live execution session exists BEFORE any
+    # physical SMART/format/mount work.
     con = db.connect()
     try:
+        require_no_live_session(con)
         _guard_existing_label(con, label)      # before SMART, dry-run, or any physical/remote/catalog mutation
     finally:
         con.close()

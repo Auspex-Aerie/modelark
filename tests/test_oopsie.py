@@ -54,8 +54,15 @@ def test_expected_fill_error_keeps_typed_terminal_instead_of_unhandled(tmp_path)
         "actions": ["open_huggingface", "retry_fill"],
         "failed": [{"repo": "org/gated"}],
     }
+    from modelark import execution_service
+    session_start = mock.Mock()
+    session_start.session = mock.Mock(
+        session_id="s-test", state="running", fencing_token=1,
+        controller_identity="ctrl")
+    session_start.projection = mock.Mock(tasks=())
     with mock.patch.object(fill_api.fill_worker, "WORKER", worker), \
          mock.patch.object(fill_api.data, "conn", return_value=object()), \
+         mock.patch.object(execution_service, "start_fill", return_value=session_start), \
          mock.patch.object(fill_api.fill, "execute", return_value=typed):
         assert fill_api.start({"max_24h_gb": 0})["ok"]
         for _ in range(100):
