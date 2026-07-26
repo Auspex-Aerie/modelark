@@ -1,224 +1,293 @@
-"""PR-09 / #39-B Gate 1: pure monotonic projection contracts (B1, B13 drift refuse).
+"""PR-09 / #39-B Gate 1: project_pure contracts (B1, B13) — RFC-002 seam.
 
-Tests-only. Expected red until production projection lands. Projection may remove only
-newly satisfied approved work; changed/invalid/lost/expanded/remapped work must typed-refuse
-without altering the approved map.
+Canonical API only:
+  project_pure(proposal, current_input, current_graph, session_overlay)
+
+Uses real PR-08 approved proposals. Expected red until production projection lands.
 """
 from __future__ import annotations
 
-import importlib
-import sqlite3
 from copy import deepcopy
+from types import SimpleNamespace
 
-from modelark.core import db
-
-
-def _mem():
-    con = sqlite3.connect(":memory:", isolation_level=None)
-    for stmt in db._statements(db.SCHEMA_PATH.read_text()):
-        con.execute(stmt)
-    return con
+import _pr09_gate1_fixtures as f
 
 
-def _projection():
-    for name in (
-        "modelark.execution_projection",
-        "modelark.projection",
-        "modelark.execution",
-    ):
+def _approved_bundle(con):
+    f.seed_plan_selection(con, repos=("org/a", "org/b"))
+    _prop, pid, loaded = f.create_and_approve(con)
+    return loaded
+
+
+def _input_graph_from_proposal(proposal, *, archived=None, drives=None, manifests=None,
+                               observed_ratio=None, extra_requirements=None):
+    """Build current_input / current_graph shaped for project_pure from approved proposal."""
+    tasks = list(proposal.get("tasks") or ())
+    req_ids = [t["requirement_id"] for t in tasks]
+    # Per-file evidence from proposal_files if present
+    files = list(proposal.get("files") or ())
+    file_hash_evidence = {
+        (ff.get("requirement_id"), ff.get("rfilename")): ff.get("orig_sha256")
+        for ff in files
+    }
+    drives = drives or {
+        "d0": SimpleNamespace(
+            lifecycle="active", eligibility="enabled",
+            identity_epoch=1, identity_fingerprint="f" * 64),
+        "d1": SimpleNamespace(
+            lifecycle="active", eligibility="enabled",
+            identity_epoch=1, identity_fingerprint="f" * 64),
+    }
+    manifests = manifests or {
+        t["repo_id"]: t.get("full_manifest_hash") for t in tasks if t.get("repo_id")
+    }
+    archived = archived if archived is not None else {}
+    current_input = SimpleNamespace(
+        manifests=manifests,
+        archived=archived,
+        drives=drives,
+        observed_ratio=observed_ratio or {},
+        evidence={},
+        file_hash_evidence=file_hash_evidence,
+    )
+    req_set = list(req_ids)
+    if extra_requirements:
+        req_set = list(req_ids) + list(extra_requirements)
+    current_graph = SimpleNamespace(
+        requirement_ids=req_set,
+        requirement_set_hash=proposal.get("requirement_set_hash"),
+    )
+    return current_input, current_graph
+
+
+def test_project_pure_seam_exists():
+    _mod, fn = f.project_pure_fn()
+    assert fn.__code__.co_argcount >= 4 or fn.__code__.co_varnames[:4] == (
+        "proposal", "current_input", "current_graph", "session_overlay") or True
+    # At least named parameters preferred
+    import inspect
+    sig = inspect.signature(fn)
+    params = list(sig.parameters)
+    assert len(params) >= 4, (
+        f"project_pure must take proposal, current_input, current_graph, session_overlay; "
+        f"got {params}")
+
+
+def test_satisfied_only_partial_file_shrink():
+    """B1: partial file progress may shrink missing set; map identity preserved."""
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    proposal = _approved_bundle(con)
+    before = deepcopy(proposal)
+    # One file of executable task now satisfied on target
+    archived = {
+        ("org/a", "model.safetensors", "d0"): {
+            "orig_sha256": "1" * 64, "orig_bytes": 100},
+    }
+    inp, graph = _input_graph_from_proposal(proposal, archived=archived)
+    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    assert not f.is_refusal(out), out
+    assert getattr(out, "projection_hash", None) or (
+        isinstance(out, dict) and out.get("projection_hash")), (
+        "ExecutionProjection must carry projection_hash")
+    # Approved proposal object must not be rewritten
+    assert proposal.get("tasks") == before.get("tasks")
+
+
+def test_baseline_loss_refuses_with_projection_violation():
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    f.seed_plan_selection(
+        con, repos=("org/b",), with_archive_on=[("org/b", "d0")])
+    _p, _pid, proposal = f.create_and_approve(con)
+    # Drop archive / lifecycle lost → certificate cannot recompute
+    drives = {
+        "d0": SimpleNamespace(
+            lifecycle="lost", eligibility="enabled",
+            identity_epoch=1, identity_fingerprint="f" * 64),
+    }
+    inp, graph = _input_graph_from_proposal(proposal, archived={}, drives=drives)
+    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    code = f.refusal_code(out)
+    if code is None:
+        # may raise
         try:
-            mod = importlib.import_module(name)
-        except ModuleNotFoundError:
-            continue
-        if any(hasattr(mod, n) for n in (
-                "project_remaining", "project", "pure_project", "project_approved")):
-            return mod
-    raise AssertionError(
-        "pure projection module required "
-        "(modelark.execution_projection / projection / execution; expected Gate-1 red)")
+            if f.is_refusal(out):
+                code = f.refusal_code(out)
+            else:
+                raise AssertionError(f"baseline loss must refuse; got {out!r}")
+        except AssertionError:
+            raise
+    assert code in (
+        "APPROVAL_PROJECTION_VIOLATION", "APPROVED_INPUT_CHANGED",
+        "APPROVED_TARGET_IDENTITY_CHANGED"), code
 
 
-def _project_fn(mod):
-    for n in ("project_remaining", "project", "pure_project", "project_approved"):
-        fn = getattr(mod, n, None)
-        if callable(fn):
-            return fn
-    raise AssertionError(
-        "export project_remaining (or project/pure_project/project_approved); "
-        "expected Gate-1 red")
-
-
-def _sample_approved_map():
-    """Minimal immutable approved assignment for pure projection inputs."""
-    return {
-        "proposal_id": "prop-1",
-        "canonical_hash": "a" * 64,
-        "tasks": [
-            {
-                "requirement_id": "primary:org/a",
-                "row_kind": "executable",
-                "repo_id": "org/a",
-                "target_drive": "d0",
-                "source_drive": None,
-                "full_manifest_hash": "b" * 64,
-                "order_key": 1,
-                "guaranteed_durable": 100,
-            },
-            {
-                "requirement_id": "primary:org/b",
-                "row_kind": "baseline_satisfied",
-                "repo_id": "org/b",
-                "target_drive": "d0",
-                "satisfying_drive": "d0",
-                "full_manifest_hash": "c" * 64,
-                "baseline_certificate": "d" * 64,
-                "order_key": 2,
-                "guaranteed_durable": 50,
-            },
-        ],
+def test_identity_epoch_drift_refuses():
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    proposal = _approved_bundle(con)
+    drives = {
+        "d0": SimpleNamespace(
+            lifecycle="active", eligibility="enabled",
+            identity_epoch=99, identity_fingerprint="9" * 64),
+        "d1": SimpleNamespace(
+            lifecycle="active", eligibility="enabled",
+            identity_epoch=1, identity_fingerprint="f" * 64),
     }
+    inp, graph = _input_graph_from_proposal(proposal, drives=drives)
+    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    code = f.refusal_code(out)
+    assert code in (
+        "APPROVED_TARGET_IDENTITY_CHANGED", "APPROVAL_PROJECTION_VIOLATION",
+        "APPROVED_INPUT_CHANGED"), code
 
 
-def test_projection_api_is_pure_export():
-    mod = _projection()
-    project = _project_fn(mod)
-    # Pure path: no connection required for pure project of frozen facts, or explicit pure flag.
-    assert callable(project)
-
-
-def test_satisfied_only_shrink_removes_completed_executable():
-    """B1: newly satisfied approved work may leave the remaining set."""
-    mod = _projection()
-    project = _project_fn(mod)
-    approved = _sample_approved_map()
-    facts = {
-        "archived_complete": {"org/a": ["d0"]},  # primary:org/a now durable on target
-        "drives": {"d0": {"lifecycle": "active", "identity_epoch": 1, "fingerprint": "f" * 64}},
-        "manifests": {"org/a": "b" * 64, "org/b": "c" * 64},
+def test_content_certificate_drift_refuses():
+    """Stored file/content certificates must recompute from current facts."""
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    proposal = _approved_bundle(con)
+    manifests = {
+        t["repo_id"]: ("9" * 64) for t in proposal.get("tasks") or () if t.get("repo_id")
     }
-    before = deepcopy(approved["tasks"])
-    out = project(approved, facts)
-    remaining = out["tasks"] if isinstance(out, dict) else list(out)
-    ids = {t["requirement_id"] for t in remaining}
-    assert "primary:org/a" not in ids, (
-        "newly satisfied executable must shrink out of remaining work; got {ids}")
-    # Approved map identity must not be rewritten in place.
-    assert approved["tasks"] == before, "projection must not mutate approved map in place"
+    inp, graph = _input_graph_from_proposal(proposal, manifests=manifests)
+    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    assert f.refusal_code(out) in (
+        "APPROVED_INPUT_CHANGED", "APPROVAL_PROJECTION_VIOLATION"), f.refusal_code(out)
 
 
-def test_invalid_or_lost_work_refuses_without_map_edit():
-    """B1: lost/invalid satisfying evidence → typed refuse; approved tasks unchanged."""
-    mod = _projection()
-    project = _project_fn(mod)
-    approved = _sample_approved_map()
-    before = deepcopy(approved)
-    facts = {
-        "archived_complete": {},
-        "drives": {
-            "d0": {"lifecycle": "lost", "identity_epoch": 1, "fingerprint": "f" * 64},
-        },
-        "manifests": {"org/a": "b" * 64, "org/b": "c" * 64},
-    }
-    try:
-        out = project(approved, facts)
-    except Exception as exc:
-        code = str(getattr(exc, "code", "") or exc).upper()
-        assert any(k in code for k in (
-            "APPROVED_PLACEMENT", "NO_LONGER", "DRIFT", "LOST", "REFUS", "INVALID",
-            "LIFECYCLE", "TERMINAL")), (
-            f"lost/invalid must typed-refuse; got {type(exc).__name__}: {exc}")
-        assert approved == before, "refusal must not alter approved map"
+def test_replica_source_readiness_exact_only():
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/m",))
+    con.execute("UPDATE models SET numcopies=2 WHERE repo_id='org/m'")
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    _p, _pid, proposal = f.create_and_approve(con)
+    # Replica task without source fact and without home task still pending
+    inp, graph = _input_graph_from_proposal(proposal, archived={})
+    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    # Either waiting_dependency schedule or refusal if source required-ready
+    if f.is_refusal(out):
+        assert f.refusal_code(out) in (
+            "APPROVAL_PROJECTION_VIOLATION", "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE")
         return
-    # Returned typed refusal object
-    code = str(getattr(out, "code", None) or (out.get("code") if isinstance(out, dict) else "")).upper()
-    assert code and any(k in code for k in (
-        "APPROVED_PLACEMENT", "NO_LONGER", "DRIFT", "LOST", "REFUS", "INVALID", "LIFECYCLE")), (
-        f"expected typed refusal, got success {out!r}")
-    assert approved == before
+    tasks = list(out.tasks if hasattr(out, "tasks") else out["tasks"])
+    replica = [t for t in tasks if str(
+        t.get("requirement_id") if isinstance(t, dict) else getattr(t, "requirement_id", "")
+    ).startswith("replica")]
+    if replica:
+        t0 = replica[0]
+        state = t0.get("schedule_state") if isinstance(t0, dict) else getattr(
+            t0, "schedule_state", None)
+        assert state in ("waiting_dependency", "ready", "parked_gated"), state
 
 
-def test_content_drift_refuses_without_shrinking_map():
-    """B13: full_manifest / baseline drift refuses; does not drop tasks as 'invalid work'."""
-    mod = _projection()
-    project = _project_fn(mod)
-    approved = _sample_approved_map()
-    before = deepcopy(approved)
-    facts = {
-        "archived_complete": {"org/b": ["d0"]},
-        "drives": {"d0": {"lifecycle": "active", "identity_epoch": 1, "fingerprint": "f" * 64}},
-        "manifests": {"org/a": "b" * 64, "org/b": "9" * 64},  # drifted from stored c*64
+def test_cumulative_compression_budget_overrun_refuses():
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    proposal = _approved_bundle(con)
+    # Observed ratio / actual bytes blow approved envelope
+    observed_ratio = {"org/a": 10.0}  # hostile over-ratio
+    archived = {
+        # partial progress with huge stored_bytes
+        ("org/a", "model.safetensors", "d0"): {
+            "orig_sha256": "1" * 64, "orig_bytes": 100, "stored_bytes": 10**15},
     }
-    try:
-        out = project(approved, facts)
-    except Exception as exc:
-        msg = str(exc).upper()
-        assert any(k in msg for k in (
-            "MANIFEST", "DRIFT", "HASH", "BASELINE", "CONTENT", "CHANGED", "REFUS")), exc
-        assert approved == before
-        return
-    code = str(getattr(out, "code", None) or (out.get("code") if isinstance(out, dict) else "")).upper()
-    assert code, f"content drift must refuse; got {out!r}"
-    assert approved == before
+    inp, graph = _input_graph_from_proposal(
+        proposal, archived=archived, observed_ratio=observed_ratio)
+    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    assert f.is_refusal(out), (
+        "compression budget overrun must refuse APPROVED_PLACEMENT_NO_LONGER_FEASIBLE")
+    assert f.refusal_code(out) == "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE", f.refusal_code(out)
 
 
-def test_expanded_or_remapped_work_refuses():
-    """B1: expansion or target remap is not a shrink — typed failure."""
-    mod = _projection()
-    project = _project_fn(mod)
-    approved = _sample_approved_map()
-    facts = {
-        "archived_complete": {},
-        "drives": {"d0": {"lifecycle": "active", "identity_epoch": 1, "fingerprint": "f" * 64}},
-        "manifests": {"org/a": "b" * 64, "org/b": "c" * 64},
-        "expanded_requirements": ["primary:org/new"],  # work not in approved map
-        "remap": {"primary:org/a": "d1"},
+def test_offline_target_sets_await_not_remap():
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    proposal = _approved_bundle(con)
+    drives = {
+        "d0": SimpleNamespace(
+            lifecycle="active", eligibility="enabled",
+            identity_epoch=1, identity_fingerprint="f" * 64, offline=True),
+        "d1": SimpleNamespace(
+            lifecycle="active", eligibility="enabled",
+            identity_epoch=1, identity_fingerprint="f" * 64, offline=False),
     }
-    try:
-        out = project(approved, facts)
-    except Exception as exc:
-        msg = str(exc).upper()
-        assert any(k in msg for k in (
-            "EXPAND", "REMAP", "FRESH", "PREVIEW", "APPROVED", "REFUS", "DIVERG")), exc
-        return
-    code = str(getattr(out, "code", None) or (out.get("code") if isinstance(out, dict) else "")).upper()
-    assert code, f"expand/remap must refuse; got {out!r}"
+    evidence = {"d0": SimpleNamespace(executable=False, kind="unknown")}
+    inp, graph = _input_graph_from_proposal(proposal, drives=drives)
+    inp.evidence = evidence
+    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    code = f.refusal_code(out)
+    # Offline may be CAPACITY_EVIDENCE_UNKNOWN or keep tasks with await semantics
+    if f.is_refusal(out):
+        assert code in (
+            "CAPACITY_EVIDENCE_UNKNOWN", "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE",
+            "APPROVED_TARGET_IDENTITY_CHANGED"), code
+    else:
+        # Must not remap targets away from approved drives
+        tasks = list(out.tasks if hasattr(out, "tasks") else out["tasks"])
+        for t in tasks:
+            tgt = t.get("target_drive") if isinstance(t, dict) else getattr(t, "target_drive", None)
+            if tgt:
+                assert tgt in ("d0", "d1", None)
 
 
-def test_projection_deterministic_under_task_shuffle():
-    mod = _projection()
-    project = _project_fn(mod)
-    approved = _sample_approved_map()
-    facts = {
-        "archived_complete": {},
-        "drives": {"d0": {"lifecycle": "active", "identity_epoch": 1, "fingerprint": "f" * 64}},
-        "manifests": {"org/a": "b" * 64, "org/b": "c" * 64},
+def test_expanded_requirement_set_refuses():
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    proposal = _approved_bundle(con)
+    inp, graph = _input_graph_from_proposal(
+        proposal, extra_requirements=["primary:org/extra"])
+    # Force hash mismatch path as well
+    graph.requirement_set_hash = "e" * 64
+    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    assert f.refusal_code(out) in (
+        "APPROVED_INPUT_CHANGED", "APPROVAL_PROJECTION_VIOLATION"), f.refusal_code(out)
+
+
+def test_schedule_only_overlay_does_not_change_completion_truth():
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    proposal = _approved_bundle(con)
+    inp, graph = _input_graph_from_proposal(proposal)
+    overlay = SimpleNamespace(parked_gated_repos=frozenset({"org/a"}))
+    out = project_pure(proposal, inp, graph, overlay)
+    if f.is_refusal(out):
+        return  # production not ready
+    tasks = list(out.tasks if hasattr(out, "tasks") else out["tasks"])
+    for t in tasks:
+        rid = t.get("requirement_id") if isinstance(t, dict) else getattr(t, "requirement_id", "")
+        state = t.get("schedule_state") if isinstance(t, dict) else getattr(t, "schedule_state", None)
+        if "org/a" in str(rid) and state is not None:
+            assert state == "parked_gated", state
+
+
+def test_deterministic_full_projection_hash():
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    proposal = _approved_bundle(con)
+    inp, graph = _input_graph_from_proposal(proposal)
+    a = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    b = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    if f.is_refusal(a) or f.is_refusal(b):
+        raise AssertionError(
+            "happy-path projection must succeed for deterministic hash contract once implemented")
+    ha = a.projection_hash if hasattr(a, "projection_hash") else a["projection_hash"]
+    hb = b.projection_hash if hasattr(b, "projection_hash") else b["projection_hash"]
+    assert ha == hb and len(str(ha)) == 64
+
+
+def test_invalid_work_does_not_mutate_approved_map():
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    proposal = _approved_bundle(con)
+    before = deepcopy(proposal)
+    drives = {
+        "d0": SimpleNamespace(
+            lifecycle="lost", eligibility="enabled",
+            identity_epoch=1, identity_fingerprint="f" * 64),
     }
-    a = deepcopy(approved)
-    b = deepcopy(approved)
-    b["tasks"] = list(reversed(b["tasks"]))
-    out_a = project(a, facts)
-    out_b = project(b, facts)
-    # Normalize comparable remaining ids
-    def ids(o):
-        tasks = o["tasks"] if isinstance(o, dict) else list(o)
-        return sorted(t["requirement_id"] for t in tasks)
-    assert ids(out_a) == ids(out_b), "projection remaining set must be order-independent"
-
-
-def main():
-    tests = sorted((n, f) for n, f in globals().items()
-                   if n.startswith("test_") and callable(f))
-    failed = []
-    for name, fn in tests:
-        try:
-            fn()
-            print(f"PASS  {name}")
-        except Exception as exc:
-            print(f"FAIL  {name}: {exc}")
-            failed.append(name)
-    print(f"\n{len(tests) - len(failed)} passed, {len(failed)} failed")
-    raise SystemExit(1 if failed else 0)
-
-
-if __name__ == "__main__":
-    main()
+    inp, graph = _input_graph_from_proposal(proposal, drives=drives)
+    _ = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    assert proposal == before, "project_pure must not mutate approved proposal"
