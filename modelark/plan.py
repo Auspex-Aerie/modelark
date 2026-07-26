@@ -117,7 +117,12 @@ def active(con) -> dict | None:
 
 def set_active(con, plan_id) -> dict:
     """Switch active plan. No-op when already active (no revision bump). Real switch atomically
-    supersedes approvals, clears the global active pointer, flips is_active, and bumps once (A7)."""
+    supersedes approvals, clears the global active pointer, flips is_active, and bumps once (A7).
+
+    PR-09: refuse while a live execution session exists even on the proven no-op path.
+    """
+    from modelark.execution_session import require_no_live_session
+    require_no_live_session(con)
     if get(con, plan_id) is None:
         raise ValueError(f"no such plan: {plan_id}")
     current = active(con)

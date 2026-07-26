@@ -212,6 +212,8 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
     """Bootstrap / refresh / epoch-transition / recover one drive under the controller + drive fences,
     committing identity evidence + generation + anchor + authority atomically. See the module docstring
     for the full contract; raises a typed ``dm.DriveMutationRefused`` for every fail-closed path."""
+    from modelark.execution_session import require_no_live_session
+    require_no_live_session(con)
     try:
         with drive_fence.hold_controller(db.DB_PATH, blocking=blocking):
             p_epoch, p_gen, p_fp, p_cap, p_auth, p_fs, p_annex = _persisted(con, label)   # facts UNDER controller

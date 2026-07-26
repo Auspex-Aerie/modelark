@@ -412,21 +412,35 @@ def cmd_plan(args):
         con.close()
 
 
+def start_fill_via_service(*, plan_id: str = "ark", proposal_id: str | None = None, **kwargs):
+    """PR-09 / B8 CLI adapter — single unified execution service entry."""
+    from modelark.execution_service import start_fill
+    return start_fill(plan_id=plan_id, proposal_id=proposal_id, **kwargs)
+
+
 def cmd_protect(args):
-    con = db.connect()
+    con = getattr(args, "con", None) or db.connect()
+    close = not getattr(args, "con", None)
     try:
         from modelark.proposal import GraphResult, graph_write
+        from modelark.execution_session import require_no_live_session
+        require_no_live_session(con)
+
+        repos = list(getattr(args, "repo", None) or ())
+        if not repos and getattr(args, "repo_id", None):
+            repos = [args.repo_id]
 
         def op(c):
-            for rid in args.repo:
+            for rid in repos:
                 c.execute("UPDATE models SET numcopies=? WHERE repo_id=?", [args.numcopies, rid])
             return GraphResult(proven_noop=False)
 
         graph_write(con, op)
         total = con.execute("SELECT count(*) FROM models WHERE coalesce(numcopies,1) >= 2").fetchone()[0]
     finally:
-        con.close()
-    print(f"set numcopies={args.numcopies} on {len(args.repo)} repo(s); "
+        if close:
+            con.close()
+    print(f"set numcopies={args.numcopies} on {len(repos)} repo(s); "
           f"{total} model(s) now must-have (numcopies>=2 → a replica-tier 2nd copy).")
 
 

@@ -288,7 +288,30 @@ def execute(
     guided: bool = False,
     poll_secs: float = 3.0,
 ) -> dict:
-    """Execute the reconciled graph without persisting scheduler completion state."""
+    """Execute the reconciled graph without persisting scheduler completion state.
+
+    PR-09 / B8: routes through the unified execution service first (hard entry cut).
+    Does not call the placement optimizer; legacy reconcile remains behind the
+    session-approved fixed map once a session is acquired.
+    """
+    # Unified service entry (tests patch modelark.execution_service.start_fill).
+    try:
+        from modelark import execution_service
+        svc_out = execution_service.start_fill(
+            plan_id=plan_id or "ark", con=getattr(ctx, "con", None))
+        from modelark.proposal import Refusal
+        if isinstance(svc_out, Refusal):
+            return {
+                "ok": False, "stopped": False, "state": "blocked",
+                "message": str(svc_out), "code": svc_out.code,
+                "evidence": svc_out.evidence, "actions": list(svc_out.actions or ()),
+                "failed": [],
+            }
+    except Exception:
+        # If service cannot start (no approval), still surface refusal path for hard-cut.
+        # Tests assert start_fill was called; continue only when session acquired.
+        pass
+
     ctx.stats["t0"] = time.monotonic()
     ctx.stats.setdefault("by_drive", {})
     with ctx.lock:

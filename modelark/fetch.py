@@ -178,6 +178,15 @@ class RunCtx:
             return graph_write(self.con, op).value
 
 
+def get_frozen_execution_config(session_start):
+    """PR-09 / B7: transport consumes freeze from session start, never global reread."""
+    from modelark.execution_config import get_frozen_execution_config as _get
+    return _get(session_start)
+
+
+require_frozen_config = get_frozen_execution_config
+
+
 def finalized(con) -> list[str]:
     return [r[0] for r in con.execute(
         "SELECT repo_id FROM selection WHERE finalized_at IS NOT NULL ORDER BY repo_id").fetchall()]

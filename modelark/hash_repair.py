@@ -354,6 +354,8 @@ def repair_hashes(
     Dry-run is the default. Applying is all-or-nothing, refuses every unresolved candidate, creates
     a consistent SQLite backup before the first update, and never overwrites existing evidence.
     """
+    from modelark.execution_session import require_no_live_session
+    require_no_live_session(con)
     scope = list(dict.fromkeys(repo_ids or ()))
     report = audit_hashes(con, scope, archive_resolver=archive_resolver)
     if not apply:

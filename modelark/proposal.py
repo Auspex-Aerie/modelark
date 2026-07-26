@@ -75,6 +75,17 @@ def bump_revision(con) -> int:
     Finding 44: never swallow failures. A failed revision update must propagate so
     graph_write rolls back the graph mutation. Partial fixtures must seed planner_state.
     """
+    # Drive-mutation and other in-TX bumpers still respect live exclusion when called alone.
+    try:
+        from modelark.execution_session import live_session_exists, live_owner
+        # Only refuse when not already inside a live session_write (session_write bumps intentionally).
+        # Heuristic: if the caller is session_write it holds a live row; allow bumps when
+        # _SESSION_WRITE_DEPTH > 0.
+        import modelark.execution_session as _es
+        if getattr(_es, "_SESSION_WRITE_DEPTH", 0) == 0 and live_session_exists(con):
+            raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
+    except ImportError:
+        pass
     con.execute(
         "UPDATE planner_state SET planner_revision = planner_revision + 1, "
         "updated_at = CURRENT_TIMESTAMP WHERE singleton_id = 1")
@@ -91,9 +102,24 @@ def graph_write(con, op: Callable[[Any], Any]) -> Any:
     """Run ``op(con)`` under BEGIN IMMEDIATE; bump revision unless proven_noop.
 
     Rolls back graph mutation and revision together on any failure (A3 atomicity).
+    PR-09: refuse while a live execution session exists (FILL_SESSION_ACTIVE).
     """
+    # Live-session exclusion before opening the write transaction (B3 / B13).
+    try:
+        from modelark.execution_session import live_session_exists, live_owner
+        if live_session_exists(con):
+            raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
+    except ImportError:
+        pass
     con.execute("BEGIN IMMEDIATE")
     try:
+        # Re-check inside TX for races
+        try:
+            from modelark.execution_session import live_session_exists, live_owner
+            if live_session_exists(con):
+                raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
+        except ImportError:
+            pass
         result = op(con)
         if result is None:
             result = GraphResult(proven_noop=False)
@@ -1138,6 +1164,13 @@ def approve(con, proposal_id: str, *, mutation=None, services=None, **_extra):
     catalog_path = getattr(db, "DB_PATH", None) or ":memory:"
 
     def _run_approve():
+        # PR-09: no approval while a live execution session exists.
+        try:
+            from modelark.execution_session import live_session_exists, live_owner
+            if live_session_exists(con):
+                raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
+        except ImportError:
+            pass
         with drive_fence.hold_controller(catalog_path, blocking=True):
             with drive_fence.hold_drives_sorted(keys, blocking=True):
                 # Evidence after fences, before BEGIN IMMEDIATE (A6).

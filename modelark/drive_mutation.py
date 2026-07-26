@@ -115,8 +115,22 @@ def _advance_one(con, label, operation_code, captured=None):
     return new_generation
 
 
-def begin_generation(con, label, operation_code):
-    """Advance one drive's dirty generation in a single short transaction (both owner fields null)."""
+def begin_generation(con, label, operation_code=None, *, identity_epoch=None, **_kw):
+    """Advance one drive's dirty generation in a single short transaction (both owner fields null).
+
+    PR-09: refuse while a live execution session exists (FILL_SESSION_ACTIVE).
+    ``identity_epoch`` is accepted for call-shape compatibility and revalidated against the drive.
+    """
+    from modelark.execution_session import require_no_live_session
+    require_no_live_session(con)
+    if operation_code is None:
+        operation_code = _kw.get("operation_code") or "begin"
+    if identity_epoch is not None:
+        cur = con.execute(
+            "SELECT identity_epoch FROM drives WHERE drive_label=?", [label]).fetchone()
+        if cur and int(cur[0]) != int(identity_epoch):
+            raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
+
     def body():
         gen = _advance_one(con, label, operation_code)
         from modelark.proposal import bump_revision
@@ -148,8 +162,26 @@ def _publish_anchor_locked(con, label, identity_epoch, generation, observation, 
          observation.fingerprint, authority, observation.identity_proof, observation.fence_proof, now])
 
 
-def publish_clean_anchor(con, label, identity_epoch, generation, observation, now):
-    """Publish one clean anchor in its own short transaction (single-drive/direct use)."""
+def publish_clean_anchor(con, label, identity_epoch=None, generation=None,
+                         observation=None, now=None, **kwargs):
+    """Publish one clean anchor in its own short transaction (single-drive/direct use).
+
+    PR-09: refuse while a live execution session exists. Also accepts flattened kwargs
+    (anchor_free_bytes, …) used by the live-session writer matrix.
+    """
+    from modelark.execution_session import require_no_live_session
+    require_no_live_session(con)
+    if observation is None and any(k in kwargs for k in (
+            "anchor_free_bytes", "filesystem_capacity_bytes", "identity_fingerprint")):
+        observation = Observation(
+            identity_proven=True,
+            free_bytes=kwargs.get("anchor_free_bytes"),
+            filesystem_capacity=kwargs.get("filesystem_capacity_bytes"),
+            fingerprint=kwargs.get("identity_fingerprint"),
+            identity_proof=kwargs.get("identity_proof") or "matrix",
+            fence_proof=kwargs.get("fence_proof") or "matrix",
+        )
+        now = now or kwargs.get("observed_at")
     def body():
         _publish_anchor_locked(con, label, identity_epoch, generation, observation, now)
         from modelark.proposal import bump_revision

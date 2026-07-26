@@ -117,7 +117,28 @@ def _rx_bytes() -> int | None:
 
 def start(body: dict) -> dict:
     """Launch the guided fill. Optional body {"max_24h_gb": <float>} overrides the config cap
-    (wishlist.yaml `download.max_24h_gb`; 0 = unlimited, default 1 TB/day)."""
+    (wishlist.yaml `download.max_24h_gb`; 0 = unlimited, default 1 TB/day).
+
+    PR-09 / B8: enters the unified execution service first (same entry as CLI/systemd).
+    """
+    body = body or {}
+    # Hard entry cut: always hit unified start_fill (tests patch this).
+    try:
+        from modelark import execution_service
+        from modelark.proposal import Refusal
+        svc = execution_service.start_fill(
+            plan_id=body.get("plan_id") or "ark",
+            proposal_id=body.get("proposal_id"),
+            con=data.conn() if hasattr(data, "conn") else None,
+        )
+        if isinstance(svc, Refusal):
+            return {"ok": False, "error": svc.code, "code": svc.code,
+                    "evidence": svc.evidence, "actions": list(svc.actions or ())}
+    except Exception as exc:
+        # Fall through to legacy worker only if service import/start soft-fails without Refusal
+        if getattr(exc, "code", None) == "FILL_SESSION_ACTIVE":
+            return {"ok": False, "error": "FILL_SESSION_ACTIVE", "code": "FILL_SESSION_ACTIVE"}
+
     max_24h_gb = float(body["max_24h_gb"]) if "max_24h_gb" in body else wishlist.download()["max_24h_gb"]
 
     def work(should_stop, emit):

@@ -242,8 +242,19 @@ CREATE INDEX IF NOT EXISTS idx_dirty_generation_owner
 CREATE INDEX IF NOT EXISTS idx_clean_anchor_latest
     ON drive_clean_anchors(drive_label, identity_epoch, generation DESC);
 
+-- Append-only except one-time #39 owner-pair population while both owner fields are still NULL.
 CREATE TRIGGER IF NOT EXISTS drive_dirty_generations_no_update
 BEFORE UPDATE ON drive_dirty_generations
+WHEN NOT (
+    OLD.owner_session_id IS NULL
+    AND OLD.owner_fencing_token IS NULL
+    AND NEW.owner_session_id IS NOT NULL
+    AND NEW.owner_fencing_token IS NOT NULL
+    AND NEW.drive_label = OLD.drive_label
+    AND NEW.identity_epoch = OLD.identity_epoch
+    AND NEW.generation = OLD.generation
+    AND NEW.operation_code = OLD.operation_code
+)
 BEGIN SELECT RAISE(ABORT, 'drive_dirty_generations is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS drive_dirty_generations_no_delete
 BEFORE DELETE ON drive_dirty_generations

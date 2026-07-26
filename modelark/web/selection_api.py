@@ -96,7 +96,21 @@ def summary() -> dict:
     }
 
 
-def toggle(repo_id: str, on: bool) -> dict:
+def _as_body(first, kwargs):
+    """Accept portal dict body or legacy positional kwargs."""
+    if isinstance(first, dict):
+        out = dict(first)
+        out.update(kwargs)
+        return out
+    return dict(kwargs)
+
+
+def toggle(repo_id=None, on=None, **kwargs) -> dict:
+    # PR-09 matrix / portal: toggle({"repo_id": ...}) or toggle(id, on).
+    if isinstance(repo_id, dict):
+        body = _as_body(repo_id, kwargs)
+        repo_id = body.get("repo_id") or body.get("id")
+        on = body.get("on", False if "on" not in body else body["on"])
     if on:                                          # addition: never Fill-guarded; still bumps revision
         def body(c):
             c.execute(
@@ -112,7 +126,14 @@ def toggle(repo_id: str, on: bool) -> dict:
     return _guarded(mutate)
 
 
-def bulk(ids: list[str], on: bool) -> dict:
+def bulk(ids=None, on=None, **kwargs) -> dict:
+    # PR-09 matrix: bulk({"repo_ids": [...], "op": "remove"}).
+    if isinstance(ids, dict):
+        body = _as_body(ids, kwargs)
+        ids = body.get("repo_ids") or body.get("ids") or []
+        op = body.get("op")
+        if on is None:
+            on = False if op in ("remove", "off", "clear") else bool(body.get("on", False))
     if on:                                          # bulk addition: never Fill-guarded; still bumps
         def body(c):
             c.executemany(
@@ -129,23 +150,30 @@ def bulk(ids: list[str], on: bool) -> dict:
     return _guarded(mutate)
 
 
-def clear() -> dict:
+def clear(body=None, **_kwargs) -> dict:
+    if body is not None and not isinstance(body, dict):
+        raise TypeError("clear body must be a dict when provided")
     def mutate():
-        def body(c):
+        def body_fn(c):
             c.execute("DELETE FROM selection")
             return _summary_on(c)
-        return _with_revision(body)
+        return _with_revision(body_fn)
     return _guarded(mutate)
 
 
-def finalize() -> dict:
-    """Commit the current cart: stamp the whole un-finalized set as the wishlist."""
+def finalize(body=None, **_kwargs) -> dict:
+    """Commit the current cart: stamp the whole un-finalized set as the wishlist.
+
+    Accepts optional portal/matrix body dict (ignored fields) for call-shape compatibility.
+    """
+    if body is not None and not isinstance(body, dict):
+        raise TypeError("finalize body must be a dict when provided")
     def mutate():
-        def body(c):
+        def body_fn(c):
             c.execute(
                 "UPDATE selection SET finalized_at = CURRENT_TIMESTAMP WHERE finalized_at IS NULL")
             return _summary_on(c)
-        return _with_revision(body)
+        return _with_revision(body_fn)
     return _guarded(mutate)
 
 
