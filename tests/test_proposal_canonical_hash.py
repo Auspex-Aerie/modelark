@@ -288,9 +288,11 @@ def test_client_supplied_hash_or_blob_is_not_authority():
     # A10: identity fingerprint required on drive authority model.
     con.execute(
         "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
-        "lifecycle,eligibility,identity_epoch,identity_fingerprint) "
-        "VALUES('d0',?,?,?,?,?,?,?,?)",
-        [10**12, 10**12, "primary", 0, "active", "enabled", 1, "a" * 64])
+        "lifecycle,eligibility,identity_epoch,identity_fingerprint,"
+        "write_authority,filesystem_capacity_bytes) "
+        "VALUES('d0',?,?,?,?,?,?,?,?,?,?)",
+        [10**12, 10**12, "primary", 0, "active", "enabled", 1, "a" * 64,
+         "dedicated_local", 10**12])
     from modelark import plan
     plan.create(con, "ark", name="Ark")
     plan.add_drive(con, "ark", "d0")

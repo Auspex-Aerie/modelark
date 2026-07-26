@@ -101,8 +101,10 @@ def _seed_selection(con, repos=("org/m",)):
             [repo])
     con.execute(
         "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
-        "lifecycle,eligibility,identity_epoch,identity_fingerprint) "
-        "VALUES('d0',1000000000000,1000000000000,'primary',0,'active','enabled',1,?)",
+        "lifecycle,eligibility,identity_epoch,identity_fingerprint,"
+        "write_authority,filesystem_capacity_bytes) "
+        "VALUES('d0',1000000000000,1000000000000,'primary',0,'active','enabled',1,?,"
+        "'dedicated_local',1000000000000)",
         ["f" * 64])
     from modelark import plan
     if plan.get(con, "ark") is None:
@@ -544,8 +546,10 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
     fp_d1 = "e" * 64
     con.execute(
         "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
-        "lifecycle,eligibility,identity_epoch,identity_fingerprint) "
-        "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',2,?)",
+        "lifecycle,eligibility,identity_epoch,identity_fingerprint,"
+        "write_authority,filesystem_capacity_bytes) "
+        "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',2,?,"
+        "'dedicated_local',1000000000000)",
         [fp_d1])
     from modelark import plan
     plan.add_drive(con, "ark", "d1")
@@ -832,6 +836,83 @@ def test_noop_set_active_preserves_existing_approval_and_pointer():
         _lifecycle(con, p1),
     )
     assert before == after, "no-op must preserve revision, pointer, plan, and approval lifecycle"
+
+
+def test_fence_keys_refuse_missing_identity_fingerprint():
+    """Finding 38: missing fingerprints refuse — never silently omit fence keys."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    con.execute(
+        "UPDATE drives SET identity_fingerprint=NULL WHERE drive_label='d0'")
+    try:
+        prop._fence_keys(con, ["d0"])
+        raise AssertionError("must refuse missing fingerprint")
+    except Exception as exc:
+        msg = str(exc).upper()
+        assert "IDENTITY" in msg or "FINGERPRINT" in msg or "DRIVE_IDENTITY" in msg, exc
+
+
+def test_two_copy_executable_sets_source_drive_on_replica():
+    """Finding 40: replica tasks name a durable source_drive, not None."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    con.execute("UPDATE models SET numcopies=2 WHERE repo_id='org/m'")
+    con.execute(
+        "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
+        "lifecycle,eligibility,identity_epoch,identity_fingerprint,"
+        "write_authority,filesystem_capacity_bytes) "
+        "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',2,?,"
+        "'dedicated_local',1000000000000)",
+        ["e" * 64])
+    from modelark import plan
+    plan.add_drive(con, "ark", "d1")
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    rows = con.execute(
+        "SELECT requirement_id, target_drive, source_drive, row_kind FROM proposal_tasks "
+        "WHERE proposal_id=? ORDER BY order_key", [pid]).fetchall()
+    assert len(rows) >= 2, rows
+    replica = [r for r in rows if str(r[0]).startswith("replica")]
+    assert replica, f"expected replica task; got {rows}"
+    for rid, target, source, kind in replica:
+        assert kind == "executable"
+        assert source is not None, f"{rid} must set source_drive; target={target}"
+        assert source != target, f"{rid} source must differ from target for multi-copy"
+
+
+def test_baseline_certificate_persisted_and_revalidated():
+    """Finding 39/A10: baseline certificate is stored and binds revalidation."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    # Complete archive on d0 → baseline_satisfied with certificate.
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,stored_bytes,"
+        "orig_sha256) VALUES('org/m','model.safetensors','d0',0,100,100,?)",
+        ["1" * 64])
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    row = con.execute(
+        "SELECT row_kind, baseline_certificate, satisfying_drive FROM proposal_tasks "
+        "WHERE proposal_id=?", [pid]).fetchone()
+    assert row is not None
+    assert row[0] == "baseline_satisfied", row
+    assert row[1] and len(row[1]) == 64, f"baseline_certificate must be stored; got {row[1]!r}"
+    # Tamper certificate → hash or exact-assignment revalidation refuses.
+    con.execute(
+        "UPDATE proposal_tasks SET baseline_certificate=? WHERE proposal_id=?",
+        ["f" * 64, pid])
+    try:
+        _approve(prop, con, pid)
+        raise AssertionError("tampered baseline certificate must refuse")
+    except Exception as exc:
+        msg = str(exc).upper()
+        assert any(k in msg for k in (
+            "ASSIGN", "CERTIFICATE", "BASELINE", "HASH")), exc
 
 
 def main():

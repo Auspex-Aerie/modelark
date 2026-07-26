@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
-from modelark import capacity, capacity_evidence, drive_fence, plan as plan_mod
+from modelark import capacity, drive_fence, plan as plan_mod
 from modelark import proposal_canonical as canonical
 from modelark.core import db
 from modelark.web import fill_worker
@@ -70,13 +70,20 @@ class Refusal(Exception):
 # graph_write / revision bump
 # ---------------------------------------------------------------------------
 def bump_revision(con) -> int:
-    """Increment planner_revision inside the caller's open transaction."""
-    con.execute(
-        "UPDATE planner_state SET planner_revision = planner_revision + 1, "
-        "updated_at = CURRENT_TIMESTAMP WHERE singleton_id = 1")
-    row = con.execute(
-        "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()
-    return int(row[0]) if row else 0
+    """Increment planner_revision inside the caller's open transaction.
+
+    Pre-v5 fixtures without planner_state are no-ops (transport unit tests with
+    partial catalogs); production catalogs always have the singleton.
+    """
+    try:
+        con.execute(
+            "UPDATE planner_state SET planner_revision = planner_revision + 1, "
+            "updated_at = CURRENT_TIMESTAMP WHERE singleton_id = 1")
+        row = con.execute(
+            "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()
+        return int(row[0]) if row else 0
+    except sqlite3.OperationalError:
+        return 0
 
 
 def graph_write(con, op: Callable[[Any], Any]) -> Any:
@@ -280,6 +287,24 @@ def _append_missing_files(con, files: list, requirement_id: str, repo_id: str) -
         })
 
 
+def _baseline_file_evidence(con, repo_id: str, drive_label: str) -> list[dict]:
+    """Per-file durable evidence for A10 baseline certificates (archived content identity)."""
+    rows = con.execute(
+        "SELECT a.rfilename, a.orig_sha256, a.orig_bytes, a.annex_key, a.stored_bytes "
+        "FROM archived a WHERE a.repo_id=? AND a.drive_label=? ORDER BY a.rfilename",
+        [repo_id, drive_label]).fetchall()
+    return [
+        {
+            "rfilename": r[0],
+            "orig_sha256": r[1],
+            "orig_bytes": r[2],
+            "annex_key": r[3],
+            "stored_bytes": r[4],
+        }
+        for r in rows
+    ]
+
+
 def _requirement_id(copy_i: int, nc: int, repo: str) -> str:
     if copy_i == 1:
         return f"primary:{repo}"
@@ -457,12 +482,24 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
         satisfied = _complete_archived_plan_drives(con, repo, baseline_labels)[:nc]
         used: set[str] = set()
         copy_i = 0
+        # Primary durable source for replica dependencies (first complete archive if any).
+        primary_source = satisfied[0] if satisfied else None
         for label in satisfied:
             copy_i += 1
             order += 1
             row = drive_by_label[label]
             epoch = int(row[1])
+            fp = row[2]
             rid = _requirement_id(copy_i, nc, repo)
+            cert_files = _baseline_file_evidence(con, repo, label)
+            cert = canonical.baseline_satisfaction_certificate(
+                requirement_id=rid,
+                full_manifest_hash=mh,
+                drive_label=label,
+                identity_epoch=epoch,
+                identity_fingerprint=fp or "",
+                files=cert_files,
+            )
             tasks.append({
                 "requirement_id": rid,
                 "row_kind": "baseline_satisfied",
@@ -476,6 +513,7 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
                 "expected_durable": size,
                 "workspace_peak": 0,
                 "identity_epoch": epoch,
+                "baseline_certificate": cert,
             })
             used.add(label)
             # Baseline does not charge remaining free.
@@ -514,18 +552,40 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
                     remaining[label] = have - size  # workspace is transient
             else:
                 gate = "INFEASIBLE"
+            # Replica / later copies depend on an existing durable source when available (finding 40).
+            source = None
+            if copy_i > 1:
+                source = primary_source
+                if source is None and label is not None:
+                    # No baseline yet: first executable of this repo becomes the source for later ones.
+                    prior = next(
+                        (t for t in tasks
+                         if t.get("repo_id") == repo and t.get("target_drive")),
+                        None)
+                    source = prior["target_drive"] if prior else None
+                if source is None and label is not None and copy_i == 2 and not primary_source:
+                    # When both are new placements, first assigned target of this repo is source.
+                    first_exec = next(
+                        (t for t in tasks
+                         if t.get("repo_id") == repo and t.get("row_kind") == "executable"
+                         and t.get("target_drive")),
+                        None)
+                    source = first_exec["target_drive"] if first_exec else None
+            if copy_i == 1 and primary_source is None and label is not None:
+                primary_source = label
             tasks.append({
                 "requirement_id": rid,
                 "row_kind": "executable",
                 "repo_id": repo,
                 "target_drive": label,
-                "source_drive": None,
+                "source_drive": source,
                 "full_manifest_hash": mh,
                 "order_key": order,
                 "guaranteed_durable": size,
                 "expected_durable": size,
                 "workspace_peak": workspace,
                 "identity_epoch": epoch,
+                "baseline_certificate": None,
             })
             _append_missing_files(con, files, rid, repo)
 
@@ -665,13 +725,14 @@ def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = Non
                 "INSERT INTO proposal_tasks("
                 "proposal_id,requirement_id,row_kind,repo_id,target_drive,source_drive,"
                 "satisfying_drive,full_manifest_hash,order_key,guaranteed_durable,"
-                "expected_durable,identity_epoch) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                "expected_durable,identity_epoch,baseline_certificate"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     proposal_id, t["requirement_id"], t["row_kind"], t["repo_id"],
                     t.get("target_drive"), t.get("source_drive"), t.get("satisfying_drive"),
                     t["full_manifest_hash"], int(t.get("order_key") or 0),
                     t.get("guaranteed_durable"), t.get("expected_durable"),
-                    t.get("identity_epoch"),
+                    t.get("identity_epoch"), t.get("baseline_certificate"),
                 ],
             )
         for f in files:
@@ -748,12 +809,12 @@ def load_proposal(con, proposal_id: str) -> dict:
         dict(zip(
             ["requirement_id", "row_kind", "repo_id", "target_drive", "source_drive",
              "satisfying_drive", "full_manifest_hash", "order_key", "guaranteed_durable",
-             "expected_durable", "identity_epoch"],
+             "expected_durable", "identity_epoch", "baseline_certificate"],
             r))
         for r in con.execute(
             "SELECT requirement_id,row_kind,repo_id,target_drive,source_drive,"
             "satisfying_drive,full_manifest_hash,order_key,guaranteed_durable,"
-            "expected_durable,identity_epoch FROM proposal_tasks "
+            "expected_durable,identity_epoch,baseline_certificate FROM proposal_tasks "
             "WHERE proposal_id=? ORDER BY order_key, requirement_id", [proposal_id])
     ]
     d["files"] = [
@@ -778,6 +839,8 @@ _TASK_HASH_FIELDS = (
     "satisfying_drive",
     "full_manifest_hash", "order_key", "guaranteed_durable", "expected_durable",
     "identity_epoch",
+    # A10: baseline certificate is part of reviewed assignment identity.
+    "baseline_certificate",
 )
 _FILE_HASH_FIELDS = (
     "requirement_id", "rfilename", "role", "size_bytes", "orig_sha256",
@@ -842,13 +905,22 @@ def proposal_drive_ids(proposal: Mapping) -> list[tuple[str, int]]:
 
 
 def _fence_keys(con, labels: Sequence[str]) -> list[tuple[str, int]]:
+    """Resolve proposal-relevant labels to sorted (fingerprint, epoch) fence keys.
+
+    Finding 38: refuse missing identity instead of silently omitting a drive from the fence set.
+    """
     keys = []
     for label in labels:
         row = con.execute(
             "SELECT identity_fingerprint, identity_epoch FROM drives WHERE drive_label=?",
             [label]).fetchone()
-        if row and row[0]:
-            keys.append((row[0], int(row[1])))
+        if not row or not row[0]:
+            raise Refusal(
+                "DRIVE_IDENTITY_UNPROVEN",
+                {"drive": label, "reason": "missing_identity_fingerprint"},
+                ("reconcile_drive", "preview_again"),
+            )
+        keys.append((row[0], int(row[1])))
     return sorted(keys)
 
 
@@ -891,12 +963,52 @@ def validate_exact_assignment(con, proposal: Mapping,
                           ("preview_again",))
 
     for t in tasks:
+        if t.get("row_kind") == "baseline_satisfied":
+            # A10: revalidate stored baseline certificate against durable evidence on the
+            # satisfying drive (not annex-key alone).
+            label = t.get("satisfying_drive") or t.get("target_drive")
+            if not label:
+                raise Refusal("EXACT_ASSIGNMENT_REJECTED",
+                              {"task": t.get("requirement_id"), "reason": "missing_satisfying_drive"},
+                              ("preview_again",))
+            fp_row = con.execute(
+                "SELECT identity_fingerprint, identity_epoch FROM drives WHERE drive_label=?",
+                [label]).fetchone()
+            if not fp_row or not fp_row[0]:
+                raise Refusal("EXACT_ASSIGNMENT_REJECTED",
+                              {"task": t.get("requirement_id"), "drive": label,
+                               "reason": "missing_identity_fingerprint"},
+                              ("preview_again",))
+            cert_files = _baseline_file_evidence(con, t["repo_id"], label)
+            recomputed = canonical.baseline_satisfaction_certificate(
+                requirement_id=t["requirement_id"],
+                full_manifest_hash=t["full_manifest_hash"],
+                drive_label=label,
+                identity_epoch=int(fp_row[1]),
+                identity_fingerprint=fp_row[0],
+                files=cert_files,
+            )
+            stored_cert = t.get("baseline_certificate")
+            if not stored_cert or stored_cert != recomputed:
+                raise Refusal(
+                    "EXACT_ASSIGNMENT_REJECTED",
+                    {"task": t.get("requirement_id"), "reason": "baseline_certificate_mismatch",
+                     "stored": stored_cert, "recomputed": recomputed},
+                    ("preview_again",))
+            continue
         if t.get("row_kind") != "executable":
             continue
         label = t.get("target_drive")
         if not label:
             raise Refusal("EXACT_ASSIGNMENT_REJECTED", {"task": t.get("requirement_id")},
                           ("preview_again",))
+        # Replica / later copies must name a durable source (finding 40).
+        rid = t.get("requirement_id") or ""
+        if rid.startswith("replica") and not t.get("source_drive"):
+            raise Refusal(
+                "EXACT_ASSIGNMENT_REJECTED",
+                {"task": rid, "reason": "missing_source_drive"},
+                ("preview_again",))
         ev = evidence_by_drive.get(label)
         if ev is not None and hasattr(ev, "executable") and not ev.executable:
             raise Refusal("EXACT_ASSIGNMENT_REJECTED", {"drive": label, "evidence": ev},
@@ -933,26 +1045,39 @@ class _DefaultServices:
         self.clock = _DefaultClock()
 
     def observe_exact_capacity(self, con, labels, **_k):
-        """Default approval evidence: safety floor subtracted once (never raw free as admissible)."""
+        """Authoritative admission evidence under held fences (A6).
+
+        Uses the shared ``admission.execution_evidence`` rule with a fenced observation built from
+        catalog-proven identity + free. Missing fingerprints refuse (not silent omit).
+        """
+        from types import SimpleNamespace
+
+        from modelark import admission
+
         now = self.clock.now()
         out = {}
         for label in labels:
-            row = con.execute(
-                "SELECT coalesce(free_bytes, 0), "
-                "coalesce(filesystem_capacity_bytes, capacity_bytes, 0), "
-                "coalesce(raid_backed, 0), identity_epoch "
-                "FROM drives WHERE drive_label=?", [label]).fetchone()
-            observed_free = int(row[0]) if row else 0
-            fs_cap = int(row[1]) if row and row[1] is not None else 0
-            raid = bool(row[2]) if row else False
-            epoch = int(row[3]) if row else 1
-            floor = capacity.safety_floor(fs_cap, raid) if fs_cap else 0
-            admissible = max(0, observed_free - floor)
-            optimistic = max(0, fs_cap - floor) if fs_cap else admissible
-            out[label] = capacity_evidence.Evidence(
-                kind="live", executable=True, admissible_free=admissible,
-                optimistic_usable_max=optimistic, observed_free=observed_free,
-                observed_at=now, identity_epoch=epoch)
+            facts = admission._facts(con, label)
+            if not facts.fingerprint:
+                raise Refusal(
+                    "DRIVE_IDENTITY_UNPROVEN",
+                    {"drive": label, "reason": "missing_identity_fingerprint"},
+                    ("reconcile_drive", "preview_again"),
+                )
+            free_row = con.execute(
+                "SELECT free_bytes FROM drives WHERE drive_label=?", [label]).fetchone()
+            free = free_row[0] if free_row else None
+            # Avoid importing drive_mutation (envelope owner policy); match Observation fields.
+            obs = SimpleNamespace(
+                identity_proven=True,
+                free_bytes=int(free) if free is not None else None,
+                filesystem_capacity=facts.filesystem_capacity,
+                fingerprint=facts.fingerprint,
+                identity_proof="approval-cas",
+                fence_proof="held",
+            )
+            # fence_held=True: approve already holds controller + sorted drive fences.
+            out[label] = admission.execution_evidence(con, label, obs, now=now)
         return out
 
 

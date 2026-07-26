@@ -621,7 +621,8 @@ def test_envelope_wired_only_into_reviewed_transport():
     root = Path(__file__).resolve().parent.parent / "modelark"
     envelope = {"drive_fence", "drive_mutation"}
     mutation_allowed = {"fetch.py", "drive_bootstrap.py"}
-    fence_allowed = mutation_allowed | {"admission.py"}   # #35-C: the preview seam holds the drive fence
+    # #35-C admission preview + PR-08 proposal approval (A6) hold drive fences.
+    fence_allowed = mutation_allowed | {"admission.py", "proposal.py"}
     importers, offenders = set(), []
     for path in root.rglob("*.py"):
         if path.name in ("drive_fence.py", "drive_mutation.py"):

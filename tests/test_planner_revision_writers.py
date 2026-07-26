@@ -55,7 +55,7 @@ def _seed(con):
         "write_authority,filesystem_capacity_bytes,fs_uuid,annex_uuid,serial) "
         "VALUES('d0',1000,900,'primary',0,'active','enabled',1,0,?,'dedicated_local',1000,"
         "'fs-d0','anx-d0','ser-d0')",
-        ["a" * 64])
+        ["a" * 64])  # write_authority dedicated_local required for A6 admission evidence
     from modelark import plan
     if plan.get(con, "ark") is None:
         plan.create(con, "ark", name="Ark")
