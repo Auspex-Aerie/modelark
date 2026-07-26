@@ -313,7 +313,12 @@ def start_session(con, proposal_id, predecessor_id, services):
                 worker_identity=str(worker_id),
                 controller_identity=str(controller))
             session = load_session(con, sid) or session
-        return SessionStart(session=session, projection=projected, execution_config=frozen)
+        start = SessionStart(session=session, projection=projected, execution_config=frozen)
+        # Projection-boundary refresh authority (finding 35/37): current global reader
+        # and capacity observer are carried separately from the frozen config values.
+        start._config_reader = getattr(services, "config", None)
+        start._observe_exact_capacity = getattr(services, "observe_exact_capacity", None)
+        return start
 
 
 def _expiry_iso(services, lease_ttl: int) -> str:
@@ -364,20 +369,31 @@ def _catalog_projection_bundle(con, proposal, relevant, services, current_config
             "orig_sha256": r[3], "stored_bytes": r[4], "orig_bytes": r[5],
         }
 
+    # Finding 37: never fabricate admissible capacity. Require authoritative
+    # observe_exact_capacity for every relevant drive; fail closed when unavailable.
     evidence = {}
     observe = getattr(services, "observe_exact_capacity", None)
-    if callable(observe) and relevant:
+    if not callable(observe):
+        raise Refusal(
+            "CAPACITY_EVIDENCE_UNKNOWN",
+            {"reason": "observe_exact_capacity_missing", "drives": list(relevant)},
+            ("reconcile_drive", "preview_again"))
+    if relevant:
         try:
             evidence = observe(con, list(relevant)) or {}
         except Refusal:
             raise
-        except Exception:
-            evidence = {}
-    if not evidence:
-        for label, d in drives.items():
-            evidence[label] = SimpleNamespace(
-                kind="offline", executable=(not getattr(d, "offline", False)),
-                admissible_free=10**12)
+        except Exception as exc:
+            raise Refusal(
+                "CAPACITY_EVIDENCE_UNKNOWN",
+                {"reason": "observe_exact_capacity_failed", "error": str(exc)[:200]},
+                ("reconcile_drive", "preview_again")) from exc
+    missing = [lab for lab in relevant if lab not in evidence]
+    if missing:
+        raise Refusal(
+            "CAPACITY_EVIDENCE_UNKNOWN",
+            {"reason": "missing_drive_evidence", "drives": missing},
+            ("reconcile_drive", "preview_again"))
 
     # Recompute manifests from catalog files (not proposal self-copy).
     from modelark.proposal import _manifest_hash, _semantic_input_hash, _requirement_set_hash
@@ -464,8 +480,9 @@ def claim_worker(con, *, session_id, fencing_token, worker_identity, controller_
 transition_to_running = claim_worker
 
 
-def heartbeat(con, *, session_id, fencing_token, lease_ttl=None, services=None):
-    """Renew heartbeat_at and lease expires_at under token/state CAS (finding 36)."""
+def heartbeat(con, *, session_id, fencing_token, worker_identity=None,
+              lease_ttl=None, services=None):
+    """Renew heartbeat_at and lease expires_at under token/state/worker CAS (finding 36)."""
     row = con.execute(
         "SELECT state, fencing_token, worker_identity FROM execution_sessions "
         "WHERE session_id=?",
@@ -477,13 +494,35 @@ def heartbeat(con, *, session_id, fencing_token, lease_ttl=None, services=None):
     if row[0] not in ("running", "stopping"):
         raise Refusal("SESSION_STATE_INVALID", {"state": row[0]},
                       ("claim_worker_first",))
+    expected_worker = row[2]
+    if worker_identity is not None:
+        if expected_worker is None or str(expected_worker) != str(worker_identity):
+            raise Refusal(
+                "SESSION_WORKER_MISMATCH",
+                {"session_id": session_id, "expected": expected_worker,
+                 "got": worker_identity},
+                ("claim_worker_first",))
+    elif expected_worker is None:
+        raise Refusal(
+            "SESSION_STATE_INVALID",
+            {"state": row[0], "reason": "worker_identity_required"},
+            ("claim_worker_first",))
     ttl = int(lease_ttl if lease_ttl is not None else (
         getattr(services, "lease_ttl", None) if services is not None else None) or 3600)
     expires_at = _expiry_iso(services or SimpleNamespace(), ttl)
-    cur = con.execute(
-        "UPDATE execution_sessions SET heartbeat_at=CURRENT_TIMESTAMP, expires_at=? "
-        "WHERE session_id=? AND fencing_token=? AND state IN ('running','stopping')",
-        [expires_at, session_id, int(fencing_token)])
+    # CAS: token + live state + worker identity (finding 36).
+    if worker_identity is not None:
+        cur = con.execute(
+            "UPDATE execution_sessions SET heartbeat_at=CURRENT_TIMESTAMP, expires_at=? "
+            "WHERE session_id=? AND fencing_token=? AND worker_identity=? "
+            "AND state IN ('running','stopping')",
+            [expires_at, session_id, int(fencing_token), str(worker_identity)])
+    else:
+        cur = con.execute(
+            "UPDATE execution_sessions SET heartbeat_at=CURRENT_TIMESTAMP, expires_at=? "
+            "WHERE session_id=? AND fencing_token=? AND worker_identity=? "
+            "AND state IN ('running','stopping')",
+            [expires_at, session_id, int(fencing_token), expected_worker])
     if getattr(cur, "rowcount", None) == 0:
         raise Refusal("SESSION_TOKEN_MISMATCH", {"session_id": session_id}, ())
     return load_session(con, session_id)

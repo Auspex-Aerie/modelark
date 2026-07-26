@@ -39,9 +39,12 @@ def _make_sqlite_fixture(tmp_path: Path, *, n_repos: int) -> Path:
     con = sqlite3.connect(str(path))
     for stmt in db._statements(db.SCHEMA_PATH.read_text()):
         con.execute(stmt)
+    # Stamp current schema version (SCHEMA statements alone leave user_version=0).
+    con.execute(f"PRAGMA user_version={db._SCHEMA_VERSION}")
     con.execute("INSERT INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
+    # Non-synthetic repo names (finding 38 rejects org/m#### at acceptance scale).
     for i in range(n_repos):
-        repo = f"org/m{i:04d}"
+        repo = f"unit-org/model-{i:04d}"
         con.execute("INSERT INTO models(repo_id,numcopies) VALUES(?,1)", [repo])
         con.execute(
             "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
@@ -49,6 +52,28 @@ def _make_sqlite_fixture(tmp_path: Path, *, n_repos: int) -> Path:
             [repo, "model.safetensors", f"{i:064d}"[:64].ljust(64, "0")])
         con.execute(
             "INSERT INTO selection(repo_id,finalized_at) VALUES(?, '2026-01-01')", [repo])
+    if n_repos >= 100:
+        # Minimal approved structure for acceptance-scale validation.
+        pid = "unit-approved"
+        con.execute(
+            "INSERT INTO placement_proposals("
+            "proposal_id,plan_id,based_on_revision,lifecycle,canonical_hash,"
+            "mutation_kind,mutation_args_json,serializer_version,"
+            "capacity_mode,policy_version,solver_version,gate_b_code,"
+            "semantic_input_hash,execution_config_hash) "
+            "VALUES(?,?,0,'approved',?,'adopt_current','[]','1',"
+            "'guaranteed','1','1','FEASIBLE',?,?)",
+            [pid, "ark", "a" * 64, "b" * 64, "c" * 64])
+        for i in range(n_repos):
+            repo = f"unit-org/model-{i:04d}"
+            con.execute(
+                "INSERT INTO proposal_tasks("
+                "proposal_id,requirement_id,row_kind,repo_id,target_drive,"
+                "full_manifest_hash,order_key) VALUES(?,?,?,?,?,?,?)",
+                [pid, f"primary:{repo}", "executable", repo, "d0", "d" * 64, i])
+        con.execute(
+            "UPDATE planner_state SET active_approved_proposal_id=? WHERE singleton_id=1",
+            [pid])
     con.commit()
     con.close()
     return path

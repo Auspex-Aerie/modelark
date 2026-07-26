@@ -196,7 +196,8 @@ _CAPACITY_MODE_SCHEMA_VERSION = 2
 _CAPACITY_EVIDENCE_SCHEMA_VERSION = 3
 _LIFECYCLE_ELIGIBILITY_SCHEMA_VERSION = 4  # v4: drives.lifecycle + drives.eligibility (#37)
 _PROPOSAL_CONTROL_SCHEMA_VERSION = 5  # v5: planner_state + proposals + execution_sessions (#39-A)
-_SCHEMA_VERSION = 5
+_EXECUTION_CONFIG_HASH_SCHEMA_VERSION = 6  # v6: placement_proposals.execution_config_hash (PR-09 / B7)
+_SCHEMA_VERSION = 6
 
 # v5 proposal-control tables: never created during the pre-migration tables-only pass so
 # backup-first v4→v5 owns them transactionally (same class of bug as early v3 evidence tables).
@@ -566,6 +567,36 @@ def _migrate_proposal_control_v5(con, *, backup_existing: bool) -> None:
 _migrate_placement_approval_v5 = _migrate_proposal_control_v5
 
 
+def _migrate_execution_config_hash_v6(con, *, backup_existing: bool) -> None:
+    """Backup-first v5→v6: add placement_proposals.execution_config_hash (PR-09 / B7).
+
+    Existing approved/draft rows keep NULL until re-preview binds a hash. No fabricated
+    config digests. Soft ALTER is forbidden outside this versioned migration.
+    """
+    cols = {r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()}
+    if "execution_config_hash" in cols:
+        con.execute(f"PRAGMA user_version={_EXECUTION_CONFIG_HASH_SCHEMA_VERSION}")
+        return
+    if con.execute("PRAGMA foreign_keys").fetchone()[0]:
+        raise RuntimeError("execution_config_hash migration requires foreign_keys=OFF")
+    if backup_existing:
+        _backup_before_migration(con, "pre-execution-config-v6")
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        # Application enforces 64-hex length; SQLite CHECK on ADD COLUMN is not portable.
+        con.execute(
+            "ALTER TABLE placement_proposals ADD COLUMN execution_config_hash VARCHAR"
+        )
+        con.execute(f"PRAGMA user_version={_EXECUTION_CONFIG_HASH_SCHEMA_VERSION}")
+        con.execute("COMMIT")
+    except Exception as exc:
+        con.execute("ROLLBACK")
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(
+            f"Cannot migrate catalog to v6 execution_config_hash ({exc})") from exc
+
+
 def _migrate(con, version: int, *, backup_existing: bool) -> None:
     if version < _INTEGRITY_SCHEMA_VERSION:
         if backup_existing:
@@ -585,6 +616,9 @@ def _migrate(con, version: int, *, backup_existing: bool) -> None:
     if version < _PROPOSAL_CONTROL_SCHEMA_VERSION:
         _migrate_proposal_control_v5(con, backup_existing=backup_existing)
         version = _PROPOSAL_CONTROL_SCHEMA_VERSION
+    if version < _EXECUTION_CONFIG_HASH_SCHEMA_VERSION:
+        _migrate_execution_config_hash_v6(con, backup_existing=backup_existing)
+        version = _EXECUTION_CONFIG_HASH_SCHEMA_VERSION
     if version != _SCHEMA_VERSION:
         raise RuntimeError(f"Catalog migration stopped at v{version}, expected v{_SCHEMA_VERSION}")
 

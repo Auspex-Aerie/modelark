@@ -375,11 +375,29 @@ def execute(
             try:
                 _terminalize_session_outcome(ctx.con, session, result)
             except Exception as exc:
-                # Never tokenless-update; surface failure on the result when possible.
-                if isinstance(result, dict):
-                    result["terminalize_error"] = str(
-                        getattr(exc, "code", None) or exc)[:200]
-                    result.setdefault("ok", False)
+                # Finding 36: terminalization failure must force an unsuccessful outcome
+                # even when drain already produced ok=True (never leave session running
+                # while reporting success).
+                code = str(getattr(exc, "code", None) or "SESSION_TERMINALIZE_FAILED")
+                if not isinstance(result, dict):
+                    result = _terminal(
+                        "failed", f"session terminalize refused: {code}",
+                        code=code,
+                        evidence=getattr(exc, "evidence", None),
+                        actions=["inspect_session"],
+                    )
+                else:
+                    result["ok"] = False
+                    result["stopped"] = False
+                    result["state"] = "failed"
+                    result["code"] = code
+                    result["terminalize_error"] = code[:200]
+                    result["message"] = (
+                        f"session terminalize refused: {code}; "
+                        f"prior outcome overwritten"
+                    )
+                    if getattr(exc, "evidence", None) is not None:
+                        result["evidence"] = getattr(exc, "evidence", None)
             try:
                 erec.release_child_fences(session.session_id)
             except Exception:
@@ -478,10 +496,24 @@ def _refresh_projection(ctx, session_start, *, plan_id=None):
             {"proposal_id": getattr(session, "approved_proposal_id", None)},
             ("preview_again",))
     relevant = esess._proposal_drive_ids(proposal)
-    # Compare frozen config hash at the projection boundary only (finding 35/37).
+    # Finding 35: compare frozen config against authoritative *current* global reader
+    # at projection boundaries only — never against a self-echo of the freeze.
     frozen = getattr(session_start, "execution_config", None)
+    if frozen is not None:
+        from modelark.execution_config import assert_frozen_unchanged
+        global_reader = getattr(session_start, "_config_reader", None)
+        if global_reader is None:
+            # Production default: re-read live graph-affecting config at the boundary.
+            from modelark.execution_service import production_services
+            global_reader = production_services(ctx.con).config
+        assert_frozen_unchanged(frozen, global_reader)
+    # Authoritative capacity evidence (finding 37) — never None fabricate.
+    observe = getattr(session_start, "_observe_exact_capacity", None)
+    if observe is None:
+        from modelark.proposal import _DefaultServices
+        observe = _DefaultServices().observe_exact_capacity
     services = SimpleNamespace(
-        observe_exact_capacity=None,
+        observe_exact_capacity=observe,
         config=SimpleNamespace(
             read_graph_affecting_config=lambda: dict(getattr(frozen, "values", None) or {})),
     )
@@ -503,13 +535,17 @@ def _proj_field(t, name, default=None):
     return getattr(t, name, default)
 
 
-def _projection_work_units(con, projection, repo_scope=None, proposal_files=None):
+def _projection_work_units(con, projection, repo_scope=None, proposal_files=None,
+                           *, require_proposal_files=True):
     """Convert frozen projection tasks into drain units.
 
-    Prefer approved proposal_files rows; fall back to catalog ``files``. Never invent
-    model.safetensors when no authority exists. Targets only from the projection.
+    Finding 37: when an approved proposal is bound (``require_proposal_files``),
+    ``proposal_files`` are the sole file authority — never fall back to mutable
+    catalog ``files``. Characterization paths without an approval may read catalog
+    files. Never invent paths. Targets only from the projection.
     """
     from modelark.reconcile import TaskKind
+    from modelark.proposal import Refusal
     scope = set(repo_scope) if repo_scope else None
     # requirement_id -> list of proposal file dicts
     by_req = {}
@@ -557,7 +593,7 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
                 missing_files=(), file_rows=(),
             ))
             continue
-        # Approved proposal-file authority first; catalog files as secondary.
+        # Finding 37: approved proposal_files only when approval is bound.
         prop_files = by_req.get(rid) or []
         if prop_files:
             file_specs = [
@@ -565,47 +601,46 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
                  pf.get("format"), pf.get("quant"))
                 for pf in prop_files if pf.get("rfilename")
             ]
+        elif require_proposal_files:
+            raise Refusal(
+                "APPROVED_INPUT_CHANGED",
+                {"reason": "missing_proposal_file_authority",
+                 "requirement_id": rid, "repo_id": repo},
+                ("preview_again",))
         else:
+            # Pre-approval / characterization only.
             file_specs = list(con.execute(
                 "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
                 "WHERE repo_id=? ORDER BY rfilename", [repo]).fetchall())
+        if not file_specs:
+            if require_proposal_files:
+                raise Refusal(
+                    "APPROVED_INPUT_CHANGED",
+                    {"reason": "empty_proposal_file_authority",
+                     "requirement_id": rid, "repo_id": repo},
+                    ("preview_again",))
+            continue
         missing = []
         file_rows = []
         for rfilename, size_bytes, sha256, fmt, quant in file_specs:
             arch = con.execute(
-                "SELECT 1 FROM archived WHERE repo_id=? AND rfilename=? AND drive_label=? "
-                "AND (orig_sha256 IS NULL OR orig_sha256=? OR ? IS NULL)",
-                [repo, rfilename, target, sha256, sha256]).fetchone() if target else None
+                "SELECT orig_sha256 FROM archived WHERE repo_id=? AND rfilename=? "
+                "AND drive_label=?",
+                [repo, rfilename, target]).fetchone() if target else None
             row = SimpleNamespace(
                 rfilename=rfilename, size_bytes=int(size_bytes or 0),
                 sha256=sha256, format=fmt, quant=quant)
             file_rows.append(row)
-            if not arch:
+            # Content-aware durable satisfaction: null archive identity is not satisfaction
+            # when the approved file carries a content hash (finding 37).
+            if arch is None:
+                missing.append(rfilename)
+            elif arch[0] is None and sha256:
+                missing.append(rfilename)
+            elif sha256 and arch[0] and str(arch[0]) != str(sha256):
                 missing.append(rfilename)
         if not missing and file_rows:
-            # Content-aware durable satisfaction: require non-null identity when present.
-            # Null archive identity does not count as satisfaction (finding 37).
-            null_identity = False
-            if target:
-                for fr in file_rows:
-                    arch_id = con.execute(
-                        "SELECT orig_sha256 FROM archived WHERE repo_id=? AND rfilename=? "
-                        "AND drive_label=?",
-                        [repo, fr.rfilename, target]).fetchone()
-                    if arch_id is not None and arch_id[0] is None and fr.sha256:
-                        null_identity = True
-                        break
-            if not null_identity:
-                continue  # fully satisfied on approved target — shrink out
-            # Fall through: treat null-identity rows as still missing work.
-            missing = [fr.rfilename for fr in file_rows]
-        if not file_rows:
-            # Finding 37: fail closed when approved file authority is absent.
-            from modelark.proposal import Refusal
-            raise Refusal(
-                "APPROVED_INPUT_CHANGED",
-                {"reason": "missing_file_authority", "requirement_id": rid, "repo_id": repo},
-                ("preview_again",))
+            continue  # fully satisfied on approved target — shrink out
         kind = TaskKind.REPLICATE if source else TaskKind.FETCH
         from modelark.budgets import FileBudget
         file_budgets = []
@@ -656,7 +691,13 @@ def _drain_projection(
     session = getattr(session_start, "session", None)
     # Load approved proposal files once for file authority.
     proposal_files = list(getattr(session_start, "_proposal_files", None) or ())
-    if not proposal_files and session is not None:
+    # Bound approval + frozen config ⇒ proposal_files are sole authority (finding 37).
+    require_proposal_files = bool(
+        session is not None
+        and getattr(session, "approved_proposal_id", None)
+        and getattr(session_start, "execution_config", None) is not None
+    )
+    if not proposal_files and session is not None and require_proposal_files:
         try:
             from modelark.proposal import load_proposal
             prop = load_proposal(ctx.con, session.approved_proposal_id)
@@ -698,7 +739,9 @@ def _drain_projection(
             )
 
     with ctx.lock:
-        remaining = _projection_work_units(ctx.con, projection, repo_scope, proposal_files=proposal_files)
+        remaining = _projection_work_units(
+            ctx.con, projection, repo_scope, proposal_files=proposal_files,
+            require_proposal_files=require_proposal_files)
 
     attempts: dict[str, int] = {}
     gated_hits: dict[str, int] = {}
@@ -715,7 +758,9 @@ def _drain_projection(
 
     while not ctx.should_stop():
         with ctx.lock:
-            remaining = _projection_work_units(ctx.con, projection, repo_scope, proposal_files=proposal_files)
+            remaining = _projection_work_units(
+            ctx.con, projection, repo_scope, proposal_files=proposal_files,
+            require_proposal_files=require_proposal_files)
         # re-apply deferred + session-completed filters
         ready = [
             u for u in remaining
@@ -949,11 +994,15 @@ def _drain_projection(
             from modelark import execution_session as esess
             from modelark.proposal import Refusal
             try:
+                # Reload so worker_identity CAS uses the claimed row (finding 36).
+                live = esess.load_session(ctx.con, session.session_id) or session
                 esess.heartbeat(
                     ctx.con,
-                    session_id=session.session_id,
-                    fencing_token=int(session.fencing_token),
+                    session_id=live.session_id,
+                    fencing_token=int(live.fencing_token),
+                    worker_identity=getattr(live, "worker_identity", None),
                 )
+                session = live
             except Refusal as exc:
                 return _terminal(
                     "failed", f"session heartbeat refused: {exc.code}",
@@ -972,7 +1021,12 @@ def _drain_projection(
         # when an approved proposal is bound. Characterization bridges without an approval
         # keep the fixed start projection and re-derive work units only.
         from modelark.proposal import Refusal as _Refusal
-        has_approval = bool(getattr(session, "approved_proposal_id", None)) if session else False
+        # Real start path carries frozen execution_config; characterization bridges do not.
+        has_approval = bool(
+            session is not None
+            and getattr(session, "approved_proposal_id", None)
+            and getattr(session_start, "execution_config", None) is not None
+        )
         if has_approval:
             try:
                 refreshed = _refresh_projection(ctx, session_start, plan_id=pid)
@@ -1002,7 +1056,8 @@ def _drain_projection(
             with ctx.lock:
                 remaining = _projection_work_units(
                     ctx.con, projection, repo_scope,
-                    proposal_files=proposal_files)
+                    proposal_files=proposal_files,
+                    require_proposal_files=require_proposal_files)
         except _Refusal as exc:
             return _terminal(
                 "failed", f"projection work units refused: {exc.code}",

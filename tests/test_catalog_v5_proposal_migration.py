@@ -202,8 +202,8 @@ def _hash64(ch="a"):
 def test_migrate_v4_to_v5_adds_five_tables_and_seeds_planner_state(tmp_path):
     _seed_v4(tmp_path)
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 5, (
-        "v4→v5 proposal/control migration not implemented (expected Gate-1 red)")
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
+        f"v4→v5(+current) migration not implemented; expected v{db._SCHEMA_VERSION}")
 
     tables = {r[0] for r in con.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
@@ -251,8 +251,8 @@ def test_v5_migration_is_idempotent(tmp_path):
     _seed_v4(tmp_path)
     db.connect().close()
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 5, (
-        "v5 migration not implemented (expected Gate-1 red)")
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
+        f"idempotent full connect must land at v{db._SCHEMA_VERSION}")
     row = con.execute(
         "SELECT planner_revision, active_approved_proposal_id, next_fencing_token "
         "FROM planner_state WHERE singleton_id=1"
@@ -317,8 +317,8 @@ def test_v5_tables_not_introduced_during_integrity_rebuild(tmp_path):
     con.close()
 
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 5, (
-        "full migration must land at v5 (expected Gate-1 red)")
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
+        f"full migration must land at v{db._SCHEMA_VERSION}")
     tables = {r[0] for r in con.execute(
         "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
     for name in _V5_TABLES:
@@ -366,8 +366,8 @@ def _seed_minimal_approved_proposal(con, proposal_id="prop-1"):
 def test_proposal_lifecycle_and_task_row_kind_constraints(tmp_path):
     _seed_v4(tmp_path)
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 5, (
-        "v5 required (expected Gate-1 red)")
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
+        f"schema v{db._SCHEMA_VERSION} required")
 
     def rejected(sql, params=()):
         try:
@@ -409,8 +409,8 @@ def test_execution_sessions_schema_constraints_with_synthetic_rows(tmp_path):
     """Complete schema pin: columns, FKs, state domain, worker-claim, live uniqueness."""
     _seed_v4(tmp_path)
     con = db.connect()
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 5, (
-        "v5 schema required for execution_sessions (expected Gate-1 red)")
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
+        f"schema v{db._SCHEMA_VERSION} required for execution_sessions")
     con.execute("PRAGMA foreign_keys=ON")
 
     cols = {r[1] for r in con.execute("PRAGMA table_info(execution_sessions)").fetchall()}

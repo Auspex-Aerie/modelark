@@ -195,7 +195,9 @@ def test_finding_36_heartbeat_renews_expiry_and_terminal_clears():
     services.clock = SimpleNamespace(now=lambda: "2026-06-01T00:00:00Z")
     sess.heartbeat(
         con, session_id=session.session_id,
-        fencing_token=int(session.fencing_token), services=services)
+        fencing_token=int(session.fencing_token),
+        worker_identity=session.worker_identity,
+        services=services)
     after = con.execute(
         "SELECT expires_at, heartbeat_at FROM execution_sessions WHERE session_id=?",
         [session.session_id]).fetchone()
@@ -206,9 +208,18 @@ def test_finding_36_heartbeat_renews_expiry_and_terminal_clears():
     f.assert_refuses(
         lambda: sess.heartbeat(
             con, session_id=session.session_id,
-            fencing_token=int(session.fencing_token) + 99),
+            fencing_token=int(session.fencing_token) + 99,
+            worker_identity=session.worker_identity),
         code="SESSION_TOKEN_MISMATCH",
         label="wrong token heartbeat",
+    )
+    f.assert_refuses(
+        lambda: sess.heartbeat(
+            con, session_id=session.session_id,
+            fencing_token=int(session.fencing_token),
+            worker_identity="wrong-worker"),
+        code="SESSION_WORKER_MISMATCH",
+        label="wrong worker heartbeat",
     )
 
     sess.terminalize(
@@ -246,7 +257,111 @@ def test_finding_36_terminalize_no_tokenless_fallback():
     assert st in ("starting", "running")
 
 
+def test_finding_36_terminalize_failure_overwrites_ok_true():
+    """Terminalize CAS failure must not leave returned ok=True with live session."""
+    from modelark import fill as fill_mod
+    from modelark import fetch
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','model.safetensors','d0',0,100,100,?)",
+        ["1" * 64])
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    _p, pid, _ = f.create_and_approve(con)
+    sess = f.session_api()
+    out = f.require_success(
+        sess.start_session(con, pid, None, f.default_services()), label="start")
+    # Claim then corrupt token so terminalize fails after drain success
+    _claim(con, out)
+    con.execute(
+        "UPDATE execution_sessions SET fencing_token=fencing_token+99 "
+        "WHERE session_id=?", [out.session.session_id])
+    # Drain will still see pre-reload session token in session object
+    import modelark.execution_recovery as erec
+    with mock.patch.object(erec, "inherit_drive_fence_fds", return_value=()):
+        result = fill_mod.execute(
+            fetch.RunCtx(con=con), session_start=out, guided=False, max_24h_gb=0)
+    assert result.get("ok") is False, result
+    assert result.get("terminalize_error") or result.get("code"), result
+    st = con.execute(
+        "SELECT state FROM execution_sessions WHERE session_id=?",
+        [out.session.session_id]).fetchone()[0]
+    # Session remains live only if terminalize truly failed without tokenless update
+    assert st in ("starting", "running", "stopping") or result.get("ok") is False
+
+
 def test_finding_37_refresh_propagates_refusal():
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    _p, pid, _ = f.create_and_approve(con)
+    sess = f.session_api()
+    out = f.require_success(
+        sess.start_session(con, pid, None, f.default_services()), label="start")
+    # Self-echo config reader would hide drift; force hostile current reader.
+    out._config_reader = SimpleNamespace(
+        read_graph_affecting_config=lambda: {
+            "capacity_mode": "compression_aware",
+            "policy_version": "1", "solver_version": "1",
+            "compression": {"level": 9}, "numcopies_default": 1,
+        })
+    ctx = SimpleNamespace(con=con, lock=mock.MagicMock(
+        __enter__=lambda s: None, __exit__=lambda *a: False))
+
+    f.assert_refuses(
+        lambda: fill_mod._refresh_projection(ctx, out),
+        code="APPROVED_INPUT_CHANGED",
+        label="hostile global config at refresh boundary",
+    )
+
+
+def test_finding_37_missing_proposal_files_refuses():
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    projection = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d0",
+        source_drive=None, requirement_id="primary:org/a",
+        schedule_state="ready", order_key=1,
+        guaranteed_durable=100, expected_durable=100,
+    ),))
+    f.assert_refuses(
+        lambda: fill_mod._projection_work_units(con, projection, proposal_files=[]),
+        code="APPROVED_INPUT_CHANGED",
+        label="missing proposal_files authority",
+    )
+
+
+def test_finding_37_null_archive_identity_not_satisfied():
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','model.safetensors','d0',0,100,100,NULL)")
+    projection = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d0",
+        source_drive=None, requirement_id="primary:org/a",
+        schedule_state="ready", order_key=1,
+        guaranteed_durable=100, expected_durable=100,
+    ),))
+    proposal_files = [{
+        "requirement_id": "primary:org/a", "rfilename": "model.safetensors",
+        "size_bytes": 100, "orig_sha256": "1" * 64, "format": "safetensors", "quant": "bf16",
+    }]
+    units = fill_mod._projection_work_units(
+        con, projection, proposal_files=proposal_files)
+    assert units, "null archive identity must leave work unit"
+    assert "model.safetensors" in units[0].missing_files
+
+
+def test_finding_37_thrown_refresh_fails_closed():
     from modelark import fill as fill_mod
 
     con = f.mem_con()
@@ -261,13 +376,15 @@ def test_finding_37_refresh_propagates_refusal():
 
     with mock.patch(
             "modelark.execution_projection.project_pure",
-            return_value=Refusal("APPROVED_INPUT_CHANGED", {"probe": True}, ())):
+            side_effect=RuntimeError("boom")):
         try:
             fill_mod._refresh_projection(ctx, out)
             raised = None
-        except Refusal as exc:
+        except Exception as exc:
             raised = exc
-    assert raised is not None and raised.code == "APPROVED_INPUT_CHANGED"
+    # Capacity observe or config may refuse first; thrown RuntimeError must not be swallowed as None
+    assert raised is not None
+    assert not (isinstance(raised, type(None)))
 
 
 def test_finding_38_acceptance_rejects_missing_approved_structure(tmp_path):

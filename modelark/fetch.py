@@ -205,19 +205,25 @@ require_frozen_config = get_frozen_execution_config
 def _compression_from_ctx(ctx: RunCtx | None) -> dict:
     """Resolve DEC-022 compression gate config from frozen ExecutionConfig when present.
 
-    Finding 35: mid-session global wishlist edits must not alter codec behavior for a
-    live Fill. CLI/plain-fetch without a freeze still reads wishlist once per run.
+    Finding 35: once ExecutionConfig is frozen on the RunCtx, never reread wishlist.
+    CLI/plain-fetch without a freeze still reads wishlist once per run.
     """
     frozen = getattr(ctx, "execution_config", None) if ctx is not None else None
     values = getattr(frozen, "values", None) if frozen is not None else None
-    if isinstance(values, Mapping) and values.get("compression") is not None:
-        # Merge frozen graph-affecting compression over operational defaults so
-        # transport keys (threads, max_compress_ram_gb, …) remain complete.
-        base = dict(wishlist.compression())
+    if isinstance(values, Mapping) and "compression" in values:
         frozen_comp = values.get("compression")
         if isinstance(frozen_comp, Mapping):
+            # Use only the frozen mapping (plus safe operational defaults that are
+            # themselves fixed literals — never a live wishlist reread).
+            base = {
+                "max_compress_ram_gb": 4.0,
+                "stream_compress": True,
+                "threads": 1,
+            }
             base.update(dict(frozen_comp))
-        return base
+            return base
+        if frozen_comp is not None:
+            return dict(frozen_comp) if isinstance(frozen_comp, dict) else {"value": frozen_comp}
     return wishlist.compression()
 
 

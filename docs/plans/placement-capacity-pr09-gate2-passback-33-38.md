@@ -1,8 +1,8 @@
 # Passback to Gate-2 reviewer — findings 33–38
 
-**Date:** 2026-07-26  
-**From:** implementer  
-**To:** human Gate-2 reviewer  
+**Date:** 2026-07-26
+**From:** implementer
+**To:** human Gate-2 reviewer
 
 ---
 
@@ -41,7 +41,7 @@ Human Gate-2 withheld at `d88d1b1` for findings **33–38**. One remediation cyc
 | **37** | Refresh/heartbeat fail open | Typed refusals propagate; drain fails closed; missing/null file authority fails closed |
 | **38** | B12 no approved structure / fabricated d0 / fake refresh counts | Acceptance requires approved proposal; refresh instrumented; 390-repo artifact exported |
 
-Primary regressions: `tests/test_gate2_findings_33_38.py`  
+Primary regressions: `tests/test_gate2_findings_33_38.py`
 Production: `drive_mutation.py`, `execution_session.py`, `proposal.py`, `fetch.py`, `fill.py`, `execution_benchmark.py`, `schema.sql`
 
 ---
@@ -80,6 +80,6 @@ Production: `drive_mutation.py`, `execution_session.py`, `proposal.py`, `fetch.p
 
 ## Requested reviewer action
 
-Re-review code tip **`e353066`** against findings **33–38** and RFC-002 / DEC-049.  
-Automation is green; human Gate-2 acceptance is still required.  
+Re-review code tip **`e353066`** against findings **33–38** and RFC-002 / DEC-049.
+Automation is green; human Gate-2 acceptance is still required.
 **Do not merge or start Gate 3** from this passback.

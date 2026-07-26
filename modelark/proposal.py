@@ -726,13 +726,18 @@ def preview_pure(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", 
 compute_draft_payload = preview_pure
 
 
-def ensure_execution_config_hash_column(con) -> None:
-    """Soft-add execution_config_hash on v5 catalogs (prefer no schema-version bump)."""
+def require_execution_config_hash_column(con) -> None:
+    """Refuse if the versioned v6 column is absent (no opportunistic ALTER)."""
     cols = {r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()}
     if "execution_config_hash" not in cols:
-        con.execute(
-            "ALTER TABLE placement_proposals ADD COLUMN execution_config_hash VARCHAR"
+        raise RuntimeError(
+            "placement_proposals.execution_config_hash missing — catalog requires "
+            "schema v6 migration (open once with a writable ModelArk connect)"
         )
+
+
+# Backward-compatible name used by older call sites / tests.
+ensure_execution_config_hash_column = require_execution_config_hash_column
 
 
 def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = None,
@@ -745,7 +750,7 @@ def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = Non
         raise TypeError("payload must be the pure preview result")
 
     def _persist():
-        ensure_execution_config_hash_column(con)
+        require_execution_config_hash_column(con)
         header = dict(payload["header"])
         tasks = list(payload["tasks"])
         files = list(payload["files"])

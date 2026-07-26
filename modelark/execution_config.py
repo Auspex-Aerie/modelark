@@ -1,4 +1,4 @@
-"""Frozen ExecutionConfig + graph-affecting config hash (PR-09 / B7). Prefer no v6."""
+"""Frozen ExecutionConfig + graph-affecting config hash (PR-09 / B7). Schema v6 binds hash."""
 from __future__ import annotations
 
 import hashlib
@@ -13,6 +13,14 @@ _GRAPH_AFFECTING_KEYS = frozenset({
     "capacity_mode", "policy_version", "solver_version",
     "compression", "numcopies_default",
 })
+
+# Literal operational defaults for transport keys that may be omitted from the
+# graph-affecting freeze payload. Never sourced from a live wishlist reread.
+_COMPRESSION_TRANSPORT_DEFAULTS = {
+    "max_compress_ram_gb": 4.0,
+    "stream_compress": True,
+    "threads": 1,
+}
 
 
 def _canonical_graph_affecting(values: Mapping[str, Any]) -> dict:

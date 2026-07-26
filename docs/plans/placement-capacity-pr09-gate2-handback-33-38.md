@@ -1,11 +1,11 @@
 # PR-09 / #39-B — Gate 2 findings **33–38** handback
 
-**Date:** 2026-07-26  
-**Status:** Gate 2 **remediation complete — not accepted**. Gate 3 **not authorized**.  
-**Parent (withheld tip):** `d88d1b1b312bf600c2af389763fbe4e29f217b62`  
-**Remediation tip:** `52322ded7fe3595b600e0d2e74c4e32703cfb975`  
-**Draft PR:** https://github.com/Auspex-Aerie/modelark/pull/54  
-**Phase branch:** `fix/placement-capacity-pr09-execution-projection`  
+**Date:** 2026-07-26
+**Status:** Gate 2 **remediation complete — not accepted**. Gate 3 **not authorized**.
+**Parent (withheld tip):** `d88d1b1b312bf600c2af389763fbe4e29f217b62`
+**Remediation tip:** `52322ded7fe3595b600e0d2e74c4e32703cfb975`
+**Draft PR:** https://github.com/Auspex-Aerie/modelark/pull/54
+**Phase branch:** `fix/placement-capacity-pr09-execution-projection`
 
 ---
 
