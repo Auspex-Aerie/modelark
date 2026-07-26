@@ -33,15 +33,30 @@ def test_lock_order_controller_then_all_proposal_drives_no_sqlite_while_waiting(
 
     class Ctrl:
         def hold(self):
-            order.append("controller")
-            return mock.MagicMock(__enter__=lambda s: None, __exit__=lambda *a: False)
+            # Record only when context is entered (not at construction).
+            class _CM:
+                def __enter__(self_inner):
+                    order.append("controller")
+                    return None
+
+                def __exit__(self_inner, *a):
+                    return False
+
+            return _CM()
 
     class Drives:
         def hold_all_sorted(self, ids):
-            order.append(("drives", tuple(sorted(ids))))
-            # Prove no SQLite write txn held while acquiring physical locks:
-            # recovery must not pass an open IMMEDIATE transaction into fence wait.
-            return mock.MagicMock(__enter__=lambda s: tuple(ids), __exit__=lambda *a: False)
+            labels = tuple(sorted(ids))
+
+            class _CM:
+                def __enter__(self_inner):
+                    order.append(("drives", labels))
+                    return labels
+
+                def __exit__(self_inner, *a):
+                    return False
+
+            return _CM()
 
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/a", "org/b"))

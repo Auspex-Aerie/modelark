@@ -50,45 +50,66 @@ def test_cli_fill_invokes_unified_service_once():
             f"CLI must call unified {name} exactly once; got {spy.call_count}")
 
 
-def test_portal_systemd_and_second_portal_each_call_unified_once():
+def test_portal_systemd_and_second_portal_each_call_unified_once(tmp_path):
     umod = _unified_mod()
     name = _start_name(umod)
-    calls = []
-
-    def capture(*a, **k):
-        calls.append((a, k))
-        return {"ok": True, "via": "unified"}
-
     fill_api = importlib.import_module("modelark.web.fill_api")
     server = importlib.import_module("modelark.web.server")
 
+    # Surfaces must bind to the unified symbol (same function or thin wrapper calling it).
+    resume = getattr(server, "auto_resume_fill", None)
+    assert callable(resume), "server.auto_resume_fill required for systemd resume hard-cut"
+    assert callable(fill_api.start), "fill_api.start required"
+
+    marker = tmp_path / "unified_calls.txt"
+    if marker.exists():
+        marker.unlink()
+
+    def capture(*a, **k):
+        with open(marker, "a", encoding="utf-8") as fh:
+            fh.write("call\n")
+        return {"ok": True, "via": "unified"}
+
     with mock.patch.object(umod, name, side_effect=capture):
-        # Portal surface
-        assert callable(fill_api.start)
+        # Portal (this process)
         fill_api.start({})
-        # Systemd resume surface (must be distinct call site wired to same service)
-        resume = getattr(server, "auto_resume_fill", None)
-        if resume is None:
-            # Contract: production must export auto_resume_fill for systemd
-            raise AssertionError(
-                "server.auto_resume_fill required for systemd resume hard-cut")
+        # Systemd resume (this process, distinct adapter)
         resume({})
-        # Second portal: separate process calls fill_api.start
-        def second_portal(q):
+        # Second portal: real child process must also invoke unified start
+        import multiprocessing as mp
+
+        def second_portal(q, marker_path, mod_name, start_name):
             try:
                 import importlib as il
+                from unittest import mock as child_mock
+                um = il.import_module(mod_name)
                 fa = il.import_module("modelark.web.fill_api")
-                fa.start({})
+
+                def child_capture(*a, **k):
+                    with open(marker_path, "a", encoding="utf-8") as fh:
+                        fh.write("call\n")
+                    return {"ok": True}
+
+                with child_mock.patch.object(um, start_name, side_effect=child_capture):
+                    fa.start({})
                 q.put("ok")
             except Exception as exc:
-                q.put(f"err:{exc}")
+                q.put(f"err:{type(exc).__name__}:{exc}")
 
-        # In-process second "portal" module re-import still hits same patched symbol
-        fill_api.start({})  # second portal process would share service; count third call
+        q = mp.Queue()
+        proc = mp.Process(
+            target=second_portal,
+            args=(q, str(marker), umod.__name__, name))
+        proc.start()
+        proc.join(timeout=60)
+        assert proc.exitcode == 0, proc.exitcode
+        child_status = q.get(timeout=5)
+        assert child_status == "ok", f"second portal process failed: {child_status}"
 
-    # Exactly one call per surface: portal + systemd + second portal = 3
-    assert len(calls) == 3, (
-        f"expected 1 call per surface (portal, systemd, second portal)=3; got {len(calls)}")
+    lines = marker.read_text().splitlines() if marker.exists() else []
+    assert len(lines) == 3, (
+        f"expected 1 unified call each for portal, systemd, second-portal process; "
+        f"got {len(lines)} marker lines")
 
 
 def test_fill_execute_routes_through_service_without_optimizer():
