@@ -90,6 +90,13 @@ def _mem():
     con = sqlite3.connect(":memory:", isolation_level=None)
     for stmt in db._statements(db.SCHEMA_PATH.read_text()):
         con.execute(stmt)
+    # Finding 44 / A3: schema DDL creates planner_state but does not seed the
+    # singleton; graph_write → bump_revision requires it (v5 migration seeds it).
+    if con.execute(
+            "SELECT count(*) FROM planner_state WHERE singleton_id=1").fetchone()[0] == 0:
+        con.execute(
+            "INSERT INTO planner_state(singleton_id,planner_revision,"
+            "active_approved_proposal_id,next_fencing_token) VALUES(1,0,NULL,0)")
     return con
 
 
