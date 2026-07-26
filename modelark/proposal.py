@@ -207,8 +207,12 @@ def _archived_matches_manifest(
     """Content-aware match of one archived row against the current files manifest.
 
     Filename presence alone is not enough: a same-name refresh of hash/size must not
-    count as a durable baseline copy of the *current* catalog content.
+    count as a durable baseline copy of the *current* catalog content. Catalog rows
+    with no identity evidence (neither sha256 nor size_bytes) never satisfy baseline.
     """
+    # Fail closed: unproven catalog identity cannot claim durable content match.
+    if not file_sha256 and file_size is None:
+        return False
     # Prefer hash identity when the catalog has one.
     if file_sha256:
         if not arch_sha256 or arch_sha256 != file_sha256:
@@ -220,7 +224,6 @@ def _archived_matches_manifest(
     # Catalog size known but archive has no size *and* no hash proof → unproven.
     if file_size is not None and arch_bytes is None and not (file_sha256 and arch_sha256):
         return False
-    # Catalog hash known was already enforced above; no further identity required.
     return True
 
 
