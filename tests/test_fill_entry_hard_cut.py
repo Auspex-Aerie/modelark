@@ -1,8 +1,14 @@
-"""PR-09 Gate 1: hard Fill entry cut — adapter wiring only (no fork/spawn).
+"""PR-09 Gate 1: hard Fill entry cut — real surface adapters only (B8).
 
-Each surface adapter (CLI, portal, systemd resume, second-portal adapter) must
-invoke the unified start_fill / enter_execution exactly once. Cold installed
-CLI/portal subprocess smoke is Gate-2 — not a PR-09 multiprocessing contract.
+Retain in-process wiring proofs for:
+  - CLI fill entry
+  - portal fill_api.start
+  - systemd auto_resume_fill
+
+Do **not** invent second_portal_start_fill, FILL_ENTRYPOINTS, or ENTRYPOINT_ADAPTERS.
+A second portal is another **cold instance of the same portal entrypoint**, proven at
+Gate 2 via exec-style installed-process smoke (same catalog, other state directory,
+exact FILL_SESSION_ACTIVE). No production multiprocessing; no fork/spawn selection.
 """
 from __future__ import annotations
 
@@ -56,6 +62,7 @@ def test_cli_adapter_invokes_unified_service_once():
 
 
 def test_portal_adapter_invokes_unified_service_once():
+    """Portal surface is fill_api.start — the same entry a second portal instance uses."""
     umod = _unified_mod()
     name = _start_name(umod)
     fill_api = importlib.import_module("modelark.web.fill_api")
@@ -78,65 +85,6 @@ def test_systemd_resume_adapter_invokes_unified_service_once():
         resume({})
         assert spy.call_count == 1, (
             f"systemd auto_resume_fill must call unified {name} once; got {spy.call_count}")
-
-
-def test_second_portal_adapter_invokes_unified_service_once():
-    """Second portal is a second *adapter entry*, not a fork/spawn process.
-
-    Production may export second_portal_start_fill or re-export the same portal
-    adapter under an explicit multi-portal entry name. Gate-2 owns cold subprocess
-    smoke of a second installed portal process.
-    """
-    umod = _unified_mod()
-    name = _start_name(umod)
-    adapter = (
-        getattr(umod, "second_portal_start_fill", None)
-        or getattr(umod, "portal_start_fill", None)
-    )
-    fill_api = importlib.import_module("modelark.web.fill_api")
-    if not callable(adapter):
-        # Accept explicit multi-portal binding: second portal uses same fill_api.start
-        # only if production documents FILL_ENTRYPOINTS includes second_portal → start_fill.
-        entries = getattr(umod, "FILL_ENTRYPOINTS", None) or getattr(
-            umod, "fill_entrypoints", None)
-        assert entries is not None, (
-            "export FILL_ENTRYPOINTS including second_portal, or second_portal_start_fill")
-        names = {str(k).lower() for k in (
-            entries.keys() if isinstance(entries, dict) else entries)}
-        assert any("second" in n or "portal" in n for n in names), names
-        adapter = fill_api.start
-    with mock.patch.object(umod, name) as spy:
-        spy.return_value = {"ok": True}
-        adapter({})
-        assert spy.call_count == 1, (
-            f"second-portal adapter must call unified {name} once; got {spy.call_count}")
-
-
-def test_all_surface_adapters_share_same_unified_target():
-    """Adapter wiring pin: every surface resolves to one unified callable (in-process)."""
-    umod = _unified_mod()
-    name = _start_name(umod)
-    unified = getattr(umod, name)
-    server = importlib.import_module("modelark.web.server")
-    resume = getattr(server, "auto_resume_fill", None)
-    assert callable(resume)
-    # Production may wrap; require FILL_ENTRYPOINTS map or identity of underlying target
-    entries = getattr(umod, "FILL_ENTRYPOINTS", None) or getattr(umod, "ENTRYPOINT_ADAPTERS", None)
-    assert entries is not None, (
-        "export FILL_ENTRYPOINTS / ENTRYPOINT_ADAPTERS mapping "
-        "cli|portal|systemd|second_portal → unified start (expected Gate-1 red)")
-    mapping = entries if isinstance(entries, dict) else {}
-    required = {"cli", "portal", "systemd"}
-    keys = {str(k).lower() for k in mapping}
-    missing = [r for r in required if not any(r in k for k in keys)]
-    assert not missing, f"FILL_ENTRYPOINTS missing {missing}; have={sorted(keys)}"
-    # All mapped callables must be the unified start (or name equal)
-    for key, target in mapping.items():
-        if not callable(target):
-            continue
-        assert target is unified or getattr(target, "__name__", "") in (
-            name, "start_fill", "enter_execution", "start"), (
-            f"entrypoint {key} must target unified {name}; got {target!r}")
 
 
 def test_fill_execute_routes_through_service_without_optimizer():

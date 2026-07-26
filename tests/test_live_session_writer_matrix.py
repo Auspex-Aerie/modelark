@@ -1,8 +1,13 @@
 """PR-09 Gate 1: complete A3 writer matrix while live + catalog/state-dir exclusion.
 
-No default-multiprocessing / fork / spawn in PR-09 contracts. Cold installed-CLI/portal
-subprocess smoke is Gate-2. Gate-1 uses independent SQLite connections and distinct
-state-directory service inputs with exact FILL_SESSION_ACTIVE.
+No production multiprocessing and no fork/spawn selection in PR-09.
+
+Gate 1: independent SQLite connections + distinct state_dir service inputs with exact
+FILL_SESSION_ACTIVE (covers “second portal” as another catalog client, not a new API).
+
+Gate 2 (not this file): exec-style cold installed process — start one real portal/session,
+launch the same installed portal or CLI entrypoint independently against the same catalog
+with another state directory, require exact FILL_SESSION_ACTIVE.
 """
 from __future__ import annotations
 
