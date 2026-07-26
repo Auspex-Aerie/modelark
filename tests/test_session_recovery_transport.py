@@ -25,6 +25,28 @@ def _rec_mod():
     raise AssertionError("recovery behavioral APIs required (expected Gate-1 red)")
 
 
+class _SpyConnection:
+    """Delegate to a real sqlite3 connection while recording SQL against lock order.
+
+    ``sqlite3.Connection.execute`` is a read-only C slot (assignment/patch fail). A
+    thin proxy is the enforceable observation surface for BEGIN IMMEDIATE timing.
+    """
+
+    def __init__(self, real, order, sqlite_during_lock):
+        object.__setattr__(self, "_real", real)
+        object.__setattr__(self, "_order", order)
+        object.__setattr__(self, "_sqlite_during_lock", sqlite_during_lock)
+
+    def execute(self, sql, *a, **k):
+        text = sql if isinstance(sql, str) else str(sql)
+        if "BEGIN" in text.upper():
+            self._sqlite_during_lock.append((list(self._order), text))
+        return self._real.execute(sql, *a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 def test_lock_order_controller_then_all_proposal_drives_no_sqlite_while_waiting():
     mod = _rec_mod()
     recover = getattr(mod, "recover_expired_session", None) or getattr(mod, "recover_session")
@@ -58,10 +80,10 @@ def test_lock_order_controller_then_all_proposal_drives_no_sqlite_while_waiting(
 
             return _CM()
 
-    con = f.mem_con()
-    f.seed_plan_selection(con, repos=("org/a", "org/b"))
-    _p, pid, proposal = f.create_and_approve(con)
-    con.execute(
+    real = f.mem_con()
+    f.seed_plan_selection(real, repos=("org/a", "org/b"))
+    _p, pid, proposal = f.create_and_approve(real)
+    real.execute(
         "INSERT INTO execution_sessions("
         "session_id,plan_id,approved_proposal_id,controller_identity,worker_identity,"
         "state,bound_planner_revision,fencing_token,expires_at) "
@@ -75,10 +97,7 @@ def test_lock_order_controller_then_all_proposal_drives_no_sqlite_while_waiting(
         for t in proposal.get("tasks") or ()
         if (t.get("target_drive") or t.get("satisfying_drive"))
     })
-    # Observe physical lock order via services (sqlite3.Connection.execute is a
-    # read-only C slot — cannot spy BEGIN IMMEDIATE by assignment/patch). Production
-    # recover holds controller → drives before BEGIN IMMEDIATE; flock enter order is
-    # the enforceable Gate-1 observation surface.
+    con = _SpyConnection(real, order, sqlite_during_lock)
     f.require_success(
         recover(con, session_id="s1", services=services), label="recover")
     assert order and order[0] == "controller", order
@@ -86,15 +105,23 @@ def test_lock_order_controller_then_all_proposal_drives_no_sqlite_while_waiting(
     assert drive_steps, order
     locked = set(drive_steps[0][1])
     assert set(labels) <= locked, f"proposal drives {labels} must be locked; got {locked}"
-    # Controller must precede drives; drives precede any post-lock SQLite work
-    # (recover structure: locks then BEGIN IMMEDIATE).
+    # Controller must precede drives.
     ctrl_i = order.index("controller")
     drive_i = next(i for i, x in enumerate(order) if isinstance(x, tuple) and x[0] == "drives")
     assert ctrl_i < drive_i, order
-    assert sqlite_during_lock == [] or all(
-        "controller" in held and any(isinstance(x, tuple) and x[0] == "drives" for x in held)
-        for held, sql in sqlite_during_lock if "IMMEDIATE" in sql.upper()
-    ), sqlite_during_lock
+    # BEGIN IMMEDIATE must be observed and only after both physical locks are held.
+    immediates = [
+        (held, sql) for held, sql in sqlite_during_lock
+        if "IMMEDIATE" in sql.upper()
+    ]
+    assert immediates, (
+        f"must observe BEGIN IMMEDIATE under held locks; "
+        f"order={order} sqlite={sqlite_during_lock}")
+    for held, sql in immediates:
+        assert "controller" in held and any(
+            isinstance(x, tuple) and x[0] == "drives" for x in held), (
+            f"SQLite IMMEDIATE must not run while waiting only on physical locks; "
+            f"held={held} sql={sql}")
 
 def test_token_scoped_dirty_and_stale_token():
     mod = _rec_mod()
