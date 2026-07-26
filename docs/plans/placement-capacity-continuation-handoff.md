@@ -14,7 +14,7 @@ Operational handoff only — not a new product requirements source.
 | Integration branch | `fix/placement-capacity-hardening` |
 | Integration tip (PR-07 merge) | `03afbdcc6cd0143d839e7665354e5a3669c981bc` |
 | **PR-08 phase branch** | `fix/placement-capacity-pr08-proposal-control` |
-| **PR-08 tip (this stop)** | **`b76e992` base + findings 38–43 amendment (push after commit)** |
+| **PR-08 tip (this stop)** | **`d4b02bde4ce317aadfe58fcd66a334bb1ef88710`** |
 | Draft PR | [#53](https://github.com/Auspex-Aerie/modelark/pull/53) → hardening |
 | Last human review | Gate-2 withheld at `b76e992` with findings **38–43** |
 | **Status** | Amendments applied; **stop for Gate-2 re-review**. Do not merge. |
