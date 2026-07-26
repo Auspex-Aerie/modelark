@@ -1,293 +1,248 @@
-"""PR-09 / #39-B Gate 1: project_pure contracts (B1, B13) — RFC-002 seam.
-
-Canonical API only:
-  project_pure(proposal, current_input, current_graph, session_overlay)
-
-Uses real PR-08 approved proposals. Expected red until production projection lands.
-"""
+"""PR-09 Gate 1: project_pure — exact RFC codes, complete inputs, no false greens."""
 from __future__ import annotations
 
+import inspect
 from copy import deepcopy
 from types import SimpleNamespace
 
 import _pr09_gate1_fixtures as f
 
 
-def _approved_bundle(con):
-    f.seed_plan_selection(con, repos=("org/a", "org/b"))
-    _prop, pid, loaded = f.create_and_approve(con)
+def _approved(con, **seed_kw):
+    f.seed_plan_selection(con, **seed_kw)
+    _p, _pid, loaded = f.create_and_approve(con)
     return loaded
 
 
-def _input_graph_from_proposal(proposal, *, archived=None, drives=None, manifests=None,
-                               observed_ratio=None, extra_requirements=None):
-    """Build current_input / current_graph shaped for project_pure from approved proposal."""
-    tasks = list(proposal.get("tasks") or ())
-    req_ids = [t["requirement_id"] for t in tasks]
-    # Per-file evidence from proposal_files if present
-    files = list(proposal.get("files") or ())
-    file_hash_evidence = {
-        (ff.get("requirement_id"), ff.get("rfilename")): ff.get("orig_sha256")
-        for ff in files
-    }
-    drives = drives or {
-        "d0": SimpleNamespace(
-            lifecycle="active", eligibility="enabled",
-            identity_epoch=1, identity_fingerprint="f" * 64),
-        "d1": SimpleNamespace(
-            lifecycle="active", eligibility="enabled",
-            identity_epoch=1, identity_fingerprint="f" * 64),
-    }
-    manifests = manifests or {
-        t["repo_id"]: t.get("full_manifest_hash") for t in tasks if t.get("repo_id")
-    }
-    archived = archived if archived is not None else {}
-    current_input = SimpleNamespace(
-        manifests=manifests,
-        archived=archived,
-        drives=drives,
-        observed_ratio=observed_ratio or {},
-        evidence={},
-        file_hash_evidence=file_hash_evidence,
-    )
-    req_set = list(req_ids)
-    if extra_requirements:
-        req_set = list(req_ids) + list(extra_requirements)
-    current_graph = SimpleNamespace(
-        requirement_ids=req_set,
-        requirement_set_hash=proposal.get("requirement_set_hash"),
-    )
-    return current_input, current_graph
-
-
-def test_project_pure_seam_exists():
+def test_project_pure_four_parameters():
     _mod, fn = f.project_pure_fn()
-    assert fn.__code__.co_argcount >= 4 or fn.__code__.co_varnames[:4] == (
-        "proposal", "current_input", "current_graph", "session_overlay") or True
-    # At least named parameters preferred
-    import inspect
-    sig = inspect.signature(fn)
-    params = list(sig.parameters)
-    assert len(params) >= 4, (
-        f"project_pure must take proposal, current_input, current_graph, session_overlay; "
-        f"got {params}")
+    params = list(inspect.signature(fn).parameters)
+    assert len(params) >= 4, params
+    assert params[0] == "proposal", params
+    assert params[1] == "current_input", params
+    assert params[2] == "current_graph", params
+    assert "session" in params[3], params
 
 
-def test_satisfied_only_partial_file_shrink():
-    """B1: partial file progress may shrink missing set; map identity preserved."""
+def test_partial_file_shrink_preserves_map_and_hash():
     _mod, project_pure = f.project_pure_fn()
     con = f.mem_con()
-    proposal = _approved_bundle(con)
+    proposal = _approved(con)
     before = deepcopy(proposal)
-    # One file of executable task now satisfied on target
     archived = {
         ("org/a", "model.safetensors", "d0"): {
-            "orig_sha256": "1" * 64, "orig_bytes": 100},
+            "orig_sha256": "1" * 64, "orig_bytes": 100, "stored_bytes": 100},
     }
-    inp, graph = _input_graph_from_proposal(proposal, archived=archived)
-    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
-    assert not f.is_refusal(out), out
-    assert getattr(out, "projection_hash", None) or (
-        isinstance(out, dict) and out.get("projection_hash")), (
-        "ExecutionProjection must carry projection_hash")
-    # Approved proposal object must not be rewritten
-    assert proposal.get("tasks") == before.get("tasks")
+    inp, graph = f.complete_projection_inputs(proposal, archived=archived)
+    out = f.require_success(project_pure(proposal, inp, graph, f.EMPTY_OVERLAY),
+                            label="partial shrink")
+    ph = f.get_field(out, "projection_hash")
+    assert ph and len(str(ph)) == 64, ph
+    assert proposal == before
 
 
-def test_baseline_loss_refuses_with_projection_violation():
+def test_baseline_loss_is_approval_projection_violation():
     _mod, project_pure = f.project_pure_fn()
     con = f.mem_con()
-    f.seed_plan_selection(
-        con, repos=("org/b",), with_archive_on=[("org/b", "d0")])
+    f.seed_plan_selection(con, repos=("org/b",), with_archive_on=[("org/b", "d0")])
     _p, _pid, proposal = f.create_and_approve(con)
-    # Drop archive / lifecycle lost → certificate cannot recompute
     drives = {
         "d0": SimpleNamespace(
             lifecycle="lost", eligibility="enabled",
-            identity_epoch=1, identity_fingerprint="f" * 64),
+            identity_epoch=1, identity_fingerprint=f.DRIVE_IDS["d0"]["fingerprint"],
+            offline=False),
     }
-    inp, graph = _input_graph_from_proposal(proposal, archived={}, drives=drives)
-    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
-    code = f.refusal_code(out)
-    if code is None:
-        # may raise
-        try:
-            if f.is_refusal(out):
-                code = f.refusal_code(out)
-            else:
-                raise AssertionError(f"baseline loss must refuse; got {out!r}")
-        except AssertionError:
-            raise
-    assert code in (
-        "APPROVAL_PROJECTION_VIOLATION", "APPROVED_INPUT_CHANGED",
-        "APPROVED_TARGET_IDENTITY_CHANGED"), code
+    inp, graph = f.complete_projection_inputs(proposal, archived={}, drives=drives)
+    f.assert_refuses(
+        lambda: project_pure(proposal, inp, graph, f.EMPTY_OVERLAY),
+        code="APPROVAL_PROJECTION_VIOLATION",
+        label="baseline loss",
+    )
 
 
-def test_identity_epoch_drift_refuses():
+def test_identity_epoch_drift_is_approved_target_identity_changed():
     _mod, project_pure = f.project_pure_fn()
     con = f.mem_con()
-    proposal = _approved_bundle(con)
+    proposal = _approved(con)
     drives = {
         "d0": SimpleNamespace(
             lifecycle="active", eligibility="enabled",
-            identity_epoch=99, identity_fingerprint="9" * 64),
+            identity_epoch=99, identity_fingerprint="9" * 64, offline=False),
         "d1": SimpleNamespace(
             lifecycle="active", eligibility="enabled",
-            identity_epoch=1, identity_fingerprint="f" * 64),
+            identity_epoch=f.DRIVE_IDS["d1"]["epoch"],
+            identity_fingerprint=f.DRIVE_IDS["d1"]["fingerprint"], offline=False),
     }
-    inp, graph = _input_graph_from_proposal(proposal, drives=drives)
-    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
-    code = f.refusal_code(out)
-    assert code in (
-        "APPROVED_TARGET_IDENTITY_CHANGED", "APPROVAL_PROJECTION_VIOLATION",
-        "APPROVED_INPUT_CHANGED"), code
+    inp, graph = f.complete_projection_inputs(proposal, drives=drives)
+    f.assert_refuses(
+        lambda: project_pure(proposal, inp, graph, f.EMPTY_OVERLAY),
+        code="APPROVED_TARGET_IDENTITY_CHANGED",
+        label="identity/epoch drift",
+    )
 
 
-def test_content_certificate_drift_refuses():
-    """Stored file/content certificates must recompute from current facts."""
+def test_content_manifest_drift_is_approved_input_changed():
     _mod, project_pure = f.project_pure_fn()
     con = f.mem_con()
-    proposal = _approved_bundle(con)
+    proposal = _approved(con)
     manifests = {
-        t["repo_id"]: ("9" * 64) for t in proposal.get("tasks") or () if t.get("repo_id")
+        t["repo_id"]: ("9" * 64)
+        for t in proposal.get("tasks") or () if t.get("repo_id")
     }
-    inp, graph = _input_graph_from_proposal(proposal, manifests=manifests)
-    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
-    assert f.refusal_code(out) in (
-        "APPROVED_INPUT_CHANGED", "APPROVAL_PROJECTION_VIOLATION"), f.refusal_code(out)
+    inp, graph = f.complete_projection_inputs(proposal, manifests=manifests)
+    f.assert_refuses(
+        lambda: project_pure(proposal, inp, graph, f.EMPTY_OVERLAY),
+        code="APPROVED_INPUT_CHANGED",
+        label="manifest content drift",
+    )
 
 
-def test_replica_source_readiness_exact_only():
+def test_replica_source_not_ready_without_exact_source_fact():
     _mod, project_pure = f.project_pure_fn()
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/m",))
     con.execute("UPDATE models SET numcopies=2 WHERE repo_id='org/m'")
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
     _p, _pid, proposal = f.create_and_approve(con)
-    # Replica task without source fact and without home task still pending
-    inp, graph = _input_graph_from_proposal(proposal, archived={})
+    replica_tasks = [
+        t for t in proposal.get("tasks") or ()
+        if str(t.get("requirement_id", "")).startswith("replica")
+    ]
+    assert replica_tasks, f"fixture must produce replica task; tasks={proposal.get('tasks')}"
+    # No archived source fact — must not report ready with exact source
+    inp, graph = f.complete_projection_inputs(proposal, archived={})
     out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
-    # Either waiting_dependency schedule or refusal if source required-ready
     if f.is_refusal(out):
-        assert f.refusal_code(out) in (
-            "APPROVAL_PROJECTION_VIOLATION", "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE")
+        assert f.refusal_code(out) == "APPROVAL_PROJECTION_VIOLATION", f.refusal_code(out)
         return
-    tasks = list(out.tasks if hasattr(out, "tasks") else out["tasks"])
-    replica = [t for t in tasks if str(
-        t.get("requirement_id") if isinstance(t, dict) else getattr(t, "requirement_id", "")
-    ).startswith("replica")]
-    if replica:
-        t0 = replica[0]
-        state = t0.get("schedule_state") if isinstance(t0, dict) else getattr(
-            t0, "schedule_state", None)
-        assert state in ("waiting_dependency", "ready", "parked_gated"), state
+    tasks = list(f.get_field(out, "tasks") or ())
+    replica = [
+        t for t in tasks
+        if str(f.get_field(t, "requirement_id", "")).startswith("replica")
+    ]
+    assert replica, "projection must retain replica requirement row"
+    for t in replica:
+        state = f.get_field(t, "schedule_state")
+        assert state == "waiting_dependency", (
+            f"without exact source fact, replica must be waiting_dependency not {state!r}")
 
 
-def test_cumulative_compression_budget_overrun_refuses():
+def test_compression_budget_overrun_is_no_longer_feasible():
     _mod, project_pure = f.project_pure_fn()
     con = f.mem_con()
-    proposal = _approved_bundle(con)
-    # Observed ratio / actual bytes blow approved envelope
-    observed_ratio = {"org/a": 10.0}  # hostile over-ratio
+    proposal = _approved(con)
+    # Fixed-point decimal string ratio, not binary float
+    observed_ratio = {"org/a": "10.000"}
     archived = {
-        # partial progress with huge stored_bytes
         ("org/a", "model.safetensors", "d0"): {
             "orig_sha256": "1" * 64, "orig_bytes": 100, "stored_bytes": 10**15},
     }
-    inp, graph = _input_graph_from_proposal(
+    inp, graph = f.complete_projection_inputs(
         proposal, archived=archived, observed_ratio=observed_ratio)
-    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
-    assert f.is_refusal(out), (
-        "compression budget overrun must refuse APPROVED_PLACEMENT_NO_LONGER_FEASIBLE")
-    assert f.refusal_code(out) == "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE", f.refusal_code(out)
+    f.assert_refuses(
+        lambda: project_pure(proposal, inp, graph, f.EMPTY_OVERLAY),
+        code="APPROVED_PLACEMENT_NO_LONGER_FEASIBLE",
+        label="compression budget overrun",
+    )
 
 
-def test_offline_target_sets_await_not_remap():
+def test_offline_target_does_not_remap_and_uses_capacity_unknown_or_await():
     _mod, project_pure = f.project_pure_fn()
     con = f.mem_con()
-    proposal = _approved_bundle(con)
+    proposal = _approved(con)
+    # d0 offline; d1 online — must not remap approved d0 work to d1
     drives = {
         "d0": SimpleNamespace(
             lifecycle="active", eligibility="enabled",
-            identity_epoch=1, identity_fingerprint="f" * 64, offline=True),
+            identity_epoch=f.DRIVE_IDS["d0"]["epoch"],
+            identity_fingerprint=f.DRIVE_IDS["d0"]["fingerprint"], offline=True),
         "d1": SimpleNamespace(
             lifecycle="active", eligibility="enabled",
-            identity_epoch=1, identity_fingerprint="f" * 64, offline=False),
+            identity_epoch=f.DRIVE_IDS["d1"]["epoch"],
+            identity_fingerprint=f.DRIVE_IDS["d1"]["fingerprint"], offline=False),
     }
-    evidence = {"d0": SimpleNamespace(executable=False, kind="unknown")}
-    inp, graph = _input_graph_from_proposal(proposal, drives=drives)
-    inp.evidence = evidence
+    evidence = {
+        "d0": SimpleNamespace(kind="unknown", executable=False, admissible_free=None),
+        "d1": SimpleNamespace(kind="offline", executable=True, admissible_free=10**12),
+    }
+    inp, graph = f.complete_projection_inputs(proposal, drives=drives, evidence=evidence)
+    before_targets = {
+        t["requirement_id"]: t.get("target_drive")
+        for t in proposal.get("tasks") or () if t.get("target_drive")
+    }
     out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
-    code = f.refusal_code(out)
-    # Offline may be CAPACITY_EVIDENCE_UNKNOWN or keep tasks with await semantics
     if f.is_refusal(out):
-        assert code in (
-            "CAPACITY_EVIDENCE_UNKNOWN", "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE",
-            "APPROVED_TARGET_IDENTITY_CHANGED"), code
-    else:
-        # Must not remap targets away from approved drives
-        tasks = list(out.tasks if hasattr(out, "tasks") else out["tasks"])
-        for t in tasks:
-            tgt = t.get("target_drive") if isinstance(t, dict) else getattr(t, "target_drive", None)
-            if tgt:
-                assert tgt in ("d0", "d1", None)
-
-
-def test_expanded_requirement_set_refuses():
-    _mod, project_pure = f.project_pure_fn()
-    con = f.mem_con()
-    proposal = _approved_bundle(con)
-    inp, graph = _input_graph_from_proposal(
-        proposal, extra_requirements=["primary:org/extra"])
-    # Force hash mismatch path as well
-    graph.requirement_set_hash = "e" * 64
-    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
-    assert f.refusal_code(out) in (
-        "APPROVED_INPUT_CHANGED", "APPROVAL_PROJECTION_VIOLATION"), f.refusal_code(out)
-
-
-def test_schedule_only_overlay_does_not_change_completion_truth():
-    _mod, project_pure = f.project_pure_fn()
-    con = f.mem_con()
-    proposal = _approved_bundle(con)
-    inp, graph = _input_graph_from_proposal(proposal)
-    overlay = SimpleNamespace(parked_gated_repos=frozenset({"org/a"}))
-    out = project_pure(proposal, inp, graph, overlay)
-    if f.is_refusal(out):
-        return  # production not ready
-    tasks = list(out.tasks if hasattr(out, "tasks") else out["tasks"])
+        assert f.refusal_code(out) == "CAPACITY_EVIDENCE_UNKNOWN", f.refusal_code(out)
+        return
+    tasks = list(f.get_field(out, "tasks") or ())
     for t in tasks:
-        rid = t.get("requirement_id") if isinstance(t, dict) else getattr(t, "requirement_id", "")
-        state = t.get("schedule_state") if isinstance(t, dict) else getattr(t, "schedule_state", None)
-        if "org/a" in str(rid) and state is not None:
-            assert state == "parked_gated", state
+        rid = f.get_field(t, "requirement_id")
+        tgt = f.get_field(t, "target_drive")
+        if rid in before_targets and before_targets[rid] == "d0":
+            assert tgt == "d0", f"offline target must not remap d0→{tgt}"
 
 
-def test_deterministic_full_projection_hash():
+def test_expanded_requirement_set_is_approved_input_changed():
     _mod, project_pure = f.project_pure_fn()
     con = f.mem_con()
-    proposal = _approved_bundle(con)
-    inp, graph = _input_graph_from_proposal(proposal)
-    a = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
-    b = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
-    if f.is_refusal(a) or f.is_refusal(b):
-        raise AssertionError(
-            "happy-path projection must succeed for deterministic hash contract once implemented")
-    ha = a.projection_hash if hasattr(a, "projection_hash") else a["projection_hash"]
-    hb = b.projection_hash if hasattr(b, "projection_hash") else b["projection_hash"]
-    assert ha == hb and len(str(ha)) == 64
+    proposal = _approved(con)
+    inp, graph = f.complete_projection_inputs(
+        proposal, extra_requirements=["primary:org/extra"])
+    f.assert_refuses(
+        lambda: project_pure(proposal, inp, graph, f.EMPTY_OVERLAY),
+        code="APPROVED_INPUT_CHANGED",
+        label="expanded requirements",
+    )
 
 
-def test_invalid_work_does_not_mutate_approved_map():
+def test_schedule_only_overlay_parks_without_changing_requirement_set():
     _mod, project_pure = f.project_pure_fn()
     con = f.mem_con()
-    proposal = _approved_bundle(con)
+    proposal = _approved(con)
+    before_ids = sorted(t["requirement_id"] for t in proposal.get("tasks") or ())
+    inp, graph = f.complete_projection_inputs(proposal)
+    overlay = SimpleNamespace(parked_gated_repos=frozenset({"org/a"}))
+    out = f.require_success(
+        project_pure(proposal, inp, graph, overlay), label="schedule overlay")
+    tasks = list(f.get_field(out, "tasks") or ())
+    after_ids = sorted(f.get_field(t, "requirement_id") for t in tasks)
+    # Remaining ids ⊆ approved; schedule_state only
+    assert set(after_ids) <= set(before_ids)
+    parked = [
+        t for t in tasks
+        if "org/a" in str(f.get_field(t, "requirement_id", ""))
+        and f.get_field(t, "schedule_state") == "parked_gated"
+    ]
+    assert parked, "gated overlay must set schedule_state=parked_gated for org/a work"
+
+
+def test_deterministic_projection_hash():
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    proposal = _approved(con)
+    inp, graph = f.complete_projection_inputs(proposal)
+    a = f.require_success(project_pure(proposal, inp, graph, f.EMPTY_OVERLAY), label="hash a")
+    b = f.require_success(project_pure(proposal, inp, graph, f.EMPTY_OVERLAY), label="hash b")
+    assert f.get_field(a, "projection_hash") == f.get_field(b, "projection_hash")
+    assert len(str(f.get_field(a, "projection_hash"))) == 64
+
+
+def test_invalid_lost_work_refuses_and_does_not_mutate_map():
+    _mod, project_pure = f.project_pure_fn()
+    con = f.mem_con()
+    proposal = _approved(con)
     before = deepcopy(proposal)
     drives = {
-        "d0": SimpleNamespace(
+        label: SimpleNamespace(
             lifecycle="lost", eligibility="enabled",
-            identity_epoch=1, identity_fingerprint="f" * 64),
+            identity_epoch=meta["epoch"], identity_fingerprint=meta["fingerprint"],
+            offline=False)
+        for label, meta in f.DRIVE_IDS.items()
     }
-    inp, graph = _input_graph_from_proposal(proposal, drives=drives)
-    _ = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
-    assert proposal == before, "project_pure must not mutate approved proposal"
+    inp, graph = f.complete_projection_inputs(proposal, drives=drives)
+    f.assert_refuses(
+        lambda: project_pure(proposal, inp, graph, f.EMPTY_OVERLAY),
+        code="APPROVAL_PROJECTION_VIOLATION",
+        label="lost work invalid",
+    )
+    assert proposal == before

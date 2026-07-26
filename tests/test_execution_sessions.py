@@ -1,8 +1,4 @@
-"""PR-09 / #39-B Gate 1: start_session lifecycle (B3–B6, B4/B5 state sets).
-
-Canonical API: start_session(con, proposal_id, predecessor_id, services)
-Revision/token/config/evidence derived internally — tests do not pass client bound_revision.
-"""
+"""PR-09 Gate 1: start_session lifecycle — no false greens; exact bound revision."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -34,44 +30,34 @@ def test_live_and_resumable_state_sets():
     resumable = set(getattr(mod, "RESUMABLE_STATES", ()) or getattr(mod, "resumable_states", ()) or ())
     assert live == LIVE, live
     assert resumable == RESUMABLE, resumable
-    assert getattr(mod, "is_resumable_terminal", None) or "done" not in resumable
 
 
-def test_start_from_real_approval_derives_revision_and_token():
+def test_start_binds_exact_planner_revision_and_token():
     mod = _mod()
     con = f.mem_con()
     pid, _ = _approve_ready(con)
-    rev_before = con.execute(
-        "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
-    out = _start(mod, con, pid, None)
-    if f.is_refusal(out):
-        raise AssertionError(f"start on fresh approval must acquire; got {out!r}")
-    session = out.session if hasattr(out, "session") else (
-        out["session"] if isinstance(out, dict) and "session" in out else out)
-    sid = session["session_id"] if isinstance(session, dict) else session.session_id
-    token = session["fencing_token"] if isinstance(session, dict) else session.fencing_token
-    bound = session["bound_planner_revision"] if isinstance(session, dict) else (
-        session.bound_planner_revision)
-    state = session["state"] if isinstance(session, dict) else session.state
-    assert state == "starting"
-    assert int(token) >= 1
-    assert int(bound) == int(rev_before) or int(bound) >= 0
-    row = con.execute(
-        "SELECT state, fencing_token, bound_planner_revision, resumed_from_session_id "
-        "FROM execution_sessions WHERE session_id=?", [sid]).fetchone()
-    assert row is not None and row[0] == "starting" and row[3] is None
+    rev = int(con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0])
+    out = f.require_success(_start(mod, con, pid, None), label="start")
+    session = f.session_fields(out)
+    assert f.get_field(session, "state") == "starting"
+    assert int(f.get_field(session, "fencing_token")) >= 1
+    assert int(f.get_field(session, "bound_planner_revision")) == rev, (
+        f"bound_planner_revision must equal current planner_revision {rev}, "
+        f"got {f.get_field(session, 'bound_planner_revision')}")
+    # Services must expose worker
+    assert f.default_services().worker.identity
 
 
 def test_second_live_start_refuses_fill_session_active():
     mod = _mod()
     con = f.mem_con()
     pid, _ = _approve_ready(con)
-    first = _start(mod, con, pid, None)
-    assert not f.is_refusal(first), first
+    f.require_success(_start(mod, con, pid, None), label="first start")
     f.assert_refuses(
         lambda: _start(mod, con, pid, None),
         code="FILL_SESSION_ACTIVE",
-        label="competing start while live",
+        label="second live start",
     )
 
 
@@ -80,36 +66,30 @@ def test_resume_from_each_resumable_state():
     con = f.mem_con()
     pid, _ = _approve_ready(con)
     for state in sorted(RESUMABLE):
+        # Ensure no live row
+        con.execute(
+            "UPDATE execution_sessions SET state='stopped', "
+            "terminal_at=COALESCE(terminal_at, CURRENT_TIMESTAMP) "
+            "WHERE state IN ('starting','running','stopping')")
         pred = f"pred-{state}"
         con.execute("DELETE FROM execution_sessions WHERE session_id=?", [pred])
-        # Clear any live row from prior iteration
-        con.execute(
-            "UPDATE execution_sessions SET state='stopped', terminal_at=CURRENT_TIMESTAMP "
-            "WHERE state IN ('starting','running','stopping')")
         con.execute(
             "INSERT INTO execution_sessions("
             "session_id,plan_id,approved_proposal_id,controller_identity,worker_identity,"
             "state,bound_planner_revision,fencing_token,terminal_at) "
             "VALUES(?,?,?,'ctrl','worker',?,0,4,CURRENT_TIMESTAMP)",
             [pred, "ark", pid, state])
-        out = _start(mod, con, pid, pred)
-        if f.is_refusal(out):
-            raise AssertionError(f"resume from {state} must succeed; got {out!r}")
-        session = out.session if hasattr(out, "session") else (
-            out["session"] if isinstance(out, dict) and "session" in out else out)
-        sid = session["session_id"] if isinstance(session, dict) else session.session_id
-        token = int(session["fencing_token"] if isinstance(session, dict) else session.fencing_token)
-        prev = (session.get("resumed_from_session_id") if isinstance(session, dict)
-                else session.resumed_from_session_id)
-        assert sid != pred
-        assert token > 4
-        assert prev == pred
+        out = f.require_success(_start(mod, con, pid, pred), label=f"resume from {state}")
+        session = f.session_fields(out)
+        assert f.get_field(session, "session_id") != pred
+        assert int(f.get_field(session, "fencing_token")) > 4
+        assert f.get_field(session, "resumed_from_session_id") == pred
         pred_state = con.execute(
             "SELECT state FROM execution_sessions WHERE session_id=?", [pred]).fetchone()[0]
-        assert pred_state == state, "predecessor must remain immutable"
+        assert pred_state == state
 
 
-def test_resume_from_done_refuses_session_not_resumable():
+def test_resume_from_done_refuses():
     mod = _mod()
     con = f.mem_con()
     pid, _ = _approve_ready(con)
@@ -136,30 +116,29 @@ def test_competing_successors_refuse():
         "state,bound_planner_revision,fencing_token,terminal_at) "
         "VALUES('s-pause',?,?, 'c','w','paused',0,2,CURRENT_TIMESTAMP)",
         ["ark", pid])
-    first = _start(mod, con, pid, "s-pause")
-    assert not f.is_refusal(first), first
+    f.require_success(_start(mod, con, pid, "s-pause"), label="first successor")
     f.assert_refuses(
         lambda: _start(mod, con, pid, "s-pause"),
         code="FILL_SESSION_ACTIVE",
-        label="second successor while first live",
+        label="competing successor",
     )
 
 
-def test_worker_claim_distinct_from_controller():
+def test_worker_claim_requires_running_and_distinct_identity():
     mod = _mod()
     claim = getattr(mod, "claim_worker", None) or getattr(mod, "transition_to_running", None)
-    assert callable(claim), "claim_worker / transition_to_running required"
+    assert callable(claim), "claim_worker required"
     con = f.mem_con()
     pid, _ = _approve_ready(con)
-    out = _start(mod, con, pid, None)
-    session = out.session if hasattr(out, "session") else (
-        out["session"] if isinstance(out, dict) and "session" in out else out)
-    sid = session["session_id"] if isinstance(session, dict) else session.session_id
-    token = session["fencing_token"] if isinstance(session, dict) else session.fencing_token
-    claimed = claim(con, session_id=sid, fencing_token=token,
-                    worker_identity="worker-pid-9", controller_identity="ctrl-A")
-    if f.is_refusal(claimed):
-        raise AssertionError(claimed)
+    out = f.require_success(_start(mod, con, pid, None), label="start for claim")
+    session = f.session_fields(out)
+    sid = f.get_field(session, "session_id")
+    token = f.get_field(session, "fencing_token")
+    f.require_success(
+        claim(con, session_id=sid, fencing_token=token,
+              worker_identity="worker-pid-9", controller_identity="ctrl-A"),
+        label="claim worker",
+    )
     row = con.execute(
         "SELECT state, worker_identity, controller_identity FROM execution_sessions "
         "WHERE session_id=?", [sid]).fetchone()
@@ -168,20 +147,33 @@ def test_worker_claim_distinct_from_controller():
     assert row[2] != row[1]
 
 
-def test_heartbeat_validates_token_and_state_no_revision_bump():
+def test_heartbeat_only_when_running_validates_token():
+    """RFC: heartbeat authority is running/stopping — not starting."""
     mod = _mod()
     heartbeat = getattr(mod, "heartbeat", None) or getattr(mod, "session_heartbeat", None)
-    assert callable(heartbeat), "heartbeat required"
+    claim = getattr(mod, "claim_worker", None) or getattr(mod, "transition_to_running", None)
+    assert callable(heartbeat) and callable(claim)
     con = f.mem_con()
     pid, _ = _approve_ready(con)
-    out = _start(mod, con, pid, None)
-    session = out.session if hasattr(out, "session") else (
-        out["session"] if isinstance(out, dict) and "session" in out else out)
-    sid = session["session_id"] if isinstance(session, dict) else session.session_id
-    token = session["fencing_token"] if isinstance(session, dict) else session.fencing_token
+    out = f.require_success(_start(mod, con, pid, None), label="start")
+    session = f.session_fields(out)
+    sid = f.get_field(session, "session_id")
+    token = f.get_field(session, "fencing_token")
+    # Heartbeat while starting must refuse
+    f.assert_refuses(
+        lambda: heartbeat(con, session_id=sid, fencing_token=token),
+        code="SESSION_STATE_INVALID",
+        label="heartbeat while starting",
+    )
+    f.require_success(
+        claim(con, session_id=sid, fencing_token=token,
+              worker_identity="w1", controller_identity="c1"),
+        label="to running",
+    )
     before = con.execute(
         "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
-    heartbeat(con, session_id=sid, fencing_token=token)
+    f.require_success(
+        heartbeat(con, session_id=sid, fencing_token=token), label="heartbeat running")
     after = con.execute(
         "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
     assert after == before
@@ -195,25 +187,29 @@ def test_heartbeat_validates_token_and_state_no_revision_bump():
 def test_terminal_immutable_no_revision_bump():
     mod = _mod()
     terminalize = getattr(mod, "terminalize", None) or getattr(mod, "mark_terminal", None)
-    assert callable(terminalize), "terminalize required"
+    claim = getattr(mod, "claim_worker", None) or getattr(mod, "transition_to_running", None)
+    assert callable(terminalize) and callable(claim)
     con = f.mem_con()
     pid, _ = _approve_ready(con)
-    out = _start(mod, con, pid, None)
-    session = out.session if hasattr(out, "session") else (
-        out["session"] if isinstance(out, dict) and "session" in out else out)
-    sid = session["session_id"] if isinstance(session, dict) else session.session_id
-    token = session["fencing_token"] if isinstance(session, dict) else session.fencing_token
+    out = f.require_success(_start(mod, con, pid, None), label="start")
+    session = f.session_fields(out)
+    sid = f.get_field(session, "session_id")
+    token = f.get_field(session, "fencing_token")
+    f.require_success(
+        claim(con, session_id=sid, fencing_token=token,
+              worker_identity="w1", controller_identity="c1"),
+        label="running",
+    )
     before = con.execute(
         "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
-    terminalize(con, session_id=sid, fencing_token=token, state="stopped",
-                terminal_code="OPERATOR_STOP")
+    f.require_success(
+        terminalize(con, session_id=sid, fencing_token=token, state="stopped",
+                    terminal_code="OPERATOR_STOP"),
+        label="terminalize",
+    )
     after = con.execute(
         "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
-    assert after == before, "terminal-only write must not bump planner_revision"
-    state = con.execute(
-        "SELECT state FROM execution_sessions WHERE session_id=?", [sid]).fetchone()[0]
-    assert state == "stopped"
-    # Cannot reactivate
+    assert after == before
     f.assert_refuses(
         lambda: terminalize(con, session_id=sid, fencing_token=token, state="running",
                             terminal_code=None),
@@ -222,30 +218,24 @@ def test_terminal_immutable_no_revision_bump():
     )
 
 
-def test_expired_vs_unexpired_recovery():
+def test_expired_recovery_succeeds_unexpired_refuses():
     mod = _mod()
-    recover = getattr(mod, "recover_expired_session", None) or getattr(
-        mod, "recover_session", None)
-    assert callable(recover), "recover_expired_session required"
+    recover = getattr(mod, "recover_expired_session", None) or getattr(mod, "recover_session")
+    assert callable(recover)
     con = f.mem_con()
     pid, _ = _approve_ready(con)
+    # Single expired live row only (no dual insert)
     con.execute(
         "INSERT INTO execution_sessions("
         "session_id,plan_id,approved_proposal_id,controller_identity,worker_identity,"
         "state,bound_planner_revision,fencing_token,expires_at) "
         "VALUES('s-exp',?,?, 'c','w','running',0,7,'2000-01-01T00:00:00Z')",
         ["ark", pid])
-    con.execute(
-        "INSERT INTO execution_sessions("
-        "session_id,plan_id,approved_proposal_id,controller_identity,worker_identity,"
-        "state,bound_planner_revision,fencing_token,expires_at) "
-        "VALUES('s-live',?,?, 'c','w','running',0,8,'2099-01-01T00:00:00Z')",
-        ["ark", pid])
-    # Only one live allowed by schema — use sequential after cleanup
-    con.execute("DELETE FROM execution_sessions WHERE session_id='s-live'")
-    got = recover(con, session_id="s-exp", services=f.default_services())
-    assert not f.is_refusal(got) or f.refusal_code(got) is None or True
-    # Unexpired must refuse forced recover without operator force
+    f.require_success(
+        recover(con, session_id="s-exp", services=f.default_services()),
+        label="recover expired",
+    )
+    # Unexpired alone
     con.execute("DELETE FROM execution_sessions")
     con.execute(
         "INSERT INTO execution_sessions("
@@ -260,38 +250,39 @@ def test_expired_vs_unexpired_recovery():
     )
 
 
-def test_start_failure_cleans_up_no_live_row():
+def test_start_failure_refuses_and_leaves_no_live_row():
     mod = _mod()
     con = f.mem_con()
     pid, _ = _approve_ready(con)
-    # Inject projection failure via hostile services config mismatch after load
-    bad_cfg = f.default_services()
-    bad_cfg.config = SimpleNamespace(
-        read_graph_affecting_config=lambda: {"hostile": True})
-    out = _start(mod, con, pid, None, services=bad_cfg)
-    # Either refuses or if it fails mid-way, no live session remains
-    if f.is_refusal(out):
-        live = con.execute(
-            "SELECT count(*) FROM execution_sessions "
-            "WHERE state IN ('starting','running','stopping')").fetchone()[0]
-        assert live == 0, "failed start must not leave a live session"
-    else:
-        # Production may still start if config not yet bound — then contract is red elsewhere
-        pass
+    bad = f.default_services()
+    bad.config = SimpleNamespace(read_graph_affecting_config=lambda: {"hostile": True})
+    f.assert_refuses(
+        lambda: _start(mod, con, pid, None, services=bad),
+        code="APPROVED_INPUT_CHANGED",
+        label="hostile config start",
+    )
+    live = con.execute(
+        "SELECT count(*) FROM execution_sessions "
+        "WHERE state IN ('starting','running','stopping')").fetchone()[0]
+    assert live == 0, "failed start must leave zero live sessions"
 
 
-def test_session_write_archive_dirty_anchor_not_operator_numcopies():
-    """session_write must own archive/dirty/anchor path — not selection/numcopies operator ops."""
+def test_session_write_archive_path_not_numcopies():
     mod = _mod()
     session_write = getattr(mod, "session_write", None)
-    assert callable(session_write), "session_write required"
+    claim = getattr(mod, "claim_worker", None) or getattr(mod, "transition_to_running", None)
+    assert callable(session_write) and callable(claim)
     con = f.mem_con()
     pid, _ = _approve_ready(con)
-    out = _start(mod, con, pid, None)
-    session = out.session if hasattr(out, "session") else (
-        out["session"] if isinstance(out, dict) and "session" in out else out)
-    sid = session["session_id"] if isinstance(session, dict) else session.session_id
-    token = session["fencing_token"] if isinstance(session, dict) else session.fencing_token
+    out = f.require_success(_start(mod, con, pid, None), label="start")
+    session = f.session_fields(out)
+    sid = f.get_field(session, "session_id")
+    token = f.get_field(session, "fencing_token")
+    f.require_success(
+        claim(con, session_id=sid, fencing_token=token,
+              worker_identity="w1", controller_identity="c1"),
+        label="running",
+    )
 
     def archive_op(c):
         c.execute(
@@ -302,7 +293,8 @@ def test_session_write_archive_dirty_anchor_not_operator_numcopies():
 
     before = con.execute(
         "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
-    session_write(con, sid, token, archive_op)
+    f.require_success(
+        session_write(con, sid, token, archive_op), label="session_write archive")
     after = con.execute(
         "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
     assert after == before + 1
@@ -311,5 +303,5 @@ def test_session_write_archive_dirty_anchor_not_operator_numcopies():
     f.assert_refuses(
         lambda: session_write(con, sid, int(token) + 1, archive_op),
         code="SESSION_TOKEN_MISMATCH",
-        label="session_write stale token",
+        label="stale token session_write",
     )

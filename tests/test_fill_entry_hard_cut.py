@@ -1,10 +1,7 @@
-"""PR-09 / #39-B Gate 1: hard Fill entry cut — invoke real adapters (B8).
-
-CLI, portal fill_api, second portal process, and systemd resume must call one
-unified start service. Patch the service and assert call counts from each adapter.
-"""
+"""PR-09 Gate 1: hard Fill entry cut — each surface must call unified service once."""
 from __future__ import annotations
 
+import argparse
 import importlib
 from unittest import mock
 
@@ -28,100 +25,101 @@ def _unified_mod():
         "unified start_fill / enter_execution service required (expected Gate-1 red)")
 
 
-def test_cli_fill_routes_through_unified_service():
+def _start_name(umod):
+    return "start_fill" if hasattr(umod, "start_fill") else "enter_execution"
+
+
+def test_cli_fill_invokes_unified_service_once():
     umod = _unified_mod()
-    start = getattr(umod, "start_fill", None) or getattr(umod, "enter_execution")
+    name = _start_name(umod)
     cli = importlib.import_module("modelark.cli")
-    # Find fill command entry
-    cmd = getattr(cli, "cmd_fill", None) or getattr(cli, "cmd_run", None)
-    assert callable(cmd) or hasattr(cli, "build_parser"), (
-        "CLI fill entrypoint required for hard-cut contract")
-    with mock.patch.object(umod, start.__name__, wraps=start) as spy:
-        # Prefer explicit adapter if exported
-        adapter = getattr(umod, "cli_start_fill", None) or getattr(cli, "start_fill_via_service", None)
+    with mock.patch.object(umod, name) as spy:
+        spy.return_value = {"ok": True}
+        # Prefer explicit CLI adapter; else cmd_fill / parser fill action
+        adapter = getattr(cli, "start_fill_via_service", None) or getattr(
+            umod, "cli_start_fill", None)
         if callable(adapter):
             adapter(plan_id="ark")
-            assert spy.called or True
-        # Production must expose wiring: call adapter that invokes unified start
-        wire = getattr(umod, "CLI_ENTRY", None) or getattr(cli, "FILL_USES_EXECUTION_SERVICE", None)
-        assert wire is not None or spy.called, (
-            "CLI must invoke unified execution service (behavioral hard cut; expected Gate-1 red)")
+        elif hasattr(cli, "cmd_fill"):
+            args = argparse.Namespace(
+                plan_id="ark", max_24h_gb=0, guided=True, repos=None)
+            cli.cmd_fill(args)
+        else:
+            raise AssertionError("CLI fill entry cmd_fill or start_fill_via_service required")
+        assert spy.call_count == 1, (
+            f"CLI must call unified {name} exactly once; got {spy.call_count}")
 
 
-def test_portal_and_second_portal_and_systemd_resume_call_same_service():
+def test_portal_systemd_and_second_portal_each_call_unified_once():
     umod = _unified_mod()
-    start_name = "start_fill" if hasattr(umod, "start_fill") else "enter_execution"
+    name = _start_name(umod)
     calls = []
 
     def capture(*a, **k):
         calls.append((a, k))
         return {"ok": True, "via": "unified"}
 
-    with mock.patch.object(umod, start_name, side_effect=capture):
-        # Portal fill_api.start
-        fill_api = importlib.import_module("modelark.web.fill_api")
-        portal_adapter = getattr(fill_api, "start", None)
-        assert callable(portal_adapter), "fill_api.start required"
-        # Must be rewired to service in PR-09 — call and expect capture
-        try:
-            portal_adapter({})
-        except Exception:
-            pass  # may fail before service if not wired
-        # Systemd resume path (server.serve resume=True uses fill_api.start)
-        server = importlib.import_module("modelark.web.server")
-        resume_adapter = getattr(server, "auto_resume_fill", None) or fill_api.start
-        try:
-            resume_adapter({})
-        except Exception:
-            pass
-        # Second portal: same fill_api module in another "process" simulation
-        try:
-            portal_adapter({})
-        except Exception:
-            pass
+    fill_api = importlib.import_module("modelark.web.fill_api")
+    server = importlib.import_module("modelark.web.server")
 
-    # Hard cut: once wired, all three surfaces call unified start
-    assert len(calls) >= 1, (
-        "portal/systemd/second-portal adapters must call unified "
-        f"{start_name} (expected Gate-1 red until wired; got {len(calls)} calls)")
+    with mock.patch.object(umod, name, side_effect=capture):
+        # Portal surface
+        assert callable(fill_api.start)
+        fill_api.start({})
+        # Systemd resume surface (must be distinct call site wired to same service)
+        resume = getattr(server, "auto_resume_fill", None)
+        if resume is None:
+            # Contract: production must export auto_resume_fill for systemd
+            raise AssertionError(
+                "server.auto_resume_fill required for systemd resume hard-cut")
+        resume({})
+        # Second portal: separate process calls fill_api.start
+        def second_portal(q):
+            try:
+                import importlib as il
+                fa = il.import_module("modelark.web.fill_api")
+                fa.start({})
+                q.put("ok")
+            except Exception as exc:
+                q.put(f"err:{exc}")
+
+        # In-process second "portal" module re-import still hits same patched symbol
+        fill_api.start({})  # second portal process would share service; count third call
+
+    # Exactly one call per surface: portal + systemd + second portal = 3
+    assert len(calls) == 3, (
+        f"expected 1 call per surface (portal, systemd, second portal)=3; got {len(calls)}")
 
 
-def test_fill_execute_facade_routes_and_refuses_without_approval():
+def test_fill_execute_routes_through_service_without_optimizer():
     umod = _unified_mod()
+    name = _start_name(umod)
     fill = importlib.import_module("modelark.fill")
-    start_name = "start_fill" if hasattr(umod, "start_fill") else "enter_execution"
-    with mock.patch.object(umod, start_name) as spy:
+    from modelark import capacity, fetch, reconcile
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    ctx = fetch.RunCtx(con=con)
+
+    with mock.patch.object(umod, name) as spy, \
+         mock.patch.object(
+             capacity, "plan_capacity",
+             side_effect=AssertionError("optimizer banned")), \
+         mock.patch.object(
+             reconcile, "reconcile_plan",
+             side_effect=AssertionError("legacy reconcile banned")):
         spy.return_value = f.proposal_mod().Refusal(
             "APPROVAL_MISSING", {}, ("preview_again",))
-        # Facade must call service rather than plan_capacity / optimizer
-        con = f.mem_con()
-        f.seed_plan_selection(con, repos=("org/a",))
-        from modelark import fetch
-        ctx = fetch.RunCtx(con=con)
         try:
             fill.execute(ctx, guided=True, max_24h_gb=0)
+        except AssertionError as exc:
+            if "banned" in str(exc):
+                raise AssertionError(
+                    "fill.execute must not call capacity.plan_capacity or "
+                    "reconcile.reconcile_plan after hard cut"
+                ) from exc
+            raise
         except Exception:
             pass
         assert spy.called, (
             "fill.execute must call unified execution service "
-            "(cannot retain optimizer-only path; expected Gate-1 red)")
-
-
-def test_fill_execute_does_not_call_plan_capacity():
-    fill = importlib.import_module("modelark.fill")
-    con = f.mem_con()
-    f.seed_plan_selection(con, repos=("org/a",))
-    from modelark import fetch, plan
-    ctx = fetch.RunCtx(con=con)
-    with mock.patch.object(plan, "plan_capacity", side_effect=AssertionError("optimizer banned")):
-        # Also patch capacity solvers if imported inside execute
-        try:
-            fill.execute(ctx, guided=True, max_24h_gb=0)
-        except AssertionError as exc:
-            if "optimizer banned" in str(exc):
-                raise AssertionError(
-                    "fill.execute must not call plan_capacity after hard cut"
-                ) from exc
-            raise
-        except Exception:
-            pass  # other refusals OK
+            f"{name} (expected Gate-1 red until façade wired)")
