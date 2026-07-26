@@ -12,7 +12,7 @@
 |------|--------|
 | PR | [#54](https://github.com/Auspex-Aerie/modelark/pull/54) (draft — **not merged**) |
 | Branch | `fix/placement-capacity-pr09-execution-projection` |
-| **Code tip to re-review** | `02faffbd462153de79060ad1aa432c9cd68e64e0` |
+| **Code tip to re-review** | `38373473b55e156e4733dcd14fc267351f7398d7` |
 | Parent provisional tip | `00ba101cd704b6d855debbdc568f53e6b19f070f` |
 | Remote was | `490bf0135b14a5a08823c90daf371f46c8f8fb0c` |
 | Prior accepted | 33, 34, 36; F38 fixture identity + p95 timing |
