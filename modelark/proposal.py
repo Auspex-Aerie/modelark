@@ -72,18 +72,19 @@ class Refusal(Exception):
 def bump_revision(con) -> int:
     """Increment planner_revision inside the caller's open transaction.
 
-    Pre-v5 fixtures without planner_state are no-ops (transport unit tests with
-    partial catalogs); production catalogs always have the singleton.
+    Finding 44: never swallow failures. A failed revision update must propagate so
+    graph_write rolls back the graph mutation. Partial fixtures must seed planner_state.
     """
-    try:
-        con.execute(
-            "UPDATE planner_state SET planner_revision = planner_revision + 1, "
-            "updated_at = CURRENT_TIMESTAMP WHERE singleton_id = 1")
-        row = con.execute(
-            "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()
-        return int(row[0]) if row else 0
-    except sqlite3.OperationalError:
-        return 0
+    con.execute(
+        "UPDATE planner_state SET planner_revision = planner_revision + 1, "
+        "updated_at = CURRENT_TIMESTAMP WHERE singleton_id = 1")
+    row = con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()
+    if row is None:
+        raise RuntimeError(
+            "planner_state singleton missing after revision bump "
+            "(catalog must be v5 with seeded planner_state)")
+    return int(row[0])
 
 
 def graph_write(con, op: Callable[[Any], Any]) -> Any:
@@ -964,8 +965,8 @@ def validate_exact_assignment(con, proposal: Mapping,
 
     for t in tasks:
         if t.get("row_kind") == "baseline_satisfied":
-            # A10: revalidate stored baseline certificate against durable evidence on the
-            # satisfying drive (not annex-key alone).
+            # A10: revalidate against *current* catalog manifest + durable archive evidence
+            # (not the stored full_manifest_hash alone, and not annex-key alone).
             label = t.get("satisfying_drive") or t.get("target_drive")
             if not label:
                 raise Refusal("EXACT_ASSIGNMENT_REJECTED",
@@ -979,10 +980,17 @@ def validate_exact_assignment(con, proposal: Mapping,
                               {"task": t.get("requirement_id"), "drive": label,
                                "reason": "missing_identity_fingerprint"},
                               ("preview_again",))
+            current_mh = _manifest_hash(con, t["repo_id"])
+            if current_mh != t.get("full_manifest_hash"):
+                raise Refusal(
+                    "APPROVED_INPUT_CHANGED",
+                    {"task": t.get("requirement_id"), "reason": "full_manifest_hash",
+                     "stored": t.get("full_manifest_hash"), "current": current_mh},
+                    ("preview_again",))
             cert_files = _baseline_file_evidence(con, t["repo_id"], label)
             recomputed = canonical.baseline_satisfaction_certificate(
                 requirement_id=t["requirement_id"],
-                full_manifest_hash=t["full_manifest_hash"],
+                full_manifest_hash=current_mh,
                 drive_label=label,
                 identity_epoch=int(fp_row[1]),
                 identity_fingerprint=fp_row[0],
@@ -1041,17 +1049,20 @@ class _DefaultClock:
 
 
 class _DefaultServices:
-    def __init__(self):
+    def __init__(self, observe_live=None):
         self.clock = _DefaultClock()
+        # Optional: observe_live(label) -> Observation | None for true live evidence under fences.
+        self.observe_live = observe_live
 
     def observe_exact_capacity(self, con, labels, **_k):
-        """Authoritative admission evidence under held fences (A6).
+        """Authoritative admission evidence under held fences (A6 / finding 38).
 
-        Uses the shared ``admission.execution_evidence`` rule with a fenced observation built from
-        catalog-proven identity + free. Missing fingerprints refuse (not silent omit).
+        Never promotes ``drives.free_bytes`` to live evidence. Paths:
+        - if ``observe_live`` returns an observation → ``execution_evidence`` (fenced live);
+        - else offline derivation with ``fence_held=True`` → clean-anchor evidence or typed unknown.
+
+        Missing fingerprints refuse (not silent omit).
         """
-        from types import SimpleNamespace
-
         from modelark import admission
 
         now = self.clock.now()
@@ -1064,20 +1075,15 @@ class _DefaultServices:
                     {"drive": label, "reason": "missing_identity_fingerprint"},
                     ("reconcile_drive", "preview_again"),
                 )
-            free_row = con.execute(
-                "SELECT free_bytes FROM drives WHERE drive_label=?", [label]).fetchone()
-            free = free_row[0] if free_row else None
-            # Avoid importing drive_mutation (envelope owner policy); match Observation fields.
-            obs = SimpleNamespace(
-                identity_proven=True,
-                free_bytes=int(free) if free is not None else None,
-                filesystem_capacity=facts.filesystem_capacity,
-                fingerprint=facts.fingerprint,
-                identity_proof="approval-cas",
-                fence_proof="held",
-            )
-            # fence_held=True: approve already holds controller + sorted drive fences.
-            out[label] = admission.execution_evidence(con, label, obs, now=now)
+            live = None
+            if callable(self.observe_live):
+                live = self.observe_live(label)
+            if live is not None:
+                out[label] = admission.execution_evidence(con, label, live, now=now)
+            else:
+                # Fences already held by approve; offline/anchor path only (no catalog free→live).
+                out[label] = admission._derive(
+                    con, label, observation=None, fence_held=True, now=now)
         return out
 
 
