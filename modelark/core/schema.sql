@@ -265,6 +265,11 @@ CREATE TABLE IF NOT EXISTS planner_state (
     next_fencing_token          INTEGER NOT NULL DEFAULT 0 CHECK (next_fencing_token >= 0),
     updated_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+-- Fresh packaged schema must seed the CAS singleton (same as v4→v5 migration).
+-- Schema-only test fixtures and first-boot catalogs need revision=0 / fencing token=0.
+INSERT OR IGNORE INTO planner_state(
+    singleton_id, planner_revision, active_approved_proposal_id, next_fencing_token
+) VALUES (1, 0, NULL, 0);
 
 CREATE TABLE IF NOT EXISTS placement_proposals (
     proposal_id            VARCHAR PRIMARY KEY NOT NULL CHECK (length(trim(proposal_id)) > 0),
