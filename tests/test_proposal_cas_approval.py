@@ -938,14 +938,60 @@ def test_baseline_certificate_persisted_and_revalidated():
     con.execute(
         "UPDATE files SET sha256=? WHERE repo_id='org/m' AND rfilename='model.safetensors'",
         ["2" * 64])
-    try:
-        _approve(prop, con, pid)
-        raise AssertionError("manifest content drift must refuse approval")
-    except Exception as exc:
-        msg = str(exc).upper()
-        assert any(k in msg for k in (
-            "APPROVED_INPUT_CHANGED", "MANIFEST", "ASSIGN", "CERTIFICATE", "BASELINE", "HASH",
-            "INPUT")), exc
+    _assert_refuses(
+        lambda: _approve(prop, con, pid),
+        code="APPROVED_INPUT_CHANGED",
+        label="baseline manifest content drift",
+    )
+
+
+def test_executable_manifest_content_drift_refuses_approve():
+    """A10: executable tasks also revalidate current full_manifest_hash (not baseline-only)."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    # No complete archive → executable placement task.
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    kind = con.execute(
+        "SELECT row_kind FROM proposal_tasks WHERE proposal_id=?", [pid]).fetchone()[0]
+    assert kind == "executable", kind
+    con.execute(
+        "UPDATE files SET sha256=? WHERE repo_id='org/m' AND rfilename='model.safetensors'",
+        ["2" * 64])
+    _assert_refuses(
+        lambda: _approve(prop, con, pid),
+        code="APPROVED_INPUT_CHANGED",
+        label="executable manifest content drift",
+    )
+
+
+def test_baseline_archived_evidence_drift_refuses_approve():
+    """A10: archived per-file evidence drift invalidates baseline certificate (manifest stable)."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,stored_bytes,"
+        "orig_sha256) VALUES('org/m','model.safetensors','d0',0,100,100,?)",
+        ["1" * 64])
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    kind = con.execute(
+        "SELECT row_kind FROM proposal_tasks WHERE proposal_id=?", [pid]).fetchone()[0]
+    assert kind == "baseline_satisfied", kind
+    # Keep files.sha256 (manifest hash) stable; tamper durable archive evidence only.
+    con.execute(
+        "UPDATE archived SET orig_sha256=? WHERE repo_id='org/m' "
+        "AND rfilename='model.safetensors' AND drive_label='d0'",
+        ["9" * 64])
+    _assert_refuses(
+        lambda: _approve(prop, con, pid),
+        code="EXACT_ASSIGNMENT_REJECTED",
+        label="baseline archived per-file evidence drift",
+    )
 
 
 def test_default_evidence_is_not_catalog_free_as_live():
