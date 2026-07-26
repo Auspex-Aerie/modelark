@@ -33,6 +33,27 @@ def _admission_snapshot_compat():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _pr09_fill_session_bridge(monkeypatch):
+    """PR-09 B8 hard-cut: fill.execute always enters start_fill. Replan suites still exercise the
+    legacy reconcile/fetch drain under a synthetic SessionStart until PR-10 removes the façade.
+    Gate-1 hard-cut and Gate-2 session suites cover real approval/session paths separately."""
+    from modelark import execution_service
+
+    def _fake_start_fill(**_k):
+        return types.SimpleNamespace(
+            session=types.SimpleNamespace(
+                session_id="replan-bridge",
+                state="running",
+                fencing_token=1,
+            ),
+            projection=None,
+            execution_config=None,
+        )
+
+    monkeypatch.setattr(execution_service, "start_fill", _fake_start_fill)
+
+
 @contextlib.contextmanager
 def _passthru_mutation(*_a, **_k):
     """Bypass the physical-mutation envelope so the transport-logic characterization tests below drive
