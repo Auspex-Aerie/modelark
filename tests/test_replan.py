@@ -478,6 +478,15 @@ def test_fetch_run_bails_on_dead_drive_midbatch(tmp_path):
         raise RuntimeError("write failed: I/O error")
     import sqlite3
     con = sqlite3.connect(":memory:", isolation_level=None)
+    # Finding 44: graph_write requires planner_state — seed minimal v5 singleton.
+    con.execute(
+        "CREATE TABLE planner_state(singleton_id INTEGER PRIMARY KEY, "
+        "planner_revision INTEGER NOT NULL DEFAULT 0, "
+        "active_approved_proposal_id VARCHAR, next_fencing_token INTEGER NOT NULL DEFAULT 0, "
+        "updated_at TIMESTAMP)")
+    con.execute(
+        "INSERT INTO planner_state(singleton_id,planner_revision,next_fencing_token) "
+        "VALUES(1,0,0)")
     ctx = fetch.RunCtx(con=con, on_progress=events.append)
     with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
          mock.patch.object(fetch.register, "archive_path", side_effect=lambda con, l: tmp_path), \
@@ -506,6 +515,14 @@ def test_fetch_run_stops_on_midrun_unauthorized_without_repo_churn(tmp_path):
 
     import sqlite3
     con = sqlite3.connect(":memory:", isolation_level=None)
+    con.execute(
+        "CREATE TABLE planner_state(singleton_id INTEGER PRIMARY KEY, "
+        "planner_revision INTEGER NOT NULL DEFAULT 0, "
+        "active_approved_proposal_id VARCHAR, next_fencing_token INTEGER NOT NULL DEFAULT 0, "
+        "updated_at TIMESTAMP)")
+    con.execute(
+        "INSERT INTO planner_state(singleton_id,planner_revision,next_fencing_token) "
+        "VALUES(1,0,0)")
     ctx = fetch.RunCtx(con=con)
     with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
          mock.patch.object(fetch.register, "archive_path", return_value=tmp_path), \
@@ -610,6 +627,14 @@ def test_run_replica_defers_on_offline_source(tmp_path):
     import sqlite3
     events = []
     con = sqlite3.connect(":memory:", isolation_level=None)
+    con.execute(
+        "CREATE TABLE planner_state(singleton_id INTEGER PRIMARY KEY, "
+        "planner_revision INTEGER NOT NULL DEFAULT 0, "
+        "active_approved_proposal_id VARCHAR, next_fencing_token INTEGER NOT NULL DEFAULT 0, "
+        "updated_at TIMESTAMP)")
+    con.execute(
+        "INSERT INTO planner_state(singleton_id,planner_revision,next_fencing_token) "
+        "VALUES(1,0,0)")
     ctx = fetch.RunCtx(con=con, on_progress=events.append)
     with mock.patch.object(fetch.register, "archive_path",
                            side_effect=lambda con, l: (tmp_path if l == "drive-04" else tmp_path / "gone")), \

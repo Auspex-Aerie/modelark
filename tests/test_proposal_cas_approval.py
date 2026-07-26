@@ -101,10 +101,21 @@ def _seed_selection(con, repos=("org/m",)):
             [repo])
     con.execute(
         "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
-        "lifecycle,eligibility,identity_epoch,identity_fingerprint,"
+        "lifecycle,eligibility,identity_epoch,write_generation,identity_fingerprint,"
         "write_authority,filesystem_capacity_bytes) "
-        "VALUES('d0',1000000000000,1000000000000,'primary',0,'active','enabled',1,?,"
+        "VALUES('d0',1000000000000,1000000000000,'primary',0,'active','enabled',1,1,?,"
         "'dedicated_local',1000000000000)",
+        ["f" * 64])
+    # Clean anchor so default A6 evidence uses offline admission (not catalog free→live).
+    con.execute(
+        "INSERT OR IGNORE INTO drive_dirty_generations"
+        "(drive_label,identity_epoch,generation,operation_code) VALUES('d0',1,1,'seed')")
+    con.execute(
+        "INSERT OR IGNORE INTO drive_clean_anchors"
+        "(drive_label,identity_epoch,generation,anchor_free_bytes,filesystem_capacity_bytes,"
+        "identity_fingerprint,write_authority,identity_proof,fence_proof,observed_at) "
+        "VALUES('d0',1,1,1000000000000,1000000000000,?,'dedicated_local','seed','seed',"
+        "'2026-01-01T00:00:00Z')",
         ["f" * 64])
     from modelark import plan
     if plan.get(con, "ark") is None:
@@ -546,10 +557,20 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
     fp_d1 = "e" * 64
     con.execute(
         "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
-        "lifecycle,eligibility,identity_epoch,identity_fingerprint,"
+        "lifecycle,eligibility,identity_epoch,write_generation,identity_fingerprint,"
         "write_authority,filesystem_capacity_bytes) "
-        "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',2,?,"
+        "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',2,1,?,"
         "'dedicated_local',1000000000000)",
+        [fp_d1])
+    con.execute(
+        "INSERT OR IGNORE INTO drive_dirty_generations"
+        "(drive_label,identity_epoch,generation,operation_code) VALUES('d1',2,1,'seed')")
+    con.execute(
+        "INSERT OR IGNORE INTO drive_clean_anchors"
+        "(drive_label,identity_epoch,generation,anchor_free_bytes,filesystem_capacity_bytes,"
+        "identity_fingerprint,write_authority,identity_proof,fence_proof,observed_at) "
+        "VALUES('d1',2,1,1000000000000,1000000000000,?,'dedicated_local','seed','seed',"
+        "'2026-01-01T00:00:00Z')",
         [fp_d1])
     from modelark import plan
     plan.add_drive(con, "ark", "d1")
@@ -859,13 +880,24 @@ def test_two_copy_executable_sets_source_drive_on_replica():
     con = _mem()
     _seed_selection(con)
     con.execute("UPDATE models SET numcopies=2 WHERE repo_id='org/m'")
+    fp_d1 = "e" * 64
     con.execute(
         "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
-        "lifecycle,eligibility,identity_epoch,identity_fingerprint,"
+        "lifecycle,eligibility,identity_epoch,write_generation,identity_fingerprint,"
         "write_authority,filesystem_capacity_bytes) "
-        "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',2,?,"
+        "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',2,1,?,"
         "'dedicated_local',1000000000000)",
-        ["e" * 64])
+        [fp_d1])
+    con.execute(
+        "INSERT OR IGNORE INTO drive_dirty_generations"
+        "(drive_label,identity_epoch,generation,operation_code) VALUES('d1',2,1,'seed')")
+    con.execute(
+        "INSERT OR IGNORE INTO drive_clean_anchors"
+        "(drive_label,identity_epoch,generation,anchor_free_bytes,filesystem_capacity_bytes,"
+        "identity_fingerprint,write_authority,identity_proof,fence_proof,observed_at) "
+        "VALUES('d1',2,1,1000000000000,1000000000000,?,'dedicated_local','seed','seed',"
+        "'2026-01-01T00:00:00Z')",
+        [fp_d1])
     from modelark import plan
     plan.add_drive(con, "ark", "d1")
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
@@ -884,7 +916,7 @@ def test_two_copy_executable_sets_source_drive_on_replica():
 
 
 def test_baseline_certificate_persisted_and_revalidated():
-    """Finding 39/A10: baseline certificate is stored and binds revalidation."""
+    """Finding 39/A10: baseline certificate is stored and content revalidation refuses drift."""
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
@@ -902,17 +934,83 @@ def test_baseline_certificate_persisted_and_revalidated():
     assert row is not None
     assert row[0] == "baseline_satisfied", row
     assert row[1] and len(row[1]) == 64, f"baseline_certificate must be stored; got {row[1]!r}"
-    # Tamper certificate → hash or exact-assignment revalidation refuses.
+    # Change current file content without revision bump → approve must refuse (finding 39).
     con.execute(
-        "UPDATE proposal_tasks SET baseline_certificate=? WHERE proposal_id=?",
-        ["f" * 64, pid])
+        "UPDATE files SET sha256=? WHERE repo_id='org/m' AND rfilename='model.safetensors'",
+        ["2" * 64])
     try:
         _approve(prop, con, pid)
-        raise AssertionError("tampered baseline certificate must refuse")
+        raise AssertionError("manifest content drift must refuse approval")
     except Exception as exc:
         msg = str(exc).upper()
         assert any(k in msg for k in (
-            "ASSIGN", "CERTIFICATE", "BASELINE", "HASH")), exc
+            "APPROVED_INPUT_CHANGED", "MANIFEST", "ASSIGN", "CERTIFICATE", "BASELINE", "HASH",
+            "INPUT")), exc
+
+
+def test_default_evidence_is_not_catalog_free_as_live():
+    """Finding 38: default services must not invent live free from drives.free_bytes."""
+    prop = _proposal()
+    con = _mem()
+    # Dedicated-local drive with free_bytes but no clean anchor and generation 0 (unproven offline).
+    con.execute(
+        "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
+        "lifecycle,eligibility,identity_epoch,write_generation,identity_fingerprint,"
+        "write_authority,filesystem_capacity_bytes) "
+        "VALUES('dx',1000,900,'primary',0,'active','enabled',1,0,?,'dedicated_local',1000)",
+        ["c" * 64])
+    svc = prop._DefaultServices()
+    ev = svc.observe_exact_capacity(con, ["dx"])["dx"]
+    assert not (getattr(ev, "kind", None) == "live" and getattr(ev, "executable", False)), (
+        f"catalog free must not become live evidence; got kind={ev.kind} executable={ev.executable}")
+    assert getattr(ev, "kind", None) == "unknown" or not getattr(ev, "executable", True), (
+        f"expected unknown/non-executable without live observe or clean anchor; got {ev}")
+
+
+def test_graph_write_rolls_back_when_revision_bump_fails():
+    """Finding 44: revision-update failure must roll back the graph mutation."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    before_models = con.execute(
+        "SELECT count(*) FROM models WHERE repo_id='org/tx'").fetchone()[0]
+    before_rev = con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
+
+    class _Inject:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def execute(self, sql, *a):
+            text = sql if isinstance(sql, str) else str(sql)
+            if "UPDATE planner_state SET planner_revision" in text:
+                raise sqlite3.OperationalError("injected revision bump failure")
+            return self._inner.execute(sql, *a)
+
+        def __getattr__(self, n):
+            return getattr(self._inner, n)
+
+    spy = _Inject(con)
+
+    class Result:
+        proven_noop = False
+        value = None
+
+    def op(c):
+        c.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/tx',1)")
+        return Result()
+
+    try:
+        prop.graph_write(spy, op)
+        raise AssertionError("graph_write must fail when revision bump fails")
+    except Exception:
+        pass
+    assert con.execute(
+        "SELECT count(*) FROM models WHERE repo_id='org/tx'").fetchone()[0] == before_models
+    assert con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1"
+    ).fetchone()[0] == before_rev
 
 
 def main():
