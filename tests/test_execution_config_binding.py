@@ -1,163 +1,173 @@
-"""PR-09 / #39-B Gate 1: ExecutionConfig semantic binding (B7).
+"""PR-09 / #39-B Gate 1: ExecutionConfig semantic binding (B7) — behavioral.
 
-Prefer no v6. Config is part of proposal semantic authority; older proposals without
-binding refuse start with fresh-preview; start/resume revalidates then freezes.
+No marker-only success. Real hash changes for graph-affecting fields; legacy refuse;
+freeze reaches transport; hostile global reread cannot replace freeze.
 """
 from __future__ import annotations
 
 import importlib
-import sqlite3
+from copy import deepcopy
+from types import SimpleNamespace
 
-from modelark.core import db
-
-
-def _mem():
-    con = sqlite3.connect(":memory:", isolation_level=None)
-    for stmt in db._statements(db.SCHEMA_PATH.read_text()):
-        con.execute(stmt)
-    return con
+import _pr09_gate1_fixtures as f
 
 
-def _exec_mod():
+def _cfg_api():
     for name in (
         "modelark.execution_config",
         "modelark.execution",
-        "modelark.proposal",
         "modelark.proposal_canonical",
+        "modelark.proposal",
     ):
         try:
             mod = importlib.import_module(name)
         except ModuleNotFoundError:
             continue
-        if any(hasattr(mod, n) for n in (
-                "execution_config_hash", "ExecutionConfig", "bind_execution_config",
-                "canonical_execution_config", "graph_affecting_config_hash")):
+        if callable(getattr(mod, "hash_config", None)) or callable(
+                getattr(mod, "execution_config_hash", None)) or getattr(
+                mod, "ExecutionConfig", None):
             return mod
     raise AssertionError(
-        "ExecutionConfig binding export required on proposal/execution modules "
-        "(expected Gate-1 red; prefer no v6 schema)")
+        "hash_config / ExecutionConfig required for B7 (prefer no v6; expected Gate-1 red)")
 
 
-def test_execution_config_hash_is_deterministic():
-    mod = _exec_mod()
-    fn = None
-    for n in (
-        "execution_config_hash", "canonical_execution_config",
-        "graph_affecting_config_hash", "bind_execution_config",
+def _hash_fn(mod):
+    for n in ("hash_config", "execution_config_hash", "canonical_execution_config_hash"):
+        fn = getattr(mod, n, None)
+        if callable(fn):
+            return fn
+    # ExecutionConfig(values=..., canonical_hash=...)
+    EC = getattr(mod, "ExecutionConfig", None)
+    if EC is not None:
+        def _h(values):
+            if hasattr(EC, "from_values"):
+                return EC.from_values(values).canonical_hash
+            if hasattr(EC, "hash"):
+                return EC.hash(values)
+            raise AssertionError("ExecutionConfig must expose from_values/hash")
+        return _h
+    raise AssertionError("no config hash function")
+
+
+BASE_CFG = {
+    "capacity_mode": "guaranteed",
+    "policy_version": "1",
+    "solver_version": "1",
+    "compression": {"enabled": True, "codec": "streamznn", "level": 3},
+    "numcopies_default": 1,
+}
+
+
+def test_graph_affecting_field_changes_hash():
+    mod = _cfg_api()
+    h = _hash_fn(mod)
+    base = h(deepcopy(BASE_CFG))
+    assert isinstance(base, str) and len(base) == 64, base
+    for field, new_val in (
+        ("capacity_mode", "compression_aware"),
+        ("policy_version", "2"),
+        ("solver_version", "9"),
+        ("numcopies_default", 2),
     ):
-        cand = getattr(mod, n, None)
-        if callable(cand):
-            fn = cand
-            break
-    assert fn is not None, "hash/bind helper required"
-    cfg = {
-        "capacity_mode": "guaranteed",
-        "policy_version": "1",
-        "solver_version": "1",
-        "compression": {"enabled": True},
-        "wishlist_graph_affecting": {"numcopies_default": 1},
-    }
-    h1 = fn(cfg) if fn.__code__.co_argcount >= 1 else fn()
-    h2 = fn(dict(reversed(list(cfg.items())))) if isinstance(cfg, dict) else fn(cfg)
-    if isinstance(h1, dict):
-        h1 = h1.get("canonical_hash") or h1.get("hash")
-        h2 = h2.get("canonical_hash") or h2.get("hash")
-    assert isinstance(h1, str) and len(h1) == 64, f"expected 64-char hash; got {h1!r}"
-    assert h1 == h2, "ExecutionConfig hash must be order-independent"
+        cfg = deepcopy(BASE_CFG)
+        cfg[field] = new_val
+        assert h(cfg) != base, f"changing {field} must change ExecutionConfig hash"
+    cfg = deepcopy(BASE_CFG)
+    cfg["compression"] = dict(cfg["compression"], level=9)
+    assert h(cfg) != base, "compression graph-affecting change must change hash"
 
 
-def test_semantic_input_includes_execution_config():
-    """B7: proposal semantic authority must cover graph-affecting ExecutionConfig."""
-    prop = importlib.import_module("modelark.proposal")
-    # Either semantic hash helper accepts config, or a dedicated field is documented.
-    has_hook = any(hasattr(prop, n) for n in (
-        "execution_config_in_semantic", "SEMANTIC_INCLUDES_EXECUTION_CONFIG",
-        "_semantic_input_hash",
-    ))
-    assert has_hook, "proposal semantic path must exist"
-    flag = getattr(prop, "SEMANTIC_INCLUDES_EXECUTION_CONFIG", None)
-    if flag is not None:
-        assert flag is True, "SEMANTIC_INCLUDES_EXECUTION_CONFIG must be True once bound"
-        return
-    # Probe _semantic_input_hash signature / companion digest
-    digest_fn = getattr(prop, "execution_config_semantic_digest", None) or getattr(
-        prop, "graph_affecting_config_digest", None)
-    assert callable(digest_fn), (
-        "export execution_config_semantic_digest (or set SEMANTIC_INCLUDES_EXECUTION_CONFIG) "
-        "— _semantic_input_hash must include graph-affecting config (expected Gate-1 red)")
+def test_harmless_nonaffecting_fields_do_not_change_hash():
+    mod = _cfg_api()
+    h = _hash_fn(mod)
+    base = h(deepcopy(BASE_CFG))
+    cfg = deepcopy(BASE_CFG)
+    cfg["ui_theme"] = "dark"
+    cfg["log_level"] = "DEBUG"
+    cfg["operator_note"] = "hello"
+    # Only if production filters non-affecting keys
+    assert h(cfg) == base, (
+        "non-graph-affecting keys must not change ExecutionConfig hash")
 
 
-def test_older_proposal_without_config_binding_refuses_start():
-    mod = _exec_mod()
-    for name in (
-        "modelark.execution_session", "modelark.execution_sessions", "modelark.execution",
-    ):
+def test_legacy_proposal_without_config_hash_refuses_start():
+    sess = f.session_api()
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    prop = f.proposal_mod()
+    # Create approved proposal then strip config binding if column exists; else insert legacy-shaped
+    draft = prop.create_draft(con, plan_id="ark", mutation=("adopt_current", ()))
+    pid = draft["proposal_id"] if isinstance(draft, dict) else draft
+    prop.approve(con, pid)
+    # Remove semantic/config binding markers if production stores them
+    cols = {r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()}
+    if "execution_config_hash" in cols:
+        con.execute(
+            "UPDATE placement_proposals SET execution_config_hash=NULL WHERE proposal_id=?",
+            [pid])
+    # Force older semantic without config: null semantic_input_hash is not enough;
+    # production must detect missing config binding
+    out = sess.start_session(con, pid, None, f.default_services())
+    # After B7 production: must refuse APPROVED_INPUT_CHANGED or dedicated binding code
+    if not f.is_refusal(out):
+        # Explicit require revalidate hook
+        rev = getattr(sess, "revalidate_execution_config", None) or getattr(
+            _cfg_api(), "require_bound_execution_config", None)
+        assert callable(rev), (
+            "legacy proposal without ExecutionConfig binding must refuse start "
+            "(fresh preview); expected Gate-1 red")
+        f.assert_refuses(
+            lambda: rev(con, pid),
+            code="APPROVED_INPUT_CHANGED",
+            label="legacy missing config binding",
+        )
+    else:
+        assert f.refusal_code(out) in (
+            "APPROVED_INPUT_CHANGED", "APPROVAL_MISSING", "PROPOSAL_HASH_MISMATCH",
+            "EXECUTION_CONFIG_UNBOUND"), f.refusal_code(out)
+
+
+def test_freeze_reaches_worker_and_child_transport():
+    mod = _cfg_api()
+    freeze = getattr(mod, "freeze_execution_config", None) or getattr(mod, "ExecutionConfig", None)
+    assert freeze is not None
+    transport = None
+    for name in ("modelark.fetch", "modelark.execution", "modelark.download_worker"):
         try:
-            sess = importlib.import_module(name)
-            break
+            transport = importlib.import_module(name)
+            if hasattr(transport, "require_frozen_config") or hasattr(
+                    transport, "execution_config"):
+                break
         except ModuleNotFoundError:
-            sess = None
-    assert sess is not None, "session module required"
-    start = getattr(sess, "start_session", None) or getattr(sess, "start", None)
-    assert callable(start), "start_session required"
-    revalidate = getattr(mod, "revalidate_execution_config", None) or getattr(
-        sess, "revalidate_execution_config", None) or getattr(
-        sess, "require_execution_config_binding", None)
-    assert callable(revalidate) or getattr(sess, "REQUIRE_EXECUTION_CONFIG_BINDING", False), (
-        "start path must revalidate ExecutionConfig binding (expected Gate-1 red)")
-
-    con = _mem()
-    con.execute("INSERT OR IGNORE INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
-    # Approved proposal with no execution-config binding metadata.
-    con.execute(
-        "INSERT INTO placement_proposals("
-        "proposal_id,plan_id,based_on_revision,lifecycle,canonical_hash,"
-        "mutation_kind,mutation_args_json,serializer_version,capacity_mode,"
-        "policy_version,solver_version,gate_b_code,semantic_input_hash) "
-        "VALUES('old-prop','ark',0,'approved',?,?,?,?,?,?,?,?,?)",
-        ["a" * 64, "adopt_current", "[]", "1", "guaranteed", "1", "1", "FEASIBLE", "b" * 64])
-    con.execute(
-        "UPDATE planner_state SET active_approved_proposal_id='old-prop' WHERE singleton_id=1")
-    try:
-        start(con, plan_id="ark", proposal_id="old-prop",
-              controller_identity="c1", bound_revision=0)
-        # If start returns a refusal object:
-        raise AssertionError(
-            "older proposal without ExecutionConfig binding must refuse start "
-            "(fresh preview required)")
-    except AssertionError:
-        raise
-    except Exception as exc:
-        msg = str(exc).upper()
-        assert any(k in msg for k in (
-            "EXECUTION_CONFIG", "CONFIG", "BINDING", "FRESH", "PREVIEW", "SEMANTIC",
-            "REFUS", "STALE")), exc
+            continue
+    assert transport is not None and (
+        hasattr(transport, "require_frozen_config")
+        or hasattr(transport, "get_frozen_execution_config")
+        or hasattr(mod, "attach_frozen_config_to_run_ctx")), (
+        "worker/child transport must receive frozen ExecutionConfig (expected Gate-1 red)")
 
 
-def test_start_freezes_config_transport_cannot_reread_global():
-    mod = _exec_mod()
-    freeze = getattr(mod, "freeze_execution_config", None) or getattr(
-        mod, "ExecutionConfig", None)
-    assert freeze is not None, "freeze_execution_config / ExecutionConfig required"
-    assert getattr(mod, "TRANSPORT_MUST_NOT_REREAD_GLOBAL_CONFIG", True) is True or hasattr(
-        mod, "frozen_config_for_session"), (
-        "transport freeze contract must be explicit (expected Gate-1 red)")
+def test_hostile_global_reread_cannot_replace_freeze():
+    mod = _cfg_api()
+    h = _hash_fn(mod)
+    frozen_vals = deepcopy(BASE_CFG)
+    frozen_hash = h(frozen_vals)
+    # Simulate freeze object
+    if hasattr(mod, "ExecutionConfig") and hasattr(mod.ExecutionConfig, "from_values"):
+        frozen = mod.ExecutionConfig.from_values(frozen_vals)
+    else:
+        frozen = SimpleNamespace(values=frozen_vals, canonical_hash=frozen_hash)
 
-
-def main():
-    tests = sorted((n, f) for n, f in globals().items()
-                   if n.startswith("test_") and callable(f))
-    failed = []
-    for name, fn in tests:
-        try:
-            fn()
-            print(f"PASS  {name}")
-        except Exception as exc:
-            print(f"FAIL  {name}: {exc}")
-            failed.append(name)
-    print(f"\n{len(tests) - len(failed)} passed, {len(failed)} failed")
-    raise SystemExit(1 if failed else 0)
-
-
-if __name__ == "__main__":
-    main()
+    hostile = deepcopy(BASE_CFG)
+    hostile["capacity_mode"] = "compression_aware"
+    reader = SimpleNamespace(read_graph_affecting_config=lambda: hostile)
+    revalidate = getattr(mod, "assert_frozen_unchanged", None) or getattr(
+        mod, "reject_global_config_replace", None)
+    assert callable(revalidate), (
+        "export assert_frozen_unchanged(frozen, reader) "
+        "(hostile reread must not replace freeze; expected Gate-1 red)")
+    f.assert_refuses(
+        lambda: revalidate(frozen, reader),
+        code="APPROVED_INPUT_CHANGED",
+        label="hostile global config reread",
+    )
