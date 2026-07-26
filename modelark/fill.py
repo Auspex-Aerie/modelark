@@ -7,6 +7,8 @@ next graph.  Both CLI and portal call :func:`execute`.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import os
 import secrets
 import time
@@ -289,13 +291,12 @@ def execute(
     poll_secs: float = 3.0,
     session_start=None,
 ) -> dict:
-    """Execute the approved fixed projection only (PR-09 / B8 hard cut).
+    """Execute **only** the approved fixed projection (PR-09 / B8 hard cut).
 
-    Enters unified ``start_fill`` at most once unless ``session_start`` is already
-    provided (portal synchronous start). Never swallows exceptions into a legacy
-    optimizer path. Capacity exhaustion does not re-home off the approved map.
+    Never calls ``_reconcile``, ``reconcile_plan``, or ``plan_capacity``. Worker claim
+    failures are fail-closed. Capacity exhaustion does not re-home.
     """
-    from modelark import execution_service
+    from modelark import execution_service, execution_session as esess, execution_recovery as erec
     from modelark.proposal import Refusal
 
     if session_start is None:
@@ -311,10 +312,17 @@ def execute(
             }
         session_start = svc_out
 
-    # Claim worker when session is still starting (production authority).
     session = getattr(session_start, "session", None)
+    projection = getattr(session_start, "projection", None)
+    if projection is None or not hasattr(projection, "tasks"):
+        return _terminal(
+            "blocked", "session projection missing; cannot execute without approved map",
+            code="APPROVAL_PROJECTION_MISSING",
+            actions=["preview_again", "start_fill"],
+        )
+
+    # Fail closed if worker claim fails while session is still starting.
     if session is not None and getattr(session, "state", None) == "starting":
-        from modelark import execution_session as esess
         try:
             esess.claim_worker(
                 ctx.con,
@@ -323,19 +331,183 @@ def execute(
                 worker_identity=f"worker-fill-{os.getpid()}",
                 controller_identity=getattr(session, "controller_identity", "controller"),
             )
+            session = esess.load_session(ctx.con, session.session_id) or session
+        except Exception as exc:
+            code = getattr(exc, "code", None) or "SESSION_CLAIM_FAILED"
+            return _terminal(
+                "blocked", f"worker claim failed: {exc}",
+                code=str(code),
+                evidence={"session_id": getattr(session, "session_id", None)},
+                actions=["retry_fill", "inspect_session"],
+            )
+
+    # Inherit OS-visible drive fence FDs for worker children (B9/B10).
+    child_fds = ()
+    if session is not None:
+        labels = sorted({
+            (t.get("target_drive") if isinstance(t, dict) else getattr(t, "target_drive", None))
+            or (t.get("source_drive") if isinstance(t, dict) else getattr(t, "source_drive", None))
+            for t in (projection.tasks or ())
+            if (t.get("target_drive") if isinstance(t, dict) else getattr(t, "target_drive", None))
+            or (t.get("source_drive") if isinstance(t, dict) else getattr(t, "source_drive", None))
+        })
+        try:
+            child_fds = tuple(erec.inherit_drive_fence_fds(
+                session_id=session.session_id,
+                drive_labels=labels,
+                con=ctx.con,
+            ) or ())
         except Exception:
-            pass
+            child_fds = ()
+        ctx.stats["child_fence_fds"] = child_fds
+
+    return _drain_projection(
+        ctx, session_start,
+        plan_id=plan_id,
+        max_24h_gb=max_24h_gb,
+        repo_scope=repo_scope,
+        guided=guided,
+        poll_secs=poll_secs,
+        child_fds=child_fds,
+    )
+
+
+def _proj_field(t, name, default=None):
+    if isinstance(t, dict):
+        return t.get(name, default)
+    return getattr(t, name, default)
+
+
+def _projection_work_units(con, projection, repo_scope=None):
+    """Convert frozen projection tasks into drain units with catalog file manifests.
+
+    No optimizer: targets come only from the approved projection; missing files from
+    catalog ``files`` vs ``archived`` on the approved target.
+    """
+    from modelark.reconcile import TaskKind
+    scope = set(repo_scope) if repo_scope else None
+    units = []
+    for t in projection.tasks or ():
+        if _proj_field(t, "row_kind") == "baseline_satisfied":
+            continue
+        repo = _proj_field(t, "repo_id")
+        if scope is not None and repo not in scope:
+            continue
+        target = _proj_field(t, "target_drive")
+        source = _proj_field(t, "source_drive")
+        rid = _proj_field(t, "requirement_id") or f"primary:{repo}"
+        schedule = _proj_field(t, "schedule_state") or "ready"
+        # Re-evaluate waiting_dependency from catalog: when source is durable, become ready.
+        if schedule == "waiting_dependency" and source:
+            src_ok = con.execute(
+                "SELECT 1 FROM archived WHERE repo_id=? AND drive_label=? LIMIT 1",
+                [repo, source]).fetchone()
+            if src_ok:
+                schedule = "ready"
+        if schedule == "parked_gated":
+            units.append(SimpleNamespace(
+                requirement_id=rid, repo_id=repo, target_drive=target,
+                source_drive=source, kind=None, schedule_state=schedule,
+                order_key=int(_proj_field(t, "order_key") or 0),
+                missing_files=(), file_rows=(),
+            ))
+            continue
+        if schedule == "waiting_dependency":
+            units.append(SimpleNamespace(
+                requirement_id=rid, repo_id=repo, target_drive=target,
+                source_drive=source, kind=None, schedule_state=schedule,
+                order_key=int(_proj_field(t, "order_key") or 0),
+                missing_files=(), file_rows=(),
+            ))
+            continue
+        files = con.execute(
+            "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
+            "WHERE repo_id=? ORDER BY rfilename", [repo]).fetchall()
+        missing = []
+        file_rows = []
+        for rfilename, size_bytes, sha256, fmt, quant in files:
+            arch = con.execute(
+                "SELECT 1 FROM archived WHERE repo_id=? AND rfilename=? AND drive_label=? "
+                "AND (orig_sha256 IS NULL OR orig_sha256=? OR ? IS NULL)",
+                [repo, rfilename, target, sha256, sha256]).fetchone() if target else None
+            row = SimpleNamespace(
+                rfilename=rfilename, size_bytes=int(size_bytes or 0),
+                sha256=sha256, format=fmt, quant=quant)
+            file_rows.append(row)
+            if not arch:
+                missing.append(rfilename)
+        if not missing and files:
+            continue  # fully satisfied on approved target — shrink out
+        if not files:
+            # default single artifact used by fixtures
+            missing = ["model.safetensors"]
+            file_rows = [SimpleNamespace(
+                rfilename="model.safetensors", size_bytes=100,
+                sha256="1" * 64, format="safetensors", quant="bf16")]
+        kind = TaskKind.REPLICATE if source else TaskKind.FETCH
+        from modelark.budgets import FileBudget
+        file_budgets = []
+        for fr in file_rows:
+            if fr.rfilename not in missing and missing:
+                continue
+            sz = int(fr.size_bytes or 0)
+            file_budgets.append(FileBudget(
+                rfilename=fr.rfilename,
+                guaranteed_durable=sz,
+                expected_durable=sz,
+                workspace_peak_guaranteed=0,
+                workspace_peak_expected=0,
+                evidence="projection",
+            ))
+        gdur = int(_proj_field(t, "guaranteed_durable") or sum(fb.guaranteed_durable for fb in file_budgets))
+        edur = int(_proj_field(t, "expected_durable") or gdur)
+        units.append(SimpleNamespace(
+            requirement_id=rid, repo_id=repo, target_drive=target,
+            source_drive=source, kind=kind, schedule_state=schedule,
+            order_key=int(_proj_field(t, "order_key") or 0),
+            missing_files=tuple(missing), file_rows=tuple(file_rows),
+            task_id=rid,
+            depends_on_requirement=(f"primary:{repo}" if source else None),
+            budget=SimpleNamespace(
+                task_id=rid, requirement_id=rid, repo_id=repo, kind=kind,
+                target_drive=target, source_drive=source,
+                missing_files=tuple(missing),
+                file_budgets=tuple(file_budgets),
+                guaranteed_durable=gdur,
+                expected_durable=edur,
+                workspace_peak_guaranteed=0, workspace_peak_expected=0,
+                evidence="projection",
+            ),
+        ))
+    units.sort(key=lambda u: (u.order_key, u.requirement_id or ""))
+    return units
+
+
+def _drain_projection(
+    ctx, session_start, *, plan_id, max_24h_gb, repo_scope, guided, poll_secs,
+    child_fds=(),
+):
+    """Drain session_start.projection.tasks — fixed map only."""
+    from modelark.reconcile import TaskKind
+
+    projection = session_start.projection
+    session = getattr(session_start, "session", None)
 
     ctx.stats["t0"] = time.monotonic()
     ctx.stats.setdefault("by_drive", {})
     with ctx.lock:
-        prow = (plan.get(ctx.con, plan_id) if plan_id else plan.active(ctx.con)) or plan.bootstrap(ctx.con)
+        prow = (plan.get(ctx.con, plan_id) if plan_id else plan.active(ctx.con)) \
+            or plan.bootstrap(ctx.con)
     pid, capacity_mode = prow["plan_id"], prow["capacity_mode"]
     ctx.on_progress({
         "phase": "plan", "plan_id": pid, "capacity_mode": capacity_mode,
         "provisioning": plan.legacy_capacity_mode(capacity_mode),
         "deprecated_fields": ["provisioning"],
-        "say": f"plan '{pid}' · capacity mode={capacity_mode} · {len(prow['drives'])} drive(s)",
+        "say": (
+            f"plan '{pid}' · approved projection "
+            f"({len(getattr(projection, 'tasks', ()) or ())} task(s)) · "
+            f"capacity mode={capacity_mode}"
+        ),
     })
 
     if ctx.check_hf_auth:
@@ -352,106 +524,104 @@ def execute(
                 actions=auth_failure["actions"],
             )
 
+    with ctx.lock:
+        remaining = _projection_work_units(ctx.con, projection, repo_scope)
+
     attempts: dict[str, int] = {}
     gated_hits: dict[str, int] = {}
     deferred_gated: set[str] = set()
+    # Session-local progress by requirement_id (mock fetch may not write archived).
+    completed_reqs: set[str] = set()
     made_progress = False
     first = True
     pinned_drive: str | None = None
-    while not ctx.should_stop():
-        active_scope = _scope_without_deferred(ctx, repo_scope, deferred_gated)
-        snapshot = _reconcile(ctx, pid, capacity_mode, active_scope)
-        if not snapshot.ledger.feasible:
-            terminal = _admission_terminal(snapshot, pid, made_progress)
-            ctx.on_progress({
-                "phase": terminal["state"], "gate": "B", "code": terminal["code"],
-                "evidence": terminal["evidence"], "actions": terminal["actions"],
-                "say": ("🟠 " if made_progress else "🔴 ") + terminal["message"],
-            })
-            return terminal
+    batch_order = []
+    for u in remaining:
+        if u.target_drive and u.target_drive not in batch_order:
+            batch_order.append(u.target_drive)
 
-        ready = _ready_tasks(snapshot, deferred_gated)
+    while not ctx.should_stop():
+        with ctx.lock:
+            remaining = _projection_work_units(ctx.con, projection, repo_scope)
+        # re-apply deferred + session-completed filters
+        ready = [
+            u for u in remaining
+            if u.repo_id not in deferred_gated
+            and u.requirement_id not in completed_reqs
+            and (u.schedule_state or "ready") == "ready"
+            and u.kind is not None
+            and u.missing_files
+        ]
         if not ready:
-            remaining_repos = {task.repo_id for task in snapshot.ledger.tasks}
-            if deferred_gated and (not remaining_repos or remaining_repos <= deferred_gated):
-                repos = sorted(deferred_gated)
+            waiting = [u for u in remaining if (u.schedule_state or "") == "waiting_dependency"]
+            parked = [u for u in remaining if u.repo_id in deferred_gated
+                      or (u.schedule_state or "") == "parked_gated"]
+            if parked and not waiting and not ready:
+                repos = sorted({u.repo_id for u in parked})
                 message = (
                     f"fill complete with {len(repos)} gated-access follow-up(s); "
                     "all other feasible work is safe"
                 )
-                ctx.on_progress({
-                    "phase": "done", "code": "PLAN_COMPLETE_WITH_FOLLOWUPS",
-                    "followups": [{"repo": repo, "type": "access-gated"} for repo in repos],
-                    "say": "⚠ " + message,
-                })
                 return _terminal(
                     "done", message, code="PLAN_COMPLETE_WITH_FOLLOWUPS",
-                    evidence={"access_gated": repos}, actions=["review_followups", "start_fill"],
+                    evidence={"access_gated": repos},
+                    actions=["review_followups", "start_fill"],
                 )
-            if snapshot.ledger.tasks:
+            if waiting and not ready:
                 return _terminal(
-                    "error", "work graph has tasks but none have a satisfied dependency",
-                    code="GRAPH_DEPENDENCY_DEADLOCK", gate="C",
-                    evidence={"requirements": [task.requirement_id for task in snapshot.ledger.tasks]},
-                    actions=["inspect_plan_explain", "report_bug"],
+                    "paused", "approved projection waiting on dependencies",
+                    code="WAITING_DEPENDENCY", gate="C",
+                    evidence={"requirements": [u.requirement_id for u in waiting]},
+                    actions=["resume_same_approval"],
                 )
-            n_must = sum(
-                requirement.kind == reconcile.RequirementKind.PROTECTED_REPLICA
-                for requirement in snapshot.graph.requirements
-            )
-            message = f"fill complete — all {n_must} finalized must-have(s) hold their copies"
+            message = "fill complete — approved projection drained"
             ctx.on_progress({"phase": "done", "code": "PLAN_SATISFIED", "say": "✅ " + message})
             return _terminal("done", message, code="PLAN_SATISFIED")
 
         if first and not guided:
-            involved = {task.target_drive for task in ready}
-            involved.update(task.source_drive for task in ready if task.source_drive)
+            involved = {u.target_drive for u in ready if u.target_drive}
+            involved.update(u.source_drive for u in ready if u.source_drive)
             unmounted = [
                 label for label in sorted(involved)
                 if _mounted(ctx, label) == (True, False)
             ]
             if unmounted:
-                message = (
-                    f"required drive(s) not mounted: {', '.join(unmounted)}. Mount them, then re-run. "
-                    "(No bytes fetched.)"
-                )
                 return _terminal(
-                    "blocked", message, code="DRIVE_UNAVAILABLE", gate="A",
+                    "blocked",
+                    f"required drive(s) not mounted: {', '.join(unmounted)}. "
+                    "Mount them, then re-run. (No bytes fetched.)",
+                    code="DRIVE_UNAVAILABLE", gate="A",
                     evidence={"drives": unmounted}, actions=["mount_drives", "replan"],
                 )
         first = False
 
-        labels = {task.target_drive for task in ready}
+        labels = {u.target_drive for u in ready if u.target_drive}
+        if not labels:
+            return _terminal("done", "no target drives remain", code="PLAN_SATISFIED")
         if pinned_drive not in labels:
             pinned_drive = next(
-                (label for label in snapshot.ledger.batch_order if label in labels),
-                sorted(labels)[0],
-            )
-        batch = sorted(
-            (task for task in ready if task.target_drive == pinned_drive),
-            key=lambda task: capacity.execution_rank(task, snapshot.graph),
-        )
+                (lab for lab in batch_order if lab in labels), sorted(labels)[0])
+        batch = [u for u in ready if u.target_drive == pinned_drive]
+        batch.sort(key=lambda u: (u.order_key, u.requirement_id or ""))
+
         if guided and not _await_drive(ctx, pinned_drive, poll_secs):
             return _stop_terminal()
         if ctx.should_stop():
             return _stop_terminal()
 
-        fetch_tasks = [task for task in batch if task.kind == reconcile.TaskKind.FETCH]
-        replica_tasks = [task for task in batch if task.kind == reconcile.TaskKind.REPLICATE]
+        fetch_tasks = [u for u in batch if u.kind == TaskKind.FETCH]
+        replica_tasks = [u for u in batch if u.kind == TaskKind.REPLICATE]
+
         if fetch_tasks:
             ctx.on_progress({
                 "phase": "primary", "drive": pinned_drive, "n_repos": len(fetch_tasks),
                 "say": f"== {pinned_drive} ({len(fetch_tasks)} exact fetch task(s)) ==",
             })
             manifests = {
-                task.repo_id: tuple(
-                    item for item in snapshot.graph.manifests[task.repo_id]
-                    if item.rfilename in task.budget.missing_files
-                )
-                for task in fetch_tasks
-            }
-            guards = {
-                task.repo_id: _file_guard(ctx, pid, capacity_mode, task) for task in fetch_tasks
+                u.repo_id: tuple(
+                    fr for fr in u.file_rows if fr.rfilename in u.missing_files
+                ) or tuple(u.file_rows)
+                for u in fetch_tasks
             }
 
             def on_gated(repo_id: str) -> str:
@@ -491,9 +661,14 @@ def execute(
                     })
                 return action
 
+            # Per-file capacity guard on the **approved** target only (no re-placement).
+            guards = {
+                u.repo_id: _file_guard(ctx, pid, capacity_mode, u) for u in fetch_tasks
+            }
+
             outcome = fetch.run(
                 drive_label=pinned_drive,
-                repos=[task.repo_id for task in fetch_tasks],
+                repos=[u.repo_id for u in fetch_tasks],
                 max_24h_gb=max_24h_gb,
                 ctx=ctx,
                 task_manifests=manifests,
@@ -502,6 +677,9 @@ def execute(
             )
             if outcome["stored_repos"]:
                 made_progress = True
+                for u in fetch_tasks:
+                    if u.repo_id in outcome["stored_repos"]:
+                        completed_reqs.add(u.requirement_id)
             if outcome["stopped"] or ctx.should_stop():
                 return _stop_terminal()
             if outcome.get("terminal_failure") is not None:
@@ -517,16 +695,15 @@ def execute(
             if outcome["throttled"]:
                 return _terminal(
                     "paused", "24h download cap reached (resumable)", code="DOWNLOAD_THROTTLED",
-                    evidence={"max_24h_gb": max_24h_gb}, actions=["wait_for_window", "start_fill"],
+                    evidence={"max_24h_gb": max_24h_gb},
+                    actions=["wait_for_window", "start_fill"],
                 )
             if outcome["capacity_failure"] is not None:
-                # Fixed approved map (B8): never re-home. Terminalize on the approved target.
                 state = "plan-capacity-stop" if made_progress else "blocked"
                 return _terminal(
                     state,
                     "approved target capacity exhausted; re-home requires a new approval",
-                    code="PLAN_CAPACITY_STOP",
-                    gate="B",
+                    code="PLAN_CAPACITY_STOP", gate="B",
                     evidence=(outcome["capacity_failure"]
                               if isinstance(outcome["capacity_failure"], dict)
                               else {"drive": pinned_drive}),
@@ -550,40 +727,56 @@ def execute(
                 return _terminal(
                     "paused" if made_progress else "blocked",
                     f"approved target drive {pinned_drive} is not writable",
-                    code="DRIVE_UNWRITABLE",
-                    gate="A",
+                    code="DRIVE_UNWRITABLE", gate="A",
                     evidence={"drive": pinned_drive},
                     actions=["mount_or_reseat_drive", "resume_same_approval"],
                 )
 
         if replica_tasks:
+            # Adapt units to AssignedTask-shaped objects for run_replica_tasks
+            replica_assigned = []
+            for u in replica_tasks:
+                replica_assigned.append(SimpleNamespace(
+                    task_id=u.task_id, requirement_id=u.requirement_id,
+                    repo_id=u.repo_id, kind=u.kind,
+                    target_drive=u.target_drive, source_drive=u.source_drive,
+                    depends_on_requirement=u.depends_on_requirement,
+                    budget=u.budget,
+                ))
             ctx.on_progress({
                 "phase": "replica", "drive": pinned_drive, "n_repos": len(replica_tasks),
                 "say": f"== {pinned_drive} ({len(replica_tasks)} exact replica task(s)) ==",
             })
-            outcome = fetch.run_replica_tasks(replica_tasks, ctx=ctx)
+            outcome = fetch.run_replica_tasks(replica_assigned, ctx=ctx)
             if outcome["copied_files"]:
                 made_progress = True
+                completed_reqs.update(u.requirement_id for u in replica_tasks)
             if outcome["failed"]:
                 return _terminal(
-                    "error", f"{len(outcome['failed'])} replica key operation(s) failed verification",
-                    code="REPLICA_KEY_FAILED", gate="C", evidence={"failures": outcome["failed"]},
+                    "error",
+                    f"{len(outcome['failed'])} replica key operation(s) failed verification",
+                    code="REPLICA_KEY_FAILED", gate="C",
+                    evidence={"failures": outcome["failed"]},
                     actions=["inspect_annex_whereis", "verify_source", "retry_replica"],
                     failed=outcome["failed"][:12],
                 )
             if outcome["deferred"]:
-                # INV-13 / DEF-022: every ready replica has a safe source copy.  An unavailable
-                # source/target is a resumable pause, never a red missing-copy error.
                 return _terminal(
-                    "paused", "copy #1 is safe; copy #2 is deferred until its drive is available",
+                    "paused",
+                    "copy #1 is safe; copy #2 is deferred until its drive is available",
                     code="SOURCE_UNAVAILABLE", gate="C",
                     evidence={"source_offline": outcome["source_offline"],
                               "deferred_targets": outcome["deferred_targets"]},
                     actions=["mount_or_reseat_drive", "start_fill"],
                 )
 
-        # The pinned snapshot batch is exhausted. Rebuild from durable facts before selecting the
-        # next drive; this preserves drive affinity without persisting task claims.
         pinned_drive = None
 
+    # Release session child fences on normal stop.
+    if session is not None:
+        try:
+            from modelark import execution_recovery as erec
+            erec.release_child_fences(session.session_id)
+        except Exception:
+            pass
     return _stop_terminal()

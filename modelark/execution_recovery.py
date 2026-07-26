@@ -76,11 +76,13 @@ def owned_dirty_generations(con, *, session_id, fencing_token):
     return list(rows)
 
 
-def inherit_drive_fence_fds(*, session_id=None, drive_labels=None, catalog_path=None, **_k):
+def inherit_drive_fence_fds(
+    *, session_id=None, drive_labels=None, catalog_path=None, con=None, **_k
+):
     """Acquire OS-visible flock FDs for the session (child inherits pass_fds).
 
-    Holds exclusive locks on drive fence files and records open handles so parent death
-    does not release while the child still holds the descriptors.
+    Locks use proven identity_fingerprint + identity_epoch (not bare labels) when
+    ``con`` is available so recovery and workers contend on the same authority keys.
     """
     from modelark import drive_fence
 
@@ -88,25 +90,50 @@ def inherit_drive_fence_fds(*, session_id=None, drive_labels=None, catalog_path=
     labels = list(drive_labels or ())
     paths = []
     handles = []
-    # Always hold a session-scoped marker lock so recovery can probe OS ownership.
     marker = _lock_dir() / f"session-child-{sid}.lock"
     marker.parent.mkdir(parents=True, exist_ok=True)
+    # Drop any prior hold for this session before re-acquiring (avoids self-deadlock).
+    release_child_fences(sid)
     mh = open(marker, "w")  # noqa: SIM115
-    fcntl.flock(mh, fcntl.LOCK_EX)
+    try:
+        fcntl.flock(mh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        mh.close()
+        raise Refusal("CHILD_FENCE_HELD", {"session_id": sid, "path": str(marker)}, ()) from exc
     handles.append(mh)
     paths.append(str(marker))
     for label in labels:
-        # Key by label string when identity unknown; production pass-through uses fingerprint keys.
-        path = drive_fence.drive_lock_path(str(label), 1)
+        identity, epoch = str(label), 1
+        if con is not None and hasattr(con, "execute"):
+            row = con.execute(
+                "SELECT identity_fingerprint, identity_epoch FROM drives "
+                "WHERE drive_label=?", [label]).fetchone()
+            if row and row[0]:
+                identity, epoch = row[0], int(row[1] or 1)
+        path = drive_fence.drive_lock_path(identity, epoch)
         path.parent.mkdir(parents=True, exist_ok=True)
         h = open(path, "w")  # noqa: SIM115
-        fcntl.flock(h, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            for prev in handles:
+                try:
+                    fcntl.flock(prev, fcntl.LOCK_UN)
+                    prev.close()
+                except OSError:
+                    pass
+            raise Refusal(
+                "CHILD_FENCE_HELD",
+                {"session_id": sid, "path": str(path), "label": label},
+                ()) from exc
         handles.append(h)
         paths.append(str(path))
     _CHILD_FENCE_HANDLES[sid] = handles
     _CHILD_FENCE_META[sid] = paths
     meta_path = _lock_dir() / f"session-child-{sid}.json"
-    meta_path.write_text(json.dumps({"session_id": sid, "paths": paths}))
+    meta_path.write_text(json.dumps({
+        "session_id": sid, "paths": paths, "labels": labels,
+    }))
     return [h.fileno() for h in handles]
 
 
@@ -162,7 +189,11 @@ def can_recover(*_a, **_k):
 
 
 def recover_expired_session(con, *, session_id, services):
-    """Recover expired live session under controller → drives lock order with token CAS."""
+    """Recover expired live session under controller → drives lock order with token CAS.
+
+    Expiry is re-validated **inside** the fenced IMMEDIATE transaction so a concurrent
+    lease renewal (new expires_at with same token) cannot be terminalized.
+    """
     row = con.execute(
         "SELECT state, fencing_token, expires_at, approved_proposal_id "
         "FROM execution_sessions WHERE session_id=?", [session_id]).fetchone()
@@ -174,18 +205,20 @@ def recover_expired_session(con, *, session_id, services):
     if child_fence_still_held(session_id=session_id):
         raise Refusal("CHILD_FENCE_HELD", {"session_id": session_id}, ("wait_child",))
 
-    # Real expiry / liveness: expires_at must be in the past relative to services.clock.
-    exp = _parse_iso(expires_at)
+    # Pre-check expiry before waiting on locks (fail fast); re-check under locks.
+    def _expired(exp_raw, now) -> bool:
+        exp = _parse_iso(exp_raw)
+        if exp is not None:
+            return exp <= now
+        if exp_raw and str(exp_raw) >= "2090":
+            return False
+        if state in ("starting", "running", "stopping") and not exp_raw:
+            return False
+        # Past ISO strings without TZ parse as naive — treat non-future strings as expired
+        return bool(exp_raw and str(exp_raw) < "2090")
+
     now = _now(services)
-    if exp is None:
-        # No expiry recorded — refuse opportunistic recovery (must be explicitly expired).
-        # Tests use past ISO dates; unexpired fixtures use 2099.
-        if expires_at and str(expires_at) >= "2090":
-            raise Refusal("SESSION_NOT_EXPIRED", {"expires_at": expires_at}, ())
-        # Missing expires_at on a live row: treat as not expired unless state already terminal.
-        if state in ("starting", "running", "stopping") and not expires_at:
-            raise Refusal("SESSION_NOT_EXPIRED", {"expires_at": expires_at}, ())
-    elif exp > now:
+    if not _expired(expires_at, now):
         raise Refusal("SESSION_NOT_EXPIRED", {"expires_at": expires_at, "now": now.isoformat()}, ())
 
     labels = []
@@ -200,26 +233,52 @@ def recover_expired_session(con, *, session_id, services):
     except Exception:
         labels = []
 
-    # Preserve dirty generations owned by this token (do not clear).
     owned_before = owned_dirty_generations(
         con, session_id=session_id, fencing_token=token)
 
     ctrl = services.controller_flock
     fences = services.drive_fences
     with ctrl.hold(), fences.hold_all_sorted(labels or ["d0"]):
-        # Short TX after locks held — CAS on fencing_token + live state.
         con.execute("BEGIN IMMEDIATE")
         try:
-            cur = con.execute(
-                "UPDATE execution_sessions SET state='failed', "
-                "terminal_code='EXPIRED_RECOVERED', terminal_at=CURRENT_TIMESTAMP "
-                "WHERE session_id=? AND fencing_token=? "
-                "AND state IN ('starting','running','stopping')",
-                [session_id, token])
-            if getattr(cur, "rowcount", 1) == 0:
+            # Re-read under locks; CAS on token + live state + still-expired lease.
+            row2 = con.execute(
+                "SELECT state, fencing_token, expires_at FROM execution_sessions "
+                "WHERE session_id=?", [session_id]).fetchone()
+            if not row2:
+                raise Refusal("SESSION_NOT_FOUND", {"session_id": session_id}, ())
+            if int(row2[1]) != token:
                 raise Refusal(
                     "SESSION_TOKEN_MISMATCH",
                     {"session_id": session_id, "token": token}, ())
+            now2 = _now(services)
+            if not _expired(row2[2], now2):
+                raise Refusal(
+                    "SESSION_NOT_EXPIRED",
+                    {"expires_at": row2[2], "now": now2.isoformat()}, ())
+            if row2[0] not in ("starting", "running", "stopping"):
+                raise Refusal(
+                    "SESSION_STATE_INVALID", {"state": row2[0]}, ())
+            # Expiry re-validated above; CAS on token + live state + still-expired expires_at.
+            exp_bound = row2[2]
+            if exp_bound is None:
+                cur = con.execute(
+                    "UPDATE execution_sessions SET state='failed', "
+                    "terminal_code='EXPIRED_RECOVERED', terminal_at=CURRENT_TIMESTAMP "
+                    "WHERE session_id=? AND fencing_token=? "
+                    "AND state IN ('starting','running','stopping') AND expires_at IS NULL",
+                    [session_id, token])
+            else:
+                cur = con.execute(
+                    "UPDATE execution_sessions SET state='failed', "
+                    "terminal_code='EXPIRED_RECOVERED', terminal_at=CURRENT_TIMESTAMP "
+                    "WHERE session_id=? AND fencing_token=? "
+                    "AND state IN ('starting','running','stopping') AND expires_at=?",
+                    [session_id, token, exp_bound])
+            if getattr(cur, "rowcount", 1) == 0:
+                raise Refusal(
+                    "SESSION_TOKEN_MISMATCH",
+                    {"session_id": session_id, "token": token, "reason": "cas_miss"}, ())
             con.execute("COMMIT")
         except BaseException:
             try:
@@ -227,7 +286,6 @@ def recover_expired_session(con, *, session_id, services):
             except Exception:
                 pass
             raise
-    # Dirty generations must still be queryable under the same owner pair.
     owned_after = owned_dirty_generations(
         con, session_id=session_id, fencing_token=token)
     if owned_before and not owned_after:

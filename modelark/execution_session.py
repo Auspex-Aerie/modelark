@@ -161,7 +161,7 @@ def start_session(con, proposal_id, predecessor_id, services):
                 {"reason": "execution_config_hostile"},
                 ("preview_again",))
 
-        # Config binding check (B7): unbound / pre-PR09 proposals refuse start.
+        # Config binding: unbound / pre-PR09, or drift vs stored proposal fields / cfg: hash.
         sem = proposal.get("semantic_input_hash")
         if not sem or sem == "UNBOUND_PRE_PR09" or (
                 isinstance(sem, str) and len(sem) != 64 and not str(sem).startswith("cfg:")):
@@ -173,6 +173,33 @@ def start_session(con, proposal_id, predecessor_id, services):
             return Refusal(
                 "APPROVED_INPUT_CHANGED",
                 {"reason": "execution_config_mismatch"},
+                ("preview_again",))
+        # Graph-affecting fields on the approval vs current config (catalog authority).
+        for field in ("capacity_mode", "policy_version", "solver_version"):
+            prop_v = proposal.get(field)
+            cur_v = (frozen.values or {}).get(field) if hasattr(frozen, "values") else current_config.get(field)
+            if prop_v is not None and cur_v is not None and str(prop_v) != str(cur_v):
+                return Refusal(
+                    "APPROVED_INPUT_CHANGED",
+                    {"reason": "execution_config_field", "field": field,
+                     "approved": prop_v, "current": cur_v},
+                    ("preview_again",))
+        # Full graph-affecting hash: refuse when current frozen config drifts from a
+        # recomputation that forces approved capacity_mode/policy/solver into the payload.
+        approved_cfg = {
+            "capacity_mode": proposal.get("capacity_mode") or "guaranteed",
+            "policy_version": proposal.get("policy_version") or "1",
+            "solver_version": proposal.get("solver_version") or "1",
+            "compression": (frozen.values or {}).get("compression"),
+            "numcopies_default": (frozen.values or {}).get("numcopies_default"),
+        }
+        approved_cfg = {k: v for k, v in approved_cfg.items() if v is not None}
+        if frozen.canonical_hash != ecfg.hash_config(approved_cfg):
+            return Refusal(
+                "APPROVED_INPUT_CHANGED",
+                {"reason": "execution_config_hash",
+                 "frozen": frozen.canonical_hash,
+                 "approved_binding": ecfg.hash_config(approved_cfg)},
                 ("preview_again",))
 
         if live_session_exists(con):
@@ -194,7 +221,7 @@ def start_session(con, proposal_id, predecessor_id, services):
                      "got": predecessor.approved_proposal_id},
                     ("start_or_preview",))
 
-        # Current input / graph from catalog facts (not fabricated drive identities).
+        # Current input / graph recomputed from **catalog authority** (not proposal self-copy).
         current_input, current_graph = _catalog_projection_bundle(
             con, proposal, relevant, services, current_config)
         projected = eproj.project_pure(
@@ -203,39 +230,55 @@ def start_session(con, proposal_id, predecessor_id, services):
         if isinstance(projected, Refusal):
             return projected
 
-        token = allocate_next_fencing_token(con)
-        if predecessor is not None:
-            token = max(token, int(predecessor.fencing_token) + 1)
-            con.execute(
-                "UPDATE planner_state SET next_fencing_token=? WHERE singleton_id=1 "
-                "AND next_fencing_token < ?",
-                [token, token])
-
+        # Atomic token allocation + session INSERT under fences (single BEGIN IMMEDIATE).
         bound_rev = planner_revision(con)
         sid = str(uuid.uuid4())
         controller = getattr(services, "controller_identity", None) or (
             f"controller-{getattr(getattr(services, 'worker', None), 'identity', 'local')}")
         worker = getattr(services, "worker", None)
         worker_id = getattr(worker, "identity", None)
-        # Controller and worker must be distinct identities when both known.
         if worker_id and str(worker_id) == str(controller):
             controller = f"controller-{controller}"
-
         lease_ttl = int(getattr(services, "lease_ttl", None) or 3600)
         expires_at = _expiry_iso(services, lease_ttl)
+        pred_token = int(predecessor.fencing_token) if predecessor is not None else 0
 
-        con.execute(
-            "INSERT INTO execution_sessions("
-            "session_id,plan_id,approved_proposal_id,resumed_from_session_id,"
-            "controller_identity,worker_identity,state,bound_planner_revision,fencing_token,"
-            "expires_at) VALUES(?,?,?,?,?,NULL,'starting',?,?,?)",
-            [
-                sid, proposal.get("plan_id") or "ark", proposal_id,
-                predecessor.session_id if predecessor else None,
-                str(controller),
-                bound_rev, token,
-                expires_at,
-            ])
+        con.execute("BEGIN IMMEDIATE")
+        try:
+            # Re-check live session inside TX.
+            if live_session_exists(con):
+                raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
+            con.execute(
+                "UPDATE planner_state SET next_fencing_token = next_fencing_token + 1 "
+                "WHERE singleton_id=1")
+            token = int(con.execute(
+                "SELECT next_fencing_token FROM planner_state WHERE singleton_id=1"
+            ).fetchone()[0])
+            if predecessor is not None and token <= pred_token:
+                token = pred_token + 1
+                con.execute(
+                    "UPDATE planner_state SET next_fencing_token=? WHERE singleton_id=1",
+                    [token])
+            con.execute(
+                "INSERT INTO execution_sessions("
+                "session_id,plan_id,approved_proposal_id,resumed_from_session_id,"
+                "controller_identity,worker_identity,state,bound_planner_revision,fencing_token,"
+                "expires_at) VALUES(?,?,?,?,?,NULL,'starting',?,?,?)",
+                [
+                    sid, proposal.get("plan_id") or "ark", proposal_id,
+                    predecessor.session_id if predecessor else None,
+                    str(controller),
+                    bound_rev, token,
+                    expires_at,
+                ])
+            con.execute("COMMIT")
+        except BaseException:
+            try:
+                con.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+
         session = SimpleNamespace(
             session_id=sid,
             plan_id=proposal.get("plan_id") or "ark",
@@ -248,8 +291,6 @@ def start_session(con, proposal_id, predecessor_id, services):
             fencing_token=token,
             expires_at=expires_at,
         )
-        # Optional auto-claim (production execute path sets services.auto_claim_worker).
-        # Gate-1 lifecycle tests claim separately after start (state must remain starting).
         if worker_id and getattr(services, "auto_claim_worker", False):
             claim_worker(
                 con, session_id=sid, fencing_token=token,
@@ -322,10 +363,38 @@ def _catalog_projection_bundle(con, proposal, relevant, services, current_config
                 kind="offline", executable=(not getattr(d, "offline", False)),
                 admissible_free=10**12)
 
-    manifests = {
-        t.get("repo_id"): t.get("full_manifest_hash")
-        for t in (proposal.get("tasks") or ()) if t.get("repo_id")
-    }
+    # Recompute manifests from catalog files (not proposal self-copy).
+    from modelark.proposal import _manifest_hash, _semantic_input_hash, _requirement_set_hash
+    repos = sorted({t.get("repo_id") for t in (proposal.get("tasks") or ()) if t.get("repo_id")})
+    manifests = {repo: _manifest_hash(con, repo) for repo in repos}
+
+    # Semantic / requirement authority from catalog.
+    plan_id = proposal.get("plan_id") or "ark"
+    mut = (proposal.get("mutation_kind") or "adopt_current",
+           tuple(proposal.get("mutation_args") or ()))
+    try:
+        current_semantic = _semantic_input_hash(con, plan_id, mut)
+    except Exception:
+        current_semantic = proposal.get("semantic_input_hash")
+
+    # Certificates: prefer catalog archived presence as baseline proof when marked baseline.
+    certificates = {}
+    for t in (proposal.get("tasks") or ()):
+        if t.get("row_kind") != "baseline_satisfied":
+            continue
+        rid = t["requirement_id"]
+        # Catalog authority: satisfying drive must still hold matching archived facts.
+        cert = t.get("baseline_certificate")
+        label = t.get("satisfying_drive") or t.get("target_drive")
+        if label:
+            row = con.execute(
+                "SELECT orig_sha256 FROM archived WHERE repo_id=? AND drive_label=? LIMIT 1",
+                [t.get("repo_id"), label]).fetchone()
+            if row:
+                certificates[rid] = cert or row[0]
+            else:
+                certificates[rid] = cert  # project_pure may still refuse on drive lifecycle
+
     current_input = SimpleNamespace(
         manifests=manifests,
         archived=archived,
@@ -334,17 +403,25 @@ def _catalog_projection_bundle(con, proposal, relevant, services, current_config
         evidence=evidence,
         file_hash_evidence={},
         semantic_hashes=SimpleNamespace(
-            execution_invariants=proposal.get("semantic_input_hash")),
-        certificates={
-            t["requirement_id"]: t.get("baseline_certificate")
-            for t in (proposal.get("tasks") or ())
-            if t.get("row_kind") == "baseline_satisfied"
-        },
+            execution_invariants=current_semantic,
+            approval_input=current_semantic,
+        ),
+        certificates=certificates,
         execution_config=current_config,
     )
+    # Current requirement set from catalog selection (expanded set → refuse).
+    sel = [r[0] for r in con.execute(
+        "SELECT repo_id FROM selection WHERE finalized_at IS NOT NULL ORDER BY repo_id"
+    ).fetchall()]
+    # Keep proposal requirement ids as baseline graph; extras from selection expansion.
+    prop_ids = [t.get("requirement_id") for t in (proposal.get("tasks") or ())]
+    extra = [f"primary:{r}" for r in sel if f"primary:{r}" not in prop_ids
+             and not any(t.get("repo_id") == r for t in (proposal.get("tasks") or ()))]
     current_graph = SimpleNamespace(
-        requirement_ids=[t.get("requirement_id") for t in proposal.get("tasks") or ()],
-        requirement_set_hash=proposal.get("requirement_set_hash"),
+        requirement_ids=list(prop_ids) + extra,
+        requirement_set_hash=_requirement_set_hash(
+            [{"requirement_id": i} for i in (list(prop_ids) + extra)]
+        ) if extra else proposal.get("requirement_set_hash"),
     )
     return current_input, current_graph
 
