@@ -933,6 +933,8 @@ def validate_exact_assignment(con, proposal: Mapping,
     """Re-validate the stored assignment as a joint plan against current evidence.
 
     Never re-optimizes. Checks:
+    - A10: every task's full_manifest_hash matches current catalog content;
+    - baseline certificate recomputed from durable archive evidence;
     - distinct media per repo (numcopies durability);
     - every executable has a target;
     - non-executable evidence is refused;
@@ -964,9 +966,22 @@ def validate_exact_assignment(con, proposal: Mapping,
                           ("preview_again",))
 
     for t in tasks:
+        # A10: every proposal task is pinned to catalog content at draft time.
+        # Recompute current full_manifest_hash for all rows (baseline + executable),
+        # not only baseline_satisfied — otherwise executable content drift can approve.
+        if t.get("repo_id") is not None and t.get("full_manifest_hash") is not None:
+            current_mh = _manifest_hash(con, t["repo_id"])
+            if current_mh != t.get("full_manifest_hash"):
+                raise Refusal(
+                    "APPROVED_INPUT_CHANGED",
+                    {"task": t.get("requirement_id"), "reason": "full_manifest_hash",
+                     "stored": t.get("full_manifest_hash"), "current": current_mh},
+                    ("preview_again",))
+        else:
+            current_mh = None
+
         if t.get("row_kind") == "baseline_satisfied":
-            # A10: revalidate against *current* catalog manifest + durable archive evidence
-            # (not the stored full_manifest_hash alone, and not annex-key alone).
+            # A10: durable archive evidence + certificate (not annex-key alone).
             label = t.get("satisfying_drive") or t.get("target_drive")
             if not label:
                 raise Refusal("EXACT_ASSIGNMENT_REJECTED",
@@ -980,13 +995,8 @@ def validate_exact_assignment(con, proposal: Mapping,
                               {"task": t.get("requirement_id"), "drive": label,
                                "reason": "missing_identity_fingerprint"},
                               ("preview_again",))
-            current_mh = _manifest_hash(con, t["repo_id"])
-            if current_mh != t.get("full_manifest_hash"):
-                raise Refusal(
-                    "APPROVED_INPUT_CHANGED",
-                    {"task": t.get("requirement_id"), "reason": "full_manifest_hash",
-                     "stored": t.get("full_manifest_hash"), "current": current_mh},
-                    ("preview_again",))
+            if current_mh is None:
+                current_mh = _manifest_hash(con, t["repo_id"])
             cert_files = _baseline_file_evidence(con, t["repo_id"], label)
             recomputed = canonical.baseline_satisfaction_certificate(
                 requirement_id=t["requirement_id"],
