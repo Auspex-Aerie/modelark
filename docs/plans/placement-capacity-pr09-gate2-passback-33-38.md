@@ -12,18 +12,21 @@
 |------|--------|
 | PR | [#54](https://github.com/Auspex-Aerie/modelark/pull/54) (draft, open — **not merged**) |
 | Branch | `fix/placement-capacity-pr09-execution-projection` |
-| **Review tip** | `81061a8e81ae3df6b829e62e1c24059c0a036979` |
+| **Code tip to re-review** | `e3530667f96d2fcb2a7fef14e4d2455210f84bfd` |
 | Remediation commit | `52322ded7fe3595b600e0d2e74c4e32703cfb975` |
 | Prior withheld head | `d88d1b1b312bf600c2af389763fbe4e29f217b62` |
-| Written handback | `docs/plans/placement-capacity-pr09-gate2-handback-33-38.md` |
+| Implementer handback | `docs/plans/placement-capacity-pr09-gate2-handback-33-38.md` |
+| This passback | `docs/plans/placement-capacity-pr09-gate2-passback-33-38.md` |
 
 Gate 3 remains unauthorized. Implementer stop: no ready mark, no merge.
+
+The code tip above includes remediation (`52322de`) plus the implementer handback commit. Later commits on the branch may add only this passback document.
 
 ---
 
 ## What was remediating
 
-Human Gate-2 withheld at `d88d1b1` for findings **33–38**. One remediation cycle produced tip `81061a8` (code `52322de` + handback).
+Human Gate-2 withheld at `d88d1b1` for findings **33–38**. One remediation cycle produced code tip `e353066` (code `52322de` + handback).
 
 ---
 
@@ -56,15 +59,15 @@ Production: `drive_mutation.py`, `execution_session.py`, `proposal.py`, `fetch.p
 
 ---
 
-## Verification on tip
+## Verification on code tip
 
 | Check | Result |
 |-------|--------|
 | Full pytest (local) | **580 passed** |
 | `python tests/test_replan.py` | all passed |
 | Ruff / `git diff --check` | clean |
-| GitHub CI (3.10, 3.12, e2e) | **SUCCESS** |
-| Greptile (round 1/3) | **SUCCESS** — 39 files, **0 comments** |
+| GitHub CI (3.10, 3.12, e2e) on `e353066` | **SUCCESS** |
+| Greptile (round 1/3) on `e353066` | **SUCCESS** — 39 files, **0 comments** |
 
 ---
 
@@ -77,6 +80,6 @@ Production: `drive_mutation.py`, `execution_session.py`, `proposal.py`, `fetch.p
 
 ## Requested reviewer action
 
-Re-review tip **`e353066`** against findings **33–38** and RFC-002 / DEC-049.  
+Re-review code tip **`e353066`** against findings **33–38** and RFC-002 / DEC-049.  
 Automation is green; human Gate-2 acceptance is still required.  
 **Do not merge or start Gate 3** from this passback.
