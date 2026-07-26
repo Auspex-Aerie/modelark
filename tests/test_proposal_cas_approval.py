@@ -994,6 +994,29 @@ def test_baseline_archived_evidence_drift_refuses_approve():
     )
 
 
+def test_missing_catalog_identity_does_not_satisfy_baseline():
+    """Greptile P1: files without sha256 and size_bytes never count as complete archives."""
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    # Strip catalog identity so only the filename remains.
+    con.execute(
+        "UPDATE files SET sha256=NULL, size_bytes=NULL "
+        "WHERE repo_id='org/m' AND rfilename='model.safetensors'")
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,stored_bytes,"
+        "orig_sha256) VALUES('org/m','model.safetensors','d0',0,100,100,?)",
+        ["1" * 64])
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    kinds = [r[0] for r in con.execute(
+        "SELECT row_kind FROM proposal_tasks WHERE proposal_id=?", [pid]).fetchall()]
+    assert "baseline_satisfied" not in kinds, (
+        f"filename-only archive must not satisfy baseline; kinds={kinds}")
+    assert "executable" in kinds, kinds
+
+
 def test_default_evidence_is_not_catalog_free_as_live():
     """Finding 38: default services must not invent live free from drives.free_bytes."""
     prop = _proposal()
