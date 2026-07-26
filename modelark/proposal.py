@@ -102,21 +102,24 @@ def graph_write(con, op: Callable[[Any], Any]) -> Any:
     """Run ``op(con)`` under BEGIN IMMEDIATE; bump revision unless proven_noop.
 
     Rolls back graph mutation and revision together on any failure (A3 atomicity).
-    PR-09: refuse while a live execution session exists (FILL_SESSION_ACTIVE).
+    PR-09: refuse while a live execution session exists (FILL_SESSION_ACTIVE),
+    unless the caller is inside ``session_write`` (authorized worker path).
     """
     # Live-session exclusion before opening the write transaction (B3 / B13).
     try:
+        import modelark.execution_session as _es
         from modelark.execution_session import live_session_exists, live_owner
-        if live_session_exists(con):
+        if getattr(_es, "_SESSION_WRITE_DEPTH", 0) == 0 and live_session_exists(con):
             raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
     except ImportError:
         pass
     con.execute("BEGIN IMMEDIATE")
     try:
-        # Re-check inside TX for races
+        # Re-check inside TX for races (still allow authorized session_write depth).
         try:
+            import modelark.execution_session as _es
             from modelark.execution_session import live_session_exists, live_owner
-            if live_session_exists(con):
+            if getattr(_es, "_SESSION_WRITE_DEPTH", 0) == 0 and live_session_exists(con):
                 raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
         except ImportError:
             pass
@@ -681,11 +684,28 @@ def preview_pure(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", 
     tasks_n = _normalize_tasks_for_hash(tasks)
     files_n = _normalize_files_for_hash(files)
     semantic = _semantic_input_hash(con, plan_id, mutation)
+    # Bind complete graph-affecting config at draft time (B7 / finding 25).
+    from modelark.execution_config import hash_config
+    from modelark import wishlist as _wl
+    try:
+        compression = dict(_wl.compression() or {})
+    except Exception:
+        compression = {"enabled": True, "codec": "streamznn", "level": 3}
+    cfg_hash = hash_config({
+        "capacity_mode": capacity_mode,
+        "policy_version": "1",
+        "solver_version": "1",
+        "compression": compression,
+        "numcopies_default": 1,
+    })
     header = _header_from_facts(
         plan_id=plan_id, based_on=rev, mutation=mutation, tasks=tasks_n,
         capacity_mode=capacity_mode, gate_b_code=gate,
         selection_before=sel_before, selection_after=sel_after, semantic=semantic,
     )
+    # Persist complete approved-config binding as derivation_mode only (included in
+    # proposal_hash / hash_stored_proposal). Do not add non-canonical header keys.
+    header["derivation_mode"] = f"ecfg:{cfg_hash}"
     digest = canonical.proposal_hash(header, tasks_n, files_n)
     return {
         "header": header,

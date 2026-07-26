@@ -89,14 +89,20 @@ def seed_plan_selection(con, *, repos=("org/a", "org/b"), with_archive_on=None):
 def default_services(**overrides):
     """RFC start/recovery services: clock, config, controller/drive fences, worker, capacity."""
     clock = SimpleNamespace(now=lambda: "2026-01-01T00:00:00Z")
-    config = SimpleNamespace(
-        read_graph_affecting_config=lambda: {
+    def _read_cfg():
+        try:
+            from modelark import wishlist
+            compression = dict(wishlist.compression() or {})
+        except Exception:
+            compression = {"enabled": True, "codec": "streamznn", "level": 3}
+        return {
             "capacity_mode": "guaranteed",
             "policy_version": "1",
             "solver_version": "1",
-            "compression": {"enabled": True, "codec": "streamznn", "level": 3},
+            "compression": compression,
             "numcopies_default": 1,
-        })
+        }
+    config = SimpleNamespace(read_graph_affecting_config=_read_cfg)
     controller_flock = SimpleNamespace(
         hold=lambda: mock.MagicMock(
             __enter__=lambda s: None, __exit__=lambda *a: False))

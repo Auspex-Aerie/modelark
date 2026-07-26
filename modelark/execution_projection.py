@@ -252,9 +252,33 @@ def project_pure(proposal, current_input, current_graph, session_overlay):
                            ("inspect_integrity",))
         # Certificate must still match stored when we have certs on input
         certs = _g(current_input, "certificates") or {}
-        if cert and certs.get(td.get("requirement_id")) not in (None, cert):
+        got_cert = certs.get(td.get("requirement_id"))
+        if got_cert == "__MISSING__":
+            return Refusal(
+                "APPROVAL_PROJECTION_VIOLATION",
+                {"reason": "baseline_archive_missing", "drive": label,
+                 "repo": td.get("repo_id")},
+                ("inspect_integrity",))
+        if cert and got_cert not in (None, cert):
             return Refusal("APPROVAL_PROJECTION_VIOLATION",
                            {"reason": "baseline_certificate"}, ("inspect_integrity",))
+        # Baseline archival evidence must still exist on the satisfying drive.
+        repo = td.get("repo_id")
+        if label and repo is not None:
+            row = None
+            if isinstance(archived, Mapping):
+                for k, v in archived.items():
+                    if isinstance(k, (list, tuple)) and len(k) >= 3:
+                        if k[0] == repo and k[2] == label:
+                            row = v
+                            break
+                    if k == (repo, "model.safetensors", label):
+                        row = v
+            if not row:
+                return Refusal(
+                    "APPROVAL_PROJECTION_VIOLATION",
+                    {"reason": "baseline_archive_missing", "drive": label, "repo": repo},
+                    ("inspect_integrity",))
 
     remaining: list[_TaskView] = []
     for t in prop_tasks:

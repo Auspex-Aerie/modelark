@@ -25,12 +25,17 @@ def production_services(con=None, *, catalog_path=None, state_dir=None) -> Simpl
 
     class _Config:
         def read_graph_affecting_config(self):
+            from modelark import wishlist as _wl
+            try:
+                compression = dict(_wl.compression() or {})
+            except Exception:
+                compression = {"enabled": True, "codec": "streamznn", "level": 3}
             if con is None:
                 return {
                     "capacity_mode": "guaranteed",
                     "policy_version": "1",
                     "solver_version": "1",
-                    "compression": {"enabled": True, "codec": "streamznn", "level": 3},
+                    "compression": compression,
                     "numcopies_default": 1,
                 }
             prow = plan_mod.active(con) or plan_mod.get(con, "ark")
@@ -39,7 +44,7 @@ def production_services(con=None, *, catalog_path=None, state_dir=None) -> Simpl
                 "capacity_mode": mode,
                 "policy_version": "1",
                 "solver_version": "1",
-                "compression": {"enabled": True, "codec": "streamznn", "level": 3},
+                "compression": compression,
                 "numcopies_default": 1,
             }
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import platform
 import sqlite3
 import time
 from pathlib import Path
@@ -47,8 +48,8 @@ def recompute_fixture_identity(sqlite_path: str | Path) -> dict:
                 "SELECT count(DISTINCT requirement_id) FROM proposal_tasks").fetchone()[0]
             task_count = con.execute("SELECT count(*) FROM proposal_tasks").fetchone()[0]
             trows = con.execute(
-                "SELECT requirement_id, row_kind, repo_id, target_drive, source_drive "
-                "FROM proposal_tasks ORDER BY 1"
+                "SELECT requirement_id, row_kind, repo_id, target_drive, source_drive, "
+                "full_manifest_hash FROM proposal_tasks ORDER BY 1"
             ).fetchall()
             projection_hash = hashlib.sha256(
                 json.dumps(trows, separators=(",", ":"), default=str).encode()
@@ -57,6 +58,7 @@ def recompute_fixture_identity(sqlite_path: str | Path) -> dict:
             requirement_count = int(selected)
             task_count = int(selected)
             projection_hash = None
+            trows = []
 
         rows = con.execute(
             "SELECT repo_id, rfilename, size_bytes, sha256 FROM files ORDER BY 1, 2"
@@ -78,6 +80,7 @@ def recompute_fixture_identity(sqlite_path: str | Path) -> dict:
             "requirement_count": int(requirement_count),
             "task_count": int(task_count),
             "sqlite_path": str(path),
+            "proposal_task_rows": trows,
         }
     finally:
         con.close()
@@ -124,6 +127,7 @@ def validate_acceptance_fixture_descriptor(
                 "ACCEPTANCE_FIXTURE_MISMATCH",
                 {"reason": "canonical_hash"}, ())
 
+    # Never self-authorize: operator identity is a separate required authority.
     if operator_approved_identity is None:
         raise Refusal(
             "ACCEPTANCE_FIXTURE_INVALID",
@@ -150,8 +154,24 @@ def _p95(samples: list[float]) -> float:
     return s[max(0, int(round(0.95 * (len(s) - 1))))]
 
 
+def _load_approved_proposal_envelope(con) -> dict | None:
+    """Load the active approved proposal structure when present (real RFC-001 path)."""
+    row = con.execute(
+        "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
+    ).fetchone()
+    if not row or not row[0]:
+        # Fall back to any approved proposal
+        row = con.execute(
+            "SELECT proposal_id FROM placement_proposals WHERE lifecycle='approved' "
+            "ORDER BY approved_at DESC LIMIT 1").fetchone()
+    if not row or not row[0]:
+        return None
+    from modelark.proposal import load_proposal
+    return load_proposal(con, row[0])
+
+
 def _build_full_capture_callable(sqlite_path: str | Path):
-    """Full capture: recompute fixture identity from SQLite + pure projection over catalog."""
+    """Full path: recompute identity from SQLite + project_pure over approved structure."""
     from modelark.execution_projection import project_pure
     from modelark.proposal import _manifest_hash
 
@@ -161,62 +181,99 @@ def _build_full_capture_callable(sqlite_path: str | Path):
         identity = recompute_fixture_identity(path)
         con = sqlite3.connect(str(path))
         try:
-            # Apply minimal schema views if needed; use raw catalog facts.
-            repos = [r[0] for r in con.execute(
-                "SELECT repo_id FROM selection WHERE finalized_at IS NOT NULL ORDER BY 1"
-            ).fetchall()]
-            tasks = []
-            for i, repo in enumerate(repos):
-                mh = _manifest_hash(con, repo)
-                tasks.append({
-                    "requirement_id": f"primary:{repo}",
-                    "row_kind": "executable",
-                    "repo_id": repo,
-                    "target_drive": "d0",
-                    "source_drive": None,
-                    "full_manifest_hash": mh,
-                    "order_key": i,
-                    "guaranteed_durable": 100,
-                    "identity_epoch": 1,
-                })
-            proposal = {
-                "lifecycle": "approved",
-                "proposal_id": "bench-full",
-                "tasks": tasks,
-                "files": [],
-                "requirement_set_hash": hashlib.sha256(
-                    json.dumps([t["requirement_id"] for t in tasks],
-                               separators=(",", ":")).encode()).hexdigest(),
-                "semantic_input_hash": identity["prepared_canonical_input_hash"],
-            }
-            drives = {
-                "d0": SimpleNamespace(
-                    lifecycle="active", eligibility="enabled",
-                    identity_epoch=1, identity_fingerprint="a" * 64, offline=False),
-            }
+            proposal = _load_approved_proposal_envelope(con)
+            if proposal is None:
+                # No approved proposal: use proposal_tasks table rows if present.
+                tasks = []
+                for r in con.execute(
+                        "SELECT requirement_id, row_kind, repo_id, target_drive, source_drive, "
+                        "full_manifest_hash, order_key, guaranteed_durable, identity_epoch, "
+                        "baseline_certificate FROM proposal_tasks ORDER BY order_key, requirement_id"
+                ).fetchall() if con.execute(
+                        "SELECT name FROM sqlite_master WHERE name='proposal_tasks'").fetchone() else []:
+                    tasks.append({
+                        "requirement_id": r[0], "row_kind": r[1], "repo_id": r[2],
+                        "target_drive": r[3], "source_drive": r[4],
+                        "full_manifest_hash": r[5] or _manifest_hash(con, r[2]),
+                        "order_key": r[6] or 0, "guaranteed_durable": r[7],
+                        "identity_epoch": r[8], "baseline_certificate": r[9],
+                    })
+                if not tasks:
+                    # Last resort: one task per selected repo with catalog manifest — still
+                    # distinct from empty synthetic envelope; marks structure_source.
+                    repos = [r[0] for r in con.execute(
+                        "SELECT repo_id FROM selection WHERE finalized_at IS NOT NULL ORDER BY 1"
+                    ).fetchall()]
+                    for i, repo in enumerate(repos):
+                        tasks.append({
+                            "requirement_id": f"primary:{repo}",
+                            "row_kind": "executable",
+                            "repo_id": repo,
+                            "target_drive": "d0",
+                            "source_drive": None,
+                            "full_manifest_hash": _manifest_hash(con, repo),
+                            "order_key": i,
+                            "guaranteed_durable": 100,
+                            "identity_epoch": 1,
+                        })
+                proposal = {
+                    "lifecycle": "approved",
+                    "proposal_id": "bench-catalog",
+                    "tasks": tasks,
+                    "files": [],
+                    "requirement_set_hash": identity["prepared_projection_hash"],
+                    "semantic_input_hash": identity["prepared_canonical_input_hash"],
+                }
+                structure_source = "catalog_tasks_or_selection"
+            else:
+                structure_source = "approved_proposal"
+                # Refresh manifest hashes from catalog authority for current input.
+                tasks = list(proposal.get("tasks") or ())
+
+            drives = {}
+            for label, epoch, fp, life, elig in con.execute(
+                    "SELECT drive_label, identity_epoch, identity_fingerprint, "
+                    "lifecycle, eligibility FROM drives"):
+                drives[label] = SimpleNamespace(
+                    lifecycle=life or "active", eligibility=elig or "enabled",
+                    identity_epoch=int(epoch or 1),
+                    identity_fingerprint=fp or ("0" * 64), offline=False)
+            if not drives:
+                drives = {
+                    "d0": SimpleNamespace(
+                        lifecycle="active", eligibility="enabled",
+                        identity_epoch=1, identity_fingerprint="a" * 64, offline=False),
+                }
             archived = {}
             for r in con.execute(
                     "SELECT repo_id, rfilename, drive_label, orig_sha256, stored_bytes, orig_bytes "
                     "FROM archived"):
                 archived[(r[0], r[1], r[2])] = {
                     "orig_sha256": r[3], "stored_bytes": r[4], "orig_bytes": r[5]}
-            manifests = {t["repo_id"]: t["full_manifest_hash"] for t in tasks}
+            manifests = {}
+            for t in proposal.get("tasks") or tasks:
+                repo = t.get("repo_id")
+                if repo:
+                    manifests[repo] = _manifest_hash(con, repo)
+            evidence = {
+                lab: SimpleNamespace(kind="offline", executable=True, admissible_free=10**15)
+                for lab in drives
+            }
             inp = SimpleNamespace(
                 manifests=manifests, archived=archived, drives=drives,
-                observed_ratio={}, evidence={
-                    "d0": SimpleNamespace(kind="offline", executable=True, admissible_free=10**15),
-                },
+                observed_ratio={}, evidence=evidence,
                 file_hash_evidence={}, certificates={},
                 semantic_hashes=SimpleNamespace(
-                    execution_invariants=proposal["semantic_input_hash"]),
-                execution_config={"capacity_mode": "guaranteed"},
+                    execution_invariants=proposal.get("semantic_input_hash")),
+                execution_config={"capacity_mode": proposal.get("capacity_mode") or "guaranteed"},
             )
             graph = SimpleNamespace(
-                requirement_ids=[t["requirement_id"] for t in tasks],
-                requirement_set_hash=proposal["requirement_set_hash"],
+                requirement_ids=[t.get("requirement_id") for t in (proposal.get("tasks") or tasks)],
+                requirement_set_hash=proposal.get("requirement_set_hash"),
             )
             out = project_pure(
                 proposal, inp, graph, SimpleNamespace(parked_gated_repos=frozenset()))
+            identity = {**identity, "structure_source": structure_source}
             return identity, out
         finally:
             con.close()
@@ -224,32 +281,14 @@ def _build_full_capture_callable(sqlite_path: str | Path):
     return full_once
 
 
-def _build_pure_callable(sqlite_path: str | Path | None = None):
-    """Pure projection only — same envelope as full once identity is prepared."""
-    if sqlite_path:
-        full = _build_full_capture_callable(sqlite_path)
-
-        def pure_once():
-            return full()[1]
-
-        return pure_once
+def _build_pure_callable_from_prepared(prepared_proposal, prepared_input, prepared_graph):
+    """Pure projection only — uses pre-captured envelopes (no SQLite I/O)."""
     from modelark.execution_projection import project_pure
 
     def pure_once():
-        proposal = {
-            "lifecycle": "approved", "proposal_id": "bench",
-            "tasks": (), "requirement_set_hash": "a" * 64,
-            "semantic_input_hash": "b" * 64,
-        }
-        inp = SimpleNamespace(
-            manifests={}, archived={}, drives={}, observed_ratio={},
-            evidence={}, file_hash_evidence={}, certificates={},
-            semantic_hashes=SimpleNamespace(execution_invariants="b" * 64),
-            execution_config={},
-        )
-        graph = SimpleNamespace(requirement_ids=[], requirement_set_hash="a" * 64)
         return project_pure(
-            proposal, inp, graph, SimpleNamespace(parked_gated_repos=frozenset()))
+            prepared_proposal, prepared_input, prepared_graph,
+            SimpleNamespace(parked_gated_repos=frozenset()))
 
     return pure_once
 
@@ -259,31 +298,40 @@ def run_acceptance_wall_clock(
     fixture_descriptor=None,
     project_fn=None,
     evidence_path=None,
+    operator_approved_identity=None,
     **_k,
 ):
     """Run 5 warm-ups + 30 measured full and pure timings; export evidence artifact."""
     if not fixture_descriptor:
         raise Refusal("ACCEPTANCE_FIXTURE_INVALID", {"reason": "missing"}, ())
-    # Operator identity required — do not self-authorize from the same dict alone
-    # without explicit operator_approved_identity key separation when path present.
-    op = fixture_descriptor.get("operator_approved_identity")
-    if op is None and "operator_bundle" in fixture_descriptor:
-        op = fixture_descriptor["operator_bundle"]
-    # Tests pass full descriptor as both — require validate path.
-    validate_acceptance_fixture_descriptor(
-        {k: v for k, v in fixture_descriptor.items()
-         if k not in ("operator_approved_identity", "operator_bundle")},
-        operator_approved_identity=op if op is not None else dict(fixture_descriptor),
-    )
-    contract = wall_clock_contract()
-    sqlite_path = fixture_descriptor.get("sqlite_path")
-    pure_fn = project_fn or _build_pure_callable(sqlite_path)
-    full_fn = None
-    if sqlite_path:
-        full_fn = _build_full_capture_callable(sqlite_path)
 
+    op = operator_approved_identity
+    if op is None:
+        op = fixture_descriptor.get("operator_approved_identity")
+    # Strip nested operator key from descriptor body for validation
+    body = {k: v for k, v in dict(fixture_descriptor).items()
+            if k not in ("operator_approved_identity", "operator_bundle")}
+    validate_acceptance_fixture_descriptor(body, operator_approved_identity=op)
+
+    contract = wall_clock_contract()
+    sqlite_path = body.get("sqlite_path")
     warmups = int(contract["warmups"])
     runs = int(contract["measured_runs"])
+
+    full_fn = None
+    pure_fn = project_fn
+    prepared_identity = None
+    if sqlite_path:
+        full_fn = _build_full_capture_callable(sqlite_path)
+        # Prepare pure envelope once (no SQLite inside pure loop).
+        prepared_identity, pure_out = full_fn()
+        # Rebuild a pure-only callable that reuses last full envelopes without re-reading SQLite
+        # by capturing proposal/input/graph from a second full_fn structure.
+        # For pure timing we re-run project_pure on the identity-backed structure via a thin wrapper
+        # that does not call recompute_fixture_identity.
+        pure_fn = _pure_only_wrapper(sqlite_path)
+    elif pure_fn is None:
+        pure_fn = _empty_pure_callable()
 
     for _ in range(warmups):
         pure_fn()
@@ -305,8 +353,12 @@ def run_acceptance_wall_clock(
 
     pure_p95 = _p95(pure_samples)
     full_p95 = _p95(full_samples) if full_samples else None
+    pure_ok = pure_p95 <= float(contract["pure_p95_seconds"])
+    full_ok = full_p95 is None or full_p95 <= float(contract["full_p95_seconds"])
+    ok = pure_ok and full_ok
+
     result = {
-        "ok": True,
+        "ok": ok,
         "skipped_measurement": False,
         "contract": contract,
         "warmups": warmups,
@@ -315,20 +367,146 @@ def run_acceptance_wall_clock(
         "full_samples_seconds": full_samples,
         "pure_p95_seconds": pure_p95,
         "full_p95_seconds": full_p95,
-        "pure_p95_within_contract": pure_p95 <= float(contract["pure_p95_seconds"]),
-        "full_p95_within_contract": (
-            full_p95 is None or full_p95 <= float(contract["full_p95_seconds"])),
+        "pure_p95_within_contract": pure_ok,
+        "full_p95_within_contract": full_ok,
+        "host": platform.node(),
+        "python": platform.python_version(),
+        "platform": platform.platform(),
         "fixture_descriptor": {
-            k: fixture_descriptor[k] for k in (
+            k: body[k] for k in (
                 "selected_repository_count", "model_count", "file_count",
-                "source_sqlite_sha256", "harness_generator_version", "sqlite_path",
-            ) if k in fixture_descriptor
+                "source_sqlite_sha256", "prepared_canonical_input_hash",
+                "prepared_projection_hash", "requirement_count", "task_count",
+                "harness_generator_version", "sqlite_path",
+            ) if k in body
         },
+        "prepared_identity": {
+            k: prepared_identity[k] for k in (
+                "selected_repository_count", "model_count", "file_count",
+                "requirement_count", "task_count", "structure_source",
+                "source_sqlite_sha256", "prepared_canonical_input_hash",
+                "prepared_projection_hash",
+            ) if prepared_identity and k in prepared_identity
+        } if prepared_identity else None,
+        "projection_refresh_count": runs,  # one pure projection per measured run
     }
+    if not ok:
+        result["error"] = "WALL_CLOCK_THRESHOLD"
+        result["code"] = "WALL_CLOCK_THRESHOLD"
     if evidence_path:
         emit_acceptance_evidence(result, evidence_path)
         result["evidence_path"] = str(evidence_path)
+    if not ok:
+        raise Refusal(
+            "WALL_CLOCK_THRESHOLD",
+            {"pure_p95": pure_p95, "full_p95": full_p95, "contract": contract},
+            ("optimize_projection", "rerun_on_acceptance_host"))
     return result
+
+
+def _empty_pure_callable():
+    from modelark.execution_projection import project_pure
+
+    def pure_once():
+        proposal = {
+            "lifecycle": "approved", "proposal_id": "bench",
+            "tasks": (), "requirement_set_hash": "a" * 64,
+            "semantic_input_hash": "b" * 64,
+        }
+        inp = SimpleNamespace(
+            manifests={}, archived={}, drives={}, observed_ratio={},
+            evidence={}, file_hash_evidence={}, certificates={},
+            semantic_hashes=SimpleNamespace(execution_invariants="b" * 64),
+            execution_config={},
+        )
+        graph = SimpleNamespace(requirement_ids=[], requirement_set_hash="a" * 64)
+        return project_pure(
+            proposal, inp, graph, SimpleNamespace(parked_gated_repos=frozenset()))
+
+    return pure_once
+
+
+def _pure_only_wrapper(sqlite_path: str | Path):
+    """Capture envelopes once, then pure project_pure without re-reading SQLite."""
+    from modelark.execution_projection import project_pure
+    from modelark.proposal import _manifest_hash
+
+    path = Path(sqlite_path)
+    con = sqlite3.connect(str(path))
+    try:
+        proposal = _load_approved_proposal_envelope(con)
+        identity = recompute_fixture_identity(path)
+        if proposal is None:
+            tasks = []
+            for i, (repo,) in enumerate(con.execute(
+                    "SELECT repo_id FROM selection WHERE finalized_at IS NOT NULL ORDER BY 1")):
+                tasks.append({
+                    "requirement_id": f"primary:{repo}",
+                    "row_kind": "executable",
+                    "repo_id": repo,
+                    "target_drive": "d0",
+                    "source_drive": None,
+                    "full_manifest_hash": _manifest_hash(con, repo),
+                    "order_key": i,
+                    "guaranteed_durable": 100,
+                    "identity_epoch": 1,
+                })
+            proposal = {
+                "lifecycle": "approved",
+                "proposal_id": "bench-pure",
+                "tasks": tasks,
+                "files": [],
+                "requirement_set_hash": identity["prepared_projection_hash"],
+                "semantic_input_hash": identity["prepared_canonical_input_hash"],
+            }
+        drives = {}
+        for label, epoch, fp, life, elig in con.execute(
+                "SELECT drive_label, identity_epoch, identity_fingerprint, "
+                "lifecycle, eligibility FROM drives"):
+            drives[label] = SimpleNamespace(
+                lifecycle=life or "active", eligibility=elig or "enabled",
+                identity_epoch=int(epoch or 1),
+                identity_fingerprint=fp or ("0" * 64), offline=False)
+        if not drives:
+            drives = {
+                "d0": SimpleNamespace(
+                    lifecycle="active", eligibility="enabled",
+                    identity_epoch=1, identity_fingerprint="a" * 64, offline=False),
+            }
+        archived = {}
+        for r in con.execute(
+                "SELECT repo_id, rfilename, drive_label, orig_sha256, stored_bytes, orig_bytes "
+                "FROM archived"):
+            archived[(r[0], r[1], r[2])] = {
+                "orig_sha256": r[3], "stored_bytes": r[4], "orig_bytes": r[5]}
+        manifests = {
+            t.get("repo_id"): _manifest_hash(con, t["repo_id"])
+            for t in (proposal.get("tasks") or ()) if t.get("repo_id")
+        }
+        evidence = {
+            lab: SimpleNamespace(kind="offline", executable=True, admissible_free=10**15)
+            for lab in drives
+        }
+        inp = SimpleNamespace(
+            manifests=manifests, archived=archived, drives=drives,
+            observed_ratio={}, evidence=evidence,
+            file_hash_evidence={}, certificates={},
+            semantic_hashes=SimpleNamespace(
+                execution_invariants=proposal.get("semantic_input_hash")),
+            execution_config={"capacity_mode": proposal.get("capacity_mode") or "guaranteed"},
+        )
+        graph = SimpleNamespace(
+            requirement_ids=[t.get("requirement_id") for t in (proposal.get("tasks") or ())],
+            requirement_set_hash=proposal.get("requirement_set_hash"),
+        )
+    finally:
+        con.close()
+
+    def pure_once():
+        return project_pure(
+            proposal, inp, graph, SimpleNamespace(parked_gated_repos=frozenset()))
+
+    return pure_once
 
 
 def count_projection_refresh_calls(scenario) -> dict:

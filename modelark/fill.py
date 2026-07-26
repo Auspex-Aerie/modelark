@@ -294,82 +294,164 @@ def execute(
     """Execute **only** the approved fixed projection (PR-09 / B8 hard cut).
 
     Never calls ``_reconcile``, ``reconcile_plan``, or ``plan_capacity``. Worker claim
-    failures are fail-closed. Capacity exhaustion does not re-home.
+    failures are fail-closed. Capacity exhaustion does not re-home. Every outcome
+    terminalizes the session and releases session child fences.
     """
     from modelark import execution_service, execution_session as esess, execution_recovery as erec
     from modelark.proposal import Refusal
 
-    if session_start is None:
-        svc_out = execution_service.start_fill(
-            plan_id=plan_id or "ark", con=getattr(ctx, "con", None))
-        if isinstance(svc_out, Refusal):
-            return {
-                "ok": False, "stopped": False, "state": "blocked",
-                "message": str(svc_out), "code": svc_out.code,
-                "evidence": getattr(svc_out, "evidence", None),
-                "actions": list(getattr(svc_out, "actions", ()) or ()),
-                "failed": [],
-            }
-        session_start = svc_out
+    session = None
+    result = None
+    try:
+        if session_start is None:
+            svc_out = execution_service.start_fill(
+                plan_id=plan_id or "ark", con=getattr(ctx, "con", None))
+            if isinstance(svc_out, Refusal):
+                return {
+                    "ok": False, "stopped": False, "state": "blocked",
+                    "message": str(svc_out), "code": svc_out.code,
+                    "evidence": getattr(svc_out, "evidence", None),
+                    "actions": list(getattr(svc_out, "actions", ()) or ()),
+                    "failed": [],
+                }
+            session_start = svc_out
 
-    session = getattr(session_start, "session", None)
-    projection = getattr(session_start, "projection", None)
-    if projection is None or not hasattr(projection, "tasks"):
-        return _terminal(
-            "blocked", "session projection missing; cannot execute without approved map",
-            code="APPROVAL_PROJECTION_MISSING",
-            actions=["preview_again", "start_fill"],
+        session = getattr(session_start, "session", None)
+        projection = getattr(session_start, "projection", None)
+        if projection is None or not hasattr(projection, "tasks"):
+            result = _terminal(
+                "blocked", "session projection missing; cannot execute without approved map",
+                code="APPROVAL_PROJECTION_MISSING",
+                actions=["preview_again", "start_fill"],
+            )
+            return result
+
+        # Fail closed if worker claim fails while session is still starting.
+        if session is not None and getattr(session, "state", None) == "starting":
+            try:
+                esess.claim_worker(
+                    ctx.con,
+                    session_id=session.session_id,
+                    fencing_token=session.fencing_token,
+                    worker_identity=f"worker-fill-{os.getpid()}",
+                    controller_identity=getattr(session, "controller_identity", "controller"),
+                )
+                session = esess.load_session(ctx.con, session.session_id) or session
+            except Exception as exc:
+                code = getattr(exc, "code", None) or "SESSION_CLAIM_FAILED"
+                result = _terminal(
+                    "blocked", f"worker claim failed: {exc}",
+                    code=str(code),
+                    evidence={"session_id": getattr(session, "session_id", None)},
+                    actions=["retry_fill", "inspect_session"],
+                )
+                return result
+
+        # Bind session authority onto the RunCtx so fetch writes use session_write.
+        if session is not None:
+            ctx.session_id = session.session_id
+            ctx.fencing_token = int(session.fencing_token)
+            # Do NOT take a second set of session-level drive locks — the physical
+            # mutation envelope already holds drive fences and exposes child FDs.
+            ctx.stats["child_fence_fds"] = ()
+
+        result = _drain_projection(
+            ctx, session_start,
+            plan_id=plan_id,
+            max_24h_gb=max_24h_gb,
+            repo_scope=repo_scope,
+            guided=guided,
+            poll_secs=poll_secs,
+            child_fds=(),
         )
+        return result
+    finally:
+        # Terminalize live session + release any session child markers (finding 32).
+        if session is not None and getattr(ctx, "con", None) is not None:
+            try:
+                _terminalize_session_outcome(ctx.con, session, result)
+            except Exception:
+                pass
+            try:
+                erec.release_child_fences(session.session_id)
+            except Exception:
+                pass
 
-    # Fail closed if worker claim fails while session is still starting.
-    if session is not None and getattr(session, "state", None) == "starting":
-        try:
-            esess.claim_worker(
-                ctx.con,
-                session_id=session.session_id,
-                fencing_token=session.fencing_token,
-                worker_identity=f"worker-fill-{os.getpid()}",
-                controller_identity=getattr(session, "controller_identity", "controller"),
-            )
-            session = esess.load_session(ctx.con, session.session_id) or session
-        except Exception as exc:
-            code = getattr(exc, "code", None) or "SESSION_CLAIM_FAILED"
-            return _terminal(
-                "blocked", f"worker claim failed: {exc}",
-                code=str(code),
-                evidence={"session_id": getattr(session, "session_id", None)},
-                actions=["retry_fill", "inspect_session"],
-            )
 
-    # Inherit OS-visible drive fence FDs for worker children (B9/B10).
-    child_fds = ()
-    if session is not None:
-        labels = sorted({
-            (t.get("target_drive") if isinstance(t, dict) else getattr(t, "target_drive", None))
-            or (t.get("source_drive") if isinstance(t, dict) else getattr(t, "source_drive", None))
-            for t in (projection.tasks or ())
-            if (t.get("target_drive") if isinstance(t, dict) else getattr(t, "target_drive", None))
-            or (t.get("source_drive") if isinstance(t, dict) else getattr(t, "source_drive", None))
-        })
+def _terminalize_session_outcome(con, session, result) -> None:
+    """Map execute terminal dict → session state and mark_terminal with fencing token."""
+    from modelark import execution_session as esess
+    if session is None:
+        return
+    # Reload — claim may have updated state.
+    row = esess.load_session(con, session.session_id)
+    if row is None:
+        return
+    if getattr(row, "state", None) not in esess.LIVE_STATES:
+        return
+    token = int(getattr(row, "fencing_token", None) or getattr(session, "fencing_token", 0))
+    if result is None:
+        state, code = "failed", "UNHANDLED_FILL_ERROR"
+    else:
+        rstate = result.get("state") or ("done" if result.get("ok") else "failed")
+        code = result.get("code") or rstate.upper()
+        if rstate in ("done",) or result.get("ok"):
+            state = "done"
+        elif rstate in ("stopped",) or result.get("stopped"):
+            state = "stopped"
+        elif rstate in ("paused", "plan-capacity-stop"):
+            state = "paused"
+        elif rstate in ("blocked",):
+            state = "blocked"
+        elif rstate in ("error", "failed"):
+            state = "failed"
+        else:
+            state = "failed"
+    try:
+        esess.terminalize(
+            con, session_id=session.session_id, fencing_token=token,
+            state=state, terminal_code=str(code)[:64] if code else None)
+    except Exception:
+        # Best-effort: force failed if token/state race
         try:
-            child_fds = tuple(erec.inherit_drive_fence_fds(
-                session_id=session.session_id,
-                drive_labels=labels,
-                con=ctx.con,
-            ) or ())
+            con.execute(
+                "UPDATE execution_sessions SET state='failed', "
+                "terminal_code=?, terminal_at=CURRENT_TIMESTAMP "
+                "WHERE session_id=? AND state IN ('starting','running','stopping')",
+                [str(code or "TERMINALIZE_FAILED")[:64], session.session_id])
         except Exception:
-            child_fds = ()
-        ctx.stats["child_fence_fds"] = child_fds
+            pass
 
-    return _drain_projection(
-        ctx, session_start,
-        plan_id=plan_id,
-        max_24h_gb=max_24h_gb,
-        repo_scope=repo_scope,
-        guided=guided,
-        poll_secs=poll_secs,
-        child_fds=child_fds,
+
+
+
+def _refresh_projection(ctx, session_start, *, plan_id=None):
+    """Re-run project_pure against current catalog facts (constrained refresh)."""
+    from modelark import execution_projection as eproj, execution_session as esess
+    from modelark.proposal import load_proposal, Refusal
+    session = getattr(session_start, "session", None)
+    if session is None:
+        return None
+    try:
+        proposal = getattr(session_start, "_proposal", None) or load_proposal(
+            ctx.con, session.approved_proposal_id)
+    except Exception:
+        return None
+    relevant = esess._proposal_drive_ids(proposal)
+    services = SimpleNamespace(
+        observe_exact_capacity=None,
+        config=SimpleNamespace(read_graph_affecting_config=lambda: {}),
     )
+    cfg = getattr(getattr(session_start, "execution_config", None), "values", None) or {}
+    current_input, current_graph = esess._catalog_projection_bundle(
+        ctx.con, proposal, relevant, services, cfg)
+    parked = set()
+    out = eproj.project_pure(
+        proposal, current_input, current_graph,
+        SimpleNamespace(parked_gated_repos=frozenset(parked)))
+    if isinstance(out, Refusal):
+        return None
+    return out
 
 
 def _proj_field(t, name, default=None):
@@ -378,14 +460,26 @@ def _proj_field(t, name, default=None):
     return getattr(t, name, default)
 
 
-def _projection_work_units(con, projection, repo_scope=None):
-    """Convert frozen projection tasks into drain units with catalog file manifests.
+def _projection_work_units(con, projection, repo_scope=None, proposal_files=None):
+    """Convert frozen projection tasks into drain units.
 
-    No optimizer: targets come only from the approved projection; missing files from
-    catalog ``files`` vs ``archived`` on the approved target.
+    Prefer approved proposal_files rows; fall back to catalog ``files``. Never invent
+    model.safetensors when no authority exists. Targets only from the projection.
     """
     from modelark.reconcile import TaskKind
     scope = set(repo_scope) if repo_scope else None
+    # requirement_id -> list of proposal file dicts
+    by_req = {}
+    for ff in proposal_files or ():
+        rid = ff.get("requirement_id") if isinstance(ff, dict) else getattr(ff, "requirement_id", None)
+        if rid:
+            by_req.setdefault(rid, []).append(ff if isinstance(ff, dict) else {
+                "rfilename": getattr(ff, "rfilename", None),
+                "size_bytes": getattr(ff, "size_bytes", None),
+                "orig_sha256": getattr(ff, "orig_sha256", None),
+                "format": getattr(ff, "format", None),
+                "quant": getattr(ff, "quant", None),
+            })
     units = []
     for t in projection.tasks or ():
         if _proj_field(t, "row_kind") == "baseline_satisfied":
@@ -420,12 +514,21 @@ def _projection_work_units(con, projection, repo_scope=None):
                 missing_files=(), file_rows=(),
             ))
             continue
-        files = con.execute(
-            "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
-            "WHERE repo_id=? ORDER BY rfilename", [repo]).fetchall()
+        # Approved proposal-file authority first; catalog files as secondary.
+        prop_files = by_req.get(rid) or []
+        if prop_files:
+            file_specs = [
+                (pf.get("rfilename"), pf.get("size_bytes"), pf.get("orig_sha256"),
+                 pf.get("format"), pf.get("quant"))
+                for pf in prop_files if pf.get("rfilename")
+            ]
+        else:
+            file_specs = list(con.execute(
+                "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
+                "WHERE repo_id=? ORDER BY rfilename", [repo]).fetchall())
         missing = []
         file_rows = []
-        for rfilename, size_bytes, sha256, fmt, quant in files:
+        for rfilename, size_bytes, sha256, fmt, quant in file_specs:
             arch = con.execute(
                 "SELECT 1 FROM archived WHERE repo_id=? AND rfilename=? AND drive_label=? "
                 "AND (orig_sha256 IS NULL OR orig_sha256=? OR ? IS NULL)",
@@ -436,14 +539,11 @@ def _projection_work_units(con, projection, repo_scope=None):
             file_rows.append(row)
             if not arch:
                 missing.append(rfilename)
-        if not missing and files:
+        if not missing and file_rows:
             continue  # fully satisfied on approved target — shrink out
-        if not files:
-            # default single artifact used by fixtures
-            missing = ["model.safetensors"]
-            file_rows = [SimpleNamespace(
-                rfilename="model.safetensors", size_bytes=100,
-                sha256="1" * 64, format="safetensors", quant="bf16")]
+        if not file_rows:
+            # No approved or catalog file authority — skip rather than invent paths.
+            continue
         kind = TaskKind.REPLICATE if source else TaskKind.FETCH
         from modelark.budgets import FileBudget
         file_budgets = []
@@ -492,6 +592,17 @@ def _drain_projection(
 
     projection = session_start.projection
     session = getattr(session_start, "session", None)
+    # Load approved proposal files once for file authority.
+    proposal_files = list(getattr(session_start, "_proposal_files", None) or ())
+    if not proposal_files and session is not None:
+        try:
+            from modelark.proposal import load_proposal
+            prop = load_proposal(ctx.con, session.approved_proposal_id)
+            proposal_files = list(prop.get("files") or ())
+            session_start._proposal_files = proposal_files  # cache
+            session_start._proposal = prop
+        except Exception:
+            proposal_files = []
 
     ctx.stats["t0"] = time.monotonic()
     ctx.stats.setdefault("by_drive", {})
@@ -525,7 +636,7 @@ def _drain_projection(
             )
 
     with ctx.lock:
-        remaining = _projection_work_units(ctx.con, projection, repo_scope)
+        remaining = _projection_work_units(ctx.con, projection, repo_scope, proposal_files=proposal_files)
 
     attempts: dict[str, int] = {}
     gated_hits: dict[str, int] = {}
@@ -542,7 +653,7 @@ def _drain_projection(
 
     while not ctx.should_stop():
         with ctx.lock:
-            remaining = _projection_work_units(ctx.con, projection, repo_scope)
+            remaining = _projection_work_units(ctx.con, projection, repo_scope, proposal_files=proposal_files)
         # re-apply deferred + session-completed filters
         ready = [
             u for u in remaining
@@ -771,12 +882,32 @@ def _drain_projection(
                 )
 
         pinned_drive = None
-
-    # Release session child fences on normal stop.
-    if session is not None:
+        # Heartbeat while running (finding 32).
+        if session is not None:
+            try:
+                from modelark import execution_session as esess
+                esess.heartbeat(
+                    ctx.con,
+                    session_id=session.session_id,
+                    fencing_token=int(session.fencing_token),
+                )
+            except Exception:
+                pass
+        # Constrained projection refresh at batch boundary (B8).
         try:
-            from modelark import execution_recovery as erec
-            erec.release_child_fences(session.session_id)
+            refreshed = _refresh_projection(ctx, session_start, plan_id=pid)
+            if refreshed is not None:
+                session_start.projection = refreshed
+                projection = refreshed
+                with ctx.lock:
+                    remaining = _projection_work_units(
+                        ctx.con, projection, repo_scope,
+                        proposal_files=proposal_files)
+                batch_order = []
+                for u in remaining:
+                    if u.target_drive and u.target_drive not in batch_order:
+                        batch_order.append(u.target_drive)
         except Exception:
             pass
+
     return _stop_terminal()

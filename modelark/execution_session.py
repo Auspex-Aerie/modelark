@@ -161,7 +161,7 @@ def start_session(con, proposal_id, predecessor_id, services):
                 {"reason": "execution_config_hostile"},
                 ("preview_again",))
 
-        # Config binding: unbound / pre-PR09, or drift vs stored proposal fields / cfg: hash.
+        # Config binding: unbound / pre-PR09, or drift vs stored complete config hash.
         sem = proposal.get("semantic_input_hash")
         if not sem or sem == "UNBOUND_PRE_PR09" or (
                 isinstance(sem, str) and len(sem) != 64 and not str(sem).startswith("cfg:")):
@@ -174,32 +174,28 @@ def start_session(con, proposal_id, predecessor_id, services):
                 "APPROVED_INPUT_CHANGED",
                 {"reason": "execution_config_mismatch"},
                 ("preview_again",))
-        # Graph-affecting fields on the approval vs current config (catalog authority).
-        for field in ("capacity_mode", "policy_version", "solver_version"):
-            prop_v = proposal.get(field)
-            cur_v = (frozen.values or {}).get(field) if hasattr(frozen, "values") else current_config.get(field)
-            if prop_v is not None and cur_v is not None and str(prop_v) != str(cur_v):
-                return Refusal(
-                    "APPROVED_INPUT_CHANGED",
-                    {"reason": "execution_config_field", "field": field,
-                     "approved": prop_v, "current": cur_v},
-                    ("preview_again",))
-        # Full graph-affecting hash: refuse when current frozen config drifts from a
-        # recomputation that forces approved capacity_mode/policy/solver into the payload.
-        approved_cfg = {
-            "capacity_mode": proposal.get("capacity_mode") or "guaranteed",
-            "policy_version": proposal.get("policy_version") or "1",
-            "solver_version": proposal.get("solver_version") or "1",
-            "compression": (frozen.values or {}).get("compression"),
-            "numcopies_default": (frozen.values or {}).get("numcopies_default"),
-        }
-        approved_cfg = {k: v for k, v in approved_cfg.items() if v is not None}
-        if frozen.canonical_hash != ecfg.hash_config(approved_cfg):
+        # Complete graph-affecting config hash persisted at draft as derivation_mode=ecfg:<hash>.
+        dm = proposal.get("derivation_mode") or ""
+        stored_cfg_hash = None
+        if isinstance(dm, str) and dm.startswith("ecfg:") and len(dm) == len("ecfg:") + 64:
+            stored_cfg_hash = dm[len("ecfg:"):]
+        if stored_cfg_hash is None:
+            # Legacy proposals without ecfg binding: still check capacity_mode field.
+            for field in ("capacity_mode", "policy_version", "solver_version"):
+                prop_v = proposal.get(field)
+                cur_v = (frozen.values or {}).get(field)
+                if prop_v is not None and cur_v is not None and str(prop_v) != str(cur_v):
+                    return Refusal(
+                        "APPROVED_INPUT_CHANGED",
+                        {"reason": "execution_config_field", "field": field,
+                         "approved": prop_v, "current": cur_v},
+                        ("preview_again",))
+        elif frozen.canonical_hash != stored_cfg_hash:
             return Refusal(
                 "APPROVED_INPUT_CHANGED",
                 {"reason": "execution_config_hash",
                  "frozen": frozen.canonical_hash,
-                 "approved_binding": ecfg.hash_config(approved_cfg)},
+                 "approved_binding": stored_cfg_hash},
                 ("preview_again",))
 
         if live_session_exists(con):
@@ -393,7 +389,8 @@ def _catalog_projection_bundle(con, proposal, relevant, services, current_config
             if row:
                 certificates[rid] = cert or row[0]
             else:
-                certificates[rid] = cert  # project_pure may still refuse on drive lifecycle
+                # Leave absent so project_pure refuses baseline_archive_missing.
+                certificates[rid] = "__MISSING__"
 
     current_input = SimpleNamespace(
         manifests=manifests,

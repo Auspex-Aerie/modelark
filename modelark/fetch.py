@@ -161,13 +161,20 @@ class RunCtx:
     read_connection_factory: Callable[[], Any] | None = None
     check_hf_auth: bool = False
     request_action: Callable[[dict, float], str] = _timeout_action
+    # PR-09: authorized live session for worker catalog writes (session_write path).
+    session_id: str | None = None
+    fencing_token: int | None = None
 
     def q1(self, sql: str, params: list | None = None):
         with self.lock:
             return self.con.execute(sql, params if params is not None else []).fetchone()
 
     def write(self, fn: Callable[[Any], Any]):
-        """Catalog write under planner_revision discipline (PR-08 A3 / fetch archived path)."""
+        """Catalog write under planner_revision discipline (PR-08 A3 / fetch archived path).
+
+        While a Fill session is live, writes must go through ``session_write`` with a
+        validated fencing token so they are not excluded by FILL_SESSION_ACTIVE.
+        """
         with self.lock:
             from modelark.proposal import GraphResult, graph_write
 
@@ -175,6 +182,12 @@ class RunCtx:
                 value = fn(c)
                 return GraphResult(proven_noop=False, value=value)
 
+            if self.session_id is not None and self.fencing_token is not None:
+                from modelark.execution_session import session_write
+                # session_write validates token, holds BEGIN IMMEDIATE, bumps revision.
+                result = session_write(
+                    self.con, self.session_id, int(self.fencing_token), op)
+                return getattr(result, "value", result)
             return graph_write(self.con, op).value
 
 

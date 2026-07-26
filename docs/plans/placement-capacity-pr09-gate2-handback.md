@@ -1,38 +1,32 @@
-# PR-09 / #39-B — Gate 2 **findings 24–27 remediation handback**
+# PR-09 / #39-B — Gate 2 **findings 31–32 / B7 / B8 refresh / B12 handback**
 
 **Date:** 2026-07-26  
 **Status:** Gate 2 **remediation complete — not accepted**. Gate 3 **not authorized**.  
-**Withheld tip:** `bd5f7fd`  
-**Remediation tip:** `34829db03d3c0e16b559b382df43596dfc22f86b`  
+**Withheld tip:** `318d319eaee0bf44111a5543f0ee36f9eaca5eff`  
+**Remediation tip:** set in commit message / `git rev-parse HEAD`  
 **Draft PR:** https://github.com/Auspex-Aerie/modelark/pull/54  
 **Phase branch:** `fix/placement-capacity-pr09-execution-projection`  
-**Base:** `bc33a0664d3e65e20c6843b0a9d5b1204d15502a`  
-**Issue:** #39  
 
 ---
 
-## Findings 24–27
+## Findings addressed
 
 | # | Finding | Fix |
 |---|---------|-----|
-| **24 B8** | Projection never executed; `_reconcile`/optimizer still called | `fill.execute` drains `session_start.projection.tasks` only; no `_reconcile` / `reconcile_plan` / `plan_capacity`; success-path hard-cut regression |
-| **25 B3/B7** | Self-referential authority; non-atomic token; claim swallow | Catalog manifests/semantic/config recompute; token+INSERT in one `BEGIN IMMEDIATE`; claim fail-closed; drift + TX rollback regressions |
-| **26 B9–B10** | Recovery fences unused; label keys; CAS without expiry | `inherit_drive_fence_fds` from execute with fingerprint/epoch keys; recovery re-validates expiry under locks and CAS on `expires_at` |
-| **27 B12** | Synthetic empty benchmark | Full capture + pure 5+30 timings; full/pure p95; evidence export path |
+| **31** | Worker writes hit FILL_SESSION_ACTIVE; dual drive locks | `RunCtx.write` → `session_write` with token; graph_write allows `_SESSION_WRITE_DEPTH`; removed session-level `inherit_drive_fence_fds` (envelope FDs only) |
+| **32** | Session not terminalized; fences held | Every execute outcome terminalizes session in `finally`; fence release in `finally`; heartbeat each batch |
+| **25/B7** | Compression/numcopies unbound; baseline loss | Draft binds full config as `derivation_mode=ecfg:<hash>`; start compares frozen hash; baseline archive missing refuses |
+| **B8 refresh** | Fabricated files; no project_pure refresh | Approved `proposal_files` authority; re-run `project_pure` at batch boundary |
+| **27/B12** | Synthetic empty bench; self-auth; soft thresholds | Catalog/approved structure; pure without SQLite re-read; operator identity required; threshold raises Refusal; evidence export fields |
 
-## Verification (implementer)
+## Verification
 
 | Check | Result |
 |-------|--------|
-| Full pytest | **567 passed** |
+| Full pytest | **572 passed** |
 | `python tests/test_replan.py` | all passed |
-| Focused Gate + hardcut | green |
 | Ruff | clean |
 
 ## Explicit stop
 
-- **Do not** mark ready / merge  
-- **Do not** begin Gate 3  
-- Greptile iteration follows push  
-
-**Await Gate-2 human disposition.**
+Do **not** mark ready, merge, or begin Gate 3. Await human Gate-2 disposition.
