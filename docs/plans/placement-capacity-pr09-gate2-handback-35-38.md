@@ -1,6 +1,6 @@
 # PR-09 Gate-2 handback — findings 35–38 remediation
 
-> **SUPERSEDED** for F38 refresh counts/generator by `docs/plans/placement-capacity-pr09-gate2-handback-38-cadence.md` (after tip `768741f`). The "6 calls" claim is obsolete.
+> **SUPERSEDED** by `docs/plans/placement-capacity-pr09-gate2-passback-cut-list.md` (after pin `1939786`). Historical claims below (including "6 calls" / generator v2) remain as recorded at this tip; live refresh counts, generator version, and DEC-051 content-satisfaction authority are in `docs/plans/evidence/b12_390_acceptance_wall_clock.json` and the cut-list.
 
 
 **Date:** 2026-07-26

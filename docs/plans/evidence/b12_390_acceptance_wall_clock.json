@@ -26,7 +26,7 @@
     "executable_tasks": 429,
     "foreign_key_violations": 0,
     "integrity_check": "ok",
-    "null_hash_content_rule": "approved_null_sha: presence is durable satisfaction on source and target; approved_non_null_sha: exact non-null archive equality required",
+    "null_hash_content_rule": "DEC-051: approved_non_null_sha requires exact non-null archive equality; approved_null_sha requires non-null archived.orig_sha256 (ingestion digest); both-null fails closed on source readiness and target satisfaction",
     "proposal_files_null_orig_sha256": 4879,
     "proposal_files_total": 9520,
     "user_version": 6
@@ -103,7 +103,14 @@
     "reconcile": {
       "batch_refreshes": 2,
       "calls_equals_batch_plus_typed": true,
+      "total_refreshes_equals_batch_plus_typed": true,
+      "batch_boundary_refreshes_le_transport_batches": true,
       "typed_refreshes": 1
+    },
+    "cadence_invariants": {
+      "equality": "total_refreshes = batch_boundary_refreshes + typed_event_refreshes",
+      "batch_bound": "batch_boundary_refreshes ≤ transport_batches (often B−1: final loop re-entry finds nothing ready and exits terminal without another batch-boundary refresh)",
+      "source": "fill._drain_projection"
     },
     "source": "fill._drain_projection",
     "transport_batches": 3,

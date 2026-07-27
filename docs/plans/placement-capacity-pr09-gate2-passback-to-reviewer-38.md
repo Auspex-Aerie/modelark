@@ -1,5 +1,7 @@
 # Passback to Gate-2 reviewer — F35/F37 fail-open + F38 cadence
 
+> **SUPERSEDED** by `docs/plans/placement-capacity-pr09-gate2-passback-cut-list.md` (after pin `1939786`). Historical body retained; live refresh/generator/DEC-051 authority is the evidence JSON and cut-list.
+
 **Date:** 2026-07-26
 **From:** implementer
 **To:** human Gate-2 reviewer

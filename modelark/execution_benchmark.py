@@ -478,10 +478,11 @@ def run_acceptance_wall_clock(
                     "PRAGMA foreign_key_check").fetchall()),
                 "user_version": int(fcon.execute("PRAGMA user_version").fetchone()[0]),
             }
-            # Presence rule for unhashed approved files (F37-a): both sides use presence.
+            # DEC-051: presence alone never proves durability; both-null fails closed.
             fixture_facts["null_hash_content_rule"] = (
-                "approved_null_sha: presence is durable satisfaction on source and target; "
-                "approved_non_null_sha: exact non-null archive equality required"
+                "DEC-051: approved_non_null_sha requires exact non-null archive equality; "
+                "approved_null_sha requires non-null archived.orig_sha256 (ingestion digest); "
+                "both-null fails closed on source readiness and target satisfaction"
             )
         finally:
             fcon.close()
@@ -900,6 +901,27 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
                 "calls_equals_batch_plus_typed": True,
                 "batch_refreshes": batch_refreshes,
                 "typed_refreshes": typed_refreshes,
+                # Required equality (F38-a): total = batch_boundary + typed_event.
+                "total_refreshes_equals_batch_plus_typed": (
+                    calls == batch_refreshes + typed_refreshes
+                ),
+                # B−1: after the last transport batch, drain re-enters, finds nothing
+                # ready, and exits via the terminal path before another batch-boundary
+                # refresh — so batch_boundary_refreshes ≤ transport_batches (often B−1).
+                "batch_boundary_refreshes_le_transport_batches": (
+                    batch_refreshes <= int(batches_done["n"])
+                ),
+            },
+            "cadence_invariants": {
+                "equality": (
+                    "total_refreshes = batch_boundary_refreshes + typed_event_refreshes"
+                ),
+                "batch_bound": (
+                    "batch_boundary_refreshes ≤ transport_batches "
+                    "(often B−1: final loop re-entry finds nothing ready and "
+                    "exits terminal without another batch-boundary refresh)"
+                ),
+                "source": "fill._drain_projection",
             },
         }
     finally:

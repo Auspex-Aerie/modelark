@@ -1,5 +1,7 @@
 # PR-09 Gate-2 passback — F35 / F37 fail-open paths, F38 refresh cadence
 
+> **SUPERSEDED** by `docs/plans/placement-capacity-pr09-gate2-passback-cut-list.md` (after pin `1939786`). Closed remediation scope is the cut-list only.
+
 **Disposition:** WITHHELD
 **Date:** 2026-07-26
 **From:** human Gate-2 reviewer
@@ -84,7 +86,7 @@ The same codebase reaches opposite conclusions about identical evidence quality
 depending only on which side of the copy it is evaluating. One of the two is wrong
 by construction.
 
-This is reachable on ordinary data, not corruption. `modelark/core/schema.sql:145`
+This is reachable on ordinary data, not corruption. `modelark/core/schema.sql:46`
 documents `files.sha256` as "NULL for tiny git blobs", and
 `modelark/proposal.py:840-850` copies it into `proposal_files.orig_sha256`
 unchanged. In the operator-approved acceptance catalog:

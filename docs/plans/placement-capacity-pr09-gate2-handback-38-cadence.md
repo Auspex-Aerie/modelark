@@ -1,5 +1,7 @@
 # PR-09 Gate-2 handback — F35/F37 fail-open + F38 cadence
 
+> **SUPERSEDED** by `docs/plans/placement-capacity-pr09-gate2-passback-cut-list.md` (after pin `1939786`). F37-a presence-for-null rule below is historical; live authority is DEC-051 (both-null fails closed). Live refresh instrumentation and generator version remain as in `docs/plans/evidence/b12_390_acceptance_wall_clock.json` (`gate2-b12-rfc001-copy-v4`, source `fill._drain_projection`, 3 = 2 batch + 1 typed).
+
 **Date:** 2026-07-26
 **Status:** Remediation complete — not accepted. Gate 3 unauthorized.
 **Parent tip:** `768741f74e6c3f7533b83d6f30e3b0db47e8d286`
