@@ -196,7 +196,8 @@ _CAPACITY_MODE_SCHEMA_VERSION = 2
 _CAPACITY_EVIDENCE_SCHEMA_VERSION = 3
 _LIFECYCLE_ELIGIBILITY_SCHEMA_VERSION = 4  # v4: drives.lifecycle + drives.eligibility (#37)
 _PROPOSAL_CONTROL_SCHEMA_VERSION = 5  # v5: planner_state + proposals + execution_sessions (#39-A)
-_SCHEMA_VERSION = 5
+_EXECUTION_CONFIG_HASH_SCHEMA_VERSION = 6  # v6: placement_proposals.execution_config_hash (PR-09 / B7)
+_SCHEMA_VERSION = 6
 
 # v5 proposal-control tables: never created during the pre-migration tables-only pass so
 # backup-first v4→v5 owns them transactionally (same class of bug as early v3 evidence tables).
@@ -566,6 +567,142 @@ def _migrate_proposal_control_v5(con, *, backup_existing: bool) -> None:
 _migrate_placement_approval_v5 = _migrate_proposal_control_v5
 
 
+def _placement_proposals_has_execution_config_hash_check(con) -> bool:
+    """True when CREATE TABLE SQL enforces null-or-64 execution_config_hash (fresh v6 shape)."""
+    row = con.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='placement_proposals'"
+    ).fetchone()
+    if not row or not row[0]:
+        return False
+    sql = " ".join(str(row[0]).lower().split())
+    return (
+        "execution_config_hash" in sql
+        and "length(execution_config_hash)" in sql
+    )
+
+
+_PLACEMENT_PROPOSALS_V6_DDL = """
+CREATE TABLE placement_proposals (
+    proposal_id            VARCHAR PRIMARY KEY NOT NULL CHECK (length(trim(proposal_id)) > 0),
+    plan_id                VARCHAR NOT NULL,
+    based_on_revision      INTEGER NOT NULL CHECK (based_on_revision >= 0),
+    lifecycle              VARCHAR NOT NULL DEFAULT 'draft'
+                           CHECK (lifecycle IN ('draft','approved','superseded')),
+    canonical_hash         VARCHAR NOT NULL CHECK (length(canonical_hash) = 64),
+    mutation_kind          VARCHAR NOT NULL,
+    mutation_args_json     TEXT NOT NULL DEFAULT '[]',
+    serializer_version     VARCHAR NOT NULL,
+    requirement_set_hash   VARCHAR CHECK (requirement_set_hash IS NULL
+                                          OR length(requirement_set_hash) = 64),
+    semantic_input_hash    VARCHAR CHECK (semantic_input_hash IS NULL
+                                          OR length(semantic_input_hash) = 64),
+    selection_before_hash  VARCHAR CHECK (selection_before_hash IS NULL
+                                          OR length(selection_before_hash) = 64),
+    selection_after_hash   VARCHAR CHECK (selection_after_hash IS NULL
+                                          OR length(selection_after_hash) = 64),
+    capacity_mode          VARCHAR NOT NULL DEFAULT 'guaranteed'
+                           CHECK (capacity_mode IN ('guaranteed','compression_aware')),
+    policy_version         VARCHAR NOT NULL DEFAULT '1',
+    solver_version         VARCHAR NOT NULL DEFAULT '1',
+    gate_b_code            VARCHAR NOT NULL DEFAULT 'FEASIBLE',
+    derivation_mode        VARCHAR,
+    execution_config_hash  VARCHAR CHECK (execution_config_hash IS NULL
+                                          OR length(execution_config_hash) = 64),
+    created_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    approved_at            TIMESTAMP,
+    superseded_at          TIMESTAMP,
+    FOREIGN KEY (plan_id) REFERENCES plans(plan_id)
+        ON UPDATE CASCADE ON DELETE RESTRICT
+)
+"""
+
+
+def _migrate_execution_config_hash_v6(con, *, backup_existing: bool) -> None:
+    """Backup-first v5→v6: placement_proposals.execution_config_hash with null-or-64 CHECK.
+
+    Rebuilds the table so a migrated catalog matches a fresh v6 schema (finding 35).
+    Existing approved/draft rows keep NULL (or valid 64-char) hashes; short values become NULL.
+    """
+    cols = {r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()}
+    if "execution_config_hash" in cols and _placement_proposals_has_execution_config_hash_check(con):
+        con.execute(f"PRAGMA user_version={_EXECUTION_CONFIG_HASH_SCHEMA_VERSION}")
+        return
+    if con.execute("PRAGMA foreign_keys").fetchone()[0]:
+        raise RuntimeError("execution_config_hash migration requires foreign_keys=OFF")
+    if backup_existing:
+        _backup_before_migration(con, "pre-execution-config-v6")
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        old_cols = [r[1] for r in con.execute(
+            "PRAGMA table_info(placement_proposals)").fetchall()]
+        rows = con.execute(
+            f"SELECT {', '.join(old_cols)} FROM placement_proposals").fetchall()
+        con.execute("ALTER TABLE placement_proposals RENAME TO placement_proposals__pre_v6")
+        con.execute(_PLACEMENT_PROPOSALS_V6_DDL)
+        new_cols = [r[1] for r in con.execute(
+            "PRAGMA table_info(placement_proposals)").fetchall()]
+        for row in rows:
+            data = dict(zip(old_cols, row))
+            h = data.get("execution_config_hash")
+            if h is not None and len(str(h)) != 64:
+                data["execution_config_hash"] = None
+            if "execution_config_hash" not in data:
+                data["execution_config_hash"] = None
+            cols_ins = [c for c in new_cols if c in data]
+            con.execute(
+                f"INSERT INTO placement_proposals({','.join(cols_ins)}) "
+                f"VALUES({','.join('?' for _ in cols_ins)})",
+                [data[c] for c in cols_ins],
+            )
+        con.execute("DROP TABLE placement_proposals__pre_v6")
+        if not _placement_proposals_has_execution_config_hash_check(con):
+            raise RuntimeError(
+                "v6 migration did not produce execution_config_hash null-or-64 CHECK")
+        # Probe: short hash must be rejected by the CHECK (must fail specifically).
+        import sqlite3 as _sqlite3
+        try:
+            con.execute(
+                "INSERT INTO placement_proposals("
+                "proposal_id,plan_id,based_on_revision,lifecycle,canonical_hash,"
+                "mutation_kind,mutation_args_json,serializer_version,"
+                "execution_config_hash) "
+                "VALUES('__v6_probe__','ark',0,'draft',?,?,?,?,?)",
+                ["a" * 64, "probe", "[]", "1", "short"])
+        except _sqlite3.IntegrityError:
+            pass  # expected — CHECK (or PK/FK) rejected the row
+        else:
+            con.execute("DELETE FROM placement_proposals WHERE proposal_id='__v6_probe__'")
+            raise RuntimeError("v6 CHECK accepted short execution_config_hash")
+        # Positive control: the probe must fail even when plan_id is valid.
+        try:
+            con.execute("INSERT OR IGNORE INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
+        except Exception:
+            pass
+        try:
+            con.execute(
+                "INSERT INTO placement_proposals("
+                "proposal_id,plan_id,based_on_revision,lifecycle,canonical_hash,"
+                "mutation_kind,mutation_args_json,serializer_version,"
+                "execution_config_hash) "
+                "VALUES('__v6_probe2__','ark',0,'draft',?,?,?,?,?)",
+                ["b" * 64, "probe", "[]", "1", "short"])
+        except _sqlite3.IntegrityError as ie:
+            if "execution_config_hash" not in str(ie).lower() and "check" not in str(ie).lower():
+                # Still rejected — acceptable if CHECK message is generic.
+                pass
+        else:
+            con.execute("DELETE FROM placement_proposals WHERE proposal_id='__v6_probe2__'")
+            raise RuntimeError("v6 CHECK accepted short execution_config_hash (probe2)")
+        con.execute(f"PRAGMA user_version={_EXECUTION_CONFIG_HASH_SCHEMA_VERSION}")
+        con.execute("COMMIT")
+    except Exception as exc:
+        con.execute("ROLLBACK")
+        if isinstance(exc, RuntimeError):
+            raise
+        raise RuntimeError(
+            f"Cannot migrate catalog to v6 execution_config_hash ({exc})") from exc
+
+
 def _migrate(con, version: int, *, backup_existing: bool) -> None:
     if version < _INTEGRITY_SCHEMA_VERSION:
         if backup_existing:
@@ -585,6 +722,14 @@ def _migrate(con, version: int, *, backup_existing: bool) -> None:
     if version < _PROPOSAL_CONTROL_SCHEMA_VERSION:
         _migrate_proposal_control_v5(con, backup_existing=backup_existing)
         version = _PROPOSAL_CONTROL_SCHEMA_VERSION
+    if version < _EXECUTION_CONFIG_HASH_SCHEMA_VERSION:
+        _migrate_execution_config_hash_v6(con, backup_existing=backup_existing)
+        version = _EXECUTION_CONFIG_HASH_SCHEMA_VERSION
+    elif version >= _EXECUTION_CONFIG_HASH_SCHEMA_VERSION:
+        # Repair catalogs stamped v6 by an earlier unconstrained ADD COLUMN.
+        if not _placement_proposals_has_execution_config_hash_check(con):
+            _migrate_execution_config_hash_v6(con, backup_existing=backup_existing)
+            version = _EXECUTION_CONFIG_HASH_SCHEMA_VERSION
     if version != _SCHEMA_VERSION:
         raise RuntimeError(f"Catalog migration stopped at v{version}, expected v{_SCHEMA_VERSION}")
 

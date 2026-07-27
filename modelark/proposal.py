@@ -69,12 +69,29 @@ class Refusal(Exception):
 # ---------------------------------------------------------------------------
 # graph_write / revision bump
 # ---------------------------------------------------------------------------
+def _session_write_authorized(con) -> bool:
+    """Connection-scoped session_write authority only (finding 34 — never process-global)."""
+    try:
+        from modelark.execution_session import session_write_authorized
+        return bool(session_write_authorized(con))
+    except ImportError:
+        return False
+
+
 def bump_revision(con) -> int:
     """Increment planner_revision inside the caller's open transaction.
 
     Finding 44: never swallow failures. A failed revision update must propagate so
     graph_write rolls back the graph mutation. Partial fixtures must seed planner_state.
     """
+    # Drive-mutation and other in-TX bumpers still respect live exclusion when called alone.
+    try:
+        from modelark.execution_session import live_session_exists, live_owner
+        # Only refuse when not already inside an authorized session_write for *this* connection.
+        if not _session_write_authorized(con) and live_session_exists(con):
+            raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
+    except ImportError:
+        pass
     con.execute(
         "UPDATE planner_state SET planner_revision = planner_revision + 1, "
         "updated_at = CURRENT_TIMESTAMP WHERE singleton_id = 1")
@@ -91,9 +108,25 @@ def graph_write(con, op: Callable[[Any], Any]) -> Any:
     """Run ``op(con)`` under BEGIN IMMEDIATE; bump revision unless proven_noop.
 
     Rolls back graph mutation and revision together on any failure (A3 atomicity).
+    PR-09: refuse while a live execution session exists (FILL_SESSION_ACTIVE),
+    unless the caller is inside ``session_write`` on this same connection.
     """
+    # Live-session exclusion before opening the write transaction (B3 / B13).
+    try:
+        from modelark.execution_session import live_session_exists, live_owner
+        if not _session_write_authorized(con) and live_session_exists(con):
+            raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
+    except ImportError:
+        pass
     con.execute("BEGIN IMMEDIATE")
     try:
+        # Re-check inside TX for races (still allow authorized session_write on this con).
+        try:
+            from modelark.execution_session import live_session_exists, live_owner
+            if not _session_write_authorized(con) and live_session_exists(con):
+                raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
+        except ImportError:
+            pass
         result = op(con)
         if result is None:
             result = GraphResult(proven_noop=False)
@@ -626,7 +659,9 @@ def _header_from_facts(
         "solver_version": "1",
         "serializer_version": canonical.SERIALIZER_VERSION,
         "gate_b_code": gate_b_code,
-        "derivation_mode": None,
+        # Placement audit evidence only (optimized | state_truncated | canonical_fallback).
+        # Never store config hashes here (finding 35).
+        "derivation_mode": "optimized" if gate_b_code == "FEASIBLE" else "canonical_fallback",
     }
 
 
@@ -655,11 +690,29 @@ def preview_pure(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", 
     tasks_n = _normalize_tasks_for_hash(tasks)
     files_n = _normalize_files_for_hash(files)
     semantic = _semantic_input_hash(con, plan_id, mutation)
+    # Bind complete graph-affecting config at draft time (B7 / finding 25/35).
+    from modelark.execution_config import hash_config
+    from modelark import wishlist as _wl
+    try:
+        compression = dict(_wl.compression() or {})
+    except Exception:
+        compression = {"enabled": True, "codec": "streamznn", "level": 3}
+    cfg_values = {
+        "capacity_mode": capacity_mode,
+        "policy_version": "1",
+        "solver_version": "1",
+        "compression": compression,
+        "numcopies_default": 1,
+    }
+    cfg_hash = hash_config(cfg_values)
     header = _header_from_facts(
         plan_id=plan_id, based_on=rev, mutation=mutation, tasks=tasks_n,
         capacity_mode=capacity_mode, gate_b_code=gate,
         selection_before=sel_before, selection_after=sel_after, semantic=semantic,
     )
+    # Authoritative config binding is its own header field (included in proposal_hash).
+    # derivation_mode remains placement audit evidence only.
+    header["execution_config_hash"] = cfg_hash
     digest = canonical.proposal_hash(header, tasks_n, files_n)
     return {
         "header": header,
@@ -673,6 +726,20 @@ def preview_pure(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", 
 compute_draft_payload = preview_pure
 
 
+def require_execution_config_hash_column(con) -> None:
+    """Refuse if the versioned v6 column is absent (no opportunistic ALTER)."""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()}
+    if "execution_config_hash" not in cols:
+        raise RuntimeError(
+            "placement_proposals.execution_config_hash missing — catalog requires "
+            "schema v6 migration (open once with a writable ModelArk connect)"
+        )
+
+
+# Backward-compatible name used by older call sites / tests.
+ensure_execution_config_hash_column = require_execution_config_hash_column
+
+
 def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = None,
                   **_kw) -> dict:
     """Persist an immutable draft under BEGIN IMMEDIATE; no selection/revision mutation."""
@@ -683,6 +750,7 @@ def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = Non
         raise TypeError("payload must be the pure preview result")
 
     def _persist():
+        require_execution_config_hash_column(con)
         header = dict(payload["header"])
         tasks = list(payload["tasks"])
         files = list(payload["files"])
@@ -700,30 +768,60 @@ def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = Non
                           ("preview_again",))
         proposal_id = str(uuid.uuid4())
         mut_args = header.get("mutation_args") or ()
-        con.execute(
-            "INSERT INTO placement_proposals("
-            "proposal_id,plan_id,based_on_revision,lifecycle,canonical_hash,"
-            "mutation_kind,mutation_args_json,serializer_version,"
-            "requirement_set_hash,semantic_input_hash,"
-            "selection_before_hash,selection_after_hash,"
-            "capacity_mode,policy_version,solver_version,gate_b_code,derivation_mode"
-            ") VALUES(?,?,?,'draft',?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [
-                proposal_id, header["plan_id"], int(header["based_on_revision"]), digest,
-                header["mutation_kind"],
-                json.dumps(list(mut_args), separators=(",", ":")),
-                header["serializer_version"],
-                header.get("requirement_set_hash"),
-                header.get("semantic_input_hash"),
-                header.get("selection_before_hash"),
-                header.get("selection_after_hash"),
-                header.get("capacity_mode") or "guaranteed",
-                header.get("policy_version") or "1",
-                header.get("solver_version") or "1",
-                header.get("gate_b_code") or "FEASIBLE",
-                header.get("derivation_mode"),
-            ],
-        )
+        cols = {r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()}
+        has_cfg = "execution_config_hash" in cols
+        if has_cfg:
+            con.execute(
+                "INSERT INTO placement_proposals("
+                "proposal_id,plan_id,based_on_revision,lifecycle,canonical_hash,"
+                "mutation_kind,mutation_args_json,serializer_version,"
+                "requirement_set_hash,semantic_input_hash,"
+                "selection_before_hash,selection_after_hash,"
+                "capacity_mode,policy_version,solver_version,gate_b_code,derivation_mode,"
+                "execution_config_hash"
+                ") VALUES(?,?,?,'draft',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    proposal_id, header["plan_id"], int(header["based_on_revision"]), digest,
+                    header["mutation_kind"],
+                    json.dumps(list(mut_args), separators=(",", ":")),
+                    header["serializer_version"],
+                    header.get("requirement_set_hash"),
+                    header.get("semantic_input_hash"),
+                    header.get("selection_before_hash"),
+                    header.get("selection_after_hash"),
+                    header.get("capacity_mode") or "guaranteed",
+                    header.get("policy_version") or "1",
+                    header.get("solver_version") or "1",
+                    header.get("gate_b_code") or "FEASIBLE",
+                    header.get("derivation_mode"),
+                    header.get("execution_config_hash"),
+                ],
+            )
+        else:
+            con.execute(
+                "INSERT INTO placement_proposals("
+                "proposal_id,plan_id,based_on_revision,lifecycle,canonical_hash,"
+                "mutation_kind,mutation_args_json,serializer_version,"
+                "requirement_set_hash,semantic_input_hash,"
+                "selection_before_hash,selection_after_hash,"
+                "capacity_mode,policy_version,solver_version,gate_b_code,derivation_mode"
+                ") VALUES(?,?,?,'draft',?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    proposal_id, header["plan_id"], int(header["based_on_revision"]), digest,
+                    header["mutation_kind"],
+                    json.dumps(list(mut_args), separators=(",", ":")),
+                    header["serializer_version"],
+                    header.get("requirement_set_hash"),
+                    header.get("semantic_input_hash"),
+                    header.get("selection_before_hash"),
+                    header.get("selection_after_hash"),
+                    header.get("capacity_mode") or "guaranteed",
+                    header.get("policy_version") or "1",
+                    header.get("solver_version") or "1",
+                    header.get("gate_b_code") or "FEASIBLE",
+                    header.get("derivation_mode"),
+                ],
+            )
         for t in tasks:
             con.execute(
                 "INSERT INTO proposal_tasks("
@@ -791,13 +889,19 @@ preview_and_draft = create_draft
 
 
 def load_proposal(con, proposal_id: str) -> dict:
-    row = con.execute(
-        "SELECT proposal_id, plan_id, based_on_revision, lifecycle, canonical_hash, "
+    table_cols = {r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()}
+    has_cfg = "execution_config_hash" in table_cols
+    select_cols = (
+        "proposal_id, plan_id, based_on_revision, lifecycle, canonical_hash, "
         "mutation_kind, mutation_args_json, serializer_version, requirement_set_hash, "
         "semantic_input_hash, selection_before_hash, selection_after_hash, "
         "capacity_mode, policy_version, solver_version, gate_b_code, derivation_mode, "
-        "created_at, approved_at, superseded_at "
-        "FROM placement_proposals WHERE proposal_id=?", [proposal_id]).fetchone()
+        + ("execution_config_hash, " if has_cfg else "")
+        + "created_at, approved_at, superseded_at"
+    )
+    row = con.execute(
+        f"SELECT {select_cols} FROM placement_proposals WHERE proposal_id=?",
+        [proposal_id]).fetchone()
     if row is None:
         raise KeyError(proposal_id)
     cols = [
@@ -805,9 +909,13 @@ def load_proposal(con, proposal_id: str) -> dict:
         "mutation_kind", "mutation_args_json", "serializer_version", "requirement_set_hash",
         "semantic_input_hash", "selection_before_hash", "selection_after_hash",
         "capacity_mode", "policy_version", "solver_version", "gate_b_code", "derivation_mode",
-        "created_at", "approved_at", "superseded_at",
     ]
+    if has_cfg:
+        cols.append("execution_config_hash")
+    cols.extend(["created_at", "approved_at", "superseded_at"])
     d = dict(zip(cols, row))
+    if "execution_config_hash" not in d:
+        d["execution_config_hash"] = None
     d["mutation_args"] = tuple(json.loads(d.pop("mutation_args_json") or "[]"))
     d["tasks"] = [
         dict(zip(
@@ -886,6 +994,9 @@ def hash_stored_proposal(con, proposal_id: str) -> str:
         "gate_b_code": p["gate_b_code"],
         "derivation_mode": p["derivation_mode"],
     }
+    # Include config binding when present so hash matches draft authority (finding 35).
+    if p.get("execution_config_hash"):
+        header["execution_config_hash"] = p["execution_config_hash"]
     return canonical.proposal_hash(
         header,
         _normalize_tasks_for_hash(p["tasks"]),
@@ -1138,6 +1249,13 @@ def approve(con, proposal_id: str, *, mutation=None, services=None, **_extra):
     catalog_path = getattr(db, "DB_PATH", None) or ":memory:"
 
     def _run_approve():
+        # PR-09: no approval while a live execution session exists.
+        try:
+            from modelark.execution_session import live_session_exists, live_owner
+            if live_session_exists(con):
+                raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
+        except ImportError:
+            pass
         with drive_fence.hold_controller(catalog_path, blocking=True):
             with drive_fence.hold_drives_sorted(keys, blocking=True):
                 # Evidence after fences, before BEGIN IMMEDIATE (A6).

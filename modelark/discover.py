@@ -140,6 +140,8 @@ def persist_info(con, info) -> None:
 
 def discover_one(api: HfApi, con, repo_id: str) -> str:
     """Fetch + catalog one repo unconditionally (explicit discovery bypasses scope)."""
+    from modelark.execution_session import require_no_live_session
+    require_no_live_session(con)
     try:
         info = api.model_info(repo_id, files_metadata=True)
     except GatedRepoError:

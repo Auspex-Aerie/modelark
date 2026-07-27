@@ -412,21 +412,61 @@ def cmd_plan(args):
         con.close()
 
 
+def start_fill_via_service(*, plan_id: str = "ark", proposal_id: str | None = None, **kwargs):
+    """PR-09 / B8 CLI adapter — single unified execution service entry."""
+    from modelark.execution_service import start_fill
+    return start_fill(plan_id=plan_id, proposal_id=proposal_id, **kwargs)
+
+
+def cmd_session_start(args):
+    """Installed CLI Fill entry: start (or refuse) an execution session via unified service."""
+    from modelark.proposal import Refusal
+    out = start_fill_via_service(
+        plan_id=getattr(args, "plan", None) or "ark",
+        proposal_id=getattr(args, "proposal_id", None),
+    )
+    if isinstance(out, Refusal):
+        payload = {
+            "ok": False, "code": out.code,
+            "evidence": getattr(out, "evidence", None),
+            "actions": list(getattr(out, "actions", ()) or ()),
+        }
+        print(json.dumps(payload, default=str))
+        raise SystemExit(2)
+    session = getattr(out, "session", out)
+    payload = {
+        "ok": True,
+        "session_id": getattr(session, "session_id", None),
+        "state": getattr(session, "state", None),
+        "fencing_token": getattr(session, "fencing_token", None),
+        "approved_proposal_id": getattr(session, "approved_proposal_id", None),
+    }
+    print(json.dumps(payload, default=str))
+
+
 def cmd_protect(args):
-    con = db.connect()
+    con = getattr(args, "con", None) or db.connect()
+    close = not getattr(args, "con", None)
     try:
         from modelark.proposal import GraphResult, graph_write
+        from modelark.execution_session import require_no_live_session
+        require_no_live_session(con)
+
+        repos = list(getattr(args, "repo", None) or ())
+        if not repos and getattr(args, "repo_id", None):
+            repos = [args.repo_id]
 
         def op(c):
-            for rid in args.repo:
+            for rid in repos:
                 c.execute("UPDATE models SET numcopies=? WHERE repo_id=?", [args.numcopies, rid])
             return GraphResult(proven_noop=False)
 
         graph_write(con, op)
         total = con.execute("SELECT count(*) FROM models WHERE coalesce(numcopies,1) >= 2").fetchone()[0]
     finally:
-        con.close()
-    print(f"set numcopies={args.numcopies} on {len(args.repo)} repo(s); "
+        if close:
+            con.close()
+    print(f"set numcopies={args.numcopies} on {len(repos)} repo(s); "
           f"{total} model(s) now must-have (numcopies>=2 → a replica-tier 2nd copy).")
 
 
@@ -589,6 +629,14 @@ def main(argv=None):
     sv.add_argument("--resume", action="store_true",
                     help="auto-resume the fill on boot if work remains (for the supervised systemd service, DEC-023)")
     sv.set_defaults(func=cmd_serve)
+
+    sess = sub.add_parser("session", help="execution session control (PR-09 Fill entry)")
+    sess_sub = sess.add_subparsers(dest="session_cmd", required=True)
+    ss = sess_sub.add_parser("start", help="start a Fill session for the active/approved proposal")
+    ss.add_argument("--proposal-id", dest="proposal_id", default=None,
+                    help="approved proposal id (default: active_approved_proposal_id)")
+    ss.add_argument("--plan", default="ark", help="plan id (default: ark)")
+    ss.set_defaults(func=cmd_session_start)
 
     ft = sub.add_parser("fetch", help="download the finalized wishlist onto a drive")
     ft.add_argument("--dest", help="explicit archive dir override (default: resolved from --drive)")

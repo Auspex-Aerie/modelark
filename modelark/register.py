@@ -349,18 +349,35 @@ def _guard_existing_label(con, label: str) -> None:
             f"to change or replace an existing drive.")
 
 
-def register_drive(dev: str, label: str, mount: str | None = None,
+def register_drive(dev, label=None, mount: str | None = None,
                    format_fs: str | None = None, location: str | None = None,
                    library: str | None = None, dry_run: bool = False,
                    role: str = "primary", raid_backed: bool = False,
-                   skip_smart: bool = False, confirm_format: str | None = None) -> dict:
+                   skip_smart: bool = False, confirm_format: str | None = None,
+                   path: str | None = None, **_kw) -> dict:
     """Qualify, prepare, and register a drive as a fleet member. A RAID-backed LUN
     (iSCSI — auto-detected — or forced with raid_backed=True) has no physical SMART:
     redundancy is the array's, integrity is our sha256 + canary, so SMART is skipped.
     `skip_smart` (INC-002) registers a drive whose USB bridge won't pass SMART with an
-    'unchecked' verdict — an explicit operator override; verify health externally."""
+    'unchecked' verdict — an explicit operator override; verify health externally.
+
+    PR-09: when the first argument is a catalog connection (writer-matrix shape), refuse
+    while a live execution session exists before any physical work.
+    """
+    from modelark.execution_session import require_no_live_session
+
+    # Matrix / catalog-connection form: register_drive(con, "d-new", path=...).
+    if hasattr(dev, "execute") and callable(getattr(dev, "execute")):
+        require_no_live_session(dev)
+        # Live session refused above; remaining path still needs a real device string.
+        raise TypeError(
+            "register_drive requires a device path when no live session blocks the call")
+
+    # Normal device path: refuse while a live execution session exists BEFORE any
+    # physical SMART/format/mount work.
     con = db.connect()
     try:
+        require_no_live_session(con)
         _guard_existing_label(con, label)      # before SMART, dry-run, or any physical/remote/catalog mutation
     finally:
         con.close()

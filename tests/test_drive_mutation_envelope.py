@@ -622,7 +622,10 @@ def test_envelope_wired_only_into_reviewed_transport():
     envelope = {"drive_fence", "drive_mutation"}
     mutation_allowed = {"fetch.py", "drive_bootstrap.py"}
     # #35-C admission preview + PR-08 proposal approval (A6) hold drive fences.
-    fence_allowed = mutation_allowed | {"admission.py", "proposal.py"}
+    # PR-09 execution session/recovery holds real controller+drive fences (B8/B9).
+    fence_allowed = mutation_allowed | {
+        "admission.py", "proposal.py", "execution_service.py", "execution_recovery.py",
+    }
     importers, offenders = set(), []
     for path in root.rglob("*.py"):
         if path.name in ("drive_fence.py", "drive_mutation.py"):

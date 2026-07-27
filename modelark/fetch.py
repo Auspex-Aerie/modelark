@@ -161,13 +161,22 @@ class RunCtx:
     read_connection_factory: Callable[[], Any] | None = None
     check_hf_auth: bool = False
     request_action: Callable[[dict, float], str] = _timeout_action
+    # PR-09: authorized live session for worker catalog writes (session_write path).
+    session_id: str | None = None
+    fencing_token: int | None = None
+    # Frozen ExecutionConfig from SessionStart (finding 35) — transport must not reread globals.
+    execution_config: Any = None
 
     def q1(self, sql: str, params: list | None = None):
         with self.lock:
             return self.con.execute(sql, params if params is not None else []).fetchone()
 
     def write(self, fn: Callable[[Any], Any]):
-        """Catalog write under planner_revision discipline (PR-08 A3 / fetch archived path)."""
+        """Catalog write under planner_revision discipline (PR-08 A3 / fetch archived path).
+
+        While a Fill session is live, writes must go through ``session_write`` with a
+        validated fencing token so they are not excluded by FILL_SESSION_ACTIVE.
+        """
         with self.lock:
             from modelark.proposal import GraphResult, graph_write
 
@@ -175,7 +184,49 @@ class RunCtx:
                 value = fn(c)
                 return GraphResult(proven_noop=False, value=value)
 
+            if self.session_id is not None and self.fencing_token is not None:
+                from modelark.execution_session import session_write
+                # session_write validates token, holds BEGIN IMMEDIATE, bumps revision.
+                result = session_write(
+                    self.con, self.session_id, int(self.fencing_token), op)
+                return getattr(result, "value", result)
             return graph_write(self.con, op).value
+
+
+def get_frozen_execution_config(session_start):
+    """PR-09 / B7: transport consumes freeze from session start, never global reread."""
+    from modelark.execution_config import get_frozen_execution_config as _get
+    return _get(session_start)
+
+
+require_frozen_config = get_frozen_execution_config
+
+
+def _compression_from_ctx(ctx: RunCtx | None) -> dict:
+    """Resolve DEC-022 compression gate config from frozen ExecutionConfig when present.
+
+    Finding 35: once any ExecutionConfig freeze is attached to the RunCtx, transport
+    never rereads wishlist — including incomplete/malformed frozen mappings. Only the
+    CLI/plain-fetch path (no freeze object) may call wishlist.compression().
+    """
+    frozen = getattr(ctx, "execution_config", None) if ctx is not None else None
+    if frozen is not None:
+        # Literal operational defaults only — never wishlist.
+        base = {
+            "max_compress_ram_gb": 4.0,
+            "stream_compress": True,
+            "threads": 1,
+        }
+        values = getattr(frozen, "values", None)
+        if isinstance(values, Mapping):
+            frozen_comp = values.get("compression")
+            if isinstance(frozen_comp, Mapping):
+                base.update(dict(frozen_comp))
+            elif frozen_comp is not None and not isinstance(frozen_comp, Mapping):
+                # Malformed freeze: still no global reread; keep literal defaults.
+                pass
+        return base
+    return wishlist.compression()
 
 
 def finalized(con) -> list[str]:
@@ -965,7 +1016,8 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
             print(f"WARNING: {dest} is not a git-annex repo — storing verified files raw, "
                   f"not annex-tracked. (Run drive registration to enable annex.)")
         cap = (max_24h_gb or 0) * 1e9
-        compress_cfg = wishlist.compression()       # DEC-022 codec gate config (loaded once per run)
+        # Finding 35: prefer frozen SessionStart config; never reread wishlist mid-session.
+        compress_cfg = _compression_from_ctx(ctx)
 
         # RFC-002 / DEC-049 physical-mutation envelope: fence this drive, commit the dirty generation
         # before any staging/download/publish, hold the drive fence across the whole batch, reconcile
@@ -981,7 +1033,10 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
         try:
             with drive_mutation.drive_mutation(
                     con, [drive_label], "fill", observe=_observe, reconcile=_reconcile,
-                    now=datetime.now(timezone.utc).isoformat(sep=" ")) as _writer:
+                    now=datetime.now(timezone.utc).isoformat(sep=" "),
+                    session_id=getattr(ctx, "session_id", None),
+                    fencing_token=getattr(ctx, "fencing_token", None),
+            ) as _writer:
                 for k, rid in enumerate(ids):
                     if ctx.should_stop():
                         break

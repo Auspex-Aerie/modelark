@@ -21,6 +21,12 @@ from modelark import plan, wishlist
 from modelark.web import (catalog_api, data, disk_api, fill_api, fill_worker,
                                  library_api, plan_api, selection_api, verify_api)
 
+
+def auto_resume_fill(body: dict | None = None) -> dict:
+    """PR-09 / B8 systemd resume surface — same unified start_fill as portal/CLI."""
+    from modelark.execution_service import auto_resume_fill as _resume
+    return _resume(body or {})
+
 STATIC = Path(str(resources.files("modelark.web").joinpath("static")))
 MAX_REQUEST_BODY = 64 * 1024
 CSRF_HEADER = "X-ModelArk-CSRF"
@@ -311,11 +317,11 @@ def serve(port: int = 8077, open_browser: bool = True, resume: bool = False,
         except Exception:
             pass
     if resume:   # DEC-023 resume-on-boot: for the supervised systemd service, pick the fill back up unattended
-        r = fill_api.start({})   # plans in the worker thread (non-blocking); worker finishes 'done' if nothing to do
-        if r["ok"]:
+        r = auto_resume_fill({})  # PR-09: unified service entry (same as portal start)
+        if r.get("ok"):
             log.info("auto-resume: fill worker started — continuing at the next unfilled shard")
         else:
-            log.warning("auto-resume skipped", reason=r["error"])   # already running; drive-absent surfaces as worker 'error'
+            log.warning("auto-resume skipped", reason=r.get("error") or r.get("code"))
     signal.signal(signal.SIGTERM, lambda *a: (_ for _ in ()).throw(KeyboardInterrupt))
     try:
         httpd.serve_forever()
