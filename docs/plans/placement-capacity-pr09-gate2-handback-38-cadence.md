@@ -3,7 +3,7 @@
 **Date:** 2026-07-26
 **Status:** Remediation complete — not accepted. Gate 3 unauthorized.
 **Parent tip:** `768741f74e6c3f7533b83d6f30e3b0db47e8d286`
-**Code remediation tip:** parent of the commit that contains this file (see `git log -1 --format=%P`)
+**Code remediation tip:** `fadc937a549482d445aa17b17f72bfd3f0174458`
 **Passback implemented:** `docs/plans/placement-capacity-pr09-gate2-passback-38-cadence.md`
 
 ## Closures
