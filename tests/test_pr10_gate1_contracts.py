@@ -6,11 +6,15 @@ catalog_sha=None (archive-row fields only; proposal_files remain file-list autho
 """
 from __future__ import annotations
 
+import hashlib
 import inspect
+import shutil
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+import pytest
 
 import _pr09_gate1_fixtures as f
 from modelark.core import db
@@ -18,6 +22,41 @@ from modelark.core import db
 
 def _annex_key(digest: str, size: int = 10) -> str:
     return f"SHA256E-s{size}--{digest}"
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _assert_sqlite_artifact_unmutated(path: Path, before_sha: str) -> None:
+    """Outcome pin: measurement must not change container bytes or leave WAL sidecars."""
+    path = Path(path)
+    after = _file_sha256(path)
+    assert after == before_sha, (
+        f"evidence artifact mutated: before={before_sha[:16]}… after={after[:16]}…"
+    )
+    for suffix in ("-wal", "-shm"):
+        side = Path(str(path) + suffix)
+        assert not side.exists(), f"unexpected sqlite sidecar left behind: {side.name}"
+
+
+def _seed_minimal_recompute_sqlite(path: Path) -> None:
+    con = sqlite3.connect(str(path))
+    for stmt in db._statements(db.SCHEMA_PATH.read_text()):
+        con.execute(stmt)
+    con.execute("INSERT INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
+    con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/a',1)")
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
+        "VALUES('org/a','m.bin',1,'safetensors','bf16',?)", ["a" * 64])
+    con.execute(
+        "INSERT INTO selection(repo_id,finalized_at) VALUES('org/a','2026-01-01')")
+    con.commit()
+    con.close()
 
 
 def _proj_primary(repo="org/a", target="d0", rid="primary:org/a"):
@@ -318,23 +357,17 @@ def test_dec052_validate_does_not_gate_on_source_sqlite_sha256_mismatch():
 
 
 def test_dec052_recompute_opens_sqlite_read_only(tmp_path):
-    """Evidence catalogs must open read-only (or copy-first for write paths)."""
+    """recompute_fixture_identity must open mode=ro (stricter than DEC-052 general).
+
+    Deliberately stricter than DEC-052's general "read-only *or* copy-first" rule:
+    this function has no write-capable path, so every connect must be ``mode=ro``.
+    Outcome is also pinned: the artifact bytes must be unchanged after recompute.
+    """
     from modelark import execution_benchmark as bench
 
-    # Tiny valid sqlite for recompute
     path = tmp_path / "ev.sqlite"
-    con = sqlite3.connect(str(path))
-    for stmt in db._statements(db.SCHEMA_PATH.read_text()):
-        con.execute(stmt)
-    con.execute("INSERT INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
-    con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/a',1)")
-    con.execute(
-        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
-        "VALUES('org/a','m.bin',1,'safetensors','bf16',?)", ["a" * 64])
-    con.execute(
-        "INSERT INTO selection(repo_id,finalized_at) VALUES('org/a','2026-01-01')")
-    con.commit()
-    con.close()
+    _seed_minimal_recompute_sqlite(path)
+    before = _file_sha256(path)
 
     modes = []
     real_connect = sqlite3.connect
@@ -347,31 +380,89 @@ def test_dec052_recompute_opens_sqlite_read_only(tmp_path):
         bench.recompute_fixture_identity(path)
 
     assert modes, "expected at least one connect"
-    # DEC-052: must use URI mode=ro or equivalent read-only flag
+
     def is_readonly(entry):
         args, kwargs = entry["args"], entry["kwargs"]
         uri = str(args[0]) if args else ""
-        if "mode=ro" in uri or kwargs.get("uri") is True and "mode=ro" in uri:
+        if "mode=ro" in uri:
             return True
-        # sqlite3.connect(..., uri=True) with file:...?mode=ro
         if kwargs.get("uri") and "mode=ro" in uri:
             return True
         return False
 
     assert all(is_readonly(m) for m in modes), (
-        f"DEC-052: recompute_fixture_identity must open RO; got {modes!r}")
+        f"DEC-052: recompute_fixture_identity must open mode=ro; got {modes!r}")
+    _assert_sqlite_artifact_unmutated(path, before)
 
 
-def test_dec052_measure_refresh_does_not_open_evidence_readwrite(tmp_path):
-    """measure_executor_refresh_boundaries must not hold RW handle on evidence."""
+def test_dec052_recompute_unmutated_contract_fails_when_writer_runs(tmp_path):
+    """Demonstrate the digest pin fails if the callable mutates the artifact."""
+    path = tmp_path / "ev.sqlite"
+    _seed_minimal_recompute_sqlite(path)
+    before = _file_sha256(path)
+
+    def writer(_path):
+        con = sqlite3.connect(str(path))
+        con.execute("CREATE TABLE IF NOT EXISTS _mutate(x INTEGER)")
+        con.execute("INSERT INTO _mutate(x) VALUES (1)")
+        con.commit()
+        con.close()
+
+    writer(path)
+    with pytest.raises(AssertionError, match="evidence artifact mutated"):
+        _assert_sqlite_artifact_unmutated(path, before)
+
+
+def test_dec052_measure_refresh_leaves_evidence_bytes_unchanged(tmp_path):
+    """measure must not mutate the evidence artifact (RO or copy-first — outcome pin).
+
+    Asserts container SHA-256 unchanged and no ``-wal``/``-shm`` sidecars after the
+    call. Implementation-agnostic: permits mode=ro or copy-first; forbids the
+    measurement rewriting its own evidence.
+    """
     from modelark import execution_benchmark as bench
 
-    # Contract pin via source inspection + connect tracking when measure is invocable.
-    src = inspect.getsource(bench.measure_executor_refresh_boundaries)
-    assert "mode=ro" in src or "copy" in src.lower() or "tempfile" in src.lower() or \
-        "NamedTemporaryFile" in src or "backup" in src.lower(), (
-        "DEC-052: measure_executor_refresh_boundaries must document RO or copy-first "
-        "access to the evidence artifact (Gate-1 red until Gate 2)")
+    src_fixture = Path("docs/plans/evidence/b12_390_approved_fixture.sqlite")
+    if not src_fixture.is_file():
+        pytest.skip("acceptance fixture bytes absent on disk")
+    path = tmp_path / "evidence.sqlite"
+    shutil.copy2(src_fixture, path)
+    # Ensure a clean starting state (no sidecars from the source tree).
+    for suffix in ("-wal", "-shm"):
+        side = Path(str(path) + suffix)
+        if side.exists():
+            side.unlink()
+    before = _file_sha256(path)
+
+    # Run the real measure path; it may refuse or raise on incomplete bench setup.
+    # Mutation during a partial run still violates DEC-052.
+    try:
+        bench.measure_executor_refresh_boundaries(path)
+    except Exception:
+        pass
+
+    _assert_sqlite_artifact_unmutated(path, before)
+
+
+def test_dec052_measure_unmutated_contract_fails_when_function_writes(tmp_path):
+    """Demonstrate the measure outcome pin fails when the callable writes the artifact."""
+    path = tmp_path / "evidence.sqlite"
+    _seed_minimal_recompute_sqlite(path)
+    before = _file_sha256(path)
+
+    def writing_measure(sqlite_path):
+        con = sqlite3.connect(str(sqlite_path))
+        # WAL-mode write path that leaves sidecars and/or rewrites pages.
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE IF NOT EXISTS _bench_write(x INTEGER)")
+        con.execute("INSERT INTO _bench_write(x) VALUES (42)")
+        con.commit()
+        con.close()
+        return {"ok": True}
+
+    writing_measure(path)
+    with pytest.raises(AssertionError):
+        _assert_sqlite_artifact_unmutated(path, before)
 
 
 def test_dec052_fixture_path_from_config_not_env_and_skips_when_absent():
