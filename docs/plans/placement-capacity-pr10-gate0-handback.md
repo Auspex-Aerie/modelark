@@ -1,11 +1,11 @@
 # PR-10 Gate-0 handback — helper inventory and scope confirmation
 
-**Date:** 2026-07-27  
-**Status:** Gate 0 complete — **not accepted**. Gate 1 unauthorized until human review.  
-**From:** implementer  
-**To:** human Gate-0 reviewer  
-**Brief:** `docs/plans/placement-capacity-pr10-gate0-brief.md` (committed verbatim)  
-**Branch:** `fix/placement-capacity-pr10-content-satisfaction`  
+**Date:** 2026-07-27
+**Status:** Gate 0 complete — **not accepted**. Gate 1 unauthorized until human review.
+**From:** implementer
+**To:** human Gate-0 reviewer
+**Brief:** `docs/plans/placement-capacity-pr10-gate0-brief.md` (committed verbatim)
+**Branch:** `fix/placement-capacity-pr10-content-satisfaction`
 **Branched from:** `a2c3707dc129257733fabc015b688e9738d3dc51` (`origin/fix/placement-capacity-hardening` tip at branch time; re-verified before branch)
 
 ## Commits this gate (docs/ledger only)
@@ -96,8 +96,8 @@ These three subsystems already treat a raw `SHA256(E)` annex key as original-byt
 
 **Gate-0 raise (no unilateral choice):** folding a CHECK into PR-11's planned v7 (with DEC-053 provenance) is likely cheaper than a PR-10-only v7 or a DEF-033 deferral. Prefer reviewer disposition:
 
-1. DEF-033 in PR-10 (explicit revisit: with PR-11 v7), or  
-2. CHECK in PR-10 v7 alone, or  
+1. DEF-033 in PR-10 (explicit revisit: with PR-11 v7), or
+2. CHECK in PR-10 v7 alone, or
 3. Schedule CHECK with PR-11 v7 and document in handback only.
 
 ### Item 4 — hygiene inventory

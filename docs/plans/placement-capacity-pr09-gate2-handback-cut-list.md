@@ -1,9 +1,9 @@
 # PR-09 Gate-2 handback — closed cut-list remediation
 
-**Date:** 2026-07-26  
-**Status:** Remediation complete — **not accepted**. Gate 3 unauthorized. PR-10 unauthorized.  
-**From:** implementer  
-**To:** human Gate-2 reviewer  
+**Date:** 2026-07-26
+**Status:** Remediation complete — **not accepted**. Gate 3 unauthorized. PR-10 unauthorized.
+**From:** implementer
+**To:** human Gate-2 reviewer
 **Implements:** `docs/plans/placement-capacity-pr09-gate2-passback-cut-list.md`
 
 ## Tips
@@ -30,8 +30,8 @@ This handback commit is docs-only after a green Greptile/CI tip; if present as H
 
 ## Item 2 — independent DEC-051 impact (fixture on disk)
 
-Fixture bytes still local at  
-`bac9bea888843c47765550239d808977ddc5142d8d38425c74ed51ee06c1522f`  
+Fixture bytes still local at
+`bac9bea888843c47765550239d808977ddc5142d8d38425c74ed51ee06c1522f`
 (untracked; not deleted). Approved proposal `824fce33-…`, 9,520 `proposal_files` rows.
 
 | target drive | no archive (unhashed) | archive hashed (unhashed pf) | archive NULL → fails closed | hashed approved |
@@ -53,10 +53,10 @@ DEC-051 parks **265** target rows on `drive-00` (both digests null) rather than 
 
 ## Commits this cycle (no amends)
 
-1. `72e8257` — cut-list verbatim (**note:** already-staged fixture `git rm --cached` hitchhiked into this commit; bytes remain on disk)  
-2. `204795f` — `.gitignore` + DEC-051/052/DEF-032 ledger  
-3. `74698fb` — DEC-051 code + regressions  
-4. `10a9be9` — evidence JSON, harness cadence emit, supersede headers, citation fix  
+1. `72e8257` — cut-list verbatim (**note:** already-staged fixture `git rm --cached` hitchhiked into this commit; bytes remain on disk)
+2. `204795f` — `.gitignore` + DEC-051/052/DEF-032 ledger
+3. `74698fb` — DEC-051 code + regressions
+4. `10a9be9` — evidence JSON, harness cadence emit, supersede headers, citation fix
 
 ## Verification
 
@@ -83,5 +83,5 @@ Title/body updated to Gate-2 production scope (projection, session lifecycle, co
 
 ## Stop
 
-Do **not** mark ready, merge, begin Gate 3, or begin PR-10.  
+Do **not** mark ready, merge, begin Gate 3, or begin PR-10.
 Pin re-engages on this handback: **no further pushes** until human Gate-2 disposition.
