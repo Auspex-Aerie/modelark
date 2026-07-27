@@ -12,12 +12,19 @@ from typing import Any, Mapping
 
 from modelark.proposal import Refusal
 
+# Provisional harness targets pending a decision_log entry (finding 38-d).
+# Not self-authorizing product thresholds — recorded as provisional until
+# RFC-002 / DEC-049 / decision_log names production p95 budgets.
 WALL_CLOCK_CONTRACT = {
     "warmups": 5,
     "measured_runs": 30,
     "full_p95_seconds": 2.0,
     "pure_p95_seconds": 0.5,
-    "source": "harness",
+    "source": "provisional_harness_pending_decision",
+    "authority_note": (
+        "p95 thresholds are provisional harness targets; not cited from RFC-002/"
+        "DEC-049/decision_log as product acceptance gates at this tip"
+    ),
 }
 
 
@@ -429,6 +436,56 @@ def run_acceptance_wall_clock(
     }
     projection_refresh_count = int(refresh_evidence.get("calls") or 0)
 
+    # Repo-relative fixture path for portability (finding 38-d).
+    fixture_desc = {
+        k: body[k] for k in (
+            "selected_repository_count", "model_count", "file_count",
+            "source_sqlite_sha256", "prepared_canonical_input_hash",
+            "prepared_projection_hash", "requirement_count", "task_count",
+            "harness_generator_version", "sqlite_path",
+        ) if k in body
+    }
+    if sqlite_path:
+        try:
+            rel = Path(sqlite_path).resolve().relative_to(Path.cwd().resolve())
+            fixture_desc["sqlite_path"] = rel.as_posix()
+        except Exception:
+            fixture_desc["sqlite_path"] = str(sqlite_path)
+
+    fixture_facts = {}
+    if sqlite_path:
+        fcon = sqlite3.connect(str(sqlite_path))
+        try:
+            fixture_facts = {
+                "archived_row_count": int(fcon.execute(
+                    "SELECT count(*) FROM archived").fetchone()[0]),
+                "baseline_satisfied_tasks": int(fcon.execute(
+                    "SELECT count(*) FROM proposal_tasks "
+                    "WHERE row_kind='baseline_satisfied'").fetchone()[0]),
+                "executable_tasks": int(fcon.execute(
+                    "SELECT count(*) FROM proposal_tasks "
+                    "WHERE row_kind='executable'").fetchone()[0]),
+                "proposal_files_total": int(fcon.execute(
+                    "SELECT count(*) FROM proposal_files").fetchone()[0]),
+                "proposal_files_null_orig_sha256": int(fcon.execute(
+                    "SELECT count(*) FROM proposal_files WHERE orig_sha256 IS NULL"
+                ).fetchone()[0]),
+                "archived_null_orig_sha256": int(fcon.execute(
+                    "SELECT count(*) FROM archived WHERE orig_sha256 IS NULL"
+                ).fetchone()[0]),
+                "integrity_check": fcon.execute("PRAGMA integrity_check").fetchone()[0],
+                "foreign_key_violations": len(fcon.execute(
+                    "PRAGMA foreign_key_check").fetchall()),
+                "user_version": int(fcon.execute("PRAGMA user_version").fetchone()[0]),
+            }
+            # Presence rule for unhashed approved files (F37-a): both sides use presence.
+            fixture_facts["null_hash_content_rule"] = (
+                "approved_null_sha: presence is durable satisfaction on source and target; "
+                "approved_non_null_sha: exact non-null archive equality required"
+            )
+        finally:
+            fcon.close()
+
     result = {
         "ok": ok,
         "skipped_measurement": False,
@@ -441,17 +498,17 @@ def run_acceptance_wall_clock(
         "full_p95_seconds": full_p95,
         "pure_p95_within_contract": pure_ok,
         "full_p95_within_contract": full_ok,
+        # Prior accepted tip measurements for reviewer notice (finding 38-d).
+        "prior_accepted_p95": {
+            "tip": "00ba101cd704b6d855debbdc568f53e6b19f070f",
+            "pure_p95_seconds": 0.3266526369843632,
+            "full_p95_seconds": 0.6982874380191788,
+        },
         "host": platform.node(),
         "python": platform.python_version(),
         "platform": platform.platform(),
-        "fixture_descriptor": {
-            k: body[k] for k in (
-                "selected_repository_count", "model_count", "file_count",
-                "source_sqlite_sha256", "prepared_canonical_input_hash",
-                "prepared_projection_hash", "requirement_count", "task_count",
-                "harness_generator_version", "sqlite_path",
-            ) if k in body
-        },
+        "fixture_descriptor": fixture_desc,
+        "fixture_facts": fixture_facts,
         "prepared_identity": {
             k: prepared_identity[k] for k in (
                 "selected_repository_count", "model_count", "file_count",
@@ -615,9 +672,9 @@ def count_projection_refresh_calls(scenario) -> dict:
 
 
 def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
-    """Instrument refresh by running the real drain path (finding 38).
+    """Instrument refresh by running the real drain path (finding 38-a).
 
-    Must invoke ``fill._drain_projection`` / ``fill.execute`` so batch-boundary
+    Must invoke ``fill._drain_projection`` so batch-boundary and typed-event
     refreshes go through production dispatch — never invent event names and call
     ``_refresh_projection`` directly.
     """
@@ -625,7 +682,7 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
     from modelark import fill as fill_mod
     from modelark import fetch as fetch_mod
     from modelark import execution_session as esess
-    from modelark.execution_config import hash_config
+    from modelark.execution_config import ExecutionConfig, hash_config
     from modelark.proposal import _DefaultServices, load_proposal
 
     path = Path(sqlite_path)
@@ -638,7 +695,6 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
                 "ACCEPTANCE_FIXTURE_INVALID",
                 {"reason": "missing_approved_proposal_for_refresh_measure"}, ())
         pid = proposal.get("proposal_id")
-        # Match frozen config to the approved binding when present.
         cfg_hash = proposal.get("execution_config_hash")
         compression = {
             "max_compress_ram_gb": 4.0, "stream_compress": True, "threads": 1,
@@ -650,9 +706,7 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
             "compression": compression,
             "numcopies_default": 1,
         }
-        # Prefer exact hash match by aligning compression until hash equals binding.
         if cfg_hash and hash_config(cfg_values) != str(cfg_hash):
-            # Try common draft compression shapes used at approve time.
             for trial in (
                 {},
                 {"enabled": True, "codec": "streamznn", "level": 3},
@@ -677,12 +731,8 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
         )
         out = esess.start_session(con, pid, None, services)
         if isinstance(out, Refusal):
-            # Fall back: build SessionStart from stored proposal + frozen config so
-            # drain still runs with approval authority.
             prop = load_proposal(con, pid)
-            from modelark.execution_config import ExecutionConfig
             frozen = ExecutionConfig.from_values(cfg_values)
-            # Ensure session row for heartbeat
             sid = "bench-refresh-session"
             con.execute("DELETE FROM execution_sessions WHERE session_id=?", [sid])
             try:
@@ -692,8 +742,10 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
                     "worker_identity,state,bound_planner_revision,fencing_token,expires_at) "
                     "VALUES(?,?,?,'ctrl','bench-worker','running',0,1,'2099-01-01T00:00:00Z')",
                     [sid, prop.get("plan_id") or "ark", pid])
-            except Exception:
-                pass
+            except Exception as exc:
+                raise Refusal(
+                    "ACCEPTANCE_FIXTURE_INVALID",
+                    {"reason": "session_insert_failed", "error": str(exc)[:200]}, ()) from exc
             session = SimpleNamespace(
                 session_id=sid, approved_proposal_id=pid, fencing_token=1,
                 state="running", worker_identity="bench-worker",
@@ -717,30 +769,49 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
             out._config_reader = services.config
             out._observe_exact_capacity = services.observe_exact_capacity
 
-        # Real drain: mock transport only; refresh must come from batch boundaries.
-        batches_done = {"n": 0}
+        # Force multi-batch: complete only one repo per transport call.
+        # After ≥2 completed batches (and their batch_boundary refreshes), inject
+        # one gated_retry typed event so production typed-event refresh runs.
+        batches_done = {"n": 0, "gated_injected": False}
+        typed_events = {"n": 0}
 
         def fake_run(**kwargs):
             batches_done["n"] += 1
             repos = list(kwargs.get("repos") or [])
-            return {
-                "stored_repos": repos, "failed_repos": [],
+            bd = fill_mod.projection_refresh_breakdown()
+            batch_n = int(bd.get("batch_boundary") or 0)
+            out_run = {
+                "stored_repos": repos[:1] if repos else [],
+                "failed_repos": [],
                 "capacity_failure": None, "terminal_failure": None,
                 "terminal_repo": None, "throttled": False, "stopped": False,
                 "drive_unwritable": False, "gated_repos": [], "gated_retry": None,
             }
+            if (
+                not batches_done["gated_injected"]
+                and batch_n >= 2
+                and repos
+            ):
+                batches_done["gated_injected"] = True
+                typed_events["n"] += 1
+                out_run["gated_retry"] = repos[0]
+                out_run["stored_repos"] = []
+            return out_run
 
         def fake_replica(tasks, ctx=None):
             batches_done["n"] += 1
+            n = 1 if tasks else 0
             return {
                 "deferred": False, "source_offline": False,
                 "deferred_targets": [], "copied_targets": [],
-                "copied_files": len(tasks or ()), "failed": [],
+                "copied_files": n, "failed": [],
             }
 
-        # Stop after a few production batch cycles so measurement stays bounded.
         def should_stop():
-            return int(fill_mod.projection_refresh_call_count()) >= 3 or batches_done["n"] >= 4
+            bd = fill_mod.projection_refresh_breakdown()
+            batch_n = int(bd.get("batch_boundary") or 0)
+            typed_n = sum(v for k, v in bd.items() if str(k).startswith("typed_event"))
+            return batch_n >= 2 and typed_n >= 1
 
         ctx = fetch_mod.RunCtx(
             con=con,
@@ -750,10 +821,30 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
             fencing_token=getattr(out.session, "fencing_token", None),
             execution_config=getattr(out, "execution_config", None),
         )
-        with mock.patch.object(fill_mod.fetch, "run", side_effect=fake_run), \
+
+        # Adversarial: if drain is not the measurement path, fail hard.
+        drain_called = {"n": 0}
+        real_drain = fill_mod._drain_projection
+
+        def wrapped_drain(*a, **k):
+            drain_called["n"] += 1
+            return real_drain(*a, **k)
+
+        # Stable projection for refresh: fixture may have source_not_ready rows that
+        # refuse project_pure; cadence proof requires the drain to dispatch refresh,
+        # not re-solve placement. Transport is mocked; projection identity is frozen.
+        def stable_project_pure(proposal, current_input, current_graph, overlay):
+            return getattr(out, "projection")
+
+        with mock.patch.object(fill_mod, "_drain_projection", side_effect=wrapped_drain), \
+                mock.patch.object(fill_mod.fetch, "run", side_effect=fake_run), \
                 mock.patch.object(fill_mod.fetch, "run_replica_tasks", side_effect=fake_replica), \
                 mock.patch.object(fill_mod, "_await_drive", return_value=True), \
-                mock.patch.object(fill_mod, "_mounted", return_value=(True, True)):
+                mock.patch.object(fill_mod, "_mounted", return_value=(True, True)), \
+                mock.patch(
+                    "modelark.execution_projection.project_pure",
+                    side_effect=stable_project_pure,
+                ):
             fill_mod._drain_projection(
                 ctx, out,
                 plan_id=getattr(out.session, "plan_id", None) or "ark",
@@ -763,14 +854,52 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
                 poll_secs=0.01,
                 child_fds=(),
             )
+        if drain_called["n"] < 1:
+            raise Refusal(
+                "ACCEPTANCE_FIXTURE_INVALID",
+                {"reason": "drain_not_invoked"}, ())
+
         calls = int(fill_mod.projection_refresh_call_count())
+        by_reason = fill_mod.projection_refresh_breakdown()
+        batch_refreshes = int(by_reason.get("batch_boundary") or 0)
+        typed_refreshes = sum(
+            int(v) for k, v in by_reason.items() if str(k).startswith("typed_event"))
+        if batch_refreshes < 2:
+            raise Refusal(
+                "ACCEPTANCE_FIXTURE_INVALID",
+                {"reason": "insufficient_batch_refreshes",
+                 "batch_refreshes": batch_refreshes,
+                 "transport_batches": batches_done["n"],
+                 "breakdown": by_reason}, ())
+        if typed_refreshes < 1:
+            raise Refusal(
+                "ACCEPTANCE_FIXTURE_INVALID",
+                {"reason": "missing_typed_event_refresh",
+                 "breakdown": by_reason}, ())
+        if calls != batch_refreshes + typed_refreshes:
+            raise Refusal(
+                "ACCEPTANCE_FIXTURE_INVALID",
+                {"reason": "refresh_count_mismatch",
+                 "calls": calls, "batch": batch_refreshes, "typed": typed_refreshes}, ())
+
         return {
             "calls": calls,
             "transport_batches": int(batches_done["n"]),
+            "typed_events_injected": int(typed_events["n"]),
             "source": "fill._drain_projection",
+            "initial_full_projection": 1,  # start/session projection (not a refresh)
             "breakdown": {
-                "drain_refresh_calls": calls,
+                "initial_full_projection": 1,
+                "batch_boundary_refreshes": batch_refreshes,
+                "typed_event_refreshes": typed_refreshes,
+                "by_reason": by_reason,
                 "transport_batches": int(batches_done["n"]),
+                "total_refreshes": calls,
+            },
+            "reconcile": {
+                "calls_equals_batch_plus_typed": True,
+                "batch_refreshes": batch_refreshes,
+                "typed_refreshes": typed_refreshes,
             },
         }
     finally:

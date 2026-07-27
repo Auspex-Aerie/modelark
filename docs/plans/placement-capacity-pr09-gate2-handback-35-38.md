@@ -1,5 +1,8 @@
 # PR-09 Gate-2 handback — findings 35–38 remediation
 
+> **SUPERSEDED** for F38 refresh counts/generator by `docs/plans/placement-capacity-pr09-gate2-handback-38-cadence.md` (after tip `768741f`). The "6 calls" claim is obsolete.
+
+
 **Date:** 2026-07-26
 **Status:** Gate 2 remediation complete — **not accepted**. Gate 3 **not authorized**.
 **Parent (withheld tip):** `490bf0135b14a5a08823c90daf371f46c8f8fb0c`

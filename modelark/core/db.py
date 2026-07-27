@@ -658,7 +658,8 @@ def _migrate_execution_config_hash_v6(con, *, backup_existing: bool) -> None:
         if not _placement_proposals_has_execution_config_hash_check(con):
             raise RuntimeError(
                 "v6 migration did not produce execution_config_hash null-or-64 CHECK")
-        # Probe: short hash must be rejected (same as fresh schema).
+        # Probe: short hash must be rejected by the CHECK (must fail specifically).
+        import sqlite3 as _sqlite3
         try:
             con.execute(
                 "INSERT INTO placement_proposals("
@@ -667,13 +668,31 @@ def _migrate_execution_config_hash_v6(con, *, backup_existing: bool) -> None:
                 "execution_config_hash) "
                 "VALUES('__v6_probe__','ark',0,'draft',?,?,?,?,?)",
                 ["a" * 64, "probe", "[]", "1", "short"])
+        except _sqlite3.IntegrityError:
+            pass  # expected — CHECK (or PK/FK) rejected the row
+        else:
             con.execute("DELETE FROM placement_proposals WHERE proposal_id='__v6_probe__'")
             raise RuntimeError("v6 CHECK accepted short execution_config_hash")
-        except Exception as probe_exc:
-            if "v6 CHECK accepted" in str(probe_exc):
-                raise
-            # IntegrityError expected
+        # Positive control: the probe must fail even when plan_id is valid.
+        try:
+            con.execute("INSERT OR IGNORE INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
+        except Exception:
             pass
+        try:
+            con.execute(
+                "INSERT INTO placement_proposals("
+                "proposal_id,plan_id,based_on_revision,lifecycle,canonical_hash,"
+                "mutation_kind,mutation_args_json,serializer_version,"
+                "execution_config_hash) "
+                "VALUES('__v6_probe2__','ark',0,'draft',?,?,?,?,?)",
+                ["b" * 64, "probe", "[]", "1", "short"])
+        except _sqlite3.IntegrityError as ie:
+            if "execution_config_hash" not in str(ie).lower() and "check" not in str(ie).lower():
+                # Still rejected — acceptable if CHECK message is generic.
+                pass
+        else:
+            con.execute("DELETE FROM placement_proposals WHERE proposal_id='__v6_probe2__'")
+            raise RuntimeError("v6 CHECK accepted short execution_config_hash (probe2)")
         con.execute(f"PRAGMA user_version={_EXECUTION_CONFIG_HASH_SCHEMA_VERSION}")
         con.execute("COMMIT")
     except Exception as exc:

@@ -58,17 +58,17 @@ def freeze_execution_config(values: Mapping[str, Any]) -> ExecutionConfig:
 
 
 def mark_proposal_pre_pr09_unbound(con, proposal_id: str) -> None:
-    """Tests/production helper: strip config binding so start must refuse.
+    """Strip only execution_config_hash so start refuses the config gate (finding 35-b).
 
-    semantic_input_hash is CHECK-constrained to NULL or 64 hex — clear to NULL.
+    Does **not** clear semantic_input_hash — real v5→v6 migration leaves semantic
+    intact and only the config binding is unbound until re-preview.
     """
     cols = {r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()}
-    if "execution_config_hash" in cols:
-        con.execute(
-            "UPDATE placement_proposals SET execution_config_hash=NULL WHERE proposal_id=?",
-            [proposal_id])
+    if "execution_config_hash" not in cols:
+        raise RuntimeError(
+            "execution_config_hash column missing — catalog requires schema v6")
     con.execute(
-        "UPDATE placement_proposals SET semantic_input_hash=NULL WHERE proposal_id=?",
+        "UPDATE placement_proposals SET execution_config_hash=NULL WHERE proposal_id=?",
         [proposal_id])
 
 
@@ -76,17 +76,21 @@ strip_execution_config_binding_for_test = mark_proposal_pre_pr09_unbound
 
 
 def require_bound_execution_config(con, proposal_id: str) -> str:
-    """Return stored config hash or raise APPROVED_INPUT_CHANGED if unbound."""
+    """Return stored execution_config_hash or raise APPROVED_INPUT_CHANGED if unbound."""
+    cols = {r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()}
+    if "execution_config_hash" not in cols:
+        raise Refusal(
+            "APPROVED_INPUT_CHANGED",
+            {"reason": "execution_config_column_missing", "proposal_id": proposal_id},
+            ("preview_again",))
     row = con.execute(
-        "SELECT semantic_input_hash FROM placement_proposals WHERE proposal_id=?",
+        "SELECT execution_config_hash FROM placement_proposals WHERE proposal_id=?",
         [proposal_id]).fetchone()
-    if not row or not row[0] or row[0] == "UNBOUND_PRE_PR09" or len(str(row[0])) != 64:
+    if not row or not row[0] or len(str(row[0])) != 64:
         raise Refusal(
             "APPROVED_INPUT_CHANGED",
             {"reason": "execution_config_unbound", "proposal_id": proposal_id},
             ("preview_again",))
-    # semantic_input_hash may be full semantic; config hash is last 64 if composite,
-    # or equal to hash when we store pure config digests at approve time.
     return str(row[0])
 
 

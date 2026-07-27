@@ -193,14 +193,11 @@ def start_session(con, proposal_id, predecessor_id, services):
                 "APPROVED_INPUT_CHANGED",
                 {"reason": "execution_config_mismatch"},
                 ("preview_again",))
-        # Finding 35: execution_config_hash is required. NULL/empty binding refuses start
-        # and forces a fresh preview/approval — no field-by-field legacy soft path.
+        # Finding 35: execution_config_hash alone is authoritative. NULL/empty/short
+        # refuses start and requires a fresh preview. derivation_mode is placement audit
+        # evidence only (optimized|state_truncated|canonical_fallback) and never supplies
+        # a config binding (no ecfg: fallback).
         stored_cfg_hash = proposal.get("execution_config_hash")
-        if not stored_cfg_hash:
-            # One-release read of the mistaken ecfg: derivation_mode binding only.
-            dm = proposal.get("derivation_mode") or ""
-            if isinstance(dm, str) and dm.startswith("ecfg:") and len(dm) == len("ecfg:") + 64:
-                stored_cfg_hash = dm[len("ecfg:"):]
         if not stored_cfg_hash or len(str(stored_cfg_hash)) != 64:
             return Refusal(
                 "APPROVED_INPUT_CHANGED",

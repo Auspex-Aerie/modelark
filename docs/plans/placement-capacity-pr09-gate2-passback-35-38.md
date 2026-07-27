@@ -1,8 +1,8 @@
 # Passback to Gate-2 reviewer — findings 35 / 37 / 38 (remaining)
 
-**Date:** 2026-07-26  
-**From:** implementer  
-**To:** human Gate-2 reviewer  
+**Date:** 2026-07-26
+**From:** implementer
+**To:** human Gate-2 reviewer
 
 ---
 
@@ -62,5 +62,5 @@ Gate 3 remains unauthorized.
 
 ## Requested action
 
-Re-review the pushed tip against remaining F35/F37/F38 only.  
+Re-review the pushed tip against remaining F35/F37/F38 only.
 Do not merge or start Gate 3 from this passback.

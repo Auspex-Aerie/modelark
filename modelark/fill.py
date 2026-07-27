@@ -453,29 +453,38 @@ def _terminalize_session_outcome(con, session, result) -> None:
             ("inspect_session",)) from exc
 
 
-# Instrumented batch/event refresh counter for B12 acceptance (finding 38).
+# Instrumented batch/event refresh counters for B12 acceptance (finding 38).
 _PROJECTION_REFRESH_CALLS = 0
+_PROJECTION_REFRESH_BY_REASON: dict[str, int] = {}
 
 
 def projection_refresh_call_count() -> int:
     return int(_PROJECTION_REFRESH_CALLS)
 
 
+def projection_refresh_breakdown() -> dict[str, int]:
+    return dict(_PROJECTION_REFRESH_BY_REASON)
+
+
 def reset_projection_refresh_call_count() -> None:
-    global _PROJECTION_REFRESH_CALLS
+    global _PROJECTION_REFRESH_CALLS, _PROJECTION_REFRESH_BY_REASON
     _PROJECTION_REFRESH_CALLS = 0
+    _PROJECTION_REFRESH_BY_REASON = {}
 
 
-def _refresh_projection(ctx, session_start, *, plan_id=None):
+def _refresh_projection(ctx, session_start, *, plan_id=None, reason: str = "batch_boundary"):
     """Re-run project_pure against current catalog facts (constrained refresh).
 
     Finding 37: propagate typed projection/config/evidence refusals — never convert
     them to None and continue on a stale projection.
+    ``reason`` tags the production seam (batch_boundary | typed_event:<name>).
     """
-    global _PROJECTION_REFRESH_CALLS
+    global _PROJECTION_REFRESH_CALLS, _PROJECTION_REFRESH_BY_REASON
     from modelark import execution_projection as eproj, execution_session as esess
     from modelark.proposal import load_proposal, Refusal
     _PROJECTION_REFRESH_CALLS += 1
+    key = str(reason or "batch_boundary")
+    _PROJECTION_REFRESH_BY_REASON[key] = int(_PROJECTION_REFRESH_BY_REASON.get(key) or 0) + 1
     session = getattr(session_start, "session", None)
     if session is None:
         raise Refusal(
@@ -535,10 +544,31 @@ def _proj_field(t, name, default=None):
     return getattr(t, name, default)
 
 
-def _source_files_content_ready(con, repo_id, source_drive, proposal_files_for_req) -> bool:
-    """True only when every approved file has matching content identity on source.
+def _archive_content_satisfies(approved_sha, archived_sha) -> bool:
+    """Durable content satisfaction when an archive row exists (finding 37-a).
 
-    Finding 37: archive row presence alone is insufficient for replica readiness.
+    Explicit rule (schema/DEC-022 tiny-git-blob authority: ``files.sha256`` may be
+    NULL for small git blobs; proposal_files copies that field):
+
+    * If the approved file carries a content hash, the archive must carry the same
+      non-null hash (exact equality).
+    * If the approved file carries no content hash, **presence** of the archive row
+      is durable satisfaction on both source and target sides (null-vs-null and
+      null-vs-present are both presence).
+
+    Applied identically by source readiness and target missing-set evaluation.
+    """
+    if approved_sha:
+        return archived_sha is not None and str(archived_sha) == str(approved_sha)
+    # Unhashed approved file: presence alone.
+    return True
+
+
+def _source_files_content_ready(con, repo_id, source_drive, proposal_files_for_req) -> bool:
+    """True only when every approved file is content-satisfied on the source drive.
+
+    Finding 37: archive row presence alone is insufficient when a hash is bound;
+    unhashed approved files require presence only (same rule as target side).
     """
     if not proposal_files_for_req or not source_drive:
         return False
@@ -552,11 +582,7 @@ def _source_files_content_ready(con, repo_id, source_drive, proposal_files_for_r
             [repo_id, rfilename, source_drive]).fetchone()
         if arch is None:
             return False
-        if want:
-            if arch[0] is None or str(arch[0]) != str(want):
-                return False
-        elif arch[0] is None:
-            # Approved file has no hash but archive also null — not content-proven.
+        if not _archive_content_satisfies(want, arch[0]):
             return False
     return True
 
@@ -667,13 +693,8 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
                 rfilename=rfilename, size_bytes=int(size_bytes or 0),
                 sha256=sha256, format=fmt, quant=quant)
             file_rows.append(row)
-            # Content-aware durable satisfaction: null archive identity is not satisfaction
-            # when the approved file carries a content hash (finding 37).
-            if arch is None:
-                missing.append(rfilename)
-            elif arch[0] is None and sha256:
-                missing.append(rfilename)
-            elif sha256 and arch[0] and str(arch[0]) != str(sha256):
+            # Same content-satisfaction rule as source readiness (finding 37-a).
+            if arch is None or not _archive_content_satisfies(sha256, arch[0]):
                 missing.append(rfilename)
         if not missing and file_rows:
             continue  # fully satisfied on approved target — shrink out
@@ -748,6 +769,8 @@ def _drain_projection(
         and getattr(session, "approved_proposal_id", None)
         and getattr(session_start, "execution_config", None) is not None
     )
+    # Same gate as require_proposal_files: real SessionStart with freeze + approval.
+    has_approval = require_proposal_files
     if not proposal_files and session is not None and require_proposal_files:
         try:
             from modelark.proposal import load_proposal
@@ -991,6 +1014,32 @@ def _drain_projection(
                         failed=[{"repo": repo_id, "attempts": attempts[repo_id]}],
                     )
             if outcome.get("gated_retry"):
+                # Typed state-changing event: gated retry — refresh before continuing
+                # (RFC-002 batch/event cadence; finding 38).
+                if has_approval:
+                    from modelark.proposal import Refusal as _Refusal
+                    try:
+                        refreshed = _refresh_projection(
+                            ctx, session_start, plan_id=pid,
+                            reason="typed_event:gated_retry")
+                    except _Refusal as exc:
+                        return _terminal(
+                            "failed", f"projection refresh refused: {exc.code}",
+                            code=str(exc.code),
+                            evidence=getattr(exc, "evidence", None),
+                            actions=list(getattr(exc, "actions", ()) or ())
+                            or ["preview_again"],
+                        )
+                    except Exception as exc:
+                        return _terminal(
+                            "failed", f"projection refresh failed: {exc}",
+                            code="PROJECTION_REFRESH_FAILED",
+                            evidence={"error": str(exc)[:200]},
+                            actions=["preview_again", "inspect_session"],
+                        )
+                    if refreshed is not None:
+                        session_start.projection = refreshed
+                        projection = refreshed
                 continue
             if outcome["drive_unwritable"]:
                 return _terminal(
@@ -1072,15 +1121,10 @@ def _drain_projection(
         # when an approved proposal is bound. Characterization bridges without an approval
         # keep the fixed start projection and re-derive work units only.
         from modelark.proposal import Refusal as _Refusal
-        # Real start path carries frozen execution_config; characterization bridges do not.
-        has_approval = bool(
-            session is not None
-            and getattr(session, "approved_proposal_id", None)
-            and getattr(session_start, "execution_config", None) is not None
-        )
         if has_approval:
             try:
-                refreshed = _refresh_projection(ctx, session_start, plan_id=pid)
+                refreshed = _refresh_projection(
+                    ctx, session_start, plan_id=pid, reason="batch_boundary")
             except _Refusal as exc:
                 return _terminal(
                     "failed", f"projection refresh refused: {exc.code}",

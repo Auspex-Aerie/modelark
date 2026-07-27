@@ -199,6 +199,44 @@ def test_finding_35_null_execution_config_hash_refuses_start():
     )
 
 
+def test_finding_35a_ecfg_derivation_mode_does_not_authorize_start():
+    """NULL execution_config_hash + derivation_mode=ecfg:<hash> must still refuse."""
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    _p, pid, loaded = f.create_and_approve(con)
+    cfg = loaded.get("execution_config_hash")
+    assert cfg and len(cfg) == 64
+    con.execute(
+        "UPDATE placement_proposals SET execution_config_hash=NULL, "
+        "derivation_mode=? WHERE proposal_id=?",
+        [f"ecfg:{cfg}", pid])
+    sess = f.session_api()
+    f.assert_refuses(
+        lambda: sess.start_session(con, pid, None, f.default_services()),
+        code="APPROVED_INPUT_CHANGED",
+        label="f35a_ecfg_bypass",
+    )
+
+
+def test_finding_35b_unbind_helper_clears_only_config_hash():
+    from modelark.execution_config import mark_proposal_pre_pr09_unbound
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
+    _p, pid, _ = f.create_and_approve(con)
+    before = con.execute(
+        "SELECT semantic_input_hash, execution_config_hash FROM placement_proposals "
+        "WHERE proposal_id=?", [pid]).fetchone()
+    assert before[0] and before[1]
+    mark_proposal_pre_pr09_unbound(con, pid)
+    after = con.execute(
+        "SELECT semantic_input_hash, execution_config_hash FROM placement_proposals "
+        "WHERE proposal_id=?", [pid]).fetchone()
+    assert after[0] == before[0], "semantic must stay intact"
+    assert after[1] is None
+
+
 def test_finding_35_derivation_mode_not_ecfg_hash():
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/a",))
@@ -420,6 +458,87 @@ def test_finding_37_stale_replica_source_identity_not_ready():
     assert units[0].schedule_state == "waiting_dependency", (
         f"stale_source_schedule: {units[0].schedule_state}")
     assert units[0].kind is None
+
+
+def test_finding_37_null_null_same_on_source_and_target():
+    """Unhashed approved file + null archive: presence satisfies both sides (37-a)."""
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','tiny.bin','d0',0,10,10,NULL)")
+    # Target side: fully present with null-null → shrink out
+    proj_tgt = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d0",
+        source_drive=None, requirement_id="primary:org/a",
+        schedule_state="ready", order_key=1,
+        guaranteed_durable=10, expected_durable=10,
+    ),))
+    pfiles = [{
+        "requirement_id": "primary:org/a", "rfilename": "tiny.bin",
+        "size_bytes": 10, "orig_sha256": None, "format": None, "quant": None,
+    }]
+    units_t = fill_mod._projection_work_units(
+        con, proj_tgt, proposal_files=pfiles, require_proposal_files=True)
+    assert units_t == [], "null-null on target must be presence satisfaction (shrink out)"
+
+    # Source side: null-null must also be ready for replica
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','tiny.bin','d1',0,10,10,NULL)")
+    # only on d0 source for replica to d1 — wait, put source on d0, target d1 missing
+    con.execute("DELETE FROM archived WHERE drive_label='d1'")
+    proj_src = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d1",
+        source_drive="d0", requirement_id="replica:org/a",
+        schedule_state="waiting_dependency", order_key=1,
+        guaranteed_durable=10, expected_durable=10,
+    ),))
+    pfiles_r = [{
+        "requirement_id": "replica:org/a", "rfilename": "tiny.bin",
+        "size_bytes": 10, "orig_sha256": None, "format": None, "quant": None,
+    }]
+    units_s = fill_mod._projection_work_units(
+        con, proj_src, proposal_files=pfiles_r, require_proposal_files=True)
+    assert units_s and units_s[0].schedule_state == "ready", units_s
+    assert units_s[0].kind is not None
+
+
+def test_finding_37b_multifile_source_stale_and_absent():
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    # File A good, file B stale
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','a.bin','d0',0,1,1,?)", ["1" * 64])
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','b.bin','d0',0,1,1,?)", ["9" * 64])
+    proj = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d1",
+        source_drive="d0", requirement_id="replica:org/a",
+        schedule_state="waiting_dependency", order_key=1,
+        guaranteed_durable=2, expected_durable=2,
+    ),))
+    pfiles = [
+        {"requirement_id": "replica:org/a", "rfilename": "a.bin",
+         "size_bytes": 1, "orig_sha256": "1" * 64},
+        {"requirement_id": "replica:org/a", "rfilename": "b.bin",
+         "size_bytes": 1, "orig_sha256": "2" * 64},
+    ]
+    units = fill_mod._projection_work_units(
+        con, proj, proposal_files=pfiles, require_proposal_files=True)
+    assert units[0].schedule_state == "waiting_dependency", "stale second file"
+
+    # File B absent
+    con.execute("DELETE FROM archived WHERE rfilename='b.bin'")
+    units2 = fill_mod._projection_work_units(
+        con, proj, proposal_files=pfiles, require_proposal_files=True)
+    assert units2[0].schedule_state == "waiting_dependency", "absent second file"
 
 
 def test_finding_37_thrown_refresh_fails_closed():
