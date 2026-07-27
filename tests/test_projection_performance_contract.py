@@ -168,7 +168,10 @@ def test_alternate_cannot_self_authorize(tmp_path):
     actual = recompute(path)
     alt = {
         **actual,
-        "prepared_projection_hash": actual["prepared_canonical_input_hash"],
+        # Keep content hashes honest so refusal is operator-identity (DEC-052),
+        # not a projection_hash mismatch masking the self-auth rule.
+        "prepared_projection_hash": actual.get("prepared_projection_hash")
+        or actual["prepared_canonical_input_hash"],
         "requirement_count": 50,
         "task_count": 50,
         "harness_generator_version": "alt-1",

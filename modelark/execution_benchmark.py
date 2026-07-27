@@ -3,14 +3,50 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import platform
+import shutil
 import sqlite3
+import tempfile
 import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 
 from modelark.proposal import Refusal
+
+log = logging.getLogger(__name__)
+
+
+def _connect_readonly(path: str | Path) -> sqlite3.Connection:
+    """Open an evidence catalog read-only (DEC-052)."""
+    resolved = Path(path).resolve()
+    uri = f"file:{resolved.as_posix()}?mode=ro"
+    return sqlite3.connect(uri, uri=True)
+
+
+def resolve_acceptance_fixture_path(*, config: Mapping[str, Any] | None = None):
+    """Resolve acceptance fixture SQLite path from config (not environment).
+
+    Returns ``(path_or_None, typed_reason_or_None)``. When the path is absent or
+    the configured file is missing, callers must skip measurement and set
+    ``skipped_measurement`` rather than synthesizing a fixture.
+    """
+    cfg = dict(config or {})
+    if not cfg:
+        try:
+            from modelark import wishlist
+            loaded = wishlist.load() or {}
+            cfg = dict(loaded.get("acceptance") or {})
+        except Exception:
+            cfg = {}
+    raw = cfg.get("fixture_sqlite_path") or cfg.get("sqlite_path")
+    if raw is None or str(raw).strip() == "":
+        return None, "acceptance_fixture_path_absent"
+    path = Path(str(raw)).expanduser()
+    if not path.is_file():
+        return None, "acceptance_fixture_path_missing"
+    return path, None
 
 # Provisional harness targets pending a decision_log entry (finding 38-d).
 # Not self-authorizing product thresholds — recorded as provisional until
@@ -33,14 +69,18 @@ def wall_clock_contract():
 
 
 def recompute_fixture_identity(sqlite_path: str | Path) -> dict:
-    """Independent authority: counts and hashes from the actual SQLite file."""
+    """Independent authority: counts and hashes from the actual SQLite file.
+
+    Opens the catalog read-only (DEC-052). Binding identity is the content hashes
+    and row counts; ``source_sqlite_sha256`` is container provenance only.
+    """
     path = Path(sqlite_path)
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(1 << 20), b""):
             h.update(chunk)
     source_sha = h.hexdigest()
-    con = sqlite3.connect(str(path))
+    con = _connect_readonly(path)
     try:
         selected = con.execute(
             "SELECT count(*) FROM selection WHERE finalized_at IS NOT NULL"
@@ -138,20 +178,29 @@ def validate_acceptance_fixture_descriptor(
                 "ACCEPTANCE_FIXTURE_MISMATCH",
                 {"claimed": d.get("selected_repository_count"),
                  "actual": actual["selected_repository_count"]}, ())
+        # DEC-052: container byte hash is provenance only — log drift, never gate.
         if d.get("source_sqlite_sha256") and d["source_sqlite_sha256"] != actual[
                 "source_sqlite_sha256"]:
-            raise Refusal(
-                "ACCEPTANCE_FIXTURE_MISMATCH",
-                {"reason": "source_sha"}, ())
+            log.info(
+                "acceptance evidence container hash changed (provenance only): "
+                "descriptor=%s actual=%s",
+                str(d.get("source_sqlite_sha256"))[:16],
+                str(actual["source_sqlite_sha256"])[:16],
+            )
         if d.get("prepared_canonical_input_hash") and d[
                 "prepared_canonical_input_hash"] != actual["prepared_canonical_input_hash"]:
             raise Refusal(
                 "ACCEPTANCE_FIXTURE_MISMATCH",
                 {"reason": "canonical_hash"}, ())
+        if d.get("prepared_projection_hash") and d[
+                "prepared_projection_hash"] != actual.get("prepared_projection_hash"):
+            raise Refusal(
+                "ACCEPTANCE_FIXTURE_MISMATCH",
+                {"reason": "projection_hash"}, ())
         # Acceptance-scale fixtures (finding 38): schema version, approved structure,
         # and no synthetic org/m#### pattern. Smaller unit-test fixtures stay exempt.
         if int(d.get("selected_repository_count") or 0) >= 100:
-            con = sqlite3.connect(str(path))
+            con = _connect_readonly(path)
             try:
                 uv = int(con.execute("PRAGMA user_version").fetchone()[0])
                 if uv < 5:
@@ -181,17 +230,31 @@ def validate_acceptance_fixture_descriptor(
                 con.close()
 
     # Never self-authorize: operator identity is a separate required authority.
+    # Checked after path identity so fabricated count/hash descriptors still refuse
+    # with ACCEPTANCE_FIXTURE_MISMATCH rather than masking as missing operator.
     if operator_approved_identity is None:
         raise Refusal(
             "ACCEPTANCE_FIXTURE_INVALID",
             {"reason": "missing_operator_identity",
              "selected": int(d.get("selected_repository_count") or 0)}, ())
 
-    for k in ("source_sqlite_sha256", "selected_repository_count", "model_count"):
+    # Binding identity fields only (DEC-052). source_sqlite_sha256 is provenance.
+    for k in ("selected_repository_count", "model_count"):
         if operator_approved_identity.get(k) != d.get(k):
             raise Refusal(
                 "ACCEPTANCE_FIXTURE_MISMATCH",
                 {"field": k}, ())
+    if (
+        operator_approved_identity.get("source_sqlite_sha256")
+        and d.get("source_sqlite_sha256")
+        and operator_approved_identity.get("source_sqlite_sha256") != d.get("source_sqlite_sha256")
+    ):
+        log.info(
+            "operator provenance source_sqlite_sha256 differs from descriptor "
+            "(not a gate): op=%s desc=%s",
+            str(operator_approved_identity.get("source_sqlite_sha256"))[:16],
+            str(d.get("source_sqlite_sha256"))[:16],
+        )
 
     return {"ok": True, "descriptor": d}
 
@@ -249,7 +312,7 @@ def _build_full_capture_callable(sqlite_path: str | Path, *, for_acceptance: boo
 
     def full_once():
         identity = recompute_fixture_identity(path)
-        con = sqlite3.connect(str(path))
+        con = _connect_readonly(path)
         try:
             proposal = _require_approved_proposal_structure(
                 con, for_acceptance=for_acceptance)
@@ -372,6 +435,7 @@ def run_acceptance_wall_clock(
     project_fn=None,
     evidence_path=None,
     operator_approved_identity=None,
+    acceptance_config=None,
     **_k,
 ):
     """Run 5 warm-ups + 30 measured full and pure timings; export evidence artifact."""
@@ -384,6 +448,30 @@ def run_acceptance_wall_clock(
     # Strip nested operator key from descriptor body for validation
     body = {k: v for k, v in dict(fixture_descriptor).items()
             if k not in ("operator_approved_identity", "operator_bundle")}
+
+    # DEC-052: fixture path from config when descriptor omits sqlite_path.
+    skip_reason = None
+    if not body.get("sqlite_path"):
+        resolved, skip_reason = resolve_acceptance_fixture_path(config=acceptance_config)
+        if resolved is not None:
+            body["sqlite_path"] = str(resolved)
+        elif project_fn is None:
+            result = {
+                "ok": True,
+                "skipped_measurement": True,
+                "skip_reason": skip_reason or "acceptance_fixture_path_absent",
+                "contract": wall_clock_contract(),
+                "fixture_descriptor": body,
+                "projection_refresh_count": 0,
+                "projection_refresh_instrumentation": {
+                    "calls": 0, "events": (), "source": "skipped",
+                },
+            }
+            if evidence_path:
+                emit_acceptance_evidence(result, evidence_path)
+                result["evidence_path"] = str(evidence_path)
+            return result
+
     validate_acceptance_fixture_descriptor(body, operator_approved_identity=op)
 
     contract = wall_clock_contract()
@@ -454,7 +542,7 @@ def run_acceptance_wall_clock(
 
     fixture_facts = {}
     if sqlite_path:
-        fcon = sqlite3.connect(str(sqlite_path))
+        fcon = _connect_readonly(sqlite_path)
         try:
             fixture_facts = {
                 "archived_row_count": int(fcon.execute(
@@ -478,11 +566,12 @@ def run_acceptance_wall_clock(
                     "PRAGMA foreign_key_check").fetchall()),
                 "user_version": int(fcon.execute("PRAGMA user_version").fetchone()[0]),
             }
-            # DEC-051: presence alone never proves durability; both-null fails closed.
+            # DEC-055: resolve via archive_hash.expected_sha256 (catalog_sha=None).
             fixture_facts["null_hash_content_rule"] = (
-                "DEC-051: approved_non_null_sha requires exact non-null archive equality; "
-                "approved_null_sha requires non-null archived.orig_sha256 (ingestion digest); "
-                "both-null fails closed on source readiness and target satisfaction"
+                "DEC-055: archive_hash.expected_sha256(catalog_sha=None, orig_sha256, "
+                "compressed, annex_key); approved hash requires resolved equality; "
+                "approved null requires resolvable digest (raw SHA256E annex ok); "
+                "nothing resolvable fails closed on source and target"
             )
         finally:
             fcon.close()
@@ -563,7 +652,7 @@ def _pure_only_wrapper(sqlite_path: str | Path, *, for_acceptance: bool = True):
     from modelark.proposal import _manifest_hash
 
     path = Path(sqlite_path)
-    con = sqlite3.connect(str(path))
+    con = _connect_readonly(path)
     try:
         proposal = _require_approved_proposal_structure(
             con, for_acceptance=for_acceptance)
@@ -678,7 +767,23 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
     Must invoke ``fill._drain_projection`` so batch-boundary and typed-event
     refreshes go through production dispatch — never invent event names and call
     ``_refresh_projection`` directly.
+
+    DEC-052: never holds a write handle on the operator evidence file. Works on a
+    temporary copy so session/drain writes cannot rewrite container pages or leave
+    ``-wal``/``-shm`` beside the original artifact.
     """
+    from modelark import fill as fill_mod
+
+    source = Path(sqlite_path)
+    fill_mod.reset_projection_refresh_call_count()
+    with tempfile.TemporaryDirectory(prefix="modelark-b12-measure-") as td:
+        work = Path(td) / "evidence-copy.sqlite"
+        shutil.copy2(source, work)
+        return _measure_executor_refresh_boundaries_on_copy(work)
+
+
+def _measure_executor_refresh_boundaries_on_copy(path: Path) -> dict:
+    """Write-capable measure body against a disposable copy (DEC-052)."""
     from unittest import mock
     from modelark import fill as fill_mod
     from modelark import fetch as fetch_mod
@@ -686,8 +791,6 @@ def measure_executor_refresh_boundaries(sqlite_path: str | Path) -> dict:
     from modelark.execution_config import ExecutionConfig, hash_config
     from modelark.proposal import _DefaultServices, load_proposal
 
-    path = Path(sqlite_path)
-    fill_mod.reset_projection_refresh_call_count()
     con = sqlite3.connect(str(path))
     try:
         proposal = _require_approved_proposal_structure(con, for_acceptance=True)

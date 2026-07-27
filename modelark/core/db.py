@@ -617,6 +617,20 @@ CREATE TABLE placement_proposals (
 """
 
 
+def _is_execution_config_hash_check_error(exc: BaseException) -> bool:
+    """True when an IntegrityError is the execution_config_hash null-or-64 CHECK.
+
+    PK/FK/unique failures must not be treated as proof the CHECK works (PR-10 hygiene).
+    """
+    msg = str(exc).lower()
+    if "execution_config_hash" in msg:
+        return True
+    # SQLite often reports only "CHECK constraint failed" for named column checks.
+    return "check constraint failed" in msg or (
+        "check" in msg and "constraint" in msg
+    )
+
+
 def _migrate_execution_config_hash_v6(con, *, backup_existing: bool) -> None:
     """Backup-first v5→v6: placement_proposals.execution_config_hash with null-or-64 CHECK.
 
@@ -668,8 +682,12 @@ def _migrate_execution_config_hash_v6(con, *, backup_existing: bool) -> None:
                 "execution_config_hash) "
                 "VALUES('__v6_probe__','ark',0,'draft',?,?,?,?,?)",
                 ["a" * 64, "probe", "[]", "1", "short"])
-        except _sqlite3.IntegrityError:
-            pass  # expected — CHECK (or PK/FK) rejected the row
+        except _sqlite3.IntegrityError as ie:
+            if not _is_execution_config_hash_check_error(ie):
+                raise RuntimeError(
+                    "v6 short-hash probe rejected for a non-CHECK reason "
+                    f"({ie}); cannot prove execution_config_hash CHECK"
+                ) from ie
         else:
             con.execute("DELETE FROM placement_proposals WHERE proposal_id='__v6_probe__'")
             raise RuntimeError("v6 CHECK accepted short execution_config_hash")
@@ -687,9 +705,11 @@ def _migrate_execution_config_hash_v6(con, *, backup_existing: bool) -> None:
                 "VALUES('__v6_probe2__','ark',0,'draft',?,?,?,?,?)",
                 ["b" * 64, "probe", "[]", "1", "short"])
         except _sqlite3.IntegrityError as ie:
-            if "execution_config_hash" not in str(ie).lower() and "check" not in str(ie).lower():
-                # Still rejected — acceptable if CHECK message is generic.
-                pass
+            if not _is_execution_config_hash_check_error(ie):
+                raise RuntimeError(
+                    "v6 short-hash probe2 rejected for a non-CHECK reason "
+                    f"({ie}); cannot prove execution_config_hash CHECK"
+                ) from ie
         else:
             con.execute("DELETE FROM placement_proposals WHERE proposal_id='__v6_probe2__'")
             raise RuntimeError("v6 CHECK accepted short execution_config_hash (probe2)")

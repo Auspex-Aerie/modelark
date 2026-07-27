@@ -434,12 +434,25 @@ def test_dec052_measure_refresh_leaves_evidence_bytes_unchanged(tmp_path):
             side.unlink()
     before = _file_sha256(path)
 
-    # Run the real measure path; it may refuse or raise on incomplete bench setup.
-    # Mutation during a partial run still violates DEC-052.
+    # Outcome pin requires a real measurement attempt. Capture the result: success
+    # must return expected keys; Refusal/other errors must be typed, not swallowed.
+    outcome = None
+    err = None
     try:
-        bench.measure_executor_refresh_boundaries(path)
-    except Exception:
-        pass
+        outcome = bench.measure_executor_refresh_boundaries(path)
+    except Exception as exc:  # Refusal and runtime failures are recorded, not ignored
+        err = exc
+
+    if err is not None:
+        from modelark.proposal import Refusal
+        assert isinstance(err, (Refusal, RuntimeError, sqlite3.Error, OSError, ValueError)), (
+            f"unexpected measure failure type {type(err).__name__}: {err!r}"
+        )
+    else:
+        assert isinstance(outcome, dict), "measure must return a dict on success"
+        assert "calls" in outcome or "breakdown" in outcome, (
+            f"measure success missing instrumentation keys: {outcome!r}"
+        )
 
     _assert_sqlite_artifact_unmutated(path, before)
 
@@ -469,15 +482,35 @@ def test_dec052_fixture_path_from_config_not_env_and_skips_when_absent():
     """Fixture location from config (not env); absent → typed skip + skipped_measurement."""
     from modelark import execution_benchmark as bench
 
-    # Prefer an explicit resolver if present after Gate 2
     resolver = getattr(bench, "resolve_acceptance_fixture_path", None)
     assert resolver is not None, (
         "DEC-052: need resolve_acceptance_fixture_path (or equivalent) reading "
         "config — not an environment variable")
-    # When config omits path, must not raise blindly — typed skip contract
     path, reason = resolver(config={})
     assert path is None
     assert reason, "typed skip reason required when fixture path absent"
+
+    # Full wall-clock path must record skipped_measurement and not invent a fixture.
+    result = bench.run_acceptance_wall_clock(
+        fixture_descriptor={
+            "harness_generator_version": "gate1-dec052-skip",
+            "selected_repository_count": 2,
+            "model_count": 2,
+            "file_count": 2,
+            "source_sqlite_sha256": "0" * 64,
+            "prepared_canonical_input_hash": "1" * 64,
+            "prepared_projection_hash": "2" * 64,
+            # no sqlite_path
+            "operator_approved_identity": {
+                "source_sqlite_sha256": "0" * 64,
+                "selected_repository_count": 2,
+                "model_count": 2,
+            },
+        },
+        acceptance_config={},
+    )
+    assert result.get("skipped_measurement") is True, result
+    assert result.get("skip_reason"), result
 
 
 # ---------------------------------------------------------------------------
@@ -487,40 +520,15 @@ def test_dec052_fixture_path_from_config_not_env_and_skips_when_absent():
 
 def test_gate1_v6_probe_requires_check_specific_integrity_error():
     """Probe must not treat an unrelated IntegrityError as proof the CHECK works."""
-    src = inspect.getsource(db._migrate_execution_config_hash_v6)
-    # Contract: after catching IntegrityError on short-hash insert, must verify
-    # the error is the CHECK (execution_config_hash / check), not bare `pass`.
-    # Accept either explicit message assertion or a dedicated helper call.
-    has_specific = (
-        ("execution_config_hash" in src and "check" in src.lower()
-         and "IntegrityError" in src
-         and "raise" in src)
-        and (
-            "if \"execution_config_hash\"" in src
-            or "if 'execution_config_hash'" in src
-            or "_assert" in src
-            or "not in str" in src
-        )
-    )
-    # Current probe1: `except IntegrityError: pass` with no message check — red.
-    # Probe2 has a partial check; require probe1 (first short insert) also specific.
-    first_probe = src.split("Positive control")[0] if "Positive control" in src else src
-    probe1_specific = (
-        "execution_config_hash" in first_probe
-        and (
-            "not in str" in first_probe
-            or "execution_config_hash" in first_probe.split("IntegrityError")[-1][:400]
-            and "if" in first_probe.split("IntegrityError")[-1][:200]
-        )
-        and "pass  # expected" not in first_probe
-        and "pass  # expected — CHECK (or PK/FK)" not in first_probe
-    )
-    # Stronger behavioral pin: helper that classifies IntegrityError
     helper = getattr(db, "_is_execution_config_hash_check_error", None)
-    if helper is not None:
-        assert helper(Exception("CHECK constraint failed: execution_config_hash"))
-        assert not helper(Exception("UNIQUE constraint failed: placement_proposals.proposal_id"))
-        return
-    assert probe1_specific or has_specific and "pass  # expected — CHECK (or PK/FK)" not in first_probe, (
-        "v6 short-hash probe must assert CHECK-specific IntegrityError, "
-        "not accept any IntegrityError (PK/FK collision would false-pass)")
+    assert helper is not None, "need _is_execution_config_hash_check_error classifier"
+    assert helper(Exception("CHECK constraint failed: execution_config_hash"))
+    assert helper(Exception("CHECK constraint failed"))
+    assert not helper(
+        Exception("UNIQUE constraint failed: placement_proposals.proposal_id"))
+    assert not helper(Exception("FOREIGN KEY constraint failed"))
+    # Both probe sites in the migration must use the classifier (not bare pass).
+    src = inspect.getsource(db._migrate_execution_config_hash_v6)
+    assert src.count("_is_execution_config_hash_check_error") >= 2, (
+        "both short-hash probes must classify IntegrityError via the helper")
+    assert "pass  # expected — CHECK (or PK/FK)" not in src

@@ -1,6 +1,11 @@
 # Packaged default configuration. A user config at the platform config directory
 # (or `modelark --config PATH`) overrides this file.
 
+# DEC-052: optional path to an operator acceptance catalog (not committed).
+# When absent or missing on disk, B12 measurement skips with skipped_measurement.
+acceptance:
+  fixture_sqlite_path: null
+
 compression:
   max_compress_ram_gb: 4.0
   stream_compress: true

@@ -544,31 +544,51 @@ def _proj_field(t, name, default=None):
     return getattr(t, name, default)
 
 
-def _archive_content_satisfies(approved_sha, archived_sha) -> bool:
-    """Durable content satisfaction when an archive row exists (DEC-051).
+def _archive_content_satisfies(
+    approved_sha,
+    archived_sha=None,
+    *,
+    orig_sha256=None,
+    compressed: bool = False,
+    annex_key=None,
+) -> bool:
+    """Durable content satisfaction when an archive row exists (DEC-055).
 
-    One rule for replica source readiness and target durable satisfaction:
+    Resolves the stored copy's original-byte digest through
+    ``archive_hash.expected_sha256`` (shared with restore, verification, repair)
+    with ``catalog_sha=None`` so Fill never reopens catalog ``files`` authority.
+    ``proposal_files`` remains the approved file-list authority (RFC-002).
 
-    * Approved hash present → archived row must carry the same non-null hash.
-    * Approved hash absent, archived hash present → satisfied (ingestion-computed
-      digest; ordinary for non-LFS blobs where Hub publishes none).
-    * Both absent → fails closed. Archive-row presence alone never proves
-      durability (INC-017 / DIS-002 alignment).
+    * Approved hash present → resolved digest must equal it (case-insensitive).
+    * Approved hash absent → a digest must be resolvable (ingestion ``orig_sha256``
+      or raw ``SHA256``/``SHA256E`` annex key). Compressed annex keys do not resolve.
+    * Nothing resolvable → fails closed. Archive-row presence alone never proves
+      durability.
 
-    ``files.sha256`` may be null (``schema.sql:46``) is a data-shape fact only;
-    it is not a durability policy. DEC-022 is unrelated (compression codec/RAM).
+    ``archived_sha`` is accepted as a legacy positional alias for ``orig_sha256``
+    when keyword archive fields are omitted (pure two-arg matrix tests).
     """
+    from modelark import archive_hash
+
+    if orig_sha256 is None and annex_key is None and archived_sha is not None:
+        orig_sha256 = archived_sha
+    resolved = archive_hash.expected_sha256(
+        catalog_sha=None,
+        orig_sha256=orig_sha256,
+        compressed=bool(compressed),
+        annex_key=annex_key,
+    )
     if approved_sha:
-        return archived_sha is not None and str(archived_sha) == str(approved_sha)
-    # Unhashed approved file: require an ingestion-computed archive digest.
-    return archived_sha is not None and str(archived_sha) != ""
+        if resolved is None:
+            return False
+        return str(resolved).lower() == str(approved_sha).lower()
+    return resolved is not None and str(resolved) != ""
 
 
 def _source_files_content_ready(con, repo_id, source_drive, proposal_files_for_req) -> bool:
     """True only when every approved file is content-satisfied on the source drive.
 
-    DEC-051: same content-satisfaction rule as target evaluation; presence alone
-    never proves durability when both approved and archived digests are null.
+    DEC-055: same resolution rule as target evaluation via ``expected_sha256``.
     """
     if not proposal_files_for_req or not source_drive:
         return False
@@ -578,11 +598,13 @@ def _source_files_content_ready(con, repo_id, source_drive, proposal_files_for_r
         if not rfilename:
             return False
         arch = con.execute(
-            "SELECT orig_sha256 FROM archived WHERE repo_id=? AND rfilename=? AND drive_label=?",
+            "SELECT orig_sha256, compressed, annex_key FROM archived "
+            "WHERE repo_id=? AND rfilename=? AND drive_label=?",
             [repo_id, rfilename, source_drive]).fetchone()
         if arch is None:
             return False
-        if not _archive_content_satisfies(want, arch[0]):
+        if not _archive_content_satisfies(
+                want, orig_sha256=arch[0], compressed=bool(arch[1]), annex_key=arch[2]):
             return False
     return True
 
@@ -686,15 +708,17 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
         file_rows = []
         for rfilename, size_bytes, sha256, fmt, quant in file_specs:
             arch = con.execute(
-                "SELECT orig_sha256 FROM archived WHERE repo_id=? AND rfilename=? "
-                "AND drive_label=?",
+                "SELECT orig_sha256, compressed, annex_key FROM archived "
+                "WHERE repo_id=? AND rfilename=? AND drive_label=?",
                 [repo, rfilename, target]).fetchone() if target else None
             row = SimpleNamespace(
                 rfilename=rfilename, size_bytes=int(size_bytes or 0),
                 sha256=sha256, format=fmt, quant=quant)
             file_rows.append(row)
-            # Same content-satisfaction rule as source readiness (DEC-051).
-            if arch is None or not _archive_content_satisfies(sha256, arch[0]):
+            # Same content-satisfaction rule as source readiness (DEC-055).
+            if arch is None or not _archive_content_satisfies(
+                    sha256, orig_sha256=arch[0], compressed=bool(arch[1]),
+                    annex_key=arch[2]):
                 missing.append(rfilename)
         if not missing and file_rows:
             continue  # fully satisfied on approved target — shrink out
