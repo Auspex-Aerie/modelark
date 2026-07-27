@@ -545,30 +545,30 @@ def _proj_field(t, name, default=None):
 
 
 def _archive_content_satisfies(approved_sha, archived_sha) -> bool:
-    """Durable content satisfaction when an archive row exists (finding 37-a).
+    """Durable content satisfaction when an archive row exists (DEC-051).
 
-    Explicit rule (schema/DEC-022 tiny-git-blob authority: ``files.sha256`` may be
-    NULL for small git blobs; proposal_files copies that field):
+    One rule for replica source readiness and target durable satisfaction:
 
-    * If the approved file carries a content hash, the archive must carry the same
-      non-null hash (exact equality).
-    * If the approved file carries no content hash, **presence** of the archive row
-      is durable satisfaction on both source and target sides (null-vs-null and
-      null-vs-present are both presence).
+    * Approved hash present → archived row must carry the same non-null hash.
+    * Approved hash absent, archived hash present → satisfied (ingestion-computed
+      digest; ordinary for non-LFS blobs where Hub publishes none).
+    * Both absent → fails closed. Archive-row presence alone never proves
+      durability (INC-017 / DIS-002 alignment).
 
-    Applied identically by source readiness and target missing-set evaluation.
+    ``files.sha256`` may be null (``schema.sql:46``) is a data-shape fact only;
+    it is not a durability policy. DEC-022 is unrelated (compression codec/RAM).
     """
     if approved_sha:
         return archived_sha is not None and str(archived_sha) == str(approved_sha)
-    # Unhashed approved file: presence alone.
-    return True
+    # Unhashed approved file: require an ingestion-computed archive digest.
+    return archived_sha is not None and str(archived_sha) != ""
 
 
 def _source_files_content_ready(con, repo_id, source_drive, proposal_files_for_req) -> bool:
     """True only when every approved file is content-satisfied on the source drive.
 
-    Finding 37: archive row presence alone is insufficient when a hash is bound;
-    unhashed approved files require presence only (same rule as target side).
+    DEC-051: same content-satisfaction rule as target evaluation; presence alone
+    never proves durability when both approved and archived digests are null.
     """
     if not proposal_files_for_req or not source_drive:
         return False
@@ -693,7 +693,7 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
                 rfilename=rfilename, size_bytes=int(size_bytes or 0),
                 sha256=sha256, format=fmt, quant=quant)
             file_rows.append(row)
-            # Same content-satisfaction rule as source readiness (finding 37-a).
+            # Same content-satisfaction rule as source readiness (DEC-051).
             if arch is None or not _archive_content_satisfies(sha256, arch[0]):
                 missing.append(rfilename)
         if not missing and file_rows:

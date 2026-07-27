@@ -460,17 +460,83 @@ def test_finding_37_stale_replica_source_identity_not_ready():
     assert units[0].kind is None
 
 
-def test_finding_37_null_null_same_on_source_and_target():
-    """Unhashed approved file + null archive: presence satisfies both sides (37-a)."""
+def test_dec051_archive_content_satisfies_matrix():
+    """DEC-051 pure matrix: equal / unequal / null-archive / absent-present / both-null."""
+    from modelark import fill as fill_mod
+
+    good = "1" * 64
+    bad = "9" * 64
+    assert fill_mod._archive_content_satisfies(good, good) is True
+    assert fill_mod._archive_content_satisfies(good, bad) is False
+    assert fill_mod._archive_content_satisfies(good, None) is False
+    assert fill_mod._archive_content_satisfies(None, good) is True
+    assert fill_mod._archive_content_satisfies(None, None) is False
+    assert fill_mod._archive_content_satisfies("", "") is False
+    # Empty approved is absent; non-empty archive still satisfies.
+    assert fill_mod._archive_content_satisfies(None, bad) is True
+    assert fill_mod._archive_content_satisfies("", good) is True
+
+
+def test_dec051_target_present_equal_shrinks_out():
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    good = "1" * 64
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','model.bin','d0',0,10,10,?)",
+        [good])
+    proj = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d0",
+        source_drive=None, requirement_id="primary:org/a",
+        schedule_state="ready", order_key=1,
+        guaranteed_durable=10, expected_durable=10,
+    ),))
+    pfiles = [{
+        "requirement_id": "primary:org/a", "rfilename": "model.bin",
+        "size_bytes": 10, "orig_sha256": good, "format": None, "quant": None,
+    }]
+    units = fill_mod._projection_work_units(
+        con, proj, proposal_files=pfiles, require_proposal_files=True)
+    assert units == [], "present/equal target must shrink out"
+
+
+def test_dec051_target_present_unequal_stays_missing():
     from modelark import fill as fill_mod
 
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/a",))
     con.execute(
         "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
-        "stored_bytes,orig_sha256) VALUES('org/a','tiny.bin','d0',0,10,10,NULL)")
-    # Target side: fully present with null-null → shrink out
-    proj_tgt = SimpleNamespace(tasks=(SimpleNamespace(
+        "stored_bytes,orig_sha256) VALUES('org/a','model.bin','d0',0,10,10,?)",
+        ["9" * 64])
+    proj = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d0",
+        source_drive=None, requirement_id="primary:org/a",
+        schedule_state="ready", order_key=1,
+        guaranteed_durable=10, expected_durable=10,
+    ),))
+    pfiles = [{
+        "requirement_id": "primary:org/a", "rfilename": "model.bin",
+        "size_bytes": 10, "orig_sha256": "1" * 64, "format": None, "quant": None,
+    }]
+    units = fill_mod._projection_work_units(
+        con, proj, proposal_files=pfiles, require_proposal_files=True)
+    assert units and "model.bin" in units[0].missing_files
+
+
+def test_dec051_target_absent_present_shrinks_out():
+    """Approved null + archived ingestion digest → durable satisfaction."""
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','tiny.bin','d0',0,10,10,?)",
+        ["a" * 64])
+    proj = SimpleNamespace(tasks=(SimpleNamespace(
         row_kind="executable", repo_id="org/a", target_drive="d0",
         source_drive=None, requirement_id="primary:org/a",
         schedule_state="ready", order_key=1,
@@ -480,30 +546,159 @@ def test_finding_37_null_null_same_on_source_and_target():
         "requirement_id": "primary:org/a", "rfilename": "tiny.bin",
         "size_bytes": 10, "orig_sha256": None, "format": None, "quant": None,
     }]
-    units_t = fill_mod._projection_work_units(
-        con, proj_tgt, proposal_files=pfiles, require_proposal_files=True)
-    assert units_t == [], "null-null on target must be presence satisfaction (shrink out)"
+    units = fill_mod._projection_work_units(
+        con, proj, proposal_files=pfiles, require_proposal_files=True)
+    assert units == [], "absent/present target must shrink out under DEC-051"
 
-    # Source side: null-null must also be ready for replica
+
+def test_dec051_target_both_null_fails_closed():
+    """Approved null + archived null → not satisfied (DEC-051 regression of presence)."""
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
     con.execute(
         "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
-        "stored_bytes,orig_sha256) VALUES('org/a','tiny.bin','d1',0,10,10,NULL)")
-    # only on d0 source for replica to d1 — wait, put source on d0, target d1 missing
-    con.execute("DELETE FROM archived WHERE drive_label='d1'")
-    proj_src = SimpleNamespace(tasks=(SimpleNamespace(
+        "stored_bytes,orig_sha256) VALUES('org/a','tiny.bin','d0',0,10,10,NULL)")
+    proj = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d0",
+        source_drive=None, requirement_id="primary:org/a",
+        schedule_state="ready", order_key=1,
+        guaranteed_durable=10, expected_durable=10,
+    ),))
+    pfiles = [{
+        "requirement_id": "primary:org/a", "rfilename": "tiny.bin",
+        "size_bytes": 10, "orig_sha256": None, "format": None, "quant": None,
+    }]
+    units = fill_mod._projection_work_units(
+        con, proj, proposal_files=pfiles, require_proposal_files=True)
+    assert units, "both-null must not shrink out"
+    assert "tiny.bin" in units[0].missing_files
+
+
+def test_dec051_source_present_equal_ready():
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    good = "1" * 64
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','model.bin','d0',0,10,10,?)",
+        [good])
+    proj = SimpleNamespace(tasks=(SimpleNamespace(
         row_kind="executable", repo_id="org/a", target_drive="d1",
         source_drive="d0", requirement_id="replica:org/a",
         schedule_state="waiting_dependency", order_key=1,
         guaranteed_durable=10, expected_durable=10,
     ),))
-    pfiles_r = [{
+    pfiles = [{
+        "requirement_id": "replica:org/a", "rfilename": "model.bin",
+        "size_bytes": 10, "orig_sha256": good, "format": None, "quant": None,
+    }]
+    units = fill_mod._projection_work_units(
+        con, proj, proposal_files=pfiles, require_proposal_files=True)
+    assert units and units[0].schedule_state == "ready", units
+    assert units[0].kind is not None
+
+
+def test_dec051_source_present_unequal_waiting():
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','model.bin','d0',0,10,10,?)",
+        ["9" * 64])
+    proj = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d1",
+        source_drive="d0", requirement_id="replica:org/a",
+        schedule_state="waiting_dependency", order_key=1,
+        guaranteed_durable=10, expected_durable=10,
+    ),))
+    pfiles = [{
+        "requirement_id": "replica:org/a", "rfilename": "model.bin",
+        "size_bytes": 10, "orig_sha256": "1" * 64, "format": None, "quant": None,
+    }]
+    units = fill_mod._projection_work_units(
+        con, proj, proposal_files=pfiles, require_proposal_files=True)
+    assert units and units[0].schedule_state == "waiting_dependency"
+    assert units[0].kind is None
+
+
+def test_dec051_source_present_null_archive_waiting():
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','model.bin','d0',0,10,10,NULL)")
+    proj = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d1",
+        source_drive="d0", requirement_id="replica:org/a",
+        schedule_state="waiting_dependency", order_key=1,
+        guaranteed_durable=10, expected_durable=10,
+    ),))
+    pfiles = [{
+        "requirement_id": "replica:org/a", "rfilename": "model.bin",
+        "size_bytes": 10, "orig_sha256": "1" * 64, "format": None, "quant": None,
+    }]
+    units = fill_mod._projection_work_units(
+        con, proj, proposal_files=pfiles, require_proposal_files=True)
+    assert units and units[0].schedule_state == "waiting_dependency"
+    assert units[0].kind is None
+
+
+def test_dec051_source_absent_present_ready():
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','tiny.bin','d0',0,10,10,?)",
+        ["b" * 64])
+    proj = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d1",
+        source_drive="d0", requirement_id="replica:org/a",
+        schedule_state="waiting_dependency", order_key=1,
+        guaranteed_durable=10, expected_durable=10,
+    ),))
+    pfiles = [{
         "requirement_id": "replica:org/a", "rfilename": "tiny.bin",
         "size_bytes": 10, "orig_sha256": None, "format": None, "quant": None,
     }]
-    units_s = fill_mod._projection_work_units(
-        con, proj_src, proposal_files=pfiles_r, require_proposal_files=True)
-    assert units_s and units_s[0].schedule_state == "ready", units_s
-    assert units_s[0].kind is not None
+    units = fill_mod._projection_work_units(
+        con, proj, proposal_files=pfiles, require_proposal_files=True)
+    assert units and units[0].schedule_state == "ready", units
+    assert units[0].kind is not None
+
+
+def test_dec051_source_both_null_waiting():
+    """Both digests null on source → waiting_dependency (not ready)."""
+    from modelark import fill as fill_mod
+
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+        "stored_bytes,orig_sha256) VALUES('org/a','tiny.bin','d0',0,10,10,NULL)")
+    proj = SimpleNamespace(tasks=(SimpleNamespace(
+        row_kind="executable", repo_id="org/a", target_drive="d1",
+        source_drive="d0", requirement_id="replica:org/a",
+        schedule_state="waiting_dependency", order_key=1,
+        guaranteed_durable=10, expected_durable=10,
+    ),))
+    pfiles = [{
+        "requirement_id": "replica:org/a", "rfilename": "tiny.bin",
+        "size_bytes": 10, "orig_sha256": None, "format": None, "quant": None,
+    }]
+    units = fill_mod._projection_work_units(
+        con, proj, proposal_files=pfiles, require_proposal_files=True)
+    assert units and units[0].schedule_state == "waiting_dependency", units
+    assert units[0].kind is None
 
 
 def test_finding_37b_multifile_source_stale_and_absent():
