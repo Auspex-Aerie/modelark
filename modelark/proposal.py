@@ -12,10 +12,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
-from modelark import capacity, drive_fence, plan as plan_mod
+from modelark import archive_manifest, capacity, drive_fence, plan as plan_mod
 from modelark import proposal_canonical as canonical
 from modelark.core import db
 from modelark.web import fill_worker
+
+# Exact Gate-B actions for multi-repo acquisition-policy INFEASIBLE (INC-024 Q2 / DEC-050).
+_MANIFEST_POLICY_ACTIONS = ("review_manifest_policy", "trim_selection", "replan")
 
 # ---------------------------------------------------------------------------
 # Inventory of graph-affecting writers (A3). Names are matched loosely by tests.
@@ -153,10 +156,20 @@ def _selection_hash(con) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def _manifest_hash(con, repo_id: str) -> str:
-    files = con.execute(
-        "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
-        "WHERE repo_id=? ORDER BY rfilename", [repo_id]).fetchall()
+def _manifest_hash(con, repo_id: str, planned=None) -> str:
+    """Hash the acquisition-planned file set for a repository (DEC-056 / INC-024).
+
+    Narrows internally through ``archive_manifest`` so every consumer — draft write,
+    approve-time revalidation, and projection comparison input — measures the same
+    planned set. Optional ``planned`` is a precomputed ``ManifestFile`` sequence from
+    a batch inspect (efficiency only); it is never an alternate definition of the set.
+    """
+    if planned is None:
+        planned = archive_manifest.manifest_for_repo(con, repo_id)
+    files = [
+        (m.rfilename, m.size_bytes, m.sha256, m.format, m.quant)
+        for m in planned
+    ]
     payload = json.dumps(
         [list(r) for r in files], sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -260,18 +273,20 @@ def _archived_matches_manifest(
     return True
 
 
-def _complete_archived_plan_drives(con, repo_id: str, plan_labels: set[str]) -> list[str]:
-    """Plan-member drives holding a *content-complete* archive of every current catalog file.
+def _complete_archived_plan_drives(
+        con, repo_id: str, plan_labels: set[str], planned=None) -> list[str]:
+    """Plan-member drives holding a content-complete archive of the *planned* file set.
 
-    Requires every ``files`` row to have a matching ``archived`` row on that drive whose
-    durable identity agrees with the current manifest (orig_sha256 / orig_bytes vs
-    files.sha256 / size_bytes). Filename-only matches do not satisfy numcopies.
+    Completeness is measured against the acquisition-planned set (INC-024), not the
+    whole catalog: policy-excluded formats (e.g. onnx) need not be archived for
+    baseline_satisfied. Optional ``planned`` is the batch-inspect result for this
+    repository. Filename-only matches still do not satisfy numcopies.
     """
-    needed = list(con.execute(
-        "SELECT rfilename, size_bytes, sha256 FROM files WHERE repo_id=? ORDER BY rfilename",
-        [repo_id]).fetchall())
+    if planned is None:
+        planned = archive_manifest.manifest_for_repo(con, repo_id)
+    needed = [(m.rfilename, m.size_bytes, m.sha256) for m in planned]
     if not needed:
-        # No catalog files → treat any archived presence on a plan drive as complete.
+        # Empty planned set → treat any archived presence on a plan drive as complete.
         rows = con.execute(
             "SELECT DISTINCT drive_label FROM archived WHERE repo_id=? ORDER BY drive_label",
             [repo_id]).fetchall()
@@ -301,31 +316,40 @@ def _complete_archived_plan_drives(con, repo_id: str, plan_labels: set[str]) -> 
     return complete
 
 
-def _repo_size(con, repo_id: str) -> int:
-    row = con.execute(
-        "SELECT coalesce(sum(size_bytes),0) FROM files WHERE repo_id=?",
-        [repo_id]).fetchone()
-    return int(row[0] or 0)
+def _repo_size(con, repo_id: str, planned=None) -> int:
+    """Durable byte charge for one repository — acquisition-planned set only (INC-024)."""
+    if planned is None:
+        planned = archive_manifest.manifest_for_repo(con, repo_id)
+    return int(sum(int(m.size_bytes or 0) for m in planned))
 
 
-def _append_missing_files(con, files: list, requirement_id: str, repo_id: str) -> None:
-    for fr in con.execute(
-            "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
-            "WHERE repo_id=? ORDER BY rfilename", [repo_id]):
+def _append_missing_files(
+        con, files: list, requirement_id: str, repo_id: str, planned=None) -> None:
+    """Append proposal_files rows for the acquisition-planned set (INC-024).
+
+    ``storage_action`` comes from ``ManifestFile``, not a hard-coded compress default.
+    """
+    if planned is None:
+        planned = archive_manifest.manifest_for_repo(con, repo_id)
+    for m in planned:
         files.append({
             "requirement_id": requirement_id,
-            "rfilename": fr[0],
+            "rfilename": m.rfilename,
             "role": "missing",
-            "size_bytes": fr[1],
-            "orig_sha256": fr[2],
-            "format": fr[3],
-            "quant": fr[4],
-            "storage_action": "compress",
+            "size_bytes": m.size_bytes,
+            "orig_sha256": m.sha256,
+            "format": m.format,
+            "quant": m.quant,
+            "storage_action": m.storage_action,
         })
 
 
 def _baseline_file_evidence(con, repo_id: str, drive_label: str) -> list[dict]:
-    """Per-file durable evidence for A10 baseline certificates (archived content identity)."""
+    """Per-file durable evidence for A10 baseline certificates (archived content identity).
+
+    Intentionally archived-unfiltered (INC-024 Q6 / c14): certificate payload records
+    what is on the drive, not the acquisition policy's planned subset.
+    """
     rows = con.execute(
         "SELECT a.rfilename, a.orig_sha256, a.orig_bytes, a.annex_key, a.stored_bytes "
         "FROM archived a WHERE a.repo_id=? AND a.drive_label=? ORDER BY a.rfilename",
@@ -340,6 +364,25 @@ def _baseline_file_evidence(con, repo_id: str, drive_label: str) -> list[dict]:
         }
         for r in rows
     ]
+
+
+def _manifest_policy_gate_block(
+        errors: Mapping[str, archive_manifest.ArchivePolicyError]) -> dict:
+    """Single-container MANIFEST_POLICY Gate-B observability (INC-024 Q2).
+
+    One structured block supplies code, gate, evidence, and actions. Reasons are
+    sorted by repo_id. Exact action list is contract-pinned.
+    """
+    blocked = [
+        {"repo_id": repo_id, "reason": str(errors[repo_id])}
+        for repo_id in sorted(errors)
+    ]
+    return {
+        "code": "MANIFEST_POLICY",
+        "gate": "B",
+        "evidence": {"blocked_repositories": blocked},
+        "actions": list(_MANIFEST_POLICY_ACTIONS),
+    }
 
 
 def _requirement_id(copy_i: int, nc: int, repo: str) -> str:
@@ -452,13 +495,20 @@ def joint_capacity_shortfall(
     return None
 
 
-def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], list[dict], str]:
+def _build_assignment(
+        con, plan_id: str, mutation: tuple
+) -> tuple[list[dict], list[dict], str, dict | None]:
     """Build tasks/files and gate_b_code for the hypothetical post-mutation selection.
 
     Joint model (preview ≡ approval authority):
-    - baseline only on complete archives on plan-member drives;
+    - one ``inspect_manifests_for_repos`` batch per draft (INC-024);
+    - file authority and durable charges from the acquisition-planned set;
+    - baseline only on complete *planned* archives on plan-member drives;
     - distinct media per numcopies;
-    - safety-adjusted free depleted across the whole assignment (not per-task vs full free).
+    - safety-adjusted free depleted across the whole assignment (not per-task vs full free);
+    - acquisition-policy errors → INFEASIBLE + single-container MANIFEST_POLICY block.
+
+    Returns ``(tasks, files, gate_b_code, policy_gate_block_or_None)``.
     """
     drives = _plan_drives(con, plan_id)
     repos = _selected_repos(con, mutation)
@@ -466,17 +516,28 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
     files: list[dict] = []
     order = 0
     gate = "FEASIBLE"
+    policy_gate: dict | None = None
 
     if not repos:
         # Empty selection is still a valid adopt_current draft (diagnostic-feasible no-op set).
-        return tasks, files, gate
+        return tasks, files, gate, None
+
+    # One batch inspect for the whole draft — policy errors retained per repository.
+    batch = archive_manifest.inspect_manifests_for_repos(con, repos)
+    if batch.errors:
+        gate = "INFEASIBLE"
+        policy_gate = _manifest_policy_gate_block(batch.errors)
+    # Only repositories that produced a planned manifest are placeable work.
+    placeable_repos = [r for r in repos if r in batch.manifests]
 
     if not drives:
         gate = "INFEASIBLE"
-        for repo in repos:
+        for repo in placeable_repos:
+            planned = batch.manifests[repo]
             order += 1
             rid = f"primary:{repo}"
-            mh = _manifest_hash(con, repo)
+            mh = _manifest_hash(con, repo, planned=planned)
+            size = _repo_size(con, repo, planned=planned)
             tasks.append({
                 "requirement_id": rid,
                 "row_kind": "executable",
@@ -485,12 +546,12 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
                 "source_drive": None,
                 "full_manifest_hash": mh,
                 "order_key": order,
-                "guaranteed_durable": _repo_size(con, repo),
-                "expected_durable": _repo_size(con, repo),
+                "guaranteed_durable": size,
+                "expected_durable": size,
                 "identity_epoch": None,
             })
-            _append_missing_files(con, files, rid, repo)
-        return tasks, files, gate
+            _append_missing_files(con, files, rid, repo, planned=planned)
+        return tasks, files, gate, policy_gate
 
     placeable_labels = {d[0] for d in drives}
     baseline_labels = _plan_baseline_labels(con, plan_id)
@@ -507,16 +568,18 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
     # Running remaining capacity — depleted only by executable placement charges.
     remaining = _admissible_map_from_drives(drives)
 
-    for repo in repos:
+    for repo in placeable_repos:
+        planned = batch.manifests[repo]
         nrow = con.execute(
             "SELECT coalesce(numcopies,1) FROM models WHERE repo_id=?",
             [repo]).fetchone()
         nc = int((nrow[0] if nrow else 1) or 1)
-        size = _repo_size(con, repo)
+        size = _repo_size(con, repo, planned=planned)
         workspace = _repo_workspace_peak(con, repo)
-        mh = _manifest_hash(con, repo)
-        # Complete archives on active plan members (enabled *or* excluded) satisfy durability.
-        satisfied = _complete_archived_plan_drives(con, repo, baseline_labels)[:nc]
+        mh = _manifest_hash(con, repo, planned=planned)
+        # Complete *planned* archives on active plan members satisfy durability.
+        satisfied = _complete_archived_plan_drives(
+            con, repo, baseline_labels, planned=planned)[:nc]
         used: set[str] = set()
         copy_i = 0
         # Primary durable source for replica dependencies (first complete archive if any).
@@ -528,6 +591,7 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
             epoch = int(row[1])
             fp = row[2]
             rid = _requirement_id(copy_i, nc, repo)
+            # Certificate evidence stays archived-unfiltered (c14 / Q6).
             cert_files = _baseline_file_evidence(con, repo, label)
             cert = canonical.baseline_satisfaction_certificate(
                 requirement_id=rid,
@@ -624,13 +688,13 @@ def _build_assignment(con, plan_id: str, mutation: tuple) -> tuple[list[dict], l
                 "identity_epoch": epoch,
                 "baseline_certificate": None,
             })
-            _append_missing_files(con, files, rid, repo)
+            _append_missing_files(con, files, rid, repo, planned=planned)
 
     # Final joint pass (stable order) — catches any construction path that skipped remaining.
     short = joint_capacity_shortfall(tasks, _admissible_map_from_drives(drives))
     if short is not None:
         gate = "INFEASIBLE"
-    return tasks, files, gate
+    return tasks, files, gate, policy_gate
 
 
 def _header_from_facts(
@@ -686,7 +750,7 @@ def preview_pure(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", 
         sel_after = hashlib.sha256(payload.encode()).hexdigest()
     else:
         sel_after = sel_before
-    tasks, files, gate = _build_assignment(con, plan_id, mutation)
+    tasks, files, gate, policy_gate = _build_assignment(con, plan_id, mutation)
     tasks_n = _normalize_tasks_for_hash(tasks)
     files_n = _normalize_files_for_hash(files)
     semantic = _semantic_input_hash(con, plan_id, mutation)
@@ -714,13 +778,18 @@ def preview_pure(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", 
     # derivation_mode remains placement audit evidence only.
     header["execution_config_hash"] = cfg_hash
     digest = canonical.proposal_hash(header, tasks_n, files_n)
-    return {
+    payload = {
         "header": header,
         "tasks": tasks_n,
         "files": files_n,
         "canonical_hash": digest,
         "mutation": mutation,
     }
+    # Single-container MANIFEST_POLICY observability (INC-024 Q2). Prefer named
+    # gate_b_refusal so Gate-1 contracts select one block without cross-container mix.
+    if policy_gate is not None:
+        payload["gate_b_refusal"] = policy_gate
+    return payload
 
 
 compute_draft_payload = preview_pure
@@ -1322,14 +1391,18 @@ def _approve_tx(con, proposal_id: str, *, mutation, evidence_by_drive) -> dict:
                            "current": current_semantic},
                           ("preview_again",))
 
+        # DEC-056 / INC-024: planned-set drift and exact-assignment refusals are
+        # operator-facing — surface them before PROPOSAL_HASH_MISMATCH so a draft
+        # whose tasks were corrupted to a legacy wide full_manifest_hash refuses
+        # as APPROVED_INPUT_CHANGED (reason full_manifest_hash), not hash integrity.
+        validate_exact_assignment(con, proposal, evidence_by_drive=evidence_by_drive)
+
         stored_hash = proposal["canonical_hash"]
         recomputed = hash_stored_proposal(con, proposal_id)
         if recomputed != stored_hash:
             raise Refusal("PROPOSAL_HASH_MISMATCH",
                           {"stored": stored_hash, "recomputed": recomputed},
                           ("preview_again",))
-
-        validate_exact_assignment(con, proposal, evidence_by_drive=evidence_by_drive)
 
         if proposal["mutation_kind"] == "adopt_current":
             if proposal.get("selection_before_hash") != proposal.get("selection_after_hash"):
