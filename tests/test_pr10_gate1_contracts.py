@@ -419,8 +419,14 @@ def test_dec052_measure_refresh_leaves_evidence_bytes_unchanged(tmp_path):
     Asserts container SHA-256 unchanged and no ``-wal``/``-shm`` sidecars after the
     call. Implementation-agnostic: permits mode=ro or copy-first; forbids the
     measurement rewriting its own evidence.
+
+    DEC-052 measurement gap closed here: the real drain path
+    (``fill._drain_projection``) must be reached before either success or a typed
+    failure is accepted. A validation/setup failure before the drain must fail
+    this contract even when fixture bytes remain unchanged.
     """
     from modelark import execution_benchmark as bench
+    from modelark import fill as fill_mod
 
     src_fixture = Path("docs/plans/evidence/b12_390_approved_fixture.sqlite")
     if not src_fixture.is_file():
@@ -434,14 +440,31 @@ def test_dec052_measure_refresh_leaves_evidence_bytes_unchanged(tmp_path):
             side.unlink()
     before = _file_sha256(path)
 
-    # Outcome pin requires a real measurement attempt. Capture the result: success
-    # must return expected keys; Refusal/other errors must be typed, not swallowed.
+    # Prove the real drain path was entered. measure_executor_refresh_boundaries
+    # re-patches _drain_projection internally: it captures the current object as
+    # real_drain and calls it from its wrapper, so a counting side_effect here is
+    # invoked on every production drain entry (including nested).
+    drain_hits = {"n": 0}
+    real_drain = fill_mod._drain_projection
+
+    def _counting_drain(*args, **kwargs):
+        drain_hits["n"] += 1
+        return real_drain(*args, **kwargs)
+
     outcome = None
     err = None
-    try:
-        outcome = bench.measure_executor_refresh_boundaries(path)
-    except Exception as exc:  # Refusal and runtime failures are recorded, not ignored
-        err = exc
+    with mock.patch.object(fill_mod, "_drain_projection", side_effect=_counting_drain):
+        try:
+            outcome = bench.measure_executor_refresh_boundaries(path)
+        except Exception as exc:  # Refusal and runtime failures are recorded, not ignored
+            err = exc
+
+    assert drain_hits["n"] >= 1, (
+        "DEC-052: measure must reach fill._drain_projection before success or typed "
+        f"failure is accepted; pre-drain validation/setup failure is not a valid "
+        f"immutability pin (drain_hits={drain_hits['n']}, err={err!r}, "
+        f"outcome={outcome!r})"
+    )
 
     if err is not None:
         from modelark.proposal import Refusal

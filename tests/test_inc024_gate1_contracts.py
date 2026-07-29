@@ -139,47 +139,32 @@ def test_c04_fresh_draft_full_manifest_hash_is_planned():
     assert task["full_manifest_hash"] != _wide_hash(con, "org/gte")
 
 
-def test_c05_wide_hash_approval_refused_and_reapprove_is_narrow():
-    """Q4 pin: wide stored hash fails project_pure; fresh approve regenerates narrow."""
+def _project_approved(con, pid, loaded, drives=None):
+    """Build project_pure inputs the way execution_session does (via _manifest_hash)."""
     from modelark.execution_projection import project_pure
 
-    con = f.mem_con()
-    _seed_drives_and_plan(con)
-    _gte_shape(con)
-    # Archive planned set so placement can baseline or execute cleanly after re-approve
-    for m in archive_manifest.manifest_for_repo(con, "org/gte"):
-        con.execute(
-            "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
-            "stored_bytes,orig_sha256) VALUES(?,?,?,?,?,?,?)",
-            ["org/gte", m.rfilename, "d0", 0, m.size_bytes, m.size_bytes, m.sha256 or "d" * 64])
-
-    # Simulate a legacy wide-hash approval without going through current draft helpers
-    # by drafting then overwriting full_manifest_hash to the wide value.
-    draft = _draft(con)
-    pid = draft["proposal_id"] if isinstance(draft, dict) else draft
-    wide = _wide_hash(con, "org/gte")
-    con.execute(
-        "UPDATE proposal_tasks SET full_manifest_hash=? WHERE proposal_id=? AND repo_id=?",
-        [wide, pid, "org/gte"])
-    prop.approve(con, pid, mutation=("adopt_current", ()), services=f.default_services())
-    loaded = prop.load_proposal(con, pid)
-    assert loaded["lifecycle"] == "approved"
-    # Comparison input as execution_session builds it (always via _manifest_hash)
-    manifests = {"org/gte": prop._manifest_hash(con, "org/gte")}
+    drives = drives or {
+        "d0": SimpleNamespace(lifecycle="active", identity_epoch=1),
+        "d1": SimpleNamespace(lifecycle="active", identity_epoch=1),
+    }
+    manifests = {
+        t["repo_id"]: prop._manifest_hash(con, t["repo_id"])
+        for t in loaded["tasks"] if t.get("repo_id")
+    }
     proposal = {
         "lifecycle": "approved",
         "proposal_id": pid,
         "tasks": loaded["tasks"],
         "files": loaded["files"],
-        "requirement_set_hash": loaded.get("requirement_set_hash") or loaded["tasks"][0].get("full_manifest_hash"),
+        "requirement_set_hash": (
+            loaded.get("requirement_set_hash")
+            or loaded["tasks"][0].get("full_manifest_hash")
+        ),
         "semantic_input_hash": loaded.get("semantic_input_hash") or "e" * 64,
     }
     current_input = SimpleNamespace(
         manifests=manifests,
-        drives={
-            "d0": SimpleNamespace(lifecycle="active", identity_epoch=1),
-            "d1": SimpleNamespace(lifecycle="active", identity_epoch=1),
-        },
+        drives=drives,
         archived={},
         evidence={},
         observed_ratio={},
@@ -188,46 +173,77 @@ def test_c05_wide_hash_approval_refused_and_reapprove_is_narrow():
         requirement_ids=[t["requirement_id"] for t in loaded["tasks"]],
         requirement_set_hash=proposal["requirement_set_hash"],
     )
-    out = project_pure(proposal, current_input, current_graph, SimpleNamespace(parked_gated_repos=frozenset()))
-    assert isinstance(out, Refusal), (
-        "DEC-056/Q4: wide-hash approval must be refused by project_pure, got success")
-    assert out.code == "APPROVED_INPUT_CHANGED"
-    assert (out.evidence or {}).get("reason") == "full_manifest_hash"
-
-    # Fresh preview+approve under (future) narrow code regenerates and projects cleanly
-    con.execute("UPDATE planner_state SET planner_revision=planner_revision")  # no-op keep open
-    draft2 = _draft(con)
-    pid2 = draft2["proposal_id"] if isinstance(draft2, dict) else draft2
-    prop.approve(con, pid2, mutation=("adopt_current", ()), services=f.default_services())
-    loaded2 = prop.load_proposal(con, pid2)
-    for t in loaded2["tasks"]:
-        if t.get("repo_id") == "org/gte":
-            assert t["full_manifest_hash"] == _planned_hash(con, "org/gte")
-    manifests2 = {"org/gte": prop._manifest_hash(con, "org/gte")}
-    proposal2 = {
-        "lifecycle": "approved",
-        "proposal_id": pid2,
-        "tasks": loaded2["tasks"],
-        "files": loaded2["files"],
-        "requirement_set_hash": loaded2.get("requirement_set_hash") or "f" * 64,
-        "semantic_input_hash": loaded2.get("semantic_input_hash") or "f" * 64,
-    }
-    out2 = project_pure(
-        proposal2,
-        SimpleNamespace(
-            manifests=manifests2,
-            drives=current_input.drives,
-            archived={},
-            evidence={},
-            observed_ratio={},
-        ),
-        SimpleNamespace(
-            requirement_ids=[t["requirement_id"] for t in loaded2["tasks"]],
-            requirement_set_hash=proposal2["requirement_set_hash"],
-        ),
+    return project_pure(
+        proposal, current_input, current_graph,
         SimpleNamespace(parked_gated_repos=frozenset()),
     )
-    assert not isinstance(out2, Refusal), f"fresh narrow approval must project cleanly: {out2!r}"
+
+
+def test_c05_wide_hash_approval_refused_and_reapprove_is_narrow():
+    """Q4/DEC-056: independently pin three states (do not corrupt-before-approve alone).
+
+    1. Draft corrupted to legacy wide hash is refused by approve() as
+       APPROVED_INPUT_CHANGED / full_manifest_hash.
+    2. Already-approved historical-wide proposal (approve first, then seed wide
+       on the persisted task) is refused by project_pure with the same code/reason.
+    3. Fresh narrow preview/approval projects cleanly.
+    """
+    con = f.mem_con()
+    _seed_drives_and_plan(con)
+    _gte_shape(con)
+    for m in archive_manifest.manifest_for_repo(con, "org/gte"):
+        con.execute(
+            "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
+            "stored_bytes,orig_sha256) VALUES(?,?,?,?,?,?,?)",
+            ["org/gte", m.rfilename, "d0", 0, m.size_bytes, m.size_bytes, m.sha256 or "d" * 64])
+    wide = _wide_hash(con, "org/gte")
+    services = f.default_services()
+
+    # --- 1. Corrupted draft refused at approve (validation, not project_pure) ---
+    draft1 = _draft(con)
+    pid1 = draft1["proposal_id"] if isinstance(draft1, dict) else draft1
+    con.execute(
+        "UPDATE proposal_tasks SET full_manifest_hash=? WHERE proposal_id=? AND repo_id=?",
+        [wide, pid1, "org/gte"])
+    refuse1 = f.assert_refuses(
+        lambda: prop.approve(con, pid1, mutation=("adopt_current", ()), services=services),
+        code="APPROVED_INPUT_CHANGED",
+        label="approve of draft corrupted to legacy wide full_manifest_hash",
+    )
+    ev1 = getattr(refuse1, "evidence", None) or {}
+    if not isinstance(ev1, dict):
+        ev1 = {}
+    assert ev1.get("reason") == "full_manifest_hash", (
+        f"approve refusal reason must be full_manifest_hash, got {ev1!r}")
+
+    # --- 2. Historical wide: approve first, then seed wide on persisted task ---
+    draft2 = _draft(con)
+    pid2 = draft2["proposal_id"] if isinstance(draft2, dict) else draft2
+    prop.approve(con, pid2, mutation=("adopt_current", ()), services=services)
+    con.execute(
+        "UPDATE proposal_tasks SET full_manifest_hash=? WHERE proposal_id=? AND repo_id=?",
+        [wide, pid2, "org/gte"])
+    loaded2 = prop.load_proposal(con, pid2)
+    assert loaded2["lifecycle"] == "approved"
+    out2 = _project_approved(con, pid2, loaded2)
+    assert isinstance(out2, Refusal), (
+        "DEC-056/Q4: historical wide-hash approval must be refused by project_pure, "
+        f"got success {out2!r}")
+    assert out2.code == "APPROVED_INPUT_CHANGED"
+    assert (out2.evidence or {}).get("reason") == "full_manifest_hash"
+
+    # --- 3. Fresh narrow preview/approval projects cleanly ---
+    draft3 = _draft(con)
+    pid3 = draft3["proposal_id"] if isinstance(draft3, dict) else draft3
+    prop.approve(con, pid3, mutation=("adopt_current", ()), services=services)
+    loaded3 = prop.load_proposal(con, pid3)
+    for t in loaded3["tasks"]:
+        if t.get("repo_id") == "org/gte":
+            assert t["full_manifest_hash"] == _planned_hash(con, "org/gte"), (
+                "fresh approval must store the planned-set full_manifest_hash")
+    out3 = _project_approved(con, pid3, loaded3)
+    assert not isinstance(out3, Refusal), (
+        f"fresh narrow approval must project cleanly: {out3!r}")
 
 
 def test_c06_excluded_catalog_file_does_not_invalidate_approval():
@@ -362,49 +378,171 @@ def test_c09_joint_feasibility_uses_planned_not_wide_charge():
         f"joint feasibility must use planned charge; gate={gate} "
         f"(wide catalog charge must not starve the fleet)")
 # ---------------------------------------------------------------------------
-# Policy error (Q2a)
+# Policy error (Q2a) — exact structured observability, not substring presence
 # ---------------------------------------------------------------------------
 
+_Q2_EXPECTED_ACTIONS = ["review_manifest_policy", "trim_selection", "replan"]
+_Q2_BLOCKED_REPOS = ("org/pickle", "org/noweights")
 
-def test_c10_multi_repo_policy_errors_gate_infeasible_with_named_evidence():
-    con = f.mem_con()
+
+def _seed_mixed_policy_selection(con):
+    """Healthy repo + pickle-only + unsupported-weights (both raise ArchivePolicyError)."""
     _seed_drives_and_plan(con)
-    # One healthy repo so assignment is otherwise possible
     _gte_shape(con, "org/ok")
-    # Pickle-only blocked under exclude.pickle_only
     _add_repo(con, "org/pickle", [
         ("weights.bin", 100, "pytorch", None, "3" * 64),
     ])
-    # No supported weights
     _add_repo(con, "org/noweights", [
         ("tokenizer.json", 10, "aux", None, "4" * 64),
         ("weird.dat", 10, "other", None, "5" * 64),
     ])
+
+
+def _q2_gate_observability(payload):
+    """Extract the single exact structured shape Q2 pins.
+
+    Production must surface this as structured fields — not advisory text, not a
+    global reason string, not action strings elsewhere in a serialized blob.
+    Accepted locations (first match wins): payload root (DEC-050 / admission
+    terminal shape), header, or an explicit gate_b / manifest_policy block.
+    """
+    header = payload.get("header") or {}
+    candidates = [
+        payload,
+        header,
+        payload.get("gate_b_refusal"),
+        payload.get("manifest_policy_gate"),
+        header.get("gate_b_refusal"),
+        header.get("manifest_policy_gate"),
+        payload.get("gate_b_evidence"),
+    ]
+    block = None
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        # Prefer a block that already carries the typed code or blocked list.
+        if (
+            cand.get("code") == "MANIFEST_POLICY"
+            or cand.get("gate") == "B"
+            or (isinstance(cand.get("evidence"), dict)
+                and "blocked_repositories" in cand["evidence"])
+            or "blocked_repositories" in cand
+        ):
+            block = cand
+            break
+    if block is None:
+        block = payload if isinstance(payload, dict) else {}
+
+    evidence = block.get("evidence")
+    if not isinstance(evidence, dict):
+        evidence = (
+            payload.get("evidence")
+            if isinstance(payload.get("evidence"), dict)
+            else header.get("evidence")
+            if isinstance(header.get("evidence"), dict)
+            else {}
+        )
+    # blocked_repositories may sit on evidence or (incorrectly) at block root —
+    # only evidence["blocked_repositories"] satisfies the contract.
+    actions = block.get("actions")
+    if actions is None:
+        actions = payload.get("actions")
+    if actions is None:
+        actions = header.get("actions")
+    if actions is None and isinstance(evidence, dict):
+        actions = evidence.get("actions")
+
+    return {
+        "gate_b_code": header.get("gate_b_code"),
+        "code": block.get("code") if block is not payload else (
+            payload.get("code") or header.get("code")),
+        "gate": block.get("gate") if block is not payload else (
+            payload.get("gate") or header.get("gate")),
+        "evidence": evidence if isinstance(evidence, dict) else {},
+        "actions": list(actions) if actions is not None else None,
+    }
+
+
+def _assert_q2_exact_shape(payload, *, label: str):
+    """Pin one exact structured shape for multi-repo policy INFEASIBLE.
+
+    Required:
+      - gate_b_code == "INFEASIBLE"
+      - typed code MANIFEST_POLICY
+      - gate == "B"
+      - evidence["blocked_repositories"]: one record per blocked repository
+      - every record has its own repo_id and non-empty reason
+      - exact ordered actions
+        ["review_manifest_policy", "trim_selection", "replan"]
+
+    A global reason, count-only evidence, advisory text, or action strings
+    elsewhere in the payload must not satisfy this contract.
+    """
+    obs = _q2_gate_observability(payload)
+    assert obs["gate_b_code"] == "INFEASIBLE", (
+        f"{label}: gate_b_code must be INFEASIBLE, got {obs['gate_b_code']!r}")
+    assert obs["code"] == "MANIFEST_POLICY", (
+        f"{label}: typed code must be MANIFEST_POLICY, got {obs['code']!r} "
+        f"(substring presence elsewhere is insufficient)")
+    assert obs["gate"] == "B", (
+        f"{label}: gate must be 'B', got {obs['gate']!r}")
+
+    evidence = obs["evidence"]
+    assert isinstance(evidence, dict) and evidence, (
+        f"{label}: structured evidence dict required, got {evidence!r}")
+    blocked = evidence.get("blocked_repositories")
+    assert isinstance(blocked, list), (
+        f"{label}: evidence['blocked_repositories'] must be a list of records, "
+        f"got {blocked!r} (count-only / global reason / missing key do not satisfy)")
+    assert len(blocked) >= len(_Q2_BLOCKED_REPOS), (
+        f"{label}: expected one record per blocked repository "
+        f"({_Q2_BLOCKED_REPOS}), got {blocked!r}")
+
+    by_id = {}
+    for rec in blocked:
+        assert isinstance(rec, dict), (
+            f"{label}: each blocked record must be a dict with repo_id+reason, "
+            f"got {rec!r}")
+        rid = rec.get("repo_id")
+        reason = rec.get("reason")
+        assert rid, f"{label}: blocked record missing repo_id: {rec!r}"
+        assert isinstance(reason, str) and reason.strip(), (
+            f"{label}: blocked record for {rid!r} must carry a non-empty reason, "
+            f"got {reason!r}")
+        by_id[rid] = reason
+
+    for rid in _Q2_BLOCKED_REPOS:
+        assert rid in by_id, (
+            f"{label}: blocked_repositories must include {rid!r}; got {sorted(by_id)}")
+
+    # Each blocked id maps to its own appropriate reason (not one global string).
+    pickle_reason = by_id["org/pickle"].lower()
+    noweights_reason = by_id["org/noweights"].lower()
+    assert "pickle" in pickle_reason, (
+        f"{label}: org/pickle reason must describe pickle policy, "
+        f"got {by_id['org/pickle']!r}")
+    assert (
+        "supported" in noweights_reason
+        or "no supported" in noweights_reason
+        or "weight" in noweights_reason
+    ), (
+        f"{label}: org/noweights reason must describe unsupported/missing weights, "
+        f"got {by_id['org/noweights']!r}")
+    assert by_id["org/pickle"] != by_id["org/noweights"], (
+        f"{label}: each blocked repo must carry its own reason, not a shared global "
+        f"string (both were {by_id['org/pickle']!r})")
+
+    assert obs["actions"] == _Q2_EXPECTED_ACTIONS, (
+        f"{label}: actions must be exactly {_Q2_EXPECTED_ACTIONS}, "
+        f"got {obs['actions']!r} (action strings elsewhere in the payload do not count)")
+
+
+def test_c10_multi_repo_policy_errors_gate_infeasible_with_named_evidence():
+    con = f.mem_con()
+    _seed_mixed_policy_selection(con)
     payload = prop.preview_pure(con, "ark", ("adopt_current", ()))
-    header = payload["header"]
-    assert header["gate_b_code"] == "INFEASIBLE"
-    # Evidence must name each blocked repo — surface may be header, payload top-level,
-    # or task annotations. Prefer explicit gate evidence once production lands.
-    blob = json.dumps(payload, default=str)
-    assert "org/pickle" in blob and "org/noweights" in blob, (
-        "Q2a: evidence must name every blocked repository")
-    # Established shape fields (DEC-050 observability)
-    evidence = (
-        payload.get("evidence")
-        or header.get("evidence")
-        or payload.get("gate_b_evidence")
-        or {}
-    )
-    actions = (
-        payload.get("actions")
-        or header.get("actions")
-        or (evidence.get("actions") if isinstance(evidence, dict) else None)
-        or []
-    )
-    assert "review_manifest_policy" in list(actions) or "review_manifest_policy" in blob
-    assert "trim_selection" in list(actions) or "trim_selection" in blob
-    # Count-only is insufficient — reasons present
-    assert "pickle" in blob.lower() or "blocked" in blob.lower() or "ArchivePolicy" in blob or "no supported" in blob.lower()
+    _assert_q2_exact_shape(
+        payload, label="c10 multi-repo policy INFEASIBLE observability")
 
 
 def test_c11_approve_refuses_policy_infeasible_draft():
@@ -423,32 +561,15 @@ def test_c11_approve_refuses_policy_infeasible_draft():
 
 def test_c12_blocked_repos_not_silently_omitted():
     con = f.mem_con()
-    _seed_drives_and_plan(con)
-    _gte_shape(con, "org/ok")
-    _add_repo(con, "org/pickle", [("w.bin", 100, "pytorch", None, "3" * 64)])
-    _add_repo(con, "org/noweights", [("t.json", 10, "aux", None, "4" * 64)])
+    _seed_mixed_policy_selection(con)
     payload = prop.preview_pure(con, "ark", ("adopt_current", ()))
     selected = {r[0] for r in con.execute("SELECT repo_id FROM selection")}
-    assert {"org/pickle", "org/noweights"} <= selected
-    # DEC-050 shape: blocked set must be derivable from typed gate evidence, not only
-    # by still appearing as executable work (which would mean silent inclusion).
-    evidence = (
-        payload.get("evidence")
-        or payload.get("header", {}).get("evidence")
-        or payload.get("gate_b_evidence")
-    )
-    assert isinstance(evidence, dict), (
-        "Q2a: preview must emit structured gate evidence for blocked repos")
-    blocked = (
-        evidence.get("blocked_repositories")
-        or evidence.get("manifest_policy_errors")
-        or evidence.get("repos")
-    )
-    assert blocked, f"evidence must list blocked repos, got {evidence!r}"
-    blocked_ids = {
-        (b.get("repo_id") if isinstance(b, dict) else b) for b in blocked
-    }
-    assert "org/pickle" in blocked_ids and "org/noweights" in blocked_ids
+    assert {"org/pickle", "org/noweights"} <= selected, (
+        "blocked repos must remain selected so the operator can act; silent "
+        "omission from selection is not the contract")
+    # Same exact shape as c10 — structured blocked_repositories, not omission-from-tasks alone.
+    _assert_q2_exact_shape(
+        payload, label="c12 blocked repos not silently omitted")
 
 
 # ---------------------------------------------------------------------------
