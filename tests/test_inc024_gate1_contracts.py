@@ -10,6 +10,8 @@ import hashlib
 import json
 from types import SimpleNamespace
 
+import pytest
+
 import _pr09_gate1_fixtures as f
 from modelark import archive_manifest, proposal as prop
 from modelark.proposal import Refusal
@@ -398,67 +400,71 @@ def _seed_mixed_policy_selection(con):
     ])
 
 
-def _q2_gate_observability(payload):
-    """Extract the single exact structured shape Q2 pins.
+def _q2_select_container(payload):
+    """Select exactly one structured Q2 observability container (no mixing).
 
-    Production must surface this as structured fields — not advisory text, not a
-    global reason string, not action strings elsewhere in a serialized blob.
-    Accepted locations (first match wins): payload root (DEC-050 / admission
-    terminal shape), header, or an explicit gate_b / manifest_policy block.
+    Named gate blocks are preferred over payload root / header. A container
+    qualifies only if it itself carries code, gate, or evidence.blocked_repositories.
+    ``header.gate_b_code`` is never used to select a container.
     """
-    header = payload.get("header") or {}
-    candidates = [
-        payload,
-        header,
+    if not isinstance(payload, dict):
+        return None
+    header = payload.get("header") if isinstance(payload.get("header"), dict) else {}
+    candidates = (
         payload.get("gate_b_refusal"),
         payload.get("manifest_policy_gate"),
+        payload.get("gate_b_evidence"),
         header.get("gate_b_refusal"),
         header.get("manifest_policy_gate"),
-        payload.get("gate_b_evidence"),
-    ]
-    block = None
+        # Payload root (DEC-050 / admission-terminal shape) — only if the root
+        # itself holds the observability fields, not merely nested tasks/files.
+        payload,
+        # Header only if it itself holds the observability fields (gate_b_code alone
+        # is insufficient and remains a separate Gate-B status field).
+        header,
+    )
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
-        # Prefer a block that already carries the typed code or blocked list.
+        evidence = cand.get("evidence")
         if (
-            cand.get("code") == "MANIFEST_POLICY"
-            or cand.get("gate") == "B"
-            or (isinstance(cand.get("evidence"), dict)
-                and "blocked_repositories" in cand["evidence"])
-            or "blocked_repositories" in cand
+            cand.get("code") is not None
+            or cand.get("gate") is not None
+            or (isinstance(evidence, dict) and "blocked_repositories" in evidence)
         ):
-            block = cand
-            break
-    if block is None:
-        block = payload if isinstance(payload, dict) else {}
+            return cand
+    return None
 
+
+def _q2_gate_observability(payload):
+    """Extract Q2 fields from one container only — no cross-container fallbacks.
+
+    ``header.gate_b_code`` is the separate Gate-B status field. ``code``, ``gate``,
+    ``evidence``, and ``actions`` all come from the single selected container.
+    A block missing ``actions`` is not rescued by root/header actions; evidence is
+    not borrowed from another container.
+    """
+    header = payload.get("header") if isinstance(payload, dict) else None
+    if not isinstance(header, dict):
+        header = {}
+    block = _q2_select_container(payload)
+    if block is None:
+        return {
+            "gate_b_code": header.get("gate_b_code"),
+            "code": None,
+            "gate": None,
+            "evidence": {},
+            "actions": None,
+        }
     evidence = block.get("evidence")
     if not isinstance(evidence, dict):
-        evidence = (
-            payload.get("evidence")
-            if isinstance(payload.get("evidence"), dict)
-            else header.get("evidence")
-            if isinstance(header.get("evidence"), dict)
-            else {}
-        )
-    # blocked_repositories may sit on evidence or (incorrectly) at block root —
-    # only evidence["blocked_repositories"] satisfies the contract.
-    actions = block.get("actions")
-    if actions is None:
-        actions = payload.get("actions")
-    if actions is None:
-        actions = header.get("actions")
-    if actions is None and isinstance(evidence, dict):
-        actions = evidence.get("actions")
-
+        evidence = {}
+    actions = block.get("actions")  # no cross-container rescue
     return {
         "gate_b_code": header.get("gate_b_code"),
-        "code": block.get("code") if block is not payload else (
-            payload.get("code") or header.get("code")),
-        "gate": block.get("gate") if block is not payload else (
-            payload.get("gate") or header.get("gate")),
-        "evidence": evidence if isinstance(evidence, dict) else {},
+        "code": block.get("code"),
+        "gate": block.get("gate"),
+        "evidence": evidence,
         "actions": list(actions) if actions is not None else None,
     }
 
@@ -467,16 +473,17 @@ def _assert_q2_exact_shape(payload, *, label: str):
     """Pin one exact structured shape for multi-repo policy INFEASIBLE.
 
     Required:
-      - gate_b_code == "INFEASIBLE"
-      - typed code MANIFEST_POLICY
-      - gate == "B"
-      - evidence["blocked_repositories"]: one record per blocked repository
-      - every record has its own repo_id and non-empty reason
-      - exact ordered actions
+      - header.gate_b_code == "INFEASIBLE" (separate Gate-B status field)
+      - one container's typed code MANIFEST_POLICY
+      - same container's gate == "B"
+      - same container's evidence["blocked_repositories"]: exactly one record each
+        for org/pickle and org/noweights — no duplicates, no extras, no org/ok
+      - every record has its own repo_id and non-empty reason (semantically distinct)
+      - same container's exact ordered actions
         ["review_manifest_policy", "trim_selection", "replan"]
 
-    A global reason, count-only evidence, advisory text, or action strings
-    elsewhere in the payload must not satisfy this contract.
+    A global reason, count-only evidence, advisory text, action strings outside the
+    selected container, or a healthy repo listed as blocked must not satisfy this.
     """
     obs = _q2_gate_observability(payload)
     assert obs["gate_b_code"] == "INFEASIBLE", (
@@ -489,14 +496,15 @@ def _assert_q2_exact_shape(payload, *, label: str):
 
     evidence = obs["evidence"]
     assert isinstance(evidence, dict) and evidence, (
-        f"{label}: structured evidence dict required, got {evidence!r}")
+        f"{label}: structured evidence dict required on the selected container, "
+        f"got {evidence!r}")
     blocked = evidence.get("blocked_repositories")
     assert isinstance(blocked, list), (
         f"{label}: evidence['blocked_repositories'] must be a list of records, "
         f"got {blocked!r} (count-only / global reason / missing key do not satisfy)")
-    assert len(blocked) >= len(_Q2_BLOCKED_REPOS), (
-        f"{label}: expected one record per blocked repository "
-        f"({_Q2_BLOCKED_REPOS}), got {blocked!r}")
+    assert len(blocked) == len(_Q2_BLOCKED_REPOS), (
+        f"{label}: blocked_repositories must contain exactly {len(_Q2_BLOCKED_REPOS)} "
+        f"records {_Q2_BLOCKED_REPOS}, got {len(blocked)}: {blocked!r}")
 
     by_id = {}
     for rec in blocked:
@@ -506,14 +514,20 @@ def _assert_q2_exact_shape(payload, *, label: str):
         rid = rec.get("repo_id")
         reason = rec.get("reason")
         assert rid, f"{label}: blocked record missing repo_id: {rec!r}"
+        assert rid != "org/ok", (
+            f"{label}: healthy repository org/ok must not appear in "
+            f"blocked_repositories, got {blocked!r}")
+        assert rid not in by_id, (
+            f"{label}: duplicate blocked repository {rid!r}; exactly one record "
+            f"per blocked id required, got {blocked!r}")
         assert isinstance(reason, str) and reason.strip(), (
             f"{label}: blocked record for {rid!r} must carry a non-empty reason, "
             f"got {reason!r}")
         by_id[rid] = reason
 
-    for rid in _Q2_BLOCKED_REPOS:
-        assert rid in by_id, (
-            f"{label}: blocked_repositories must include {rid!r}; got {sorted(by_id)}")
+    assert set(by_id) == set(_Q2_BLOCKED_REPOS), (
+        f"{label}: blocked set must be exactly {set(_Q2_BLOCKED_REPOS)}, "
+        f"got {set(by_id)} (no extras, no omissions)")
 
     # Each blocked id maps to its own appropriate reason (not one global string).
     pickle_reason = by_id["org/pickle"].lower()
@@ -533,13 +547,70 @@ def _assert_q2_exact_shape(payload, *, label: str):
         f"string (both were {by_id['org/pickle']!r})")
 
     assert obs["actions"] == _Q2_EXPECTED_ACTIONS, (
-        f"{label}: actions must be exactly {_Q2_EXPECTED_ACTIONS}, "
-        f"got {obs['actions']!r} (action strings elsewhere in the payload do not count)")
+        f"{label}: actions must be exactly {_Q2_EXPECTED_ACTIONS} on the selected "
+        f"container, got {obs['actions']!r} (actions outside that container do not count)")
+
+
+def _q2_well_formed_block(*, blocked=None, actions=None, omit_actions=False):
+    """Build a single well-formed observability container for negative probes."""
+    if blocked is None:
+        blocked = [
+            {"repo_id": "org/pickle", "reason": "pickle-only weights blocked by policy"},
+            {"repo_id": "org/noweights", "reason": "no supported archive weights"},
+        ]
+    block = {
+        "code": "MANIFEST_POLICY",
+        "gate": "B",
+        "evidence": {"blocked_repositories": list(blocked)},
+    }
+    if not omit_actions:
+        block["actions"] = list(actions if actions is not None else _Q2_EXPECTED_ACTIONS)
+    return block
 
 
 def test_c10_multi_repo_policy_errors_gate_infeasible_with_named_evidence():
     con = f.mem_con()
     _seed_mixed_policy_selection(con)
+
+    # --- Current-green negative probes: malformed shapes must not satisfy ---
+    # 1. actions placed outside the selected block (cross-container rescue forbidden)
+    malformed_actions_outside = {
+        "header": {"gate_b_code": "INFEASIBLE"},
+        "gate_b_refusal": _q2_well_formed_block(omit_actions=True),
+        "actions": list(_Q2_EXPECTED_ACTIONS),
+    }
+    with pytest.raises(AssertionError):
+        _assert_q2_exact_shape(
+            malformed_actions_outside,
+            label="probe: actions outside selected block")
+
+    # 2. extra blocked healthy repository org/ok
+    malformed_extra_ok = {
+        "header": {"gate_b_code": "INFEASIBLE"},
+        "gate_b_refusal": _q2_well_formed_block(blocked=[
+            {"repo_id": "org/pickle", "reason": "pickle-only weights blocked by policy"},
+            {"repo_id": "org/noweights", "reason": "no supported archive weights"},
+            {"repo_id": "org/ok", "reason": "healthy repo wrongly marked blocked"},
+        ]),
+    }
+    with pytest.raises(AssertionError):
+        _assert_q2_exact_shape(
+            malformed_extra_ok, label="probe: extra blocked org/ok")
+
+    # 3. duplicate blocked repository
+    malformed_duplicate = {
+        "header": {"gate_b_code": "INFEASIBLE"},
+        "gate_b_refusal": _q2_well_formed_block(blocked=[
+            {"repo_id": "org/pickle", "reason": "pickle-only weights blocked by policy"},
+            {"repo_id": "org/pickle", "reason": "pickle-only weights blocked by policy"},
+            {"repo_id": "org/noweights", "reason": "no supported archive weights"},
+        ]),
+    }
+    with pytest.raises(AssertionError):
+        _assert_q2_exact_shape(
+            malformed_duplicate, label="probe: duplicate blocked repository")
+
+    # Real expected-red preview assertion (production still lacks the structured shape)
     payload = prop.preview_pure(con, "ark", ("adopt_current", ()))
     _assert_q2_exact_shape(
         payload, label="c10 multi-repo policy INFEASIBLE observability")
