@@ -163,9 +163,24 @@ def _manifest_hash(con, repo_id: str, planned=None) -> str:
     approve-time revalidation, and projection comparison input — measures the same
     planned set. Optional ``planned`` is a precomputed ``ManifestFile`` sequence from
     a batch inspect (efficiency only); it is never an alternate definition of the set.
+
+    When this function must obtain its own planned set and the acquisition policy
+    refuses the repository, raise typed ``APPROVED_INPUT_CHANGED`` with
+    ``reason=manifest_policy`` rather than leaking raw ``ArchivePolicyError``.
     """
     if planned is None:
-        planned = archive_manifest.manifest_for_repo(con, repo_id)
+        try:
+            planned = archive_manifest.manifest_for_repo(con, repo_id)
+        except archive_manifest.ArchivePolicyError as exc:
+            raise Refusal(
+                "APPROVED_INPUT_CHANGED",
+                {
+                    "reason": "manifest_policy",
+                    "repo_id": repo_id,
+                    "error": str(exc),
+                },
+                ("preview_again",),
+            ) from exc
     files = [
         (m.rfilename, m.size_bytes, m.sha256, m.format, m.quant)
         for m in planned
@@ -1391,18 +1406,17 @@ def _approve_tx(con, proposal_id: str, *, mutation, evidence_by_drive) -> dict:
                            "current": current_semantic},
                           ("preview_again",))
 
-        # DEC-056 / INC-024: planned-set drift and exact-assignment refusals are
-        # operator-facing — surface them before PROPOSAL_HASH_MISMATCH so a draft
-        # whose tasks were corrupted to a legacy wide full_manifest_hash refuses
-        # as APPROVED_INPUT_CHANGED (reason full_manifest_hash), not hash integrity.
-        validate_exact_assignment(con, proposal, evidence_by_drive=evidence_by_drive)
-
+        # Canonical integrity first: a mutated task row without a matching
+        # canonical_hash is proposal tampering (PROPOSAL_HASH_MISMATCH), not
+        # ordinary catalog drift. Exact-assignment revalidation runs only after.
         stored_hash = proposal["canonical_hash"]
         recomputed = hash_stored_proposal(con, proposal_id)
         if recomputed != stored_hash:
             raise Refusal("PROPOSAL_HASH_MISMATCH",
                           {"stored": stored_hash, "recomputed": recomputed},
                           ("preview_again",))
+
+        validate_exact_assignment(con, proposal, evidence_by_drive=evidence_by_drive)
 
         if proposal["mutation_kind"] == "adopt_current":
             if proposal.get("selection_before_hash") != proposal.get("selection_after_hash"):

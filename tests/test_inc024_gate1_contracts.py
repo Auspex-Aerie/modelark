@@ -9,11 +9,12 @@ from __future__ import annotations
 import hashlib
 import json
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
 import _pr09_gate1_fixtures as f
-from modelark import archive_manifest, proposal as prop
+from modelark import archive_manifest, capacity, proposal as prop
 from modelark.proposal import Refusal
 
 
@@ -141,8 +142,27 @@ def test_c04_fresh_draft_full_manifest_hash_is_planned():
     assert task["full_manifest_hash"] != _wide_hash(con, "org/gte")
 
 
+def _recompute_and_store_canonical_hash(con, proposal_id: str) -> str:
+    """Recompute placement_proposals.canonical_hash after intentional task mutation.
+
+    Models a self-consistent legacy/wide proposal: the stored task rows and the
+    proposal's canonical_hash agree, so approval reaches exact-assignment checks
+    rather than PROPOSAL_HASH_MISMATCH.
+    """
+    digest = prop.hash_stored_proposal(con, proposal_id)
+    con.execute(
+        "UPDATE placement_proposals SET canonical_hash=? WHERE proposal_id=?",
+        [digest, proposal_id])
+    return digest
+
+
 def _project_approved(con, pid, loaded, drives=None):
-    """Build project_pure inputs the way execution_session does (via _manifest_hash)."""
+    """Build project_pure inputs in the relevant shape of execution_session.
+
+    Loads archived evidence and baseline certificates from the catalog (same
+    key shape as execution_session: (repo_id, rfilename, drive_label) → fields).
+    Does not weaken baseline projection checks.
+    """
     from modelark.execution_projection import project_pure
 
     drives = drives or {
@@ -153,6 +173,28 @@ def _project_approved(con, pid, loaded, drives=None):
         t["repo_id"]: prop._manifest_hash(con, t["repo_id"])
         for t in loaded["tasks"] if t.get("repo_id")
     }
+    archived = {}
+    for r in con.execute(
+            "SELECT repo_id, rfilename, drive_label, orig_sha256, stored_bytes, orig_bytes "
+            "FROM archived"):
+        archived[(r[0], r[1], r[2])] = {
+            "orig_sha256": r[3], "stored_bytes": r[4], "orig_bytes": r[5],
+        }
+    certificates = {}
+    for t in loaded["tasks"]:
+        if t.get("row_kind") != "baseline_satisfied":
+            continue
+        rid = t["requirement_id"]
+        cert = t.get("baseline_certificate")
+        label = t.get("satisfying_drive") or t.get("target_drive")
+        if label:
+            row = con.execute(
+                "SELECT orig_sha256 FROM archived WHERE repo_id=? AND drive_label=? LIMIT 1",
+                [t.get("repo_id"), label]).fetchone()
+            if row:
+                certificates[rid] = cert or row[0]
+            else:
+                certificates[rid] = "__MISSING__"
     proposal = {
         "lifecycle": "approved",
         "proposal_id": pid,
@@ -167,9 +209,10 @@ def _project_approved(con, pid, loaded, drives=None):
     current_input = SimpleNamespace(
         manifests=manifests,
         drives=drives,
-        archived={},
+        archived=archived,
         evidence={},
         observed_ratio={},
+        certificates=certificates,
     )
     current_graph = SimpleNamespace(
         requirement_ids=[t["requirement_id"] for t in loaded["tasks"]],
@@ -182,13 +225,15 @@ def _project_approved(con, pid, loaded, drives=None):
 
 
 def test_c05_wide_hash_approval_refused_and_reapprove_is_narrow():
-    """Q4/DEC-056: independently pin three states (do not corrupt-before-approve alone).
+    """Q4/DEC-056: canonical integrity, historical-wide drift, and fresh narrow.
 
-    1. Draft corrupted to legacy wide hash is refused by approve() as
-       APPROVED_INPUT_CHANGED / full_manifest_hash.
-    2. Already-approved historical-wide proposal (approve first, then seed wide
-       on the persisted task) is refused by project_pure with the same code/reason.
-    3. Fresh narrow preview/approval projects cleanly.
+    1. Tamper: change proposal_tasks.full_manifest_hash without updating
+       canonical_hash → PROPOSAL_HASH_MISMATCH (not ordinary drift).
+    2. Self-consistent historical-wide draft: mutate task hash then recompute
+       and store canonical_hash → APPROVED_INPUT_CHANGED / full_manifest_hash.
+    3. Self-consistent historical-wide *approved* proposal refuses project_pure
+       with the same code/reason.
+    4. Fresh narrow preview/approval projects cleanly.
     """
     con = f.mem_con()
     _seed_drives_and_plan(con)
@@ -201,57 +246,69 @@ def test_c05_wide_hash_approval_refused_and_reapprove_is_narrow():
     wide = _wide_hash(con, "org/gte")
     services = f.default_services()
 
-    # --- 1. Corrupted draft refused at approve (validation, not project_pure) ---
+    # --- 1. Genuine tampering: task row mutated, canonical_hash left stale ---
     draft1 = _draft(con)
     pid1 = draft1["proposal_id"] if isinstance(draft1, dict) else draft1
     con.execute(
         "UPDATE proposal_tasks SET full_manifest_hash=? WHERE proposal_id=? AND repo_id=?",
         [wide, pid1, "org/gte"])
-    refuse1 = f.assert_refuses(
+    f.assert_refuses(
         lambda: prop.approve(con, pid1, mutation=("adopt_current", ()), services=services),
-        code="APPROVED_INPUT_CHANGED",
-        label="approve of draft corrupted to legacy wide full_manifest_hash",
+        code="PROPOSAL_HASH_MISMATCH",
+        label="approve of draft with tampered full_manifest_hash (canonical left stale)",
     )
-    ev1 = getattr(refuse1, "evidence", None) or {}
-    if not isinstance(ev1, dict):
-        ev1 = {}
-    assert ev1.get("reason") == "full_manifest_hash", (
-        f"approve refusal reason must be full_manifest_hash, got {ev1!r}")
 
-    # --- 2. Historical wide: approve first, then seed wide on persisted task ---
+    # --- 2. Self-consistent historical-wide draft: rehash after task mutation ---
     draft2 = _draft(con)
     pid2 = draft2["proposal_id"] if isinstance(draft2, dict) else draft2
-    prop.approve(con, pid2, mutation=("adopt_current", ()), services=services)
     con.execute(
         "UPDATE proposal_tasks SET full_manifest_hash=? WHERE proposal_id=? AND repo_id=?",
         [wide, pid2, "org/gte"])
-    loaded2 = prop.load_proposal(con, pid2)
-    assert loaded2["lifecycle"] == "approved"
-    out2 = _project_approved(con, pid2, loaded2)
-    assert isinstance(out2, Refusal), (
-        "DEC-056/Q4: historical wide-hash approval must be refused by project_pure, "
-        f"got success {out2!r}")
-    assert out2.code == "APPROVED_INPUT_CHANGED"
-    assert (out2.evidence or {}).get("reason") == "full_manifest_hash"
+    _recompute_and_store_canonical_hash(con, pid2)
+    refuse2 = f.assert_refuses(
+        lambda: prop.approve(con, pid2, mutation=("adopt_current", ()), services=services),
+        code="APPROVED_INPUT_CHANGED",
+        label="approve of self-consistent legacy wide full_manifest_hash draft",
+    )
+    ev2 = getattr(refuse2, "evidence", None) or {}
+    if not isinstance(ev2, dict):
+        ev2 = {}
+    assert ev2.get("reason") == "full_manifest_hash", (
+        f"self-consistent wide draft must refuse full_manifest_hash, got {ev2!r}")
 
-    # --- 3. Fresh narrow preview/approval projects cleanly ---
+    # --- 3. Historical wide approved: approve first, seed wide, rehash, project ---
     draft3 = _draft(con)
     pid3 = draft3["proposal_id"] if isinstance(draft3, dict) else draft3
     prop.approve(con, pid3, mutation=("adopt_current", ()), services=services)
+    con.execute(
+        "UPDATE proposal_tasks SET full_manifest_hash=? WHERE proposal_id=? AND repo_id=?",
+        [wide, pid3, "org/gte"])
+    _recompute_and_store_canonical_hash(con, pid3)
     loaded3 = prop.load_proposal(con, pid3)
-    for t in loaded3["tasks"]:
+    assert loaded3["lifecycle"] == "approved"
+    out3 = _project_approved(con, pid3, loaded3)
+    assert isinstance(out3, Refusal), (
+        "DEC-056/Q4: historical wide-hash approval must be refused by project_pure, "
+        f"got success {out3!r}")
+    assert out3.code == "APPROVED_INPUT_CHANGED"
+    assert (out3.evidence or {}).get("reason") == "full_manifest_hash"
+
+    # --- 4. Fresh narrow preview/approval projects cleanly ---
+    draft4 = _draft(con)
+    pid4 = draft4["proposal_id"] if isinstance(draft4, dict) else draft4
+    prop.approve(con, pid4, mutation=("adopt_current", ()), services=services)
+    loaded4 = prop.load_proposal(con, pid4)
+    for t in loaded4["tasks"]:
         if t.get("repo_id") == "org/gte":
             assert t["full_manifest_hash"] == _planned_hash(con, "org/gte"), (
                 "fresh approval must store the planned-set full_manifest_hash")
-    out3 = _project_approved(con, pid3, loaded3)
-    assert not isinstance(out3, Refusal), (
-        f"fresh narrow approval must project cleanly: {out3!r}")
+    out4 = _project_approved(con, pid4, loaded4)
+    assert not isinstance(out4, Refusal), (
+        f"fresh narrow approval must project cleanly: {out4!r}")
 
 
 def test_c06_excluded_catalog_file_does_not_invalidate_approval():
     """DEC-056 insensitivity: new policy-excluded catalog row must not trip drift."""
-    from modelark.execution_projection import project_pure
-
     con = f.mem_con()
     _seed_drives_and_plan(con)
     _gte_shape(con)
@@ -265,31 +322,7 @@ def test_c06_excluded_catalog_file_does_not_invalidate_approval():
     con.execute(
         "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
         "VALUES('org/gte','onnx/new.onnx',999,'onnx',NULL,?)", ["e" * 64])
-    manifests = {"org/gte": prop._manifest_hash(con, "org/gte")}
-    proposal = {
-        "lifecycle": "approved",
-        "proposal_id": pid,
-        "tasks": loaded["tasks"],
-        "files": loaded["files"],
-        "requirement_set_hash": loaded.get("requirement_set_hash") or "1" * 64,
-        "semantic_input_hash": loaded.get("semantic_input_hash") or "1" * 64,
-    }
-    out = project_pure(
-        proposal,
-        SimpleNamespace(
-            manifests=manifests,
-            drives={
-                "d0": SimpleNamespace(lifecycle="active", identity_epoch=1),
-                "d1": SimpleNamespace(lifecycle="active", identity_epoch=1),
-            },
-            archived={}, evidence={}, observed_ratio={},
-        ),
-        SimpleNamespace(
-            requirement_ids=[t["requirement_id"] for t in loaded["tasks"]],
-            requirement_set_hash=proposal["requirement_set_hash"],
-        ),
-        SimpleNamespace(parked_gated_repos=frozenset()),
-    )
+    out = _project_approved(con, pid, loaded)
     assert not isinstance(out, Refusal), (
         f"excluded catalog add must not invalidate approval; got {out!r}")
 
@@ -340,11 +373,20 @@ def test_c08_planned_complete_drive_is_baseline_satisfied():
 
 
 def test_c09_joint_feasibility_uses_planned_not_wide_charge():
-    """Fleet where wide charge is INFEASIBLE but planned charge is FEASIBLE."""
+    """Fleet where planned peak fits and wide peak does not.
+
+    Explicit capacity witness (test-only free=11_000):
+      planned durable 5_000 + workspace peak 5_000 = required planned peak 10_000
+      admissible at free 11_000 = 10_450  → planned FEASIBLE
+      wide durable 45_000 + workspace 5_000 = 50_000 → still infeasible
+    """
     from modelark import plan as plan_mod
 
     con = f.mem_con()
-    free = 8_000  # planned ~5k fits; wide ~45k does not under safety-adjusted free
+    free = 11_000
+    floor = capacity.safety_floor(free, False)
+    admissible = free - floor
+    assert admissible == 10_450, f"witness admissible expected 10450, got {admissible}"
     for label, meta in f.DRIVE_IDS.items():
         con.execute(
             "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
@@ -373,12 +415,24 @@ def test_c09_joint_feasibility_uses_planned_not_wide_charge():
         ("model.safetensors", 5_000, "safetensors", "bf16", "1" * 64),
         ("onnx/big.onnx", 40_000, "onnx", None, "2" * 64),
     ])
+    planned_durable = _planned_size(con, "org/fat")
+    workspace = prop._repo_workspace_peak(con, "org/fat")
+    wide_durable = int(con.execute(
+        "SELECT coalesce(sum(size_bytes),0) FROM files WHERE repo_id=?",
+        ["org/fat"]).fetchone()[0])
+    assert planned_durable == 5_000
+    assert workspace == 5_000
+    assert planned_durable + workspace == 10_000
+    assert wide_durable + workspace == 50_000
+    assert planned_durable + workspace <= admissible
+    assert wide_durable + workspace > admissible
+
     payload = prop.preview_pure(con, "ark", ("adopt_current", ()))
     gate = payload["header"]["gate_b_code"]
-    # After fix: FEASIBLE (planned 5k). Today: typically INFEASIBLE on wide 45k.
     assert gate == "FEASIBLE", (
         f"joint feasibility must use planned charge; gate={gate} "
-        f"(wide catalog charge must not starve the fleet)")
+        f"(planned peak 10000 must fit admissible {admissible}; "
+        f"wide peak 50000 must not)")
 # ---------------------------------------------------------------------------
 # Policy error (Q2a) — exact structured observability, not substring presence
 # ---------------------------------------------------------------------------
@@ -687,6 +741,8 @@ def test_c13_source_ready_with_only_planned_files_on_source():
     assert "onnx/model.onnx" not in {p["rfilename"] for p in pfiles}
     assert fill_mod._source_files_content_ready(
         con, "org/gte", replica["source_drive"], pfiles) is True
+
+
 def test_c14_baseline_certificate_payload_stays_archived_unfiltered():
     """Pin current certificate behaviour (Q6) — archived-derived, not catalog-filtered."""
     con = f.mem_con()
@@ -707,3 +763,72 @@ def test_c14_baseline_certificate_payload_stays_archived_unfiltered():
     assert "onnx/model.onnx" in names, (
         "certificate evidence stays archived-unfiltered; onnx present on drive must appear")
     assert "model.safetensors" in names
+
+
+# ---------------------------------------------------------------------------
+# Gate-2 remediation pins
+# ---------------------------------------------------------------------------
+
+
+def test_c15_one_inspect_batch_per_nonempty_draft():
+    """Gate-0 batch decision: one inspect_manifests_for_repos call per non-empty draft."""
+    con = f.mem_con()
+    _seed_drives_and_plan(con)
+    _gte_shape(con, "org/a")
+    _gte_shape(con, "org/b")
+    _gte_shape(con, "org/c")
+    real = archive_manifest.inspect_manifests_for_repos
+    calls = {"n": 0}
+
+    def counting(con_arg, repo_ids, policy=None):
+        calls["n"] += 1
+        return real(con_arg, repo_ids, policy)
+
+    # proposal imports the archive_manifest module; patch the name it looks up.
+    with mock.patch.object(
+            prop.archive_manifest, "inspect_manifests_for_repos", side_effect=counting):
+        prop.preview_pure(con, "ark", ("adopt_current", ()))
+    assert calls["n"] == 1, (
+        f"non-empty multi-repo draft must call inspect_manifests_for_repos exactly once, "
+        f"got {calls['n']}")
+
+
+def test_c16_manifest_policy_drift_at_approve_is_typed():
+    """Policy allowed at draft, denied at approve → typed APPROVED_INPUT_CHANGED.
+
+    Does not leak raw ArchivePolicyError. Evidence: reason=manifest_policy, repo_id,
+    and the policy error text; actions include preview_again.
+    """
+    con = f.mem_con()
+    _seed_drives_and_plan(con)
+    _add_repo(con, "org/pickle", [
+        ("weights.bin", 100, "pytorch", None, "3" * 64),
+    ])
+    # Draft while pickle is allowed so a self-consistent FEASIBLE draft can be stored.
+    with mock.patch.object(
+            archive_manifest.wishlist, "exclude_pickle_only", return_value=False):
+        draft = _draft(con)
+        pid = draft["proposal_id"] if isinstance(draft, dict) else draft
+        loaded = prop.load_proposal(con, pid)
+        assert loaded["lifecycle"] == "draft"
+        assert loaded.get("gate_b_code") in (None, "FEASIBLE"), loaded.get("gate_b_code")
+
+    # Approval revalidation obtains its own planned set under exclude.pickle_only=true.
+    with mock.patch.object(
+            archive_manifest.wishlist, "exclude_pickle_only", return_value=True):
+        refuse = f.assert_refuses(
+            lambda: prop.approve(
+                con, pid, mutation=("adopt_current", ()), services=f.default_services()),
+            code="APPROVED_INPUT_CHANGED",
+            label="approve after pickle policy tightened",
+        )
+    ev = getattr(refuse, "evidence", None) or {}
+    if not isinstance(ev, dict):
+        ev = {}
+    assert ev.get("reason") == "manifest_policy", ev
+    assert ev.get("repo_id") == "org/pickle", ev
+    err_text = str(ev.get("error") or "")
+    assert "pickle" in err_text.lower(), (
+        f"policy error text must describe pickle block, got {err_text!r}")
+    actions = getattr(refuse, "actions", ()) or ()
+    assert "preview_again" in tuple(actions), actions
