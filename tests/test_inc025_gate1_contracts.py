@@ -148,19 +148,12 @@ def _assert_manifest_files(manifest_tuple, *, label: str):
             f"{label}: storage_action must be compress|raw, got {item.storage_action!r}")
 
 
-def _assert_refusal_shape(exc: Refusal, *, reason: str, repo_id: str, rfilename: str,
-                          extra_evidence: dict | None = None):
+def _assert_refusal_shape(exc: Refusal, *, evidence: dict):
+    """Exact evidence dict equality — no extra unasserted fields, no nonempty-only checks."""
     assert exc.code == "APPROVED_INPUT_CHANGED", exc
-    ev = exc.evidence if isinstance(exc.evidence, dict) else {}
-    assert ev.get("reason") == reason, ev
-    assert ev.get("repo_id") == repo_id, ev
-    assert ev.get("rfilename") == rfilename, ev
-    assert "requirement_id" in ev and ev["requirement_id"], ev
-    if extra_evidence:
-        for k, v in extra_evidence.items():
-            assert ev.get(k) == v, (k, ev)
-    actions = tuple(exc.actions or ())
-    assert actions == ("preview_again",), actions
+    got = dict(exc.evidence) if isinstance(exc.evidence, dict) else {}
+    assert got == evidence, f"evidence must equal exactly {evidence!r}, got {got!r}"
+    assert tuple(exc.actions or ()) == ("preview_again",), exc.actions
 
 
 # ---------------------------------------------------------------------------
@@ -188,15 +181,66 @@ def test_c01_work_units_preserve_storage_action_from_proposal_files():
 
 
 def test_c02_real_drain_passes_manifest_file_to_fetch_run():
-    """Load-bearing: real _drain_projection FETCH branch → capture task_manifests.
+    """Load-bearing: real drain must call _fetch_task_manifests and pass its return to fetch.run.
 
-    A helper that is never called by the drain cannot satisfy this contract.
+    Prevents: unused helper + old inline mapping, or unused helper + separate happy-path
+    inline conversion. Wraps the real helper (does not replace its behavior).
+    Expected-red until Gate 2: helper must be callable and wired through the drain.
     """
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/gte",))
     pfiles = _gte_proposal_files()
-    manifests, _result = _run_real_drain_capture_task_manifests(
-        con, _proj_fetch(), pfiles)
+
+    real_helper = getattr(fill_mod, "_fetch_task_manifests", None)
+    assert callable(real_helper), (
+        "INC-025: fill._fetch_task_manifests must exist and be callable "
+        "(expected-red until Gate 2; drain must use this helper)")
+
+    helper_trace: dict = {"n": 0, "return": None}
+
+    def recording_helper(*args, **kwargs):
+        helper_trace["n"] += 1
+        out = real_helper(*args, **kwargs)
+        helper_trace["return"] = out
+        return out
+
+    run_capture: dict = {}
+
+    def spy_run(*args, **kwargs):
+        run_capture["task_manifests"] = kwargs.get("task_manifests")
+        return _empty_fetch_run_outcome()
+
+    ctx = fetch.RunCtx(con=con, check_hf_auth=False)
+    session_start = SimpleNamespace(
+        projection=_proj_fetch(),
+        session=SimpleNamespace(
+            approved_proposal_id="inc025-gate1",
+            fencing_token=1,
+            session_id="s-inc025",
+        ),
+        execution_config=SimpleNamespace(capacity_mode="guaranteed"),
+        _proposal_files=list(pfiles),
+    )
+    with mock.patch.object(fill_mod, "_mounted", return_value=(True, True)), \
+            mock.patch.object(
+                fill_mod, "_fetch_task_manifests", side_effect=recording_helper), \
+            mock.patch.object(fill_mod.fetch, "run", side_effect=spy_run):
+        result = fill_mod._drain_projection(
+            ctx, session_start,
+            plan_id="ark", max_24h_gb=0, repo_scope=None,
+            guided=False, poll_secs=0.01, child_fds=(),
+        )
+
+    assert helper_trace["n"] == 1, (
+        f"one-batch FETCH fixture must call _fetch_task_manifests exactly once, "
+        f"got n={helper_trace['n']}; result={result!r}")
+    assert "task_manifests" in run_capture, (
+        f"drain must pass task_manifests to fetch.run; result={result!r}")
+    assert run_capture["task_manifests"] is helper_trace["return"], (
+        "task_manifests passed to fetch.run must be the exact object returned by "
+        "_fetch_task_manifests (not a separate inline conversion)")
+
+    manifests = run_capture["task_manifests"]
     assert "org/gte" in manifests, manifests
     _assert_manifest_files(manifests["org/gte"], label="c02-drain")
     by_name = {m.rfilename: m for m in manifests["org/gte"]}
@@ -231,8 +275,6 @@ def test_c04_catalog_onnx_not_invented_in_drain_manifest():
     pfiles = _gte_proposal_files(include_onnx=False)
     manifests, _result = _run_real_drain_capture_task_manifests(
         con, _proj_fetch(), pfiles)
-    names = {m.rfilename for m in manifests.get("org/gte", ())}
-    # Type pin still applies once production lands; today names may be SimpleNamespace attrs.
     names = {
         (m.rfilename if hasattr(m, "rfilename") else None)
         for m in manifests.get("org/gte", ())
@@ -290,9 +332,12 @@ def test_c06_missing_approved_row_refuses_typed():
     )
     with pytest.raises(Refusal) as ei:
         fill_mod._fetch_task_manifests([unit])
-    _assert_refusal_shape(
-        ei.value, reason="missing_proposal_file_authority",
-        repo_id="org/gte", rfilename="ghost.bin")
+    _assert_refusal_shape(ei.value, evidence={
+        "reason": "missing_proposal_file_authority",
+        "requirement_id": "primary:org/gte",
+        "repo_id": "org/gte",
+        "rfilename": "ghost.bin",
+    })
 
 
 def test_c07_ambiguous_duplicate_approved_rows_refuses_typed():
@@ -313,10 +358,13 @@ def test_c07_ambiguous_duplicate_approved_rows_refuses_typed():
     )
     with pytest.raises(Refusal) as ei:
         fill_mod._fetch_task_manifests([unit])
-    _assert_refusal_shape(
-        ei.value, reason="ambiguous_proposal_file_authority",
-        repo_id="org/gte", rfilename="model.safetensors",
-        extra_evidence={"matches": 2})
+    _assert_refusal_shape(ei.value, evidence={
+        "reason": "ambiguous_proposal_file_authority",
+        "requirement_id": "primary:org/gte",
+        "repo_id": "org/gte",
+        "rfilename": "model.safetensors",
+        "matches": 2,
+    })
 
 
 def test_c08_absent_storage_action_refuses_typed():
@@ -333,10 +381,13 @@ def test_c08_absent_storage_action_refuses_typed():
     )
     with pytest.raises(Refusal) as ei:
         fill_mod._fetch_task_manifests([unit])
-    _assert_refusal_shape(
-        ei.value, reason="invalid_storage_action",
-        repo_id="org/gte", rfilename="model.safetensors",
-        extra_evidence={"storage_action": None})
+    _assert_refusal_shape(ei.value, evidence={
+        "reason": "invalid_storage_action",
+        "requirement_id": "primary:org/gte",
+        "repo_id": "org/gte",
+        "rfilename": "model.safetensors",
+        "storage_action": None,
+    })
 
 
 def test_c09_invalid_storage_action_archive_refuses_typed():
@@ -353,10 +404,13 @@ def test_c09_invalid_storage_action_archive_refuses_typed():
     )
     with pytest.raises(Refusal) as ei:
         fill_mod._fetch_task_manifests([unit])
-    _assert_refusal_shape(
-        ei.value, reason="invalid_storage_action",
-        repo_id="org/gte", rfilename="model.safetensors",
-        extra_evidence={"storage_action": "archive"})
+    _assert_refusal_shape(ei.value, evidence={
+        "reason": "invalid_storage_action",
+        "requirement_id": "primary:org/gte",
+        "repo_id": "org/gte",
+        "rfilename": "model.safetensors",
+        "storage_action": "archive",
+    })
 
 
 # ---------------------------------------------------------------------------
