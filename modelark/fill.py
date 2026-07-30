@@ -704,20 +704,15 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
                  "requirement_id": rid, "repo_id": repo},
                 ("preview_again",))
         else:
-            # Pre-approval / characterization only: catalog file list (not approved
-            # authority). Assign storage_action from format/quant for ManifestFile
-            # construction — never used to recover a missing *approved* action.
-            from modelark.archive_manifest import FLOAT_QUANTS
-            file_specs = []
-            for rfilename, size_bytes, sha256, fmt, quant in con.execute(
-                    "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
-                    "WHERE repo_id=? ORDER BY rfilename", [repo]):
-                if fmt == "safetensors" and quant in FLOAT_QUANTS:
-                    action = "compress"
-                else:
-                    action = "raw"
-                file_specs.append(
-                    (rfilename, size_bytes, sha256, fmt, quant, action))
+            # Pre-approval / characterization only: canonical live acquisition
+            # policy (not approved authority). Approved proposal_files branch
+            # above must never call this — frozen authority only.
+            from modelark import archive_manifest as _am
+            file_specs = [
+                (mf.rfilename, mf.size_bytes, mf.sha256, mf.format, mf.quant,
+                 mf.storage_action)
+                for mf in _am.manifest_for_repo(con, repo)
+            ]
         if not file_specs:
             if require_proposal_files:
                 raise Refusal(
