@@ -621,18 +621,30 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
     from modelark.reconcile import TaskKind
     from modelark.proposal import Refusal
     scope = set(repo_scope) if repo_scope else None
-    # requirement_id -> list of proposal file dicts
+    # requirement_id -> list of proposal file dicts (storage_action preserved, never invented).
     by_req = {}
     for ff in proposal_files or ():
         rid = ff.get("requirement_id") if isinstance(ff, dict) else getattr(ff, "requirement_id", None)
         if rid:
-            by_req.setdefault(rid, []).append(ff if isinstance(ff, dict) else {
-                "rfilename": getattr(ff, "rfilename", None),
-                "size_bytes": getattr(ff, "size_bytes", None),
-                "orig_sha256": getattr(ff, "orig_sha256", None),
-                "format": getattr(ff, "format", None),
-                "quant": getattr(ff, "quant", None),
-            })
+            if isinstance(ff, dict):
+                by_req.setdefault(rid, []).append({
+                    "rfilename": ff.get("rfilename"),
+                    "size_bytes": ff.get("size_bytes"),
+                    "orig_sha256": ff.get("orig_sha256"),
+                    "format": ff.get("format"),
+                    "quant": ff.get("quant"),
+                    # Preserve frozen approval value, including absent → None. Do not default.
+                    "storage_action": ff.get("storage_action"),
+                })
+            else:
+                by_req.setdefault(rid, []).append({
+                    "rfilename": getattr(ff, "rfilename", None),
+                    "size_bytes": getattr(ff, "size_bytes", None),
+                    "orig_sha256": getattr(ff, "orig_sha256", None),
+                    "format": getattr(ff, "format", None),
+                    "quant": getattr(ff, "quant", None),
+                    "storage_action": getattr(ff, "storage_action", None),
+                })
     units = []
     for t in projection.tasks or ():
         if _proj_field(t, "row_kind") == "baseline_satisfied":
@@ -682,7 +694,7 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
         if prop_files:
             file_specs = [
                 (pf.get("rfilename"), pf.get("size_bytes"), pf.get("orig_sha256"),
-                 pf.get("format"), pf.get("quant"))
+                 pf.get("format"), pf.get("quant"), pf.get("storage_action"))
                 for pf in prop_files if pf.get("rfilename")
             ]
         elif require_proposal_files:
@@ -692,10 +704,20 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
                  "requirement_id": rid, "repo_id": repo},
                 ("preview_again",))
         else:
-            # Pre-approval / characterization only.
-            file_specs = list(con.execute(
-                "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
-                "WHERE repo_id=? ORDER BY rfilename", [repo]).fetchall())
+            # Pre-approval / characterization only: catalog file list (not approved
+            # authority). Assign storage_action from format/quant for ManifestFile
+            # construction — never used to recover a missing *approved* action.
+            from modelark.archive_manifest import FLOAT_QUANTS
+            file_specs = []
+            for rfilename, size_bytes, sha256, fmt, quant in con.execute(
+                    "SELECT rfilename, size_bytes, sha256, format, quant FROM files "
+                    "WHERE repo_id=? ORDER BY rfilename", [repo]):
+                if fmt == "safetensors" and quant in FLOAT_QUANTS:
+                    action = "compress"
+                else:
+                    action = "raw"
+                file_specs.append(
+                    (rfilename, size_bytes, sha256, fmt, quant, action))
         if not file_specs:
             if require_proposal_files:
                 raise Refusal(
@@ -706,14 +728,15 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
             continue
         missing = []
         file_rows = []
-        for rfilename, size_bytes, sha256, fmt, quant in file_specs:
+        for rfilename, size_bytes, sha256, fmt, quant, storage_action in file_specs:
             arch = con.execute(
                 "SELECT orig_sha256, compressed, annex_key FROM archived "
                 "WHERE repo_id=? AND rfilename=? AND drive_label=?",
                 [repo, rfilename, target]).fetchone() if target else None
             row = SimpleNamespace(
                 rfilename=rfilename, size_bytes=int(size_bytes or 0),
-                sha256=sha256, format=fmt, quant=quant)
+                sha256=sha256, format=fmt, quant=quant,
+                storage_action=storage_action)
             file_rows.append(row)
             # Same content-satisfaction rule as source readiness (DEC-055).
             if arch is None or not _archive_content_satisfies(
@@ -774,6 +797,73 @@ def _projection_work_units(con, projection, repo_scope=None, proposal_files=None
         ))
     units.sort(key=lambda u: (u.order_key, u.requirement_id or ""))
     return units
+
+
+def _fetch_task_manifests(fetch_tasks):
+    """Build typed FETCH manifests from frozen approved missing rows (INC-025).
+
+    Converts each unit's missing_files into ``archive_manifest.ManifestFile`` values
+    using only work-unit file_rows (approved authority). Never re-reads catalog or
+    acquisition policy. No empty-intersection fallback to all file_rows.
+    """
+    from modelark import archive_manifest
+    from modelark.proposal import Refusal
+
+    out: dict[str, tuple] = {}
+    for unit in fetch_tasks:
+        rows = []
+        for missing_name in (unit.missing_files or ()):
+            matches = [
+                fr for fr in (unit.file_rows or ())
+                if getattr(fr, "rfilename", None) == missing_name
+            ]
+            if len(matches) == 0:
+                raise Refusal(
+                    "APPROVED_INPUT_CHANGED",
+                    {
+                        "reason": "missing_proposal_file_authority",
+                        "requirement_id": unit.requirement_id,
+                        "repo_id": unit.repo_id,
+                        "rfilename": missing_name,
+                    },
+                    ("preview_again",),
+                )
+            if len(matches) > 1:
+                raise Refusal(
+                    "APPROVED_INPUT_CHANGED",
+                    {
+                        "reason": "ambiguous_proposal_file_authority",
+                        "requirement_id": unit.requirement_id,
+                        "repo_id": unit.repo_id,
+                        "rfilename": missing_name,
+                        "matches": len(matches),
+                    },
+                    ("preview_again",),
+                )
+            fr = matches[0]
+            action = getattr(fr, "storage_action", None)
+            if action not in ("compress", "raw"):
+                raise Refusal(
+                    "APPROVED_INPUT_CHANGED",
+                    {
+                        "reason": "invalid_storage_action",
+                        "requirement_id": unit.requirement_id,
+                        "repo_id": unit.repo_id,
+                        "rfilename": missing_name,
+                        "storage_action": action,
+                    },
+                    ("preview_again",),
+                )
+            rows.append(archive_manifest.ManifestFile(
+                rfilename=fr.rfilename,
+                size_bytes=int(fr.size_bytes or 0),
+                sha256=getattr(fr, "sha256", None),
+                format=getattr(fr, "format", None) or "",
+                quant=getattr(fr, "quant", None),
+                storage_action=action,
+            ))
+        out[unit.repo_id] = tuple(rows)
+    return out
 
 
 def _drain_projection(
@@ -933,12 +1023,8 @@ def _drain_projection(
                 "phase": "primary", "drive": pinned_drive, "n_repos": len(fetch_tasks),
                 "say": f"== {pinned_drive} ({len(fetch_tasks)} exact fetch task(s)) ==",
             })
-            manifests = {
-                u.repo_id: tuple(
-                    fr for fr in u.file_rows if fr.rfilename in u.missing_files
-                ) or tuple(u.file_rows)
-                for u in fetch_tasks
-            }
+            # INC-025: typed ManifestFile from frozen approved missing rows only.
+            manifests = _fetch_task_manifests(fetch_tasks)
 
             def on_gated(repo_id: str) -> str:
                 hit = gated_hits.get(repo_id, 0) + 1
