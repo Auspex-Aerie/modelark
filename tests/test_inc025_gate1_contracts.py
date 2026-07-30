@@ -5,7 +5,7 @@ Locked design (Gate 0 accepted):
   - Carry storage_action through _projection_work_units.
   - At the FETCH drain join, build archive_manifest.ManifestFile from approved
     missing rows — never re-read live catalog/policy.
-  - Fail closed on ambiguous missing names or invalid storage_action.
+  - Fail closed with typed APPROVED_INPUT_CHANGED refusals (exact shapes below).
   - Never broaden empty intersection to all unit rows.
   - fetch.py, archive_manifest.py, schema, replica path unchanged.
 
@@ -24,6 +24,11 @@ from modelark import archive_manifest, fetch
 from modelark import fill as fill_mod
 from modelark.proposal import Refusal
 from modelark.reconcile import TaskKind
+
+
+# ---------------------------------------------------------------------------
+# Fixtures / helpers
+# ---------------------------------------------------------------------------
 
 
 def _proj_fetch(repo="org/gte", target="d0", rid=None):
@@ -75,27 +80,62 @@ def _fetch_units(con, projection, proposal_files):
     return [u for u in units if getattr(u, "kind", None) == TaskKind.FETCH]
 
 
-def _production_fetch_manifests(units):
-    """Obtain FETCH task_manifests the way production must expose them.
+def _empty_fetch_run_outcome():
+    return {
+        "stored_repos": [],
+        "failed_repos": [],
+        "capacity_failure": None,
+        "terminal_failure": None,
+        "terminal_repo": None,
+        "throttled": False,
+        "stopped": False,
+        "drive_unwritable": False,
+        "gated_repos": [],
+        "gated_retry": None,
+    }
 
-    Prefers fill._fetch_task_manifests when Gate 2 lands. Until then, reproduces the
-    current drain join (including the silent empty→all fallback) so contracts stay
-    red for the intended defects.
+
+def _run_real_drain_capture_task_manifests(con, projection, proposal_files):
+    """Execute real fill._drain_projection FETCH branch; capture task_manifests.
+
+    Proves wiring through the drain, not an unused helper. Patches only:
+      - fill._mounted → always mounted
+      - fill.fetch.run → capture spy (does not patch fetch_model / as_fetch_record)
     """
-    fn = getattr(fill_mod, "_fetch_task_manifests", None)
-    if callable(fn):
-        return fn(units)
-    out = {}
-    for u in units:
-        if getattr(u, "kind", None) != TaskKind.FETCH:
-            continue
-        selected = tuple(
-            fr for fr in (u.file_rows or ())
-            if fr.rfilename in (u.missing_files or ())
+    captured: dict = {}
+
+    def spy_run(*args, **kwargs):
+        captured["task_manifests"] = kwargs.get("task_manifests")
+        captured["repos"] = kwargs.get("repos")
+        captured["drive_label"] = kwargs.get("drive_label")
+        return _empty_fetch_run_outcome()
+
+    ctx = fetch.RunCtx(con=con, check_hf_auth=False)
+    session_start = SimpleNamespace(
+        projection=projection,
+        session=SimpleNamespace(
+            approved_proposal_id="inc025-gate1",
+            fencing_token=1,
+            session_id="s-inc025",
+        ),
+        execution_config=SimpleNamespace(capacity_mode="guaranteed"),
+        _proposal_files=list(proposal_files),
+    )
+    with mock.patch.object(fill_mod, "_mounted", return_value=(True, True)), \
+            mock.patch.object(fill_mod.fetch, "run", side_effect=spy_run):
+        result = fill_mod._drain_projection(
+            ctx, session_start,
+            plan_id="ark",
+            max_24h_gb=0,
+            repo_scope=None,
+            guided=False,
+            poll_secs=0.01,
+            child_fds=(),
         )
-        # Current production (fill.py:936-941): silent broaden on empty intersection.
-        out[u.repo_id] = selected or tuple(u.file_rows or ())
-    return out
+    assert "task_manifests" in captured, (
+        f"drain must reach fetch.run with task_manifests; result={result!r} "
+        f"captured_keys={sorted(captured)}")
+    return captured["task_manifests"], result
 
 
 def _assert_manifest_files(manifest_tuple, *, label: str):
@@ -108,8 +148,23 @@ def _assert_manifest_files(manifest_tuple, *, label: str):
             f"{label}: storage_action must be compress|raw, got {item.storage_action!r}")
 
 
+def _assert_refusal_shape(exc: Refusal, *, reason: str, repo_id: str, rfilename: str,
+                          extra_evidence: dict | None = None):
+    assert exc.code == "APPROVED_INPUT_CHANGED", exc
+    ev = exc.evidence if isinstance(exc.evidence, dict) else {}
+    assert ev.get("reason") == reason, ev
+    assert ev.get("repo_id") == repo_id, ev
+    assert ev.get("rfilename") == rfilename, ev
+    assert "requirement_id" in ev and ev["requirement_id"], ev
+    if extra_evidence:
+        for k, v in extra_evidence.items():
+            assert ev.get(k) == v, (k, ev)
+    actions = tuple(exc.actions or ())
+    assert actions == ("preview_again",), actions
+
+
 # ---------------------------------------------------------------------------
-# storage_action preservation
+# storage_action on work units
 # ---------------------------------------------------------------------------
 
 
@@ -128,151 +183,73 @@ def test_c01_work_units_preserve_storage_action_from_proposal_files():
 
 
 # ---------------------------------------------------------------------------
-# Drain join → typed ManifestFile, exact missing subset, no ONNX
+# Real drain wiring (prevents helper-without-wiring false green)
 # ---------------------------------------------------------------------------
 
 
-def test_c02_drain_manifests_are_genuine_manifest_file():
+def test_c02_real_drain_passes_manifest_file_to_fetch_run():
+    """Load-bearing: real _drain_projection FETCH branch → capture task_manifests.
+
+    A helper that is never called by the drain cannot satisfy this contract.
+    """
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/gte",))
-    units = _fetch_units(con, _proj_fetch(), _gte_proposal_files())
-    manifests = _production_fetch_manifests(units)
-    assert "org/gte" in manifests
-    _assert_manifest_files(manifests["org/gte"], label="c02")
-
-
-def test_c03_safetensors_compress_aux_raw_on_drain_manifest():
-    con = f.mem_con()
-    f.seed_plan_selection(con, repos=("org/gte",))
-    units = _fetch_units(con, _proj_fetch(), _gte_proposal_files())
-    manifests = _production_fetch_manifests(units)
+    pfiles = _gte_proposal_files()
+    manifests, _result = _run_real_drain_capture_task_manifests(
+        con, _proj_fetch(), pfiles)
+    assert "org/gte" in manifests, manifests
+    _assert_manifest_files(manifests["org/gte"], label="c02-drain")
     by_name = {m.rfilename: m for m in manifests["org/gte"]}
-    _assert_manifest_files(manifests["org/gte"], label="c03")
+    assert set(by_name) == {"model.safetensors", "config.json"}
     assert by_name["model.safetensors"].storage_action == "compress"
     assert by_name["config.json"].storage_action == "raw"
 
 
-def test_c04_policy_excluded_onnx_never_in_drain_manifest():
-    """Approved authority is planned-only; even if a bad approval listed onnx, design
-    pins that production convert path uses approved rows — Gate-1 uses correct approval
-    (no onnx). Catalog may still hold onnx; drain must not invent it.
-    """
+def test_c03_real_drain_manifest_is_exact_approved_missing_subset():
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/gte",))
-    # Catalog has onnx (policy-excluded) but approved proposal_files do not.
-    con.execute(
-        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
-        "VALUES('org/gte','onnx/model.onnx',5000,'onnx',NULL,?)", ["c" * 64])
-    pfiles = _gte_proposal_files(include_onnx=False)
-    units = _fetch_units(con, _proj_fetch(), pfiles)
-    manifests = _production_fetch_manifests(units)
-    names = {m.rfilename for m in manifests.get("org/gte", ())}
-    assert "onnx/model.onnx" not in names, (
-        f"INC-025: ONNX must not appear in drain manifest; got {names}")
-    assert "model.safetensors" in names and "config.json" in names
-
-
-def test_c05_drain_manifest_is_exactly_approved_missing_subset():
-    con = f.mem_con()
-    f.seed_plan_selection(con, repos=("org/gte",))
-    # One approved file already durable on target → missing is the other only.
     con.execute(
         "INSERT INTO archived(repo_id,rfilename,drive_label,compressed,orig_bytes,"
         "stored_bytes,orig_sha256) VALUES('org/gte','config.json','d0',0,10,10,?)",
         ["b" * 64])
     pfiles = _gte_proposal_files()
-    units = _fetch_units(con, _proj_fetch(), pfiles)
-    assert units and units[0].missing_files == ("model.safetensors",), units[0].missing_files
-    manifests = _production_fetch_manifests(units)
+    manifests, _result = _run_real_drain_capture_task_manifests(
+        con, _proj_fetch(), pfiles)
     names = [m.rfilename for m in manifests["org/gte"]]
-    _assert_manifest_files(manifests["org/gte"], label="c05")
+    _assert_manifest_files(manifests["org/gte"], label="c03-drain")
     assert names == ["model.safetensors"], (
-        f"drain manifest must be exactly approved missing subset, got {names}")
+        f"drain-captured task_manifests must be exact approved missing subset, got {names}")
+    assert manifests["org/gte"][0].storage_action == "compress"
 
 
-# ---------------------------------------------------------------------------
-# Fail closed
-# ---------------------------------------------------------------------------
-
-
-def test_c06_empty_intersection_fails_closed_not_all_rows():
-    """Ghost missing name must not broaden to every file_row (fill.py:936-941 fallback)."""
-    unit = SimpleNamespace(
-        repo_id="org/gte",
-        kind=TaskKind.FETCH,
-        missing_files=("ghost.bin",),
-        file_rows=(
-            SimpleNamespace(
-                rfilename="model.safetensors", size_bytes=1000, sha256="a" * 64,
-                format="safetensors", quant="bf16", storage_action="compress"),
-            SimpleNamespace(
-                rfilename="config.json", size_bytes=10, sha256="b" * 64,
-                format="aux", quant=None, storage_action="raw"),
-        ),
-    )
-    try:
-        manifests = _production_fetch_manifests([unit])
-    except (Refusal, ValueError, RuntimeError, AssertionError, TypeError):
-        return  # green once production fails closed
-    got = manifests.get("org/gte") or ()
-    names = {getattr(x, "rfilename", None) for x in got}
-    assert False, (
-        "INC-025: empty intersection must fail closed, not return all file_rows; "
-        f"got {names}")
-
-
-def test_c07_missing_or_invalid_storage_action_fails_closed():
-    """Missing storage_action on an approved row must fail closed at typed conversion."""
+def test_c04_catalog_onnx_not_invented_in_drain_manifest():
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/gte",))
-    pfiles = [{
-        "requirement_id": "primary:org/gte", "rfilename": "model.safetensors",
-        "size_bytes": 1000, "orig_sha256": "a" * 64,
-        "format": "safetensors", "quant": "bf16",
-        # storage_action intentionally omitted
-    }]
-    try:
-        units = fill_mod._projection_work_units(
-            con, _proj_fetch(), proposal_files=pfiles, require_proposal_files=True)
-        fetch_units = [u for u in units if getattr(u, "kind", None) == TaskKind.FETCH]
-        assert fetch_units, "expected FETCH unit when approved file is missing on target"
-        manifests = _production_fetch_manifests(fetch_units)
-    except (Refusal, ValueError, RuntimeError, TypeError, AssertionError):
-        return  # green: fail-closed during unit build or join conversion
-
-    # Current production reaches here with SimpleNamespace / no valid typed action.
-    for item in manifests.get("org/gte") or ():
-        action = getattr(item, "storage_action", None)
-        is_mf = isinstance(item, archive_manifest.ManifestFile)
-        if not is_mf or action not in ("compress", "raw"):
-            assert False, (
-                "INC-025: missing/invalid storage_action must fail closed before "
-                f"emitting a drain manifest; got type={type(item).__name__} "
-                f"action={action!r}")
-    assert False, (
-        "INC-025: missing storage_action must fail closed, not invent a defaulted ManifestFile")
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
+        "VALUES('org/gte','onnx/model.onnx',5000,'onnx',NULL,?)", ["c" * 64])
+    pfiles = _gte_proposal_files(include_onnx=False)
+    manifests, _result = _run_real_drain_capture_task_manifests(
+        con, _proj_fetch(), pfiles)
+    names = {m.rfilename for m in manifests.get("org/gte", ())}
+    # Type pin still applies once production lands; today names may be SimpleNamespace attrs.
+    names = {
+        (m.rfilename if hasattr(m, "rfilename") else None)
+        for m in manifests.get("org/gte", ())
+    }
+    assert "onnx/model.onnx" not in names, names
+    assert "model.safetensors" in names and "config.json" in names
 
 
-# ---------------------------------------------------------------------------
-# Load-bearing seam: drain data → real fetch_model (do not patch consumer)
-# ---------------------------------------------------------------------------
-
-
-def test_c08_drain_manifest_crosses_real_fetch_model():
-    """Real fetch_model must accept drain-produced manifests (as_fetch_record).
-
-    Do not patch fetch_model, as_fetch_record, or fetch.run. Isolate only
-    transport/download and path prep.
-    """
+def test_c05_drain_captured_manifest_crosses_real_fetch_model():
+    """Capture from real drain, then real fetch_model (no consumer-side patches)."""
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/gte",))
     pfiles = _gte_proposal_files()
-    units = _fetch_units(con, _proj_fetch(), pfiles)
-    manifests = _production_fetch_manifests(units)
-    assert "org/gte" in manifests
+    manifests, _result = _run_real_drain_capture_task_manifests(
+        con, _proj_fetch(), pfiles)
     manifest = manifests["org/gte"]
-    # Pin type before consumer — still red on SimpleNamespace today.
-    _assert_manifest_files(manifest, label="c08-precondition")
+    _assert_manifest_files(manifest, label="c05-precondition")
 
     ctx = fetch.RunCtx(con=con)
     marker = RuntimeError("download attempted for approved missing file")
@@ -285,28 +262,139 @@ def test_c08_drain_manifest_crosses_real_fetch_model():
                 manifest=manifest,
             )
         assert ei.value is marker or "download attempted" in str(ei.value)
-    assert download.call_count >= 1, (
-        "real fetch_model must reach download for missing ManifestFile rows")
+    assert download.call_count >= 1
 
 
 # ---------------------------------------------------------------------------
-# Replica path unchanged
+# Typed fail-closed (exact Refusal only — no broad exception success)
 # ---------------------------------------------------------------------------
 
 
-def test_c09_replica_units_unchanged_by_fetch_manifest_join():
-    """Replica remains waiting_dependency / non-FETCH; join applies to FETCH only."""
+def test_c06_missing_approved_row_refuses_typed():
+    """missing rfilename with no approved row → missing_proposal_file_authority.
+
+    Calls fill._fetch_task_manifests (Gate-2 surface the drain must invoke). Only
+    exact Refusal shapes count as success — AttributeError / other exceptions fail
+    the contract (expected-red until production lands).
+    """
+    unit = SimpleNamespace(
+        requirement_id="primary:org/gte",
+        repo_id="org/gte",
+        kind=TaskKind.FETCH,
+        missing_files=("ghost.bin",),
+        file_rows=(
+            SimpleNamespace(
+                rfilename="model.safetensors", size_bytes=1000, sha256="a" * 64,
+                format="safetensors", quant="bf16", storage_action="compress"),
+        ),
+    )
+    with pytest.raises(Refusal) as ei:
+        fill_mod._fetch_task_manifests([unit])
+    _assert_refusal_shape(
+        ei.value, reason="missing_proposal_file_authority",
+        repo_id="org/gte", rfilename="ghost.bin")
+
+
+def test_c07_ambiguous_duplicate_approved_rows_refuses_typed():
+    """Two approved rows for one missing rfilename → ambiguous_proposal_file_authority."""
+    unit = SimpleNamespace(
+        requirement_id="primary:org/gte",
+        repo_id="org/gte",
+        kind=TaskKind.FETCH,
+        missing_files=("model.safetensors",),
+        file_rows=(
+            SimpleNamespace(
+                rfilename="model.safetensors", size_bytes=1000, sha256="a" * 64,
+                format="safetensors", quant="bf16", storage_action="compress"),
+            SimpleNamespace(
+                rfilename="model.safetensors", size_bytes=1000, sha256="a" * 64,
+                format="safetensors", quant="bf16", storage_action="raw"),
+        ),
+    )
+    with pytest.raises(Refusal) as ei:
+        fill_mod._fetch_task_manifests([unit])
+    _assert_refusal_shape(
+        ei.value, reason="ambiguous_proposal_file_authority",
+        repo_id="org/gte", rfilename="model.safetensors",
+        extra_evidence={"matches": 2})
+
+
+def test_c08_absent_storage_action_refuses_typed():
+    unit = SimpleNamespace(
+        requirement_id="primary:org/gte",
+        repo_id="org/gte",
+        kind=TaskKind.FETCH,
+        missing_files=("model.safetensors",),
+        file_rows=(
+            SimpleNamespace(
+                rfilename="model.safetensors", size_bytes=1000, sha256="a" * 64,
+                format="safetensors", quant="bf16"),  # no storage_action → None
+        ),
+    )
+    with pytest.raises(Refusal) as ei:
+        fill_mod._fetch_task_manifests([unit])
+    _assert_refusal_shape(
+        ei.value, reason="invalid_storage_action",
+        repo_id="org/gte", rfilename="model.safetensors",
+        extra_evidence={"storage_action": None})
+
+
+def test_c09_invalid_storage_action_archive_refuses_typed():
+    unit = SimpleNamespace(
+        requirement_id="primary:org/gte",
+        repo_id="org/gte",
+        kind=TaskKind.FETCH,
+        missing_files=("model.safetensors",),
+        file_rows=(
+            SimpleNamespace(
+                rfilename="model.safetensors", size_bytes=1000, sha256="a" * 64,
+                format="safetensors", quant="bf16", storage_action="archive"),
+        ),
+    )
+    with pytest.raises(Refusal) as ei:
+        fill_mod._fetch_task_manifests([unit])
+    _assert_refusal_shape(
+        ei.value, reason="invalid_storage_action",
+        repo_id="org/gte", rfilename="model.safetensors",
+        extra_evidence={"storage_action": "archive"})
+
+
+# ---------------------------------------------------------------------------
+# Replica unchanged
+# ---------------------------------------------------------------------------
+
+
+def test_c10_replica_units_unchanged_by_fetch_manifest_join():
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/gte",))
-    # Source not ready → replica stays waiting; no FETCH conversion applied.
     pfiles = _gte_proposal_files(rid="replica:org/gte")
     units = fill_mod._projection_work_units(
         con, _proj_replica(), proposal_files=pfiles, require_proposal_files=True)
     assert units, "expected a replica-side unit"
     assert units[0].schedule_state == "waiting_dependency"
     assert units[0].kind is None
-    # Production join must not invent FETCH manifests for non-FETCH units.
-    manifests = _production_fetch_manifests(units)
-    assert manifests == {} or all(
-        getattr(u, "kind", None) == TaskKind.FETCH for u in units if u.repo_id in manifests
-    ), manifests
+    # Real drain with only waiting replica must not call fetch.run for FETCH.
+    captured: dict = {}
+
+    def spy_run(*a, **k):
+        captured["called"] = True
+        return _empty_fetch_run_outcome()
+
+    ctx = fetch.RunCtx(con=con, check_hf_auth=False)
+    session_start = SimpleNamespace(
+        projection=_proj_replica(),
+        session=SimpleNamespace(
+            approved_proposal_id="inc025-gate1-r", fencing_token=1, session_id="s-r"),
+        execution_config=SimpleNamespace(capacity_mode="guaranteed"),
+        _proposal_files=list(pfiles),
+    )
+    with mock.patch.object(fill_mod, "_mounted", return_value=(True, True)), \
+            mock.patch.object(fill_mod.fetch, "run", side_effect=spy_run):
+        result = fill_mod._drain_projection(
+            ctx, session_start, plan_id="ark", max_24h_gb=0,
+            repo_scope=None, guided=False, poll_secs=0.01, child_fds=())
+    assert not captured.get("called"), (
+        f"replica-only waiting projection must not enter FETCH fetch.run; result={result!r}")
+    assert result.get("code") in {
+        "WAITING_DEPENDENCY", "PLAN_SATISFIED", "PLAN_COMPLETE_WITH_FOLLOWUPS",
+    }, result
