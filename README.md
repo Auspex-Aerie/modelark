@@ -1,11 +1,14 @@
 # ModelArk
 
-[![CI](https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml/badge.svg)](https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml)
-[![Release: v0.2.0 Public Alpha](https://img.shields.io/badge/release-v0.2.0%20Public%20Alpha-orange)](CHANGELOG.md#020---2026-07-20)
-[![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%E2%80%933.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
-[![Linux](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)](docs/deployment.md)
-[![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-support_AuspexLabs-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/auspexlabs?new=1)
+<p align="center">
+  <a href="https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="CHANGELOG.md#020---2026-07-20"><img alt="Release: v0.2.0 Public Alpha" src="https://img.shields.io/badge/release-v0.2.0%20Public%20Alpha-orange"></a>
+  <a href="pyproject.toml"><img alt="Python 3.10–3.12" src="https://img.shields.io/badge/python-3.10%E2%80%933.12-3776AB?logo=python&amp;logoColor=white"></a>
+  <a href="docs/deployment.md"><img alt="Linux" src="https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&amp;logoColor=black"></a>
+  <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
+  <a href="https://buymeacoffee.com/auspexlabs?new=1"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/Buy_Me_a_Coffee-support_AuspexLabs-FFDD00?logo=buymeacoffee&amp;logoColor=black"></a>
+  <a href="https://www.greptile.com/?utm_source=oss_badge&amp;utm_medium=readme&amp;utm_campaign=greptile_for_open_source"><img alt="Greptile: The War on Bugs" src="https://www.greptile.com/badge.svg"></a>
+</p>
 
 > 🚧 **ModelArk 0.2.0 — Public Alpha.** The archive pipeline, reconciled capacity engine, and
 > verified restore command are implemented and extensively tested, and StreamZNN's write-time restore
