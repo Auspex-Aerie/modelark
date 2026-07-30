@@ -58,9 +58,20 @@ def _seed(con) -> None:
         "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
         "VALUES('demo/replica-blocked','model.safetensors',2000000000,'safetensors','bf16')"
     )
+    # Hostile id/reason carrier for blocked-selection XSS contract (pickle-only → MANIFEST_POLICY).
+    con.execute(
+        "INSERT INTO models(repo_id,author,params_b,category,variant,license,downloads_30d,"
+        "gated,status) VALUES('demo/<script>alert(1)</script>','demo',1.0,'generative-llm',"
+        "'base','mit',5,'false','discovered')"
+    )
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+        "VALUES('demo/<script>alert(1)</script>','pytorch_model.bin',1000000,'pytorch','fp16')"
+    )
     con.executemany(
         "INSERT INTO selection(repo_id,finalized_at) VALUES(?,'2026-07-15')",
-        [("demo/tiny-llm",), ("demo/pickle-only",), ("demo/replica-blocked",)],
+        [("demo/tiny-llm",), ("demo/pickle-only",), ("demo/replica-blocked",),
+         ("demo/<script>alert(1)</script>",)],
     )
     con.execute(
         "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes) "
@@ -114,6 +125,205 @@ def _get(path: str):
         return json.load(r)
 
 
+def _blocked_selection_flow(pg) -> None:
+    """Fill-tab blocked-selection notice (DEC-058). Fail closed if the real UI is absent.
+
+    Stable selectors (Gate-2 production must provide them):
+      #blockedSelection #blockedSelectionList #blockedDismiss #blockedReplan
+    """
+    # Notice must appear for MANIFEST_POLICY (policy-blocked repos), not only legacy advisories.
+    pg.wait_for_selector("#blockedSelection", timeout=8000)
+    pg.wait_for_selector("#blockedSelectionList")
+    notice = pg.inner_text("#blockedSelection")
+    assert "MANIFEST_POLICY" in notice or pg.locator("#blockedSelection").count() == 1
+    list_text = pg.inner_text("#blockedSelectionList")
+    # Every policy-blocked repo + reason surface (pickle + hostile XSS id).
+    assert "demo/pickle-only" in list_text, f"pickle blocker missing from notice: {list_text!r}"
+    assert "demo/<script>alert(1)</script>" in list_text or "demo/&lt;script&gt;" in list_text, (
+        f"hostile repo id must render as text in notice: {list_text!r}")
+    # Capacity-only blocker must not enter the blocked-selection list.
+    assert "demo/replica-blocked" not in list_text, (
+        f"capacity-only repo must not populate blocked-selection list: {list_text!r}")
+    assert "REQUIREMENT_EXCEEDS_USABLE_MAX" not in list_text
+    # Hostile markup must not create an executable element.
+    assert pg.locator("#blockedSelectionList script").count() == 0
+    assert pg.locator("#blockedSelectionList img").count() == 0
+    # Controls present and enabled initially.
+    assert pg.locator("#blockedDismiss").count() == 1
+    assert pg.locator("#blockedReplan").count() == 1
+    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
+
+    # Track Dismiss/Replan traffic: no draft/approve/fill-start; Replan = GET preview only.
+    traffic = {"preview_get": 0, "bulk_post": [], "banned": []}
+
+    def preview_route(route):
+        if route.request.method == "GET":
+            traffic["preview_get"] += 1
+            # After first real-ish cycle we may fulfill; for Replan/network tests override later.
+            route.continue_()
+        else:
+            traffic["banned"].append(("preview", route.request.method))
+            route.continue_()
+
+    def ban_route(route, label):
+        traffic["banned"].append((label, route.request.method, route.request.url))
+        route.fulfill(status=500, body="banned")
+
+    pg.route("**/api/plan/preview", preview_route)
+    pg.route("**/api/fill/start", lambda r: ban_route(r, "fill_start"))
+    # No portal draft/approve endpoints today; pin absence of accidental invents if added.
+    pg.route("**/api/proposal/**", lambda r: ban_route(r, "proposal"))
+
+    # Replan performs a preview GET only.
+    before_preview = traffic["preview_get"]
+    pg.click("#blockedReplan")
+    for _ in range(40):
+        if traffic["preview_get"] > before_preview:
+            break
+        time.sleep(0.05)
+    assert traffic["preview_get"] > before_preview, "Replan must GET /api/plan/preview"
+    assert not any(b[0] == "fill_start" for b in traffic["banned"])
+    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
+    retained_after_replan = pg.inner_text("#blockedSelectionList")
+    assert "demo/pickle-only" in retained_after_replan
+    print("  blocked-selection Replan issued preview GET only")
+
+    # Simulated network failure retains evidence and re-enables controls.
+    def preview_fail(route):
+        if route.request.method == "GET":
+            traffic["preview_get"] += 1
+            route.abort("failed")
+        else:
+            route.continue_()
+
+    pg.unroute("**/api/plan/preview")
+    pg.route("**/api/plan/preview", preview_fail)
+    before_list = pg.inner_text("#blockedSelectionList")
+    pg.click("#blockedReplan")
+    for _ in range(40):
+        if pg.is_enabled("#blockedReplan"):
+            break
+        time.sleep(0.05)
+    assert pg.inner_text("#blockedSelectionList") == before_list, (
+        "network failure must retain displayed blocked evidence")
+    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
+    print("  blocked-selection network failure retained evidence + re-enabled controls")
+
+    # Simulated PREVIEW_STALE 409 retains evidence, surfaces refusal, re-enables controls.
+    def bulk_stale(route):
+        if route.request.method == "POST":
+            traffic["bulk_post"].append(route.request.post_data_json)
+            route.fulfill(
+                status=409, content_type="application/json",
+                body=json.dumps({
+                    "ok": False, "refused": True, "code": "PREVIEW_STALE",
+                    "error": "Selection changed since this preview. Replan before dismissing.",
+                    "evidence": {
+                        "current_revision": 2, "based_on_revision": 1,
+                        "selection_changed": False,
+                    },
+                    "actions": ["replan"],
+                }),
+            )
+        else:
+            route.continue_()
+
+    pg.route("**/api/selection/bulk", bulk_stale)
+    before_list = pg.inner_text("#blockedSelectionList")
+    pg.click("#blockedDismiss")
+    for _ in range(40):
+        toast = pg.inner_text("#toast") if pg.locator("#toast").count() else ""
+        if "PREVIEW_STALE" in toast or "Replan before dismissing" in toast or pg.is_enabled("#blockedDismiss"):
+            if "Replan before dismissing" in toast or "PREVIEW_STALE" in toast:
+                break
+        time.sleep(0.05)
+    toast = pg.inner_text("#toast")
+    assert "Replan before dismissing" in toast or "PREVIEW_STALE" in toast, (
+        f"PREVIEW_STALE must surface to operator, toast={toast!r}")
+    assert pg.inner_text("#blockedSelectionList") == before_list
+    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
+    # Dismiss body: exact displayed policy IDs, on:false, both bindings.
+    assert traffic["bulk_post"], "Dismiss must POST /api/selection/bulk"
+    body = traffic["bulk_post"][-1]
+    assert body.get("on") is False
+    assert "expected_revision" in body and "expected_selection_hash" in body
+    ids = body.get("ids") or body.get("repo_ids") or []
+    assert "demo/pickle-only" in ids
+    assert "demo/replica-blocked" not in ids, "capacity-only id must not be dismissed"
+    print("  blocked-selection PREVIEW_STALE retained evidence; Dismiss sent CAS bindings")
+
+    # Successful Dismiss automatically issues a new preview; notice clears while capacity remains.
+    traffic["bulk_post"].clear()
+    preview_after_dismiss = {"count": 0}
+
+    def bulk_ok(route):
+        if route.request.method == "POST":
+            traffic["bulk_post"].append(route.request.post_data_json)
+            route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({
+                    "n": 2, "bytes": 0, "finalized": 2, "budget": 27,
+                    "cap_24h_gb": 1000, "by_cat": [],
+                }),
+            )
+        else:
+            route.continue_()
+
+    def preview_after(route):
+        if route.request.method == "GET":
+            preview_after_dismiss["count"] += 1
+            traffic["preview_get"] += 1
+            # Empty policy refusal — notice should clear; capacity stays on plan_view path.
+            route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({
+                    "ok": True, "plan_id": "ark", "based_on_revision": 99,
+                    "selection_before_hash": "a" * 64, "gate_b_code": "FEASIBLE",
+                    "gate_b_refusal": None,
+                }),
+            )
+        else:
+            route.continue_()
+
+    pg.unroute("**/api/selection/bulk")
+    pg.unroute("**/api/plan/preview")
+    pg.route("**/api/selection/bulk", bulk_ok)
+    pg.route("**/api/plan/preview", preview_after)
+    pg.click("#blockedDismiss")
+    for _ in range(60):
+        if preview_after_dismiss["count"] >= 1 and pg.locator("#blockedSelection").count() == 0:
+            break
+        if preview_after_dismiss["count"] >= 1:
+            # Notice may hide or empty list when FEASIBLE.
+            if pg.locator("#blockedSelectionList").count() == 0:
+                break
+            if pg.locator("#blockedSelectionList").count() and not pg.inner_text("#blockedSelectionList").strip():
+                break
+            if pg.locator("#blockedSelection").count() and pg.is_hidden("#blockedSelection"):
+                break
+        time.sleep(0.05)
+    assert traffic["bulk_post"], "successful Dismiss must POST bulk"
+    assert preview_after_dismiss["count"] >= 1, (
+        "successful Dismiss must automatically re-preview via GET /api/plan/preview")
+    # Notice cleared of policy blockers.
+    if pg.locator("#blockedSelection").count():
+        remaining = pg.inner_text("#blockedSelectionList") if pg.locator("#blockedSelectionList").count() else ""
+        assert "demo/pickle-only" not in remaining
+        assert "demo/<script>" not in remaining and "demo/&lt;script&gt;" not in remaining
+    # Capacity blocker remains on the existing advisory/queue surface.
+    advisory = pg.inner_text("#fillAdvisories")
+    assert "REQUIREMENT_EXCEEDS_USABLE_MAX" in advisory or "demo/replica-blocked" in pg.inner_text("#fillQueue")
+    assert not any(b[0] == "fill_start" for b in traffic["banned"]), (
+        f"Dismiss/Replan must not start Fill: {traffic['banned']}")
+    assert not any(b[0] == "proposal" for b in traffic["banned"]), (
+        f"Dismiss/Replan must not draft/approve: {traffic['banned']}")
+    pg.unroute("**/api/selection/bulk")
+    pg.unroute("**/api/plan/preview")
+    pg.unroute("**/api/fill/start")
+    pg.unroute("**/api/proposal/**")
+    print("  blocked-selection notice + Dismiss/Replan contracts exercised")
+
+
 def _browser_flow() -> None:
     """Drive the portal in a headless browser: clear the #35 plan-gate by selecting `ark`, open the
     Catalog, tick the giant, and confirm the over-cap banner shows + dismisses. Patient waits per step
@@ -153,11 +363,19 @@ def _browser_flow() -> None:
             blocked = pg.inner_text("#fillQueue")
             assert "demo/pickle-only" in blocked and "MANIFEST_POLICY" in blocked
             assert "demo/replica-blocked" in blocked and "REQUIREMENT_EXCEEDS_USABLE_MAX" in blocked
-            assert pg.locator("#fillQueue .telq.blocked").count() == 2
+            # Two policy blockers (pickle + hostile XSS id) + one capacity blocker.
+            assert pg.locator("#fillQueue .telq.blocked").count() == 3
             fill_note = pg.inner_text("#fillNote")
-            assert "1 to place" in fill_note and "2 blocked" in fill_note, fill_note
+            assert "1 to place" in fill_note and "3 blocked" in fill_note, fill_note
             assert pg.locator("#fillStart").is_disabled()
             print("  policy + capacity blockers rendered with disjoint totals; Start fill disabled")
+
+            # ------------------------------------------------------------------
+            # Blocked-selection workflow (DEC-058 / Gate 1) — Fill-tab notice.
+            # Selectors: #blockedSelection #blockedSelectionList #blockedDismiss #blockedReplan
+            # Expected red until Gate-2 UI exists; e2e must not stay green without it.
+            # ------------------------------------------------------------------
+            _blocked_selection_flow(pg)
 
             # Drive chart still renders under a blocked cart. With tiered_v2 whole-plan Gate-B,
             # a structural blocker (replica exceed-max) yields 0 planned tasks on the bar while
@@ -374,7 +592,7 @@ def main() -> None:
         _seed(con)
         con.close()
         assert db.DB_PATH.parent == data_dir and db.DB_PATH.is_file()
-        print("  seeded 6 models (1 giant, policy + capacity blockers) in an isolated catalog")
+        print("  seeded models (giant, policy + capacity + hostile blockers) in an isolated catalog")
 
         serve = Path(sys.executable).with_name("modelark")  # .venv-dev/bin/modelark
         proc = subprocess.Popen(
