@@ -101,6 +101,16 @@ def _arch(repo, rfilename, drive, *, orig_sha256=None, stored_bytes=100,
     }
 
 
+def _drive(label, *, epoch=1, fingerprint=None):
+    return SimpleNamespace(
+        lifecycle="active",
+        eligibility="enabled",
+        identity_epoch=epoch,
+        identity_fingerprint=fingerprint or (label.encode().hex().ljust(64, "0")[:64]),
+        offline=False,
+    )
+
+
 def _inputs(proposal, *, archived=None, drives=None, manifests=None):
     return f.complete_projection_inputs(
         proposal, archived=archived, drives=drives, manifests=manifests)
@@ -127,15 +137,19 @@ def _refusal_evidence(exc_or_out):
 
 
 # ===========================================================================
-# Expected-red: multi-file grouping & shrink
+# Multi-file grouping & shrink
 # ===========================================================================
 
 
 def test_c01_groups_all_proposal_files_by_requirement_id():
-    """Every frozen proposal.files row for a requirement is evaluated (order-independent)."""
+    """Every frozen proposal.files row for a requirement is evaluated (order-independent).
+
+    This ordering (first present, last missing) currently PASSES under last-file
+    evaluation because the last name is absent. c02 is the reverse order that fails.
+    """
     _mod, project_pure = _proj()
     rid = "primary:org/m"
-    # Two files; only the *first* is archived. Last-file overwrite would wrongly shrink.
+    # Only the first file is archived; last (model.safetensors) is missing.
     tasks = [_task(rid, guaranteed_durable=200)]
     files = [
         _file(rid, "config.json", size=10, sha="c" * 64),
@@ -154,12 +168,11 @@ def test_c01_groups_all_proposal_files_by_requirement_id():
             f"c01: partial multi-file must not refuse, got {f.refusal_code(out)}: {out!r}")
     ids = _task_ids(out)
     assert rid in ids, (
-        f"c01: partial satisfaction must retain the requirement (last-file overwrite "
-        f"shrinks when only the last name is checked); remaining={ids}")
+        f"c01: partial satisfaction must retain the requirement; remaining={ids}")
 
 
 def test_c02_partial_never_shrinks_regardless_of_file_order():
-    """Swap file order: only the second name present → still must not shrink."""
+    """Expected-red: only the last name present must not shrink (order-independent)."""
     _mod, project_pure = _proj()
     rid = "primary:org/m"
     tasks = [_task(rid, guaranteed_durable=200)]
@@ -177,7 +190,7 @@ def test_c02_partial_never_shrinks_regardless_of_file_order():
     if f.is_refusal(out):
         raise AssertionError(f"c02: unexpected refuse {f.refusal_code(out)}: {out!r}")
     assert rid in _task_ids(out), (
-        f"c02: partial (only second file present) must not shrink; got {_task_ids(out)}")
+        f"c02: partial (only second/last file present) must not shrink; got {_task_ids(out)}")
 
 
 def test_c03_all_approved_files_satisfied_shrinks():
@@ -204,12 +217,12 @@ def test_c03_all_approved_files_satisfied_shrinks():
 
 
 # ===========================================================================
-# Expected-red: no live catalog authority for satisfaction
+# Positive compatibility: no live catalog satisfaction authority / DEC-056 drift
 # ===========================================================================
 
 
 def test_c04_no_live_manifest_for_repo_or_raw_files_for_satisfaction():
-    """Satisfaction must not call manifest_for_repo or reopen raw files rows.
+    """Positive compatibility: satisfaction must not call live catalog helpers.
 
     DEC-056 _manifest_hash drift recomputation remains allowed elsewhere; this pin
     only forbids live catalog file authority as *satisfaction* input.
@@ -241,7 +254,6 @@ def test_c05_dec056_manifest_hash_drift_still_refuses():
         tasks=[_task(rid, guaranteed_durable=100, full_manifest_hash="a" * 64)],
         files=[_file(rid, "model.safetensors", size=100, sha="m" * 64)],
     )
-    # Drifted manifest map forces APPROVED_INPUT_CHANGED (unchanged authority).
     inp, graph = _inputs(
         proposal, archived={},
         manifests={"org/m": "f" * 64},
@@ -259,7 +271,7 @@ def test_c05_dec056_manifest_hash_drift_still_refuses():
 
 
 def test_c06_missing_file_group_is_approved_input_changed():
-    """Executable task with no proposal.files group → missing_proposal_file_authority."""
+    """Expected-red: executable task with no proposal.files group."""
     _mod, project_pure = _proj()
     rid = "primary:org/m"
     proposal = _approved_proposal(
@@ -276,7 +288,7 @@ def test_c06_missing_file_group_is_approved_input_changed():
 
 
 def test_c07_rows_without_usable_filenames_is_empty_proposal_file_authority():
-    """Rows present but no usable rfilename → empty_proposal_file_authority (Fill parity)."""
+    """Expected-red: rows present but no usable rfilename (Fill parity)."""
     _mod, project_pure = _proj()
     rid = "primary:org/m"
     proposal = _approved_proposal(
@@ -316,7 +328,7 @@ def test_c07_rows_without_usable_filenames_is_empty_proposal_file_authority():
 
 
 def test_c08_catalog_projection_bundle_captures_compressed_and_annex_key():
-    """_catalog_projection_bundle archived values must include compressed + annex_key."""
+    """Expected-red: _catalog_projection_bundle must include compressed + annex_key."""
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/m",))
     con.execute(
@@ -347,7 +359,7 @@ def test_c08_catalog_projection_bundle_captures_compressed_and_annex_key():
 
 
 # ===========================================================================
-# Expected-red: digest parity with Fill / expected_sha256
+# Expected-red: digest parity + production routing through expected_sha256
 # ===========================================================================
 
 
@@ -370,12 +382,14 @@ def _parity_cases():
 
 
 def test_c09_satisfaction_matches_fill_expected_sha256_matrix():
-    """Projection satisfaction must match fill._archive_content_satisfies on the DEC-055 matrix."""
+    """Expected-red: outcome parity with Fill and routing via expected_sha256."""
+    import modelark.execution_projection as ep
+
     _mod, project_pure = _proj()
     rid = "primary:org/m"
     failures = []
     for label, approved_sha, arch_kw, fill_ok in _parity_cases():
-        # Fill oracle
+        # Fill oracle first — before installing any spy.
         fill_sat = fill_mod._archive_content_satisfies(
             approved_sha,
             orig_sha256=arch_kw.get("orig_sha256"),
@@ -387,50 +401,73 @@ def test_c09_satisfaction_matches_fill_expected_sha256_matrix():
         tasks = [_task(rid, guaranteed_durable=100)]
         files = [_file(rid, "weights.bin", size=100, sha=approved_sha)]
         proposal = _approved_proposal(tasks=tasks, files=files)
+        orig = arch_kw.get("orig_sha256")
+        compressed = arch_kw.get("compressed", 0)
+        annex_key = arch_kw.get("annex_key")
         archived = {
             ("org/m", "weights.bin", "d0"): _arch(
                 "org/m", "weights.bin", "d0",
-                orig_sha256=arch_kw.get("orig_sha256"),
+                orig_sha256=orig,
                 stored_bytes=100,
-                compressed=arch_kw.get("compressed", 0),
-                annex_key=arch_kw.get("annex_key"),
+                compressed=compressed,
+                annex_key=annex_key,
             ),
         }
-        # Prove shared helper is what production must use
-        resolved = archive_hash.expected_sha256(
-            catalog_sha=None,
-            orig_sha256=arch_kw.get("orig_sha256"),
-            compressed=bool(arch_kw.get("compressed")),
-            annex_key=arch_kw.get("annex_key"),
-        )
-        _ = resolved  # authority pin for Gate-2 implementers
-
         inp, graph = _inputs(proposal, archived=archived)
-        out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+
+        # Production must route through execution_projection.archive_hash.expected_sha256.
+        # Bind the module name when absent so the spy target matches Gate-2 import style
+        # (`from modelark import archive_hash` in execution_projection).
+        bound = False
+        if getattr(ep, "archive_hash", None) is None:
+            ep.archive_hash = archive_hash
+            bound = True
+        try:
+            with mock.patch(
+                "modelark.execution_projection.archive_hash.expected_sha256",
+                wraps=archive_hash.expected_sha256,
+            ) as spy:
+                out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+                try:
+                    spy.assert_called_once_with(
+                        catalog_sha=None,
+                        orig_sha256=orig,
+                        compressed=bool(compressed),
+                        annex_key=annex_key,
+                    )
+                except AssertionError as exc:
+                    failures.append((label, f"routing: {exc}", fill_ok))
+                    continue
+        finally:
+            if bound and getattr(ep, "archive_hash", None) is archive_hash:
+                delattr(ep, "archive_hash")
+
         if f.is_refusal(out) and f.refusal_code(out) not in (
                 None, "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE"):
-            # structural refuses are out of scope for the matrix
             if f.refusal_code(out) in ("APPROVED_INPUT_CHANGED", "APPROVAL_PROJECTION_VIOLATION"):
-                # missing_guaranteed_durable etc. may fire before matrix — still a red
                 failures.append((label, f"refuse {f.refusal_code(out)}", fill_ok))
                 continue
         remaining = rid in _task_ids(out) if not f.is_refusal(out) else True
-        # satisfied ⇒ shrink (not remaining); unsatisfied ⇒ remaining
         proj_satisfied = not remaining
         if proj_satisfied is not fill_ok:
             failures.append((label, f"proj_satisfied={proj_satisfied}", fill_ok))
     assert not failures, (
-        "c09: projection must match Fill/expected_sha256 matrix; mismatches="
-        f"{failures!r}")
+        "c09: projection must match Fill/expected_sha256 matrix and route through "
+        f"archive_hash.expected_sha256; mismatches={failures!r}")
 
 
 # ===========================================================================
-# Expected-red: replica source readiness
+# Expected-red: replica source readiness (every approved file)
 # ===========================================================================
 
 
 def test_c10_replica_source_evaluates_every_approved_file_waiting_dependency():
-    """Incomplete source with unfinished primary → waiting_dependency (preserve semantics)."""
+    """Expected-red: only LAST approved file on source → still waiting_dependency.
+
+    Archives only the last approved name on the primary/source drive. Under every-file
+    evaluation both primary and replica source are incomplete → waiting_dependency.
+    Last-file production incorrectly treats primary/source as satisfied.
+    """
     _mod, project_pure = _proj()
     primary = "primary:org/m"
     replica = "replica:org/m"
@@ -445,10 +482,11 @@ def test_c10_replica_source_evaluates_every_approved_file_waiting_dependency():
         _file(replica, "b.bin", size=100, sha="b" * 64),
     ]
     proposal = _approved_proposal(tasks=tasks, files=files)
-    # Primary incomplete (only a); source incomplete for replica (only a on d0)
+    # Only the LAST approved file on the shared primary/source drive.
     archived = {
-        ("org/m", "a.bin", "d0"): _arch(
-            "org/m", "a.bin", "d0", orig_sha256="a" * 64, stored_bytes=100),
+        ("org/m", "b.bin", "d0"): _arch(
+            "org/m", "b.bin", "d0", orig_sha256="b" * 64, stored_bytes=100),
+        # a.bin absent on d0
     }
     inp, graph = _inputs(proposal, archived=archived)
     out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
@@ -461,21 +499,31 @@ def test_c10_replica_source_evaluates_every_approved_file_waiting_dependency():
         (t.get("requirement_id") if isinstance(t, dict) else f.get_field(t, "requirement_id")): t
         for t in tasks_out
     }
+    assert primary in by_id, (
+        f"c10: primary must remain under every-file evaluation; tasks={list(by_id)}")
     assert replica in by_id, f"c10: replica must remain; tasks={list(by_id)}"
     rep = by_id[replica]
     state = rep.get("schedule_state") if isinstance(rep, dict) else f.get_field(rep, "schedule_state")
     assert state == "waiting_dependency", (
-        f"c10: expected waiting_dependency, got {state!r} (single-file source check is wrong)")
+        f"c10: expected waiting_dependency, got {state!r} "
+        f"(last-file-only source readiness is wrong)")
 
 
 def test_c11_replica_completed_primary_missing_source_is_violation():
-    """Completed primary + missing exact multi-file source evidence → APPROVAL_PROJECTION_VIOLATION."""
+    """Expected-red: completed executable primary + incomplete multi-file source.
+
+    Primary target holds every approved primary file. Replica source holds only the
+    LAST approved replica file. Replica target is empty. Third drive separates source
+    from primary target so completion and source readiness are independent.
+    No baseline_satisfied tasks, no certificate injection, no INC-027 reliance.
+    """
     _mod, project_pure = _proj()
     primary = "primary:org/m"
     replica = "replica:org/m"
+    # primary target=d0 (complete), replica source=d1 (last only), replica target=d2 (absent)
     tasks = [
         _task(primary, target="d0", source=None, order_key=1, guaranteed_durable=200),
-        _task(replica, target="d1", source="d0", order_key=2, guaranteed_durable=200),
+        _task(replica, target="d2", source="d1", order_key=2, guaranteed_durable=200),
     ]
     files = [
         _file(primary, "a.bin", size=100, sha="a" * 64),
@@ -484,92 +532,31 @@ def test_c11_replica_completed_primary_missing_source_is_violation():
         _file(replica, "b.bin", size=100, sha="b" * 64),
     ]
     proposal = _approved_proposal(tasks=tasks, files=files)
-    # Primary fully satisfied on d0; replica source incomplete (missing b on d0)
     archived = {
+        # Primary complete on d0
         ("org/m", "a.bin", "d0"): _arch(
             "org/m", "a.bin", "d0", orig_sha256="a" * 64, stored_bytes=100),
         ("org/m", "b.bin", "d0"): _arch(
             "org/m", "b.bin", "d0", orig_sha256="b" * 64, stored_bytes=100),
-        # Wait — if both on d0, source is complete. Need primary satisfied on d0 but
-        # for replica source check we need incomplete source. Primary shrink uses same d0.
-        # Scenario: primary done on d0 (both files). Replica targets d1, source d0 —
-        # if both files on d0, source is ready. For violation: remove one file from d0
-        # after primary would still... actually if primary also needs both, primary
-        # wouldn't shrink. Classic case: primary already shrunk from map meaning both
-        # satisfied; then source fact for one file disappears — hard to express in one shot.
-        #
-        # Simpler: primary has both on d0 so primary shrinks; but we only put a on d0 and
-        # also put both as "satisfied" via only last-file bug... User wants multi-file.
-        #
-        # Correct fixture: only evaluate replica with source incomplete and primary
-        # *not* remaining (primary already satisfied — both files on d0). Then source
-        # for replica must see both files on d0. To get violation: primary satisfied
-        # (both on d0) but we use a *different* incomplete set for source — impossible
-        # if source is d0.
-        #
-        # Violation path in today's code: source_ok False and primary_unsat False.
-        # primary_unsat False when primary's single evaluated file is satisfied.
-        # With multi-file: primary_unsat when *any* approved primary file unsatisfied.
-        # For violation: all primary files satisfied on d0, but replica source d0 missing
-        # a file — contradiction if source is d0.
-        #
-        # Use source_drive pointing at d0 while archived only has files on a *wrong*
-        # layout: primary target d0 has both files; replica source is d0 but we delete
-        # one file — then primary also incomplete. That yields waiting_dependency.
-        #
-        # For violation after multi-file: primary target d0 both satisfied; replica
-        # source is d0; if both satisfied on d0, source_ok True. Violation needs
-        # source_ok False with primary complete — only if source is a *different*
-        # drive. e.g. source=d0, primary target d1... unusual.
-        #
-        # Read code again: source_ok = _file_satisfied(archived, repo, rfilename, source)
-        # primary_unsat checks primary:{repo} on its target.
-        # If primary fully done on d0 and replica source is d0, source_ok True.
-        # Violation when source is d0 but the *last* file fact is missing while
-        # primary's last file was on target — same drive.
-        #
-        # Gate-0: "completed primary with missing exact source evidence remains
-        # an approval violation". Fixture: primary files both on d0; replica source
-        # d0; remove nothing — green ready. To violate: empty archived for source
-        # file while primary not in remaining — primary shrunk because its last
-        # file present even if first missing (bug). Multi-file correct primary:
-        # both on d0. Source missing one file impossible if both on d0.
-        #
-        # Practical multi-file violation: source_drive=d0, only a.bin on d0, and
-        # primary is *not* in the proposal as remaining executable — e.g. primary
-        # is baseline_satisfied. Then primary_unsat is False (no executable primary),
-        # source incomplete → violation.
+        # Replica source d1: only LAST approved file
+        ("org/m", "b.bin", "d1"): _arch(
+            "org/m", "b.bin", "d1", orig_sha256="b" * 64, stored_bytes=100),
+        # a.bin absent on d1; replica target d2 empty
     }
-    # Rebuild with primary as baseline_satisfied so it is not executable.
-    tasks = [
-        {
-            **_task(primary, target="d0", row_kind="baseline_satisfied",
-                    guaranteed_durable=200),
-            "satisfying_drive": "d0",
-            "baseline_certificate": "cert",
-        },
-        _task(replica, target="d1", source="d0", order_key=2, guaranteed_durable=200),
-    ]
-    files = [
-        _file(replica, "a.bin", size=100, sha="a" * 64),
-        _file(replica, "b.bin", size=100, sha="b" * 64),
-    ]
-    proposal = _approved_proposal(tasks=tasks, files=files)
-    archived = {
-        # Any row for baseline presence check (legacy); source multi-file incomplete
-        ("org/m", "a.bin", "d0"): _arch(
-            "org/m", "a.bin", "d0", orig_sha256="a" * 64, stored_bytes=100),
-        # b.bin missing on source d0
+    drives = {
+        "d0": _drive("d0", fingerprint="a" * 64),
+        "d1": _drive("d1", fingerprint="b" * 64),
+        "d2": _drive("d2", fingerprint="c" * 64),
     }
-    # Certificates map: baseline cert present so baseline block may pass (INC-027 boundary)
-    inp, graph = _inputs(proposal, archived=archived)
-    # Inject certificate so baseline self-copy path can pass (not under test)
-    inp.certificates = {primary: "cert"}
-    f.assert_refuses(
-        lambda: project_pure(proposal, inp, graph, f.EMPTY_OVERLAY),
-        code="APPROVAL_PROJECTION_VIOLATION",
-        label="c11 completed primary / missing multi-file source",
-    )
+    inp, graph = _inputs(proposal, archived=archived, drives=drives)
+    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    assert f.is_refusal(out) and f.refusal_code(out) == "APPROVAL_PROJECTION_VIOLATION", (
+        f"c11: expected APPROVAL_PROJECTION_VIOLATION, got {out!r}")
+    ev = _refusal_evidence(out)
+    assert ev.get("reason") == "source_not_ready", (
+        f"c11: reason=source_not_ready required, got {ev!r}")
+    assert ev.get("source") == "d1", f"c11: evidence.source must be d1, got {ev!r}"
+    assert ev.get("repo") == "org/m", f"c11: evidence.repo must be org/m, got {ev!r}"
 
 
 # ===========================================================================
@@ -578,6 +565,7 @@ def test_c11_replica_completed_primary_missing_source_is_violation():
 
 
 def test_c12_null_guaranteed_durable_is_missing_guaranteed_durable():
+    """Expected-red: null guaranteed_durable refuses with missing_guaranteed_durable."""
     _mod, project_pure = _proj()
     rid = "primary:org/m"
     t = _task(rid, guaranteed_durable=None)
@@ -596,42 +584,28 @@ def test_c12_null_guaranteed_durable_is_missing_guaranteed_durable():
 
 
 def test_c13_explicit_zero_guaranteed_durable_never_becomes_100():
-    """Explicit 0 is retained; must not coerce to fabricated 100."""
+    """Expected-red: exact durable=0 must not coerce via `or 100` into overrun.
+
+    Content-mismatched archived row with stored_bytes above the overrun floor keeps
+    the task from shrinking. With exact guaranteed_durable=0, production must not
+    fabricate a positive budget and must not issue stored_bytes_overrun; the task
+    remains and retains zero. Current `or 100` path treats durable as 100 and reds.
+    """
     _mod, project_pure = _proj()
     rid = "primary:org/m"
     proposal = _approved_proposal(
         tasks=[_task(rid, guaranteed_durable=0)],
         files=[_file(rid, "model.safetensors", size=50, sha="m" * 64)],
     )
-    # No archived → not satisfied; must remain without using durable=100 for overrun
-    # (stored=0, durable=0 → no overrun). Pin that production never rewrites 0→100 by
-    # placing a small stored amount that would *not* overrun durable=0 policy if 0 is
-    # retained (overrun only when durable>0 or policy says otherwise). With durable=0
-    # retained, stored=50 may or may not overrun depending on Gate-0 recommendation;
-    # Gate-1 locks: durable value used for overrun is 0, never 100.
-    # Spy the comparison by forcing stored large enough that durable=100 would NOT
-    # trip max(100*1000, 1TiB) but... stored needs > 1TiB to trip with durable=100.
-    # Easier: assert via monkeypatch of internals once production exposes durable,
-    # or use stored > 1TiB so both 0 and 100 paths refuse overrun — weak.
-    #
-    # Pin: with guaranteed_durable=0 and stored=0, project succeeds (remain or shrink)
-    # and does not treat durable as 100 by refusing compression-style paths.
-    # Stronger red: unit that would only fire if 0 coerced to 100 is impossible.
-    # Contract: after production, task remaining must still show guaranteed_durable==0
-    # if exposed; today field is not rewritten on output. Red: production must not
-    # refuse APPROVED_PLACEMENT_NO_LONGER_FEASIBLE for stored=50 with durable=0 using
-    # threshold max(100*1000,...). stored=50 never trips that. 
-    #
-    # Use stored just above 0*1000 but the threshold is max(durable*1000, 1e12) so
-    # durable=0 → threshold 1e12. durable=100 → same 1e12. Cannot distinguish.
-    #
-    # Alternative red: inspect that project_pure does not use `or 100` by reading
-    # source — forbidden. Use a pure helper once exported.
-    #
-    # Practical Gate-1 pin expected red: call with guaranteed_durable=0 and
-    # assert no coercion by requiring that missing durable (None) and 0 differ —
-    # None refuses (c12); 0 does not refuse for missing_guaranteed_durable.
-    inp, graph = _inputs(proposal, archived={})
+    # Mismatched digest → cannot shrink; stored above floor (> 10**12).
+    archived = {
+        ("org/m", "model.safetensors", "d0"): _arch(
+            "org/m", "model.safetensors", "d0",
+            orig_sha256="x" * 64,
+            stored_bytes=10**12 + 1,
+        ),
+    }
+    inp, graph = _inputs(proposal, archived=archived)
     out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
     if f.is_refusal(out):
         code = f.refusal_code(out)
@@ -639,72 +613,78 @@ def test_c13_explicit_zero_guaranteed_durable_never_becomes_100():
         assert not (code == "APPROVAL_PROJECTION_VIOLATION"
                     and ev.get("reason") == "missing_guaranteed_durable"), (
             "c13: explicit 0 must not be treated as missing_guaranteed_durable")
-        # Other refuses may still be red for multi-file authority until production
-        if code == "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE":
-            raise AssertionError(
-                f"c13: explicit 0 durable must not invent overrun via coerced 100; {out!r}")
-    # If success, remaining task should still carry 0 if field preserved
-    if not f.is_refusal(out):
-        for t in f.get_field(out, "tasks") or ():
-            gd = t.get("guaranteed_durable") if isinstance(t, dict) else f.get_field(
-                t, "guaranteed_durable")
-            if f.get_field(t, "requirement_id") == rid or (
-                    isinstance(t, dict) and t.get("requirement_id") == rid):
-                assert gd == 0, f"c13: guaranteed_durable must remain 0, got {gd!r}"
+        assert not (code == "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE"
+                    and ev.get("reason") == "stored_bytes_overrun"), (
+            f"c13: exact durable=0 must not issue stored_bytes_overrun via coerced 100; "
+            f"got {out!r}")
+        raise AssertionError(f"c13: unexpected refusal {code}: {out!r}")
+    assert rid in _task_ids(out), (
+        f"c13: mismatched content must remain under durable=0; remaining={_task_ids(out)}")
+    for t in f.get_field(out, "tasks") or ():
+        trid = t.get("requirement_id") if isinstance(t, dict) else f.get_field(t, "requirement_id")
+        if trid != rid:
+            continue
+        gd = t.get("guaranteed_durable") if isinstance(t, dict) else f.get_field(
+            t, "guaranteed_durable")
+        assert gd == 0, f"c13: guaranteed_durable must remain 0, got {gd!r}"
 
 
 def test_c14_stored_overrun_sums_approved_filenames_only_before_shrink():
-    """Overrun: sum stored_bytes of approved names on target vs exact task durable."""
+    """Expected-red: overrun uses exact task.guaranteed_durable and sum of approved stored.
+
+    Proposal file size totals are materially larger than task.guaranteed_durable so a
+    budget derived from proposal sizes would not trip. Aggregate approved stored_bytes
+    exceeds the threshold for the exact task budget. Large stored sits on a non-last
+    approved file so last-file production stays red. Unapproved rows are excluded.
+    """
     _mod, project_pure = _proj()
     rid = "primary:org/m"
-    # durable small; two approved files each store a lot; unapproved junk must not count
+    # Task budget small → threshold max(100*1000, 1TiB) = 1TiB.
     durable = 100
+    # Proposal sizes sum to 4e9; size-derived durable would yield threshold 4e12.
+    size_a = 2_000_000_000
+    size_b = 2_000_000_000
+    assert size_a + size_b != durable
     tasks = [_task(rid, guaranteed_durable=durable)]
     files = [
-        _file(rid, "a.bin", size=50, sha="a" * 64),
-        _file(rid, "b.bin", size=50, sha="b" * 64),
+        _file(rid, "a.bin", size=size_a, sha="a" * 64),
+        _file(rid, "b.bin", size=size_b, sha="b" * 64),
     ]
     proposal = _approved_proposal(tasks=tasks, files=files)
-    huge = max(durable * 1000, 10**12) // 2 + 1
+    # Sum of approved stored exceeds task threshold (1TiB) but not size-derived (4PiB).
+    stored_a = 10**12 + 5  # non-last
+    stored_b = 1           # last (tiny — last-file path will not refuse)
+    expected_sum = stored_a + stored_b
+    assert expected_sum > max(durable * 1000, 10**12)
+    assert expected_sum <= max((size_a + size_b) * 1000, 10**12)
     archived = {
         ("org/m", "a.bin", "d0"): _arch(
-            "org/m", "a.bin", "d0", orig_sha256="a" * 64, stored_bytes=huge),
+            "org/m", "a.bin", "d0", orig_sha256="a" * 64, stored_bytes=stored_a),
         ("org/m", "b.bin", "d0"): _arch(
-            "org/m", "b.bin", "d0", orig_sha256="b" * 64, stored_bytes=huge),
+            "org/m", "b.bin", "d0", orig_sha256="b" * 64, stored_bytes=stored_b),
         # Unapproved archive row — must not contribute to the sum
         ("org/m", "junk.onnx", "d0"): _arch(
             "org/m", "junk.onnx", "d0", orig_sha256="j" * 64, stored_bytes=10**15),
     }
     inp, graph = _inputs(proposal, archived=archived)
-    f.assert_refuses(
-        lambda: project_pure(proposal, inp, graph, f.EMPTY_OVERLAY),
-        code="APPROVED_PLACEMENT_NO_LONGER_FEASIBLE",
-        label="c14 requirement-level stored overrun",
-    )
-    # Single-file path with only last file would use stored=huge which may also refuse —
-    # strengthen: only first file huge, second tiny, and last-file evaluation would not
-    # refuse if last is tiny. Order files so last is tiny.
-    files2 = [
-        _file(rid, "a.bin", size=50, sha="a" * 64),
-        _file(rid, "b.bin", size=50, sha="b" * 64),
-    ]
-    proposal2 = _approved_proposal(tasks=tasks, files=files2)
-    archived2 = {
-        ("org/m", "a.bin", "d0"): _arch(
-            "org/m", "a.bin", "d0", orig_sha256="a" * 64, stored_bytes=huge * 2),
-        ("org/m", "b.bin", "d0"): _arch(
-            "org/m", "b.bin", "d0", orig_sha256="b" * 64, stored_bytes=1),
-    }
-    inp2, graph2 = _inputs(proposal2, archived=archived2)
-    f.assert_refuses(
-        lambda: project_pure(proposal2, inp2, graph2, f.EMPTY_OVERLAY),
-        code="APPROVED_PLACEMENT_NO_LONGER_FEASIBLE",
-        label="c14 sum includes non-last approved file",
-    )
+    out = project_pure(proposal, inp, graph, f.EMPTY_OVERLAY)
+    assert f.is_refusal(out) and f.refusal_code(out) == "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE", (
+        f"c14: expected APPROVED_PLACEMENT_NO_LONGER_FEASIBLE, got {out!r}")
+    ev = _refusal_evidence(out)
+    assert ev.get("reason") == "stored_bytes_overrun", (
+        f"c14: reason=stored_bytes_overrun required, got {ev!r}")
+    assert ev.get("stored") == expected_sum, (
+        f"c14: evidence.stored must equal sum of approved stored_bytes "
+        f"({expected_sum}), got {ev.get('stored')!r} (unapproved rows excluded)")
+
+
+# ===========================================================================
+# Positive compatibility: unapproved rows excluded from overrun alone
+# ===========================================================================
 
 
 def test_c15_unapproved_archive_rows_do_not_drive_overrun_alone():
-    """If only unapproved rows are huge, no stored_bytes_overrun from those rows."""
+    """Positive compatibility: only unapproved rows huge → no stored_bytes_overrun."""
     _mod, project_pure = _proj()
     rid = "primary:org/m"
     durable = 10**9
