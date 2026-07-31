@@ -155,6 +155,9 @@ def _blocked_selection_flow(pg) -> None:
     rows = pg.locator("#blockedSelectionList [data-repo-id]")
     assert rows.count() == 2, (
         f"exactly two policy-blocked rows required, got {rows.count()}")
+    # Both current policy-blocker fixtures are pickle-only; pin the canonical reason
+    # independently of the repository ID (name-only rows with "pickle" in the id fail).
+    expected_reason = "pickle-only weights are blocked by exclude.pickle_only=true"
     row_ids = []
     for i in range(rows.count()):
         row = rows.nth(i)
@@ -163,22 +166,11 @@ def _blocked_selection_flow(pg) -> None:
         row_ids.append(rid)
         text = row.inner_text()
         assert text.strip(), f"row {rid!r} must render non-empty text"
-        # Non-empty policy reason (beyond the bare repo id, allowing HTML-escaped form).
-        reasonish = text.replace(rid, "", 1).strip()
-        if rid == "demo/<script>alert(1)</script>":
-            reasonish = reasonish.replace(
-                "demo/&lt;script&gt;alert(1)&lt;/script&gt;", "", 1).strip()
-        assert reasonish, (
-            f"row {rid!r} must render a non-empty policy reason, text={text!r}")
+        assert expected_reason in text.lower(), (
+            f"row {rid!r} must contain canonical policy reason "
+            f"{expected_reason!r}, got {text!r}")
     assert set(row_ids) == _POLICY_BLOCKED_IDS, (
         f"exact policy-blocked row set required, got {set(row_ids)}")
-    # Pickle-policy reason must actually be rendered (not name-only).
-    pickle_row = pg.locator(
-        '#blockedSelectionList [data-repo-id="demo/pickle-only"]')
-    assert pickle_row.count() == 1
-    pickle_text = pickle_row.inner_text().lower()
-    assert "pickle" in pickle_text, (
-        f"pickle-policy reason must be rendered, got {pickle_row.inner_text()!r}")
     # Capacity-only blocker must not appear as a blocked-selection row.
     assert pg.locator(
         '#blockedSelectionList [data-repo-id="demo/replica-blocked"]').count() == 0
