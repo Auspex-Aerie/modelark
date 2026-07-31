@@ -384,31 +384,46 @@ def _assert_preview_stale(result, *, current_revision, based_on_revision, select
 
 
 def _assert_cas_before_delete(events, *, label: str, expect_delete: bool):
-    """Both CAS reads inside the same BEGIN IMMEDIATE and before the first DELETE."""
-    assert "BEGIN_IMMEDIATE" in events, f"{label}: bound dismiss requires BEGIN IMMEDIATE, got {events}"
+    """Both CAS reads inside the same BEGIN IMMEDIATE transaction.
+
+    CAS_REV_READ and CAS_SEL_READ must occur:
+      - after BEGIN_IMMEDIATE;
+      - before the first transaction end (COMMIT/ROLLBACK → END_SNAPSHOT);
+      - and, for success, before the first DELETE.
+
+    Reads after COMMIT/ROLLBACK must not satisfy the contract.
+    """
+    assert "BEGIN_IMMEDIATE" in events, (
+        f"{label}: bound dismiss requires BEGIN IMMEDIATE, got {events}")
     bi = events.index("BEGIN_IMMEDIATE")
-    # No second write-begin before CAS completes.
-    assert "BEGIN" not in events[bi + 1:], (
-        f"{label}: no non-IMMEDIATE BEGIN after BEGIN IMMEDIATE, got {events}")
+    end_i = next(
+        (i for i, e in enumerate(events) if i > bi and e == "END_SNAPSHOT"),
+        None,
+    )
+    assert end_i is not None, (
+        f"{label}: transaction must end after BEGIN IMMEDIATE, got {events}")
+    # Open transaction window (exclusive of END_SNAPSHOT).
+    tx = events[bi + 1:end_i]
+    assert "CAS_REV_READ" in tx, (
+        f"{label}: CAS_REV_READ must occur after BEGIN IMMEDIATE and before TX end; "
+        f"events={events}")
+    assert "CAS_SEL_READ" in tx, (
+        f"{label}: CAS_SEL_READ must occur after BEGIN IMMEDIATE and before TX end; "
+        f"events={events}")
+    # Post-commit reads do not count: nothing after end_i may rescue a missing in-TX read
+    # (already enforced by scanning only ``tx``).
     if expect_delete:
-        assert "DELETE" in events, f"{label}: expected DELETE, got {events}"
-        di = events.index("DELETE")
-        assert bi < di, f"{label}: BEGIN IMMEDIATE must precede DELETE"
-        window = events[bi:di]
-        assert "CAS_REV_READ" in window, (
-            f"{label}: planner_revision read must occur after BEGIN IMMEDIATE and before DELETE; "
-            f"events={events}")
-        assert "CAS_SEL_READ" in window, (
-            f"{label}: selection-hash read must occur after BEGIN IMMEDIATE and before DELETE; "
-            f"events={events}")
+        assert "DELETE" in tx, f"{label}: expected DELETE inside TX, got {events}"
+        di = bi + 1 + tx.index("DELETE")
+        pre_delete = events[bi + 1:di]
+        assert "CAS_REV_READ" in pre_delete, (
+            f"{label}: CAS_REV_READ must precede first DELETE inside TX; events={events}")
+        assert "CAS_SEL_READ" in pre_delete, (
+            f"{label}: CAS_SEL_READ must precede first DELETE inside TX; events={events}")
     else:
-        assert "DELETE" not in events, f"{label}: must not DELETE on refusal, got {events}"
-        # Comparisons still run inside the transaction before abort.
-        after = events[bi:]
-        assert "CAS_REV_READ" in after, (
-            f"{label}: revision compare requires CAS_REV_READ after BEGIN IMMEDIATE; events={events}")
-        assert "CAS_SEL_READ" in after, (
-            f"{label}: selection-hash compare requires CAS_SEL_READ after BEGIN IMMEDIATE; events={events}")
+        assert "DELETE" not in tx, f"{label}: must not DELETE inside refusing TX, got {events}"
+        assert "DELETE" not in events[: end_i + 1], (
+            f"{label}: must not DELETE before/at TX end on refuse, got {events}")
 
 
 # ===========================================================================
@@ -437,21 +452,22 @@ def test_bs01_preview_reduced_response_exact_keys_and_nested_refusal():
 
 
 def test_bs02_coherent_read_snapshot_order():
-    """BEGIN before active-plan + preview_pure; snapshot ends before close; no IMMEDIATE/shared lock."""
+    """One shared event stream: BEGIN < ACTIVE_PLAN_RESOLVE < PREVIEW_PURE < END_SNAPSHOT < CLOSE."""
     real = _policy_blocked_catalog()
     con = _proxy(real, swallow_close=True)
+    # Shared stream: SQL transaction markers and logical steps append to the same list.
+    events = con.events
     preview_fn = _require_preview()
-    order: list[str] = []
     from modelark import plan as plan_mod
     real_active = plan_mod.active
     real_pure = prop.preview_pure
 
     def track_active(c, *a, **k):
-        order.append("ACTIVE")
+        events.append("ACTIVE_PLAN_RESOLVE")
         return real_active(c, *a, **k)
 
     def track_pure(c, *a, **k):
-        order.append("PREVIEW_PURE")
+        events.append("PREVIEW_PURE")
         return real_pure(c, *a, **k)
 
     forbidden_lock = mock.MagicMock()
@@ -466,19 +482,18 @@ def test_bs02_coherent_read_snapshot_order():
 
     connect.assert_called_with(read_only=True)
     forbidden_lock.__enter__.assert_not_called()
-    assert "BEGIN_IMMEDIATE" not in con.events, (
-        f"bs02: read snapshot must not use BEGIN IMMEDIATE, got {con.events}")
-    assert "BEGIN" in con.events, f"bs02: coherent read requires BEGIN, got {con.events}"
-    bi = con.events.index("BEGIN")
-    # ACTIVE and PREVIEW_PURE are logical steps; SQL BEGIN must precede both.
-    assert "ACTIVE" in order and "PREVIEW_PURE" in order
-    assert order.index("ACTIVE") < order.index("PREVIEW_PURE")
-    # Snapshot ends before close.
-    assert "END_SNAPSHOT" in con.events, f"bs02: snapshot must end before close, got {con.events}"
-    assert "CLOSE" in con.events
-    assert con.events.index("BEGIN") < con.events.index("END_SNAPSHOT") < con.events.index("CLOSE")
-    # BEGIN is the first recorded transaction event.
-    assert bi == 0 or all(e not in ("END_SNAPSHOT", "CLOSE") for e in con.events[:bi])
+    assert "BEGIN_IMMEDIATE" not in events, (
+        f"bs02: read snapshot must not use BEGIN IMMEDIATE, got {events}")
+    for name in ("BEGIN", "ACTIVE_PLAN_RESOLVE", "PREVIEW_PURE", "END_SNAPSHOT", "CLOSE"):
+        assert name in events, f"bs02: missing {name!r} in shared stream {events}"
+    i_begin = events.index("BEGIN")
+    i_active = events.index("ACTIVE_PLAN_RESOLVE")
+    i_pure = events.index("PREVIEW_PURE")
+    i_end = events.index("END_SNAPSHOT")
+    i_close = events.index("CLOSE")
+    assert i_begin < i_active < i_pure < i_end < i_close, (
+        f"bs02: required order BEGIN < ACTIVE_PLAN_RESOLVE < PREVIEW_PURE < END_SNAPSHOT < CLOSE; "
+        f"got indices {(i_begin, i_active, i_pure, i_end, i_close)} events={events}")
     _assert_reduced_preview(result, label="bs02", expect_refusal=True)
 
 

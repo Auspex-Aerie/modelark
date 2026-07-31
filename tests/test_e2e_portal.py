@@ -125,91 +125,177 @@ def _get(path: str):
         return json.load(r)
 
 
+_POLICY_BLOCKED_IDS = {
+    "demo/pickle-only",
+    "demo/<script>alert(1)</script>",
+}
+_DISMISS_BODY_KEYS = {"ids", "on", "expected_revision", "expected_selection_hash"}
+_MUTATION_ROUTE_SPECS = (
+    ("**/api/selection", "selection"),
+    ("**/api/selection/bulk", "selection_bulk"),
+    ("**/api/selection/clear", "selection_clear"),
+    ("**/api/selection/finalize", "selection_finalize"),
+    ("**/api/fill/start", "fill_start"),
+    ("**/api/proposal/**", "proposal"),
+)
+
+
 def _blocked_selection_flow(pg) -> None:
     """Fill-tab blocked-selection notice (DEC-058). Fail closed if the real UI is absent.
 
     Stable selectors (Gate-2 production must provide them):
       #blockedSelection #blockedSelectionList #blockedDismiss #blockedReplan
+      #blockedSelectionList [data-repo-id]
     """
-    # Notice must appear for MANIFEST_POLICY (policy-blocked repos), not only legacy advisories.
+    # Exactly one notice container (no tautological count fallback).
     pg.wait_for_selector("#blockedSelection", timeout=8000)
+    assert pg.locator("#blockedSelection").count() == 1
     pg.wait_for_selector("#blockedSelectionList")
-    notice = pg.inner_text("#blockedSelection")
-    assert "MANIFEST_POLICY" in notice or pg.locator("#blockedSelection").count() == 1
+
+    rows = pg.locator("#blockedSelectionList [data-repo-id]")
+    assert rows.count() == 2, (
+        f"exactly two policy-blocked rows required, got {rows.count()}")
+    row_ids = []
+    for i in range(rows.count()):
+        row = rows.nth(i)
+        rid = row.get_attribute("data-repo-id")
+        assert rid, f"row {i} missing data-repo-id"
+        row_ids.append(rid)
+        text = row.inner_text()
+        assert text.strip(), f"row {rid!r} must render non-empty text"
+        # Non-empty policy reason (beyond the bare repo id, allowing HTML-escaped form).
+        reasonish = text.replace(rid, "", 1).strip()
+        if rid == "demo/<script>alert(1)</script>":
+            reasonish = reasonish.replace(
+                "demo/&lt;script&gt;alert(1)&lt;/script&gt;", "", 1).strip()
+        assert reasonish, (
+            f"row {rid!r} must render a non-empty policy reason, text={text!r}")
+    assert set(row_ids) == _POLICY_BLOCKED_IDS, (
+        f"exact policy-blocked row set required, got {set(row_ids)}")
+    # Pickle-policy reason must actually be rendered (not name-only).
+    pickle_row = pg.locator(
+        '#blockedSelectionList [data-repo-id="demo/pickle-only"]')
+    assert pickle_row.count() == 1
+    pickle_text = pickle_row.inner_text().lower()
+    assert "pickle" in pickle_text, (
+        f"pickle-policy reason must be rendered, got {pickle_row.inner_text()!r}")
+    # Capacity-only blocker must not appear as a blocked-selection row.
+    assert pg.locator(
+        '#blockedSelectionList [data-repo-id="demo/replica-blocked"]').count() == 0
     list_text = pg.inner_text("#blockedSelectionList")
-    # Every policy-blocked repo + reason surface (pickle + hostile XSS id).
-    assert "demo/pickle-only" in list_text, f"pickle blocker missing from notice: {list_text!r}"
-    assert "demo/<script>alert(1)</script>" in list_text or "demo/&lt;script&gt;" in list_text, (
-        f"hostile repo id must render as text in notice: {list_text!r}")
-    # Capacity-only blocker must not enter the blocked-selection list.
-    assert "demo/replica-blocked" not in list_text, (
-        f"capacity-only repo must not populate blocked-selection list: {list_text!r}")
     assert "REQUIREMENT_EXCEEDS_USABLE_MAX" not in list_text
-    # Hostile markup must not create an executable element.
+    # Hostile id is literal text; no injected elements.
+    hostile = pg.locator(
+        '#blockedSelectionList [data-repo-id="demo/<script>alert(1)</script>"]')
+    assert hostile.count() == 1
+    assert "demo/<script>alert(1)</script>" in hostile.inner_text() or \
+        "demo/<script>alert(1)</script>" in (hostile.get_attribute("data-repo-id") or "")
     assert pg.locator("#blockedSelectionList script").count() == 0
     assert pg.locator("#blockedSelectionList img").count() == 0
-    # Controls present and enabled initially.
+    # No other injected tags under the list that could execute from the reason/id.
+    assert pg.locator("#blockedSelectionList iframe").count() == 0
+    assert pg.locator("#blockedSelectionList object").count() == 0
+
     assert pg.locator("#blockedDismiss").count() == 1
     assert pg.locator("#blockedReplan").count() == 1
     assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
 
-    # Track Dismiss/Replan traffic: no draft/approve/fill-start; Replan = GET preview only.
-    traffic = {"preview_get": 0, "bulk_post": [], "banned": []}
+    traffic = {
+        "preview_get": 0,
+        "bulk_post": [],
+        "mutations": [],
+    }
 
-    def preview_route(route):
+    def record_mutation(route, label):
+        traffic["mutations"].append({
+            "label": label,
+            "method": route.request.method,
+            "url": route.request.url,
+        })
+        # Never let accidental mutation hit the isolated server during these contracts.
+        route.fulfill(status=500, content_type="application/json",
+                      body=json.dumps({"ok": False, "error": "test-blocked-mutation"}))
+
+    # Intercept mutation-capable routes BEFORE Replan (and keep them for the suite).
+    for pattern, label in _MUTATION_ROUTE_SPECS:
+        pg.route(pattern, lambda route, lab=label: record_mutation(route, lab))
+
+    def preview_pass(route):
         if route.request.method == "GET":
             traffic["preview_get"] += 1
-            # After first real-ish cycle we may fulfill; for Replan/network tests override later.
             route.continue_()
         else:
-            traffic["banned"].append(("preview", route.request.method))
-            route.continue_()
+            traffic["mutations"].append({
+                "label": "preview_non_get",
+                "method": route.request.method,
+                "url": route.request.url,
+            })
+            route.fulfill(status=500, body="preview-non-get")
 
-    def ban_route(route, label):
-        traffic["banned"].append((label, route.request.method, route.request.url))
-        route.fulfill(status=500, body="banned")
+    pg.route("**/api/plan/preview", preview_pass)
 
-    pg.route("**/api/plan/preview", preview_route)
-    pg.route("**/api/fill/start", lambda r: ban_route(r, "fill_start"))
-    # No portal draft/approve endpoints today; pin absence of accidental invents if added.
-    pg.route("**/api/proposal/**", lambda r: ban_route(r, "proposal"))
-
-    # Replan performs a preview GET only.
+    # --- Replan: preview GET only; zero mutation-route calls ---
     before_preview = traffic["preview_get"]
+    before_mut = len(traffic["mutations"])
     pg.click("#blockedReplan")
     for _ in range(40):
         if traffic["preview_get"] > before_preview:
             break
         time.sleep(0.05)
-    assert traffic["preview_get"] > before_preview, "Replan must GET /api/plan/preview"
-    assert not any(b[0] == "fill_start" for b in traffic["banned"])
+    assert traffic["preview_get"] == before_preview + 1, (
+        f"Replan must issue exactly one additional preview GET, "
+        f"before={before_preview} after={traffic['preview_get']}")
+    assert len(traffic["mutations"]) == before_mut, (
+        f"Replan must not call mutation routes, got {traffic['mutations'][before_mut:]}")
     assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
-    retained_after_replan = pg.inner_text("#blockedSelectionList")
-    assert "demo/pickle-only" in retained_after_replan
-    print("  blocked-selection Replan issued preview GET only")
+    assert set(
+        pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+            "els => els.map(e => e.getAttribute('data-repo-id'))")
+    ) == _POLICY_BLOCKED_IDS
+    print("  blocked-selection Replan: preview GET only, zero mutations")
 
-    # Simulated network failure retains evidence and re-enables controls.
-    def preview_fail(route):
+    # --- Network failure: hold request in flight, assert disabled, abort, restore ---
+    held = []
+
+    def preview_hold(route):
         if route.request.method == "GET":
             traffic["preview_get"] += 1
-            route.abort("failed")
+            held.append(route)
+            # Leave unresolved until the test aborts.
         else:
-            route.continue_()
+            route.fulfill(status=500, body="preview-non-get")
 
     pg.unroute("**/api/plan/preview")
-    pg.route("**/api/plan/preview", preview_fail)
+    pg.route("**/api/plan/preview", preview_hold)
     before_list = pg.inner_text("#blockedSelectionList")
+    before_ids = set(
+        pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+            "els => els.map(e => e.getAttribute('data-repo-id'))"))
     pg.click("#blockedReplan")
     for _ in range(40):
-        if pg.is_enabled("#blockedReplan"):
+        if held:
+            break
+        time.sleep(0.05)
+    assert held, "Replan must produce a held preview request"
+    assert not pg.is_enabled("#blockedDismiss"), "Dismiss disabled while preview in flight"
+    assert not pg.is_enabled("#blockedReplan"), "Replan disabled while preview in flight"
+    held[0].abort("failed")
+    for _ in range(40):
+        if pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan"):
             break
         time.sleep(0.05)
     assert pg.inner_text("#blockedSelectionList") == before_list, (
         "network failure must retain displayed blocked evidence")
+    assert set(
+        pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+            "els => els.map(e => e.getAttribute('data-repo-id'))")
+    ) == before_ids
     assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
-    print("  blocked-selection network failure retained evidence + re-enabled controls")
+    toast = pg.inner_text("#toast") if pg.locator("#toast").count() else ""
+    assert toast.strip(), f"network error must surface to the operator, toast={toast!r}"
+    print("  blocked-selection held-request network failure: disabled → abort → restore")
 
-    # Simulated PREVIEW_STALE 409 retains evidence, surfaces refusal, re-enables controls.
+    # --- PREVIEW_STALE 409: retain evidence, restore controls, exact Dismiss body ---
     def bulk_stale(route):
         if route.request.method == "POST":
             traffic["bulk_post"].append(route.request.post_data_json)
@@ -228,31 +314,34 @@ def _blocked_selection_flow(pg) -> None:
         else:
             route.continue_()
 
+    # Prefer bulk handler over the generic mutation ban for this step.
+    pg.unroute("**/api/selection/bulk")
     pg.route("**/api/selection/bulk", bulk_stale)
     before_list = pg.inner_text("#blockedSelectionList")
     pg.click("#blockedDismiss")
     for _ in range(40):
-        toast = pg.inner_text("#toast") if pg.locator("#toast").count() else ""
-        if "PREVIEW_STALE" in toast or "Replan before dismissing" in toast or pg.is_enabled("#blockedDismiss"):
-            if "Replan before dismissing" in toast or "PREVIEW_STALE" in toast:
-                break
+        t = pg.inner_text("#toast") if pg.locator("#toast").count() else ""
+        if "Replan before dismissing" in t or "PREVIEW_STALE" in t:
+            break
         time.sleep(0.05)
     toast = pg.inner_text("#toast")
     assert "Replan before dismissing" in toast or "PREVIEW_STALE" in toast, (
-        f"PREVIEW_STALE must surface to operator, toast={toast!r}")
+        f"PREVIEW_STALE must surface, toast={toast!r}")
     assert pg.inner_text("#blockedSelectionList") == before_list
     assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
-    # Dismiss body: exact displayed policy IDs, on:false, both bindings.
     assert traffic["bulk_post"], "Dismiss must POST /api/selection/bulk"
     body = traffic["bulk_post"][-1]
-    assert body.get("on") is False
-    assert "expected_revision" in body and "expected_selection_hash" in body
-    ids = body.get("ids") or body.get("repo_ids") or []
-    assert "demo/pickle-only" in ids
-    assert "demo/replica-blocked" not in ids, "capacity-only id must not be dismissed"
-    print("  blocked-selection PREVIEW_STALE retained evidence; Dismiss sent CAS bindings")
+    assert set(body.keys()) == _DISMISS_BODY_KEYS, (
+        f"Dismiss body exact keys required, got {sorted(body)}")
+    assert body["on"] is False
+    assert isinstance(body["expected_revision"], int)
+    assert isinstance(body["expected_selection_hash"], str) and body["expected_selection_hash"]
+    assert set(body["ids"]) == _POLICY_BLOCKED_IDS, (
+        f"Dismiss ids must be exact policy-blocked set, got {body['ids']!r}")
+    assert len(body["ids"]) == 2, "no duplicates or extras in Dismiss ids"
+    print("  blocked-selection PREVIEW_STALE + exact Dismiss CAS body")
 
-    # Successful Dismiss automatically issues a new preview; notice clears while capacity remains.
+    # --- Successful Dismiss: auto re-preview; notice clears; capacity remains ---
     traffic["bulk_post"].clear()
     preview_after_dismiss = {"count": 0}
 
@@ -273,7 +362,6 @@ def _blocked_selection_flow(pg) -> None:
         if route.request.method == "GET":
             preview_after_dismiss["count"] += 1
             traffic["preview_get"] += 1
-            # Empty policy refusal — notice should clear; capacity stays on plan_view path.
             route.fulfill(
                 status=200, content_type="application/json",
                 body=json.dumps({
@@ -283,7 +371,7 @@ def _blocked_selection_flow(pg) -> None:
                 }),
             )
         else:
-            route.continue_()
+            route.fulfill(status=500, body="preview-non-get")
 
     pg.unroute("**/api/selection/bulk")
     pg.unroute("**/api/plan/preview")
@@ -291,36 +379,46 @@ def _blocked_selection_flow(pg) -> None:
     pg.route("**/api/plan/preview", preview_after)
     pg.click("#blockedDismiss")
     for _ in range(60):
-        if preview_after_dismiss["count"] >= 1 and pg.locator("#blockedSelection").count() == 0:
-            break
         if preview_after_dismiss["count"] >= 1:
-            # Notice may hide or empty list when FEASIBLE.
-            if pg.locator("#blockedSelectionList").count() == 0:
-                break
-            if pg.locator("#blockedSelectionList").count() and not pg.inner_text("#blockedSelectionList").strip():
+            if pg.locator("#blockedSelection").count() == 0:
                 break
             if pg.locator("#blockedSelection").count() and pg.is_hidden("#blockedSelection"):
+                break
+            if pg.locator("#blockedSelectionList [data-repo-id]").count() == 0:
                 break
         time.sleep(0.05)
     assert traffic["bulk_post"], "successful Dismiss must POST bulk"
     assert preview_after_dismiss["count"] >= 1, (
         "successful Dismiss must automatically re-preview via GET /api/plan/preview")
     # Notice cleared of policy blockers.
-    if pg.locator("#blockedSelection").count():
-        remaining = pg.inner_text("#blockedSelectionList") if pg.locator("#blockedSelectionList").count() else ""
-        assert "demo/pickle-only" not in remaining
-        assert "demo/<script>" not in remaining and "demo/&lt;script&gt;" not in remaining
+    remaining_ids = set()
+    if pg.locator("#blockedSelectionList [data-repo-id]").count():
+        remaining_ids = set(
+            pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+                "els => els.map(e => e.getAttribute('data-repo-id'))"))
+    assert remaining_ids.isdisjoint(_POLICY_BLOCKED_IDS), (
+        f"policy blockers must leave the notice, still have {remaining_ids}")
     # Capacity blocker remains on the existing advisory/queue surface.
     advisory = pg.inner_text("#fillAdvisories")
-    assert "REQUIREMENT_EXCEEDS_USABLE_MAX" in advisory or "demo/replica-blocked" in pg.inner_text("#fillQueue")
-    assert not any(b[0] == "fill_start" for b in traffic["banned"]), (
-        f"Dismiss/Replan must not start Fill: {traffic['banned']}")
-    assert not any(b[0] == "proposal" for b in traffic["banned"]), (
-        f"Dismiss/Replan must not draft/approve: {traffic['banned']}")
-    pg.unroute("**/api/selection/bulk")
-    pg.unroute("**/api/plan/preview")
-    pg.unroute("**/api/fill/start")
-    pg.unroute("**/api/proposal/**")
+    queue = pg.inner_text("#fillQueue")
+    assert "REQUIREMENT_EXCEEDS_USABLE_MAX" in advisory or "demo/replica-blocked" in queue
+    # No draft/approve/fill-start across Dismiss/Replan (mutation intercept retained).
+    assert not any(m["label"] == "fill_start" for m in traffic["mutations"]), traffic["mutations"]
+    assert not any(m["label"] == "proposal" for m in traffic["mutations"]), traffic["mutations"]
+
+    for pattern, _label in _MUTATION_ROUTE_SPECS:
+        try:
+            pg.unroute(pattern)
+        except Exception:
+            pass
+    try:
+        pg.unroute("**/api/plan/preview")
+    except Exception:
+        pass
+    try:
+        pg.unroute("**/api/selection/bulk")
+    except Exception:
+        pass
     print("  blocked-selection notice + Dismiss/Replan contracts exercised")
 
 
