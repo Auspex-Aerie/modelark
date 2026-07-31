@@ -25,6 +25,17 @@ _FILL_ACTIVE_REFUSAL = {
 
 _PREVIEW_STALE_ERROR = "Selection changed since this preview. Replan before dismissing."
 
+_PREVIEW_BINDINGS_REQUIRED = {
+    "ok": False,
+    "refused": True,
+    "code": "PREVIEW_BINDINGS_REQUIRED",
+    "error": (
+        "expected_revision and expected_selection_hash "
+        "must be provided together."
+    ),
+    "actions": ["replan"],
+}
+
 
 class _PreviewStale(Exception):
     """Bound Dismiss CAS failure inside BEGIN IMMEDIATE (DEC-058)."""
@@ -154,7 +165,10 @@ def toggle(repo_id=None, on=None, **kwargs) -> dict:
 
 def bulk(ids=None, on=None, **kwargs) -> dict:
     # PR-09 matrix: bulk({"repo_ids": [...], "op": "remove"}).
-    # DEC-058 bound Dismiss: optional expected_revision + expected_selection_hash CAS.
+    # DEC-058 bound Dismiss: expected_revision + expected_selection_hash CAS.
+    # Supplying either CAS key expresses bound intent; both must be non-null together.
+    rev_provided = "expected_revision" in kwargs
+    hash_provided = "expected_selection_hash" in kwargs
     expected_revision = kwargs.pop("expected_revision", None)
     expected_selection_hash = kwargs.pop("expected_selection_hash", None)
     if isinstance(ids, dict):
@@ -164,8 +178,10 @@ def bulk(ids=None, on=None, **kwargs) -> dict:
         if on is None:
             on = False if op in ("remove", "off", "clear") else bool(body.get("on", False))
         if "expected_revision" in body:
+            rev_provided = True
             expected_revision = body["expected_revision"]
         if "expected_selection_hash" in body:
+            hash_provided = True
             expected_selection_hash = body["expected_selection_hash"]
     if on:                                          # bulk addition: never Fill-guarded; still bumps
         def body(c):
@@ -175,14 +191,21 @@ def bulk(ids=None, on=None, **kwargs) -> dict:
             return _summary_on(c)
         return _with_revision(body)
 
-    # Bound Dismiss only when both CAS bindings are present (Catalog unbound path unchanged).
-    bound = expected_revision is not None and expected_selection_hash is not None
+    # Bound intent: either CAS key present. Complete pair required for mutation.
+    bound_intent = rev_provided or hash_provided
+    bindings_complete = (
+        expected_revision is not None and expected_selection_hash is not None
+    )
 
     def mutate():                                   # bulk removal: guarded while Fill is live
         from modelark.proposal import _selection_hash
 
+        if bound_intent and not bindings_complete:
+            # Fail closed without opening a write TX / bumping revision.
+            return dict(_PREVIEW_BINDINGS_REQUIRED)
+
         def body(c):
-            if bound:
+            if bound_intent:
                 # Both comparisons inside the same BEGIN IMMEDIATE (graph_write) before DELETE.
                 # Always read both fields so CAS instrumentation / contracts observe both reads
                 # even when revision mismatch short-circuits the outcome.

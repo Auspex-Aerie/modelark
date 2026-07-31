@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -380,8 +381,11 @@ def _blocked_selection_flow(pg) -> None:
             lambda r: r.method == "GET" and "/api/plan/preview" in r.url,
             timeout=8000) as preview_req:
         pg.click("#blockedDismiss")
-    preview_after_dismiss["count"] += 1
     assert preview_req.value is not None
+    for _ in range(40):
+        if preview_after_dismiss["count"] >= 1:
+            break
+        time.sleep(0.05)
     for _ in range(40):
         if pg.locator("#blockedSelection").count() == 0:
             break
@@ -393,8 +397,10 @@ def _blocked_selection_flow(pg) -> None:
     assert traffic["bulk_post"], "successful Dismiss must POST bulk"
     assert traffic.get("bulk_modes", [])[-1:] == ["ok"], (
         f"success Dismiss bulk mode should be ok, got {traffic.get('bulk_modes')!r}")
-    assert preview_after_dismiss["count"] >= 1, (
-        "successful Dismiss must automatically re-preview via GET /api/plan/preview")
+    # Route handler alone measures the automatic re-preview GET (no manual increment).
+    assert preview_after_dismiss["count"] == 1, (
+        f"successful Dismiss must issue exactly one automatic preview GET, "
+        f"got {preview_after_dismiss['count']}")
     # Notice cleared of policy blockers.
     remaining_ids = set()
     if pg.locator("#blockedSelectionList [data-repo-id]").count():
