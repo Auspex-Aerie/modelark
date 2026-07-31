@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Mapping, Sequence
 
+from modelark import archive_hash
 from modelark.proposal import Refusal
 
 
@@ -56,14 +57,32 @@ def _arch_key_match(archived: Mapping, repo: str, rfilename: str, drive: str) ->
     return None
 
 
-def _file_satisfied(archived, repo, rfilename, drive, expected_sha) -> bool:
+def _row_field(row, name, default=None):
+    if isinstance(row, Mapping):
+        return row.get(name, default)
+    return _g(row, name, default)
+
+
+def _file_content_satisfied(archived, repo, rfilename, drive, approved_sha) -> bool:
+    """DEC-055 content satisfaction for one approved file on one drive.
+
+    Routes digests through ``archive_hash.expected_sha256`` with
+    ``catalog_sha=None`` — never reopens live catalog/file authority.
+    """
     row = _arch_key_match(archived or {}, repo, rfilename, drive)
     if not row:
         return False
-    sha = _g(row, "orig_sha256") if not isinstance(row, Mapping) else row.get("orig_sha256")
-    if expected_sha and sha and sha != expected_sha:
-        return False
-    return True
+    resolved = archive_hash.expected_sha256(
+        catalog_sha=None,
+        orig_sha256=_row_field(row, "orig_sha256"),
+        compressed=bool(_row_field(row, "compressed", False)),
+        annex_key=_row_field(row, "annex_key"),
+    )
+    if approved_sha:
+        if resolved is None:
+            return False
+        return str(resolved).lower() == str(approved_sha).lower()
+    return resolved is not None and str(resolved) != ""
 
 
 def _stored_bytes(archived, repo, rfilename, drive) -> int:
@@ -71,6 +90,78 @@ def _stored_bytes(archived, repo, rfilename, drive) -> int:
     if not row:
         return 0
     return int(_g(row, "stored_bytes", 0) or (row.get("stored_bytes") if isinstance(row, Mapping) else 0) or 0)
+
+
+def _proposal_file_groups(proposal) -> dict:
+    """Group frozen proposal.files rows by requirement_id (once per project_pure)."""
+    by_req: dict = {}
+    for ff in list(_g(proposal, "files") or ()):
+        rid = ff.get("requirement_id") if isinstance(ff, Mapping) else _g(ff, "requirement_id")
+        if rid is None:
+            continue
+        by_req.setdefault(rid, []).append(ff)
+    return by_req
+
+
+def _usable_rfilename(ff) -> str | None:
+    name = ff.get("rfilename") if isinstance(ff, Mapping) else _g(ff, "rfilename")
+    if name is None:
+        return None
+    if not isinstance(name, str):
+        name = str(name)
+    if name == "":
+        return None
+    return name
+
+
+def _usable_files(rows) -> list:
+    return [ff for ff in rows if _usable_rfilename(ff) is not None]
+
+
+def _approved_sha(ff):
+    return ff.get("orig_sha256") if isinstance(ff, Mapping) else _g(ff, "orig_sha256")
+
+
+def _all_files_content_satisfied(archived, repo, usable_files, drive) -> bool:
+    if not drive or not usable_files:
+        return False
+    for ff in usable_files:
+        name = _usable_rfilename(ff)
+        if name is None:
+            return False
+        if not _file_content_satisfied(archived, repo, name, drive, _approved_sha(ff)):
+            return False
+    return True
+
+
+def _approved_stored_sum(archived, repo, usable_files, drive) -> int:
+    total = 0
+    if not drive:
+        return 0
+    for ff in usable_files:
+        name = _usable_rfilename(ff)
+        if name is None:
+            continue
+        total += _stored_bytes(archived, repo, name, drive)
+    return total
+
+
+def _primary_executable_unfinished(prop_tasks, by_req, archived, repo) -> bool:
+    """True when an executable primary for repo still has unsatisfied approved files."""
+    primary_rid = f"primary:{repo}"
+    for pt in prop_tasks:
+        ptd = pt if isinstance(pt, Mapping) else _task_dict(pt)
+        if ptd.get("requirement_id") != primary_rid or ptd.get("row_kind") != "executable":
+            continue
+        group = by_req.get(primary_rid) or []
+        usable = _usable_files(group)
+        if not usable:
+            # Missing/empty authority is refused when primary is processed; treat
+            # as unfinished so replica waits rather than spuriously violating.
+            return True
+        return not _all_files_content_satisfied(
+            archived, repo, usable, ptd.get("target_drive"))
+    return False
 
 
 def _ratio_value(ratio_evidence, repo: str) -> float | None:
@@ -280,6 +371,9 @@ def project_pure(proposal, current_input, current_graph, session_overlay):
                     {"reason": "baseline_archive_missing", "drive": label, "repo": repo},
                     ("inspect_integrity",))
 
+    # Frozen proposal.files groups — sole file authority for executable tasks.
+    by_req = _proposal_file_groups(proposal)
+
     remaining: list[_TaskView] = []
     for t in prop_tasks:
         td = dict(t) if isinstance(t, Mapping) else _task_dict(t)
@@ -289,70 +383,64 @@ def project_pure(proposal, current_input, current_graph, session_overlay):
         target = td.get("target_drive")
         source = td.get("source_drive")
         rid = td.get("requirement_id")
-        # Determine missing files — default single model.safetensors
-        rfilename = "model.safetensors"
-        expected_sha = "1" * 64
-        files = list(_g(proposal, "files") or ())
-        for ff in files:
-            if (ff.get("requirement_id") if isinstance(ff, Mapping) else _g(ff, "requirement_id")) == rid:
-                rfilename = (ff.get("rfilename") if isinstance(ff, Mapping) else _g(ff, "rfilename")) or rfilename
-                expected_sha = (ff.get("orig_sha256") if isinstance(ff, Mapping) else _g(ff, "orig_sha256")) or expected_sha
+
+        group = by_req.get(rid)
+        if not group:
+            return Refusal(
+                "APPROVED_INPUT_CHANGED",
+                {"reason": "missing_proposal_file_authority",
+                 "requirement_id": rid, "repo_id": repo},
+                ("preview_again",))
+        usable = _usable_files(group)
+        if not usable:
+            return Refusal(
+                "APPROVED_INPUT_CHANGED",
+                {"reason": "empty_proposal_file_authority",
+                 "requirement_id": rid, "repo_id": repo},
+                ("preview_again",))
+
+        # Exact task durable — never coerce via `or 100`; never derive from file sizes.
+        if "guaranteed_durable" not in td or td.get("guaranteed_durable") is None:
+            return Refusal(
+                "APPROVAL_PROJECTION_VIOLATION",
+                {"reason": "missing_guaranteed_durable",
+                 "requirement_id": rid, "repo_id": repo},
+                ("inspect_integrity",))
+        durable = int(td.get("guaranteed_durable"))
 
         # Feasibility before shrink: compression ratio / stored overrun on any approved
         # executable placement (including ones that would otherwise shrink out).
         ratio = _ratio_value(observed_ratio, repo or "")
-        stored = _stored_bytes(archived, repo, rfilename, target) if target else 0
-        durable = int(td.get("guaranteed_durable") or 100)
+        stored = _approved_stored_sum(archived, repo, usable, target)
         if ratio is not None and ratio >= 10.0:
             return Refusal(
                 "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE",
                 {"reason": "compression_budget", "repo": repo, "ratio": ratio},
                 ("preview_again",))
-        if stored > 0 and durable > 0 and stored > max(durable * 1000, 10**12):
+        if durable > 0 and stored > max(durable * 1000, 10**12):
             return Refusal(
                 "APPROVED_PLACEMENT_NO_LONGER_FEASIBLE",
                 {"reason": "stored_bytes_overrun", "repo": repo, "stored": stored},
                 ("preview_again",))
 
-        satisfied = False
-        if target:
-            satisfied = _file_satisfied(archived, repo, rfilename, target, expected_sha)
-        if satisfied:
-            continue  # B1: newly satisfied shrinks out
+        # Shrink only when every approved file is content-satisfied on target.
+        if _all_files_content_satisfied(archived, repo, usable, target):
+            continue
 
-        # Replica source readiness
+        # Replica source readiness (every approved file on source; primary's own group).
         schedule = "ready"
         if source:
-            source_ok = _file_satisfied(archived, repo, rfilename, source, expected_sha)
-            # Home primary still remaining counts as dependency path
-            home_still = any(
-                (x.get("requirement_id") if isinstance(x, Mapping) else _g(x, "requirement_id"))
-                == f"primary:{repo}"
-                for x in remaining
-            )
-            # Also if primary was not yet satisfied (still in prop executables unsatisfied)
-            primary_unsat = False
-            for pt in prop_tasks:
-                ptd = pt if isinstance(pt, Mapping) else _task_dict(pt)
-                if ptd.get("requirement_id") == f"primary:{repo}" and ptd.get("row_kind") == "executable":
-                    ptgt = ptd.get("target_drive")
-                    if not _file_satisfied(archived, repo, rfilename, ptgt, expected_sha):
-                        primary_unsat = True
-            if not source_ok and (primary_unsat or home_still or True):
-                if not source_ok and not primary_unsat:
-                    # No durable source and primary already gone → violation
-                    # If primary still unsatisfied, waiting_dependency
-                    schedule = "waiting_dependency"
-                elif not source_ok and primary_unsat:
+            source_ok = _all_files_content_satisfied(archived, repo, usable, source)
+            primary_unfinished = _primary_executable_unfinished(
+                prop_tasks, by_req, archived, repo)
+            if not source_ok:
+                if primary_unfinished:
                     schedule = "waiting_dependency"
                 else:
-                    schedule = "waiting_dependency"
-            if not source_ok and not primary_unsat:
-                # Primary done but source fact missing
-                return Refusal(
-                    "APPROVAL_PROJECTION_VIOLATION",
-                    {"reason": "source_not_ready", "source": source, "repo": repo},
-                    ("inspect_integrity",))
+                    return Refusal(
+                        "APPROVAL_PROJECTION_VIOLATION",
+                        {"reason": "source_not_ready", "source": source, "repo": repo},
+                        ("inspect_integrity",))
 
         if repo in parked:
             schedule = "parked_gated"

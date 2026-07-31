@@ -27,6 +27,8 @@ from modelark.proposal import Refusal
 # Helpers
 # ---------------------------------------------------------------------------
 
+_MISSING = object()
+
 
 def _proj():
     return f.project_pure_fn()
@@ -60,13 +62,14 @@ def _task(
     }
 
 
-def _file(rid, rfilename, *, size=100, sha=None, role="missing"):
+def _file(rid, rfilename, *, size=100, sha=_MISSING, role="missing"):
+    # Preserve explicit None (null approved digest); default only when omitted.
     return {
         "requirement_id": rid,
         "rfilename": rfilename,
         "role": role,
         "size_bytes": size,
-        "orig_sha256": sha if sha is not None else ("b" * 64),
+        "orig_sha256": ("b" * 64) if sha is _MISSING else sha,
         "format": "safetensors",
         "quant": "bf16",
         "storage_action": "compress",
@@ -639,9 +642,9 @@ def test_c14_stored_overrun_sums_approved_filenames_only_before_shrink():
     """
     _mod, project_pure = _proj()
     rid = "primary:org/m"
-    # Task budget small → threshold max(100*1000, 1TiB) = 1TiB.
+    # Task budget small → threshold max(100*1000, 10**12) = 10**12 bytes (1 decimal TB).
     durable = 100
-    # Proposal sizes sum to 4e9; size-derived durable would yield threshold 4e12.
+    # Proposal sizes sum to 4e9; size-derived durable would yield threshold 4e12 (~4 TB).
     size_a = 2_000_000_000
     size_b = 2_000_000_000
     assert size_a + size_b != durable
@@ -651,7 +654,7 @@ def test_c14_stored_overrun_sums_approved_filenames_only_before_shrink():
         _file(rid, "b.bin", size=size_b, sha="b" * 64),
     ]
     proposal = _approved_proposal(tasks=tasks, files=files)
-    # Sum of approved stored exceeds task threshold (1TiB) but not size-derived (4PiB).
+    # Sum of approved stored exceeds task threshold (1 decimal TB) but not size-derived (~4 TB).
     stored_a = 10**12 + 5  # non-last
     stored_b = 1           # last (tiny — last-file path will not refuse)
     expected_sum = stored_a + stored_b

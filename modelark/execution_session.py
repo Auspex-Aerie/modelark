@@ -358,10 +358,14 @@ def _catalog_projection_bundle(con, proposal, relevant, services, current_config
 
     archived = {}
     for r in con.execute(
-            "SELECT repo_id, rfilename, drive_label, orig_sha256, stored_bytes, orig_bytes "
-            "FROM archived"):
+            "SELECT repo_id, rfilename, drive_label, orig_sha256, stored_bytes, orig_bytes, "
+            "compressed, annex_key FROM archived"):
         archived[(r[0], r[1], r[2])] = {
-            "orig_sha256": r[3], "stored_bytes": r[4], "orig_bytes": r[5],
+            "orig_sha256": r[3],
+            "stored_bytes": r[4],
+            "orig_bytes": r[5],
+            "compressed": r[6],
+            "annex_key": r[7],
         }
 
     # Finding 37: never fabricate admissible capacity. Require authoritative
