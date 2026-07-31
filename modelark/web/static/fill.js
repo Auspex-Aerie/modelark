@@ -58,6 +58,15 @@
       .fadv.warn{background:#fdf6e3;border-color:#eadfb8;color:#8a6d1a}
       .fadv.ok{background:#d8ece9;border-color:#bcdcd7;color:#0b5b54}
       .fadv.info{background:#eef1f6;border-color:#dde3ec;color:#5c6675}
+      .blocked-selection{margin-top:18px;padding:12px 14px;border:1px solid #e7cdca;border-radius:6px;background:#fbf1f0;color:#8f2d27}
+      .blocked-head{font:700 12px/1.3 ui-monospace,Menlo,monospace;letter-spacing:.04em;text-transform:uppercase;margin:0 0 10px}
+      .blocked-list{display:flex;flex-direction:column;gap:6px;margin:0 0 12px}
+      .blocked-row{font:500 13px/1.4 ui-monospace,Menlo,monospace;word-break:break-word}
+      .blocked-id{font-weight:700}
+      .blocked-reason{color:#a4342c}
+      .blocked-actions{display:flex;gap:8px;flex-wrap:wrap}
+      .blocked-actions button{font:600 12px ui-sans-serif,system-ui,sans-serif;padding:6px 12px;border-radius:5px;border:1px solid #d5a8a3;background:#fff;color:#8f2d27;cursor:pointer}
+      .blocked-actions button:disabled{opacity:.55;cursor:not-allowed}
       .fillloading{color:#5c6675;padding:30px;font:500 14px ui-monospace,monospace}
       .fillrun{display:flex;align-items:center;gap:12px;margin:14px 0 4px}
       #fillStop{background:#a4342c;color:#fff;border:none;border-radius:5px;padding:7px 14px;font-weight:600;cursor:pointer}
@@ -568,6 +577,131 @@
   }
   function refreshPlanBars() { MA.api("/api/plan/totals").then(renderPlanBars).catch(() => {}); }
 
+  // ---- blocked-selection notice (DEC-058 / MANIFEST_POLICY only) ----
+  let blockedPreview = null;
+  let blockedInFlight = false;
+  let blockedFlightToken = null;
+
+  function setBlockedControls(disabled) {
+    const d = document.getElementById("blockedDismiss");
+    const r = document.getElementById("blockedReplan");
+    if (d) d.disabled = !!disabled;
+    if (r) r.disabled = !!disabled;
+  }
+
+  function renderBlockedNotice(preview) {
+    const host = document.getElementById("blockedSelection");
+    const list = document.getElementById("blockedSelectionList");
+    if (!host || !list) return;
+    const refusal = preview && preview.gate_b_refusal;
+    if (!refusal || refusal.code !== "MANIFEST_POLICY") {
+      host.hidden = true;
+      while (list.firstChild) list.removeChild(list.firstChild);
+      blockedPreview = preview || null;
+      return;
+    }
+    blockedPreview = preview;
+    const blocked = (refusal.evidence && refusal.evidence.blocked_repositories) || [];
+    while (list.firstChild) list.removeChild(list.firstChild);
+    for (const b of blocked) {
+      const rid = b && b.repo_id != null ? String(b.repo_id) : "";
+      const reason = b && b.reason != null ? String(b.reason) : "";
+      const row = document.createElement("div");
+      row.className = "blocked-row";
+      row.setAttribute("data-repo-id", rid);
+      const idEl = document.createElement("span");
+      idEl.className = "blocked-id";
+      idEl.textContent = rid;
+      const reasonEl = document.createElement("span");
+      reasonEl.className = "blocked-reason";
+      reasonEl.textContent = reason;
+      row.appendChild(idEl);
+      row.appendChild(document.createTextNode(" "));
+      row.appendChild(reasonEl);
+      list.appendChild(row);
+    }
+    host.hidden = false;
+  }
+
+  function loadBlockedPreview() {
+    blockedInFlight = true;
+    const token = {};
+    blockedFlightToken = token;
+    setBlockedControls(true);
+    return MA.api("/api/plan/preview").then(p => {
+      if (p && p.ok === false && p.error) {
+        MA.toast(String(p.error));
+        // Retain prior notice evidence on typed failure.
+        return p;
+      }
+      renderBlockedNotice(p);
+      return p;
+    }).catch(e => {
+      MA.toast(String((e && e.message) || e || "preview failed"));
+      // Retain prior evidence on network failure.
+    }).finally(() => {
+      if (blockedFlightToken === token) {
+        blockedInFlight = false;
+        setBlockedControls(false);
+      }
+    });
+  }
+
+  function replanBlocked() {
+    if (blockedInFlight) return;
+    loadBlockedPreview();
+  }
+
+  function dismissBlocked() {
+    if (blockedInFlight) return;
+    const p = blockedPreview;
+    const refusal = p && p.gate_b_refusal;
+    if (!refusal || refusal.code !== "MANIFEST_POLICY") return;
+    const rows = (refusal.evidence && refusal.evidence.blocked_repositories) || [];
+    const ids = rows.map(b => b.repo_id).filter(Boolean);
+    if (!ids.length) return;
+    blockedInFlight = true;
+    setBlockedControls(true);
+    MA.post("/api/selection/bulk", {
+      ids,
+      on: false,
+      expected_revision: p.based_on_revision,
+      expected_selection_hash: p.selection_before_hash,
+    }).then(r => {
+      if (r && r.refused) {
+        MA.toast(r.error || r.code || "dismiss refused");
+        blockedInFlight = false;
+        setBlockedControls(false);
+        // Retain displayed evidence on PREVIEW_STALE / FILL_SESSION_ACTIVE.
+        return;
+      }
+      // Successful Dismiss: automatically re-preview (DEC-058).
+      // Keep controls disabled through the follow-up GET, then clear in finally.
+      const token = {};
+      blockedFlightToken = token;
+      blockedInFlight = true;
+      return MA.api("/api/plan/preview").then(p2 => {
+        if (p2 && p2.ok === false && p2.error) {
+          MA.toast(String(p2.error));
+          return p2;
+        }
+        renderBlockedNotice(p2);
+        return p2;
+      }).catch(e => {
+        MA.toast(String((e && e.message) || e || "preview failed"));
+      }).finally(() => {
+        if (blockedFlightToken === token) {
+          blockedInFlight = false;
+          setBlockedControls(false);
+        }
+      });
+    }).catch(e => {
+      MA.toast(String((e && e.message) || e || "dismiss failed"));
+      blockedInFlight = false;
+      setBlockedControls(false);
+    });
+  }
+
   window.loadFill = function () {
     refreshPlanBars();
     queueSig = null; queueCentered = false; lastQueueRepo = null;   // fresh load → rebuild + re-centre the queue once
@@ -586,6 +720,7 @@
       if (st && !st.error) { placedMap = st; placedLoaded = true; }
       renderQueue(lastStatus);
     }).catch(() => {});
+    loadBlockedPreview();
     refreshStatus(true);        // reflect any in-flight fill and resume polling if one is running
   };
 
@@ -597,6 +732,9 @@
     const fstart = document.getElementById("fillStart"), fstop = document.getElementById("fillStop");
     if (fstart) fstart.onclick = startFill;
     if (fstop) fstop.onclick = stopFill;
+    const bd = document.getElementById("blockedDismiss"), br = document.getElementById("blockedReplan");
+    if (bd) bd.onclick = dismissBlocked;
+    if (br) br.onclick = replanBlocked;
     window.addEventListener("resize", () => { if (last) drawLinks(last); });
   }
   if (document.readyState !== "loading") wire(); else document.addEventListener("DOMContentLoaded", wire);

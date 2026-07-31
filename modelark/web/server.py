@@ -205,6 +205,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(plan_api.cart())
             elif u.path == "/api/plan/explain":
                 self._json(plan_api.shadow_explain())
+            elif u.path == "/api/plan/preview":
+                self._json(plan_api.preview())
             elif u.path == "/api/verify/suspects":
                 self._json(verify_api.suspects())
             elif u.path == "/api/fill/status":
@@ -263,7 +265,9 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/selection":
                 self._selection_result(selection_api.toggle(body["id"], bool(body["on"])))
             elif u.path == "/api/selection/bulk":
-                self._selection_result(selection_api.bulk(body["ids"], bool(body["on"])))
+                # Pass the full body so DEC-058 CAS bindings (expected_revision /
+                # expected_selection_hash) reach selection_api.bulk.
+                self._selection_result(selection_api.bulk(body))
             elif u.path == "/api/selection/clear":
                 self._selection_result(selection_api.clear())
             elif u.path == "/api/selection/finalize":

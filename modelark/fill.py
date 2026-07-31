@@ -151,59 +151,6 @@ def _terminal(
     }
 
 
-def _admission_terminal(snapshot: _Snapshot, plan_id: str, made_progress: bool) -> dict:
-    ledger = snapshot.ledger
-    state = "plan-capacity-stop" if made_progress else "blocked"
-    if ledger.blocking_diagnostics:
-        codes = list(ledger.blocking_diagnostics)
-        diagnostics = [
-            {
-                "code": item.code,
-                "severity": item.severity.value,
-                "requirement_id": item.requirement_id,
-                "detail": dict(item.detail),
-            }
-            for item in snapshot.graph.diagnostics
-            if item.severity in {
-                reconcile.DiagnosticSeverity.BLOCKING,
-                reconcile.DiagnosticSeverity.ERROR,
-            }
-        ]
-        message = (
-            f"{len(diagnostics)} archive-policy/invariant blocker(s) prevent plan '{plan_id}' admission. "
-            "Review the typed evidence, change policy or selection, then re-run. (No bytes written.)"
-        )
-        return _terminal(
-            state, message, code=codes[0], gate="B",
-            evidence={"blocking_diagnostics": diagnostics},
-            actions=["review_manifest_policy", "trim_selection", "replan"],
-        )
-    failures = [_failure_dict(item) for item in ledger.failures]
-    first = failures[0] if failures else {
-        "code": "GRAPH_UNASSIGNED", "shortfall_bytes": 0, "actions": ["replan"]
-    }
-    short = sum(item.get("shortfall_bytes", 0) for item in failures)
-    if made_progress:
-        message = (
-            f"live capacity changed and {len(failures) or len(ledger.unassigned_intents)} requirement(s) "
-            f"cannot be admitted ({short / 1e12:.2f} TB short). Add eligible capacity, then re-run. "
-            "Completed files remain safe."
-        )
-    else:
-        message = (
-            f"plan '{plan_id}' cannot safely admit its committed work: "
-            f"{len(failures) or len(ledger.unassigned_intents)} requirement(s), "
-            f"{short / 1e12:.2f} TB short. Add capacity or trim the selection. (No bytes written.)"
-        )
-    return _terminal(
-        state, message, code=first["code"], gate="B",
-        evidence={"capacity_failures": failures, "unassigned": [
-            item.requirement_id for item in ledger.unassigned_intents
-        ]},
-        actions=first.get("actions", ["replan"]),
-    )
-
-
 def _stop_terminal() -> dict:
     return _terminal(
         "stopped", "stopped by request", code="OPERATOR_STOP", stopped=True,

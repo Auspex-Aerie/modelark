@@ -23,6 +23,32 @@ _FILL_ACTIVE_REFUSAL = {
     "actions": ["wait_for_fill", "stop_fill"],
 }
 
+_PREVIEW_STALE_ERROR = "Selection changed since this preview. Replan before dismissing."
+
+
+class _PreviewStale(Exception):
+    """Bound Dismiss CAS failure inside BEGIN IMMEDIATE (DEC-058)."""
+
+    def __init__(self, body: dict):
+        self.body = body
+        super().__init__(body.get("code") or "PREVIEW_STALE")
+
+
+def _preview_stale_body(*, current_revision: int, based_on_revision: int,
+                        selection_changed: bool) -> dict:
+    return {
+        "ok": False,
+        "refused": True,
+        "code": "PREVIEW_STALE",
+        "error": _PREVIEW_STALE_ERROR,
+        "evidence": {
+            "current_revision": current_revision,
+            "based_on_revision": based_on_revision,
+            "selection_changed": selection_changed,
+        },
+        "actions": ["replan"],
+    }
+
 
 def _guarded(mutate) -> dict:
     """Run a selection graph-mutation unless a Fill controller is live, in which case return the
@@ -128,12 +154,19 @@ def toggle(repo_id=None, on=None, **kwargs) -> dict:
 
 def bulk(ids=None, on=None, **kwargs) -> dict:
     # PR-09 matrix: bulk({"repo_ids": [...], "op": "remove"}).
+    # DEC-058 bound Dismiss: optional expected_revision + expected_selection_hash CAS.
+    expected_revision = kwargs.pop("expected_revision", None)
+    expected_selection_hash = kwargs.pop("expected_selection_hash", None)
     if isinstance(ids, dict):
         body = _as_body(ids, kwargs)
         ids = body.get("repo_ids") or body.get("ids") or []
         op = body.get("op")
         if on is None:
             on = False if op in ("remove", "off", "clear") else bool(body.get("on", False))
+        if "expected_revision" in body:
+            expected_revision = body["expected_revision"]
+        if "expected_selection_hash" in body:
+            expected_selection_hash = body["expected_selection_hash"]
     if on:                                          # bulk addition: never Fill-guarded; still bumps
         def body(c):
             c.executemany(
@@ -142,11 +175,43 @@ def bulk(ids=None, on=None, **kwargs) -> dict:
             return _summary_on(c)
         return _with_revision(body)
 
+    # Bound Dismiss only when both CAS bindings are present (Catalog unbound path unchanged).
+    bound = expected_revision is not None and expected_selection_hash is not None
+
     def mutate():                                   # bulk removal: guarded while Fill is live
+        from modelark.proposal import _selection_hash
+
         def body(c):
+            if bound:
+                # Both comparisons inside the same BEGIN IMMEDIATE (graph_write) before DELETE.
+                # Always read both fields so CAS instrumentation / contracts observe both reads
+                # even when revision mismatch short-circuits the outcome.
+                row = c.execute(
+                    "SELECT planner_revision FROM planner_state WHERE singleton_id=1"
+                ).fetchone()
+                current_revision = int(row[0]) if row else 0
+                current_hash = _selection_hash(c)
+                based_on = int(expected_revision)
+                if current_revision != based_on:
+                    raise _PreviewStale(_preview_stale_body(
+                        current_revision=current_revision,
+                        based_on_revision=based_on,
+                        selection_changed=False,
+                    ))
+                if current_hash != expected_selection_hash:
+                    raise _PreviewStale(_preview_stale_body(
+                        current_revision=current_revision,
+                        based_on_revision=based_on,
+                        selection_changed=True,
+                    ))
             c.executemany("DELETE FROM selection WHERE repo_id=?", [[i] for i in ids])
             return _summary_on(c)
-        return _with_revision(body)
+
+        try:
+            return _with_revision(body)
+        except _PreviewStale as exc:
+            return exc.body
+
     return _guarded(mutate)
 
 

@@ -80,6 +80,50 @@ def shadow_explain() -> dict:
         con.close()
 
 
+def preview() -> dict:
+    """Reduced placement preview for blocked-selection (DEC-058).
+
+    Dedicated read-only catalog connection + coherent BEGIN snapshot covering
+    active-plan resolution and exactly one ``proposal.preview_pure`` call.
+    Never uses the portal shared ``data.conn()`` / ``data._lock``, never
+    bootstraps a plan, never publishes/approves/mutates.
+    """
+    from modelark import plan, proposal as prop
+    from modelark.core import db
+
+    con = db.connect(read_only=True)
+    try:
+        con.execute("BEGIN")
+        try:
+            active = plan.active(con)
+            if active is None:
+                con.execute("COMMIT")
+                return {"ok": False, "error": "no active plan"}
+            pure = prop.preview_pure(
+                con, plan_id=active["plan_id"], mutation=("adopt_current", ()))
+            header = pure["header"]
+            # Exact nested container from pure preview (or null when absent).
+            refusal = pure["gate_b_refusal"] if "gate_b_refusal" in pure else None
+            result = {
+                "ok": True,
+                "plan_id": header["plan_id"],
+                "based_on_revision": int(header["based_on_revision"]),
+                "selection_before_hash": header["selection_before_hash"],
+                "gate_b_code": header.get("gate_b_code") or "FEASIBLE",
+                "gate_b_refusal": refusal,
+            }
+            con.execute("COMMIT")
+            return result
+        except BaseException:
+            try:
+                con.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+    finally:
+        con.close()
+
+
 def select(body: dict) -> dict:
     from modelark import plan
     with data._lock:

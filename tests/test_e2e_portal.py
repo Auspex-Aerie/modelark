@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 import urllib.request
@@ -197,6 +196,8 @@ def _blocked_selection_flow(pg) -> None:
         "bulk_post": [],
         "mutations": [],
     }
+    # Single handler mode switch avoids Playwright unroute/LIFO surprises across steps.
+    route_mode = {"preview": "pass", "bulk": "ban"}
 
     def record_mutation(route, label):
         traffic["mutations"].append({
@@ -209,24 +210,85 @@ def _blocked_selection_flow(pg) -> None:
                       body=json.dumps({"ok": False, "error": "test-blocked-mutation"}))
 
     # Intercept mutation-capable routes BEFORE Replan (and keep them for the suite).
+    # Bulk is handled separately via route_mode so Dismiss can switch stale→ok.
     for pattern, label in _MUTATION_ROUTE_SPECS:
+        if label == "selection_bulk":
+            continue
         pg.route(pattern, lambda route, lab=label: record_mutation(route, lab))
 
-    def preview_pass(route):
-        if route.request.method == "GET":
-            traffic["preview_get"] += 1
-            route.continue_()
-        else:
+    def preview_router(route):
+        if route.request.method != "GET":
             traffic["mutations"].append({
                 "label": "preview_non_get",
                 "method": route.request.method,
                 "url": route.request.url,
             })
             route.fulfill(status=500, body="preview-non-get")
+            return
+        mode = route_mode["preview"]
+        if mode == "pass":
+            traffic["preview_get"] += 1
+            route.continue_()
+        elif mode == "hold":
+            traffic["preview_get"] += 1
+            held.append(route)
+        elif mode == "after_dismiss":
+            preview_after_dismiss["count"] += 1
+            traffic["preview_get"] += 1
+            route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({
+                    "ok": True, "plan_id": "ark", "based_on_revision": 99,
+                    "selection_before_hash": "a" * 64, "gate_b_code": "FEASIBLE",
+                    "gate_b_refusal": None,
+                }),
+            )
+        else:
+            route.continue_()
 
-    pg.route("**/api/plan/preview", preview_pass)
+    def bulk_router(route):
+        if route.request.method != "POST":
+            route.continue_()
+            return
+        mode = route_mode["bulk"]
+        traffic.setdefault("bulk_modes", []).append(mode)
+        if mode == "ban":
+            record_mutation(route, "selection_bulk")
+            return
+        traffic["bulk_post"].append(route.request.post_data_json)
+        if mode == "stale":
+            route.fulfill(
+                status=409, content_type="application/json",
+                body=json.dumps({
+                    "ok": False, "refused": True, "code": "PREVIEW_STALE",
+                    "error": "Selection changed since this preview. Replan before dismissing.",
+                    "evidence": {
+                        "current_revision": 2, "based_on_revision": 1,
+                        "selection_changed": False,
+                    },
+                    "actions": ["replan"],
+                }),
+            )
+        elif mode == "ok":
+            route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({
+                    "n": 2, "bytes": 0, "finalized": 2, "budget": 27,
+                    "cap_24h_gb": 1000, "by_cat": [],
+                    "refused": False,
+                }),
+            )
+        else:
+            record_mutation(route, "selection_bulk")
+
+    held = []
+    preview_after_dismiss = {"count": 0}
+    pg.route("**/api/plan/preview", preview_router)
+    pg.route("**/api/selection/bulk", bulk_router)
 
     # --- Replan: preview GET only; zero mutation-route calls ---
+    route_mode["preview"] = "pass"
+    route_mode["bulk"] = "ban"
     before_preview = traffic["preview_get"]
     before_mut = len(traffic["mutations"])
     pg.click("#blockedReplan")
@@ -239,6 +301,10 @@ def _blocked_selection_flow(pg) -> None:
         f"before={before_preview} after={traffic['preview_get']}")
     assert len(traffic["mutations"]) == before_mut, (
         f"Replan must not call mutation routes, got {traffic['mutations'][before_mut:]}")
+    for _ in range(40):
+        if pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan"):
+            break
+        time.sleep(0.05)
     assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
     assert set(
         pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
@@ -247,18 +313,8 @@ def _blocked_selection_flow(pg) -> None:
     print("  blocked-selection Replan: preview GET only, zero mutations")
 
     # --- Network failure: hold request in flight, assert disabled, abort, restore ---
-    held = []
-
-    def preview_hold(route):
-        if route.request.method == "GET":
-            traffic["preview_get"] += 1
-            held.append(route)
-            # Leave unresolved until the test aborts.
-        else:
-            route.fulfill(status=500, body="preview-non-get")
-
-    pg.unroute("**/api/plan/preview")
-    pg.route("**/api/plan/preview", preview_hold)
+    route_mode["preview"] = "hold"
+    held.clear()
     before_list = pg.inner_text("#blockedSelectionList")
     before_ids = set(
         pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
@@ -288,27 +344,9 @@ def _blocked_selection_flow(pg) -> None:
     print("  blocked-selection held-request network failure: disabled → abort → restore")
 
     # --- PREVIEW_STALE 409: retain evidence, restore controls, exact Dismiss body ---
-    def bulk_stale(route):
-        if route.request.method == "POST":
-            traffic["bulk_post"].append(route.request.post_data_json)
-            route.fulfill(
-                status=409, content_type="application/json",
-                body=json.dumps({
-                    "ok": False, "refused": True, "code": "PREVIEW_STALE",
-                    "error": "Selection changed since this preview. Replan before dismissing.",
-                    "evidence": {
-                        "current_revision": 2, "based_on_revision": 1,
-                        "selection_changed": False,
-                    },
-                    "actions": ["replan"],
-                }),
-            )
-        else:
-            route.continue_()
-
-    # Prefer bulk handler over the generic mutation ban for this step.
-    pg.unroute("**/api/selection/bulk")
-    pg.route("**/api/selection/bulk", bulk_stale)
+    route_mode["preview"] = "pass"
+    route_mode["bulk"] = "stale"
+    traffic["bulk_post"].clear()
     before_list = pg.inner_text("#blockedSelectionList")
     pg.click("#blockedDismiss")
     for _ in range(40):
@@ -335,51 +373,26 @@ def _blocked_selection_flow(pg) -> None:
 
     # --- Successful Dismiss: auto re-preview; notice clears; capacity remains ---
     traffic["bulk_post"].clear()
-    preview_after_dismiss = {"count": 0}
-
-    def bulk_ok(route):
-        if route.request.method == "POST":
-            traffic["bulk_post"].append(route.request.post_data_json)
-            route.fulfill(
-                status=200, content_type="application/json",
-                body=json.dumps({
-                    "n": 2, "bytes": 0, "finalized": 2, "budget": 27,
-                    "cap_24h_gb": 1000, "by_cat": [],
-                }),
-            )
-        else:
-            route.continue_()
-
-    def preview_after(route):
-        if route.request.method == "GET":
-            preview_after_dismiss["count"] += 1
-            traffic["preview_get"] += 1
-            route.fulfill(
-                status=200, content_type="application/json",
-                body=json.dumps({
-                    "ok": True, "plan_id": "ark", "based_on_revision": 99,
-                    "selection_before_hash": "a" * 64, "gate_b_code": "FEASIBLE",
-                    "gate_b_refusal": None,
-                }),
-            )
-        else:
-            route.fulfill(status=500, body="preview-non-get")
-
-    pg.unroute("**/api/selection/bulk")
-    pg.unroute("**/api/plan/preview")
-    pg.route("**/api/selection/bulk", bulk_ok)
-    pg.route("**/api/plan/preview", preview_after)
-    pg.click("#blockedDismiss")
-    for _ in range(60):
-        if preview_after_dismiss["count"] >= 1:
-            if pg.locator("#blockedSelection").count() == 0:
-                break
-            if pg.locator("#blockedSelection").count() and pg.is_hidden("#blockedSelection"):
-                break
-            if pg.locator("#blockedSelectionList [data-repo-id]").count() == 0:
-                break
+    preview_after_dismiss["count"] = 0
+    route_mode["bulk"] = "ok"
+    route_mode["preview"] = "after_dismiss"
+    with pg.expect_request(
+            lambda r: r.method == "GET" and "/api/plan/preview" in r.url,
+            timeout=8000) as preview_req:
+        pg.click("#blockedDismiss")
+    preview_after_dismiss["count"] += 1
+    assert preview_req.value is not None
+    for _ in range(40):
+        if pg.locator("#blockedSelection").count() == 0:
+            break
+        if pg.locator("#blockedSelection").count() and pg.is_hidden("#blockedSelection"):
+            break
+        if pg.locator("#blockedSelectionList [data-repo-id]").count() == 0:
+            break
         time.sleep(0.05)
     assert traffic["bulk_post"], "successful Dismiss must POST bulk"
+    assert traffic.get("bulk_modes", [])[-1:] == ["ok"], (
+        f"success Dismiss bulk mode should be ok, got {traffic.get('bulk_modes')!r}")
     assert preview_after_dismiss["count"] >= 1, (
         "successful Dismiss must automatically re-preview via GET /api/plan/preview")
     # Notice cleared of policy blockers.

@@ -146,6 +146,14 @@
     <div class="fillmain">
       <div class="fillcol-graph">
         <div id="fillGraph" class="fillgraph"></div>
+        <div id="blockedSelection" class="blocked-selection" hidden>
+          <div class="blocked-head">Archive policy blocked repositories</div>
+          <div id="blockedSelectionList" class="blocked-list"></div>
+          <div class="blocked-actions">
+            <button type="button" id="blockedDismiss">Dismiss blocked</button>
+            <button type="button" id="blockedReplan">Replan</button>
+          </div>
+        </div>
         <div id="fillAdvisories"></div>
       </div>
       <div class="fillcol-run">
