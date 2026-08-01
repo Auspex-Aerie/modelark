@@ -1,4 +1,4 @@
-"""DEC-053 / DEC-054 / DEF-034 Gate-1 contracts — remediation 3 (strict evidence).
+"""DEC-053 / DEC-054 / DEF-034 Gate-1 contracts — remediation 4 (contracts only).
 
 Contracts only. No production. Expected-red until Gate-2 lands clone-first
 provenance migration, provenance/derivation CHECKs, explicit drive repair, and
@@ -135,6 +135,8 @@ def _logical_identity(con: sqlite3.Connection) -> str:
 
 
 def _semantic_shape(con: sqlite3.Connection, table: str) -> dict:
+    """Full semantic column/FK/index shape (type, nullability, default, PK order,
+    uniqueness/origin/partial, indexed columns). Not raw CREATE SQL identity."""
     cols = list(con.execute(f'PRAGMA table_info("{table}")'))
     # cid, name, type, notnull, dflt_value, pk
     col_shape = [
@@ -153,31 +155,94 @@ def _semantic_shape(con: sqlite3.Connection, table: str) -> dict:
         }
         for r in con.execute(f'PRAGMA foreign_key_list("{table}")')
     ]
-    # Indexes involving this table
-    idx_rows = con.execute(
-        "SELECT name, sql FROM sqlite_master WHERE type='index' "
-        "AND tbl_name=? AND name NOT LIKE 'sqlite_%'",
-        [table],
-    ).fetchall()
+    # PRAGMA index_list: seq, name, unique, origin, partial
     indexes = []
-    for name, sql in idx_rows:
-        info = [
-            {"seqno": r[0], "cid": r[1], "name": r[2]}
-            for r in con.execute(f'PRAGMA index_info("{name}")')
+    for seq, name, unique, origin, partial in con.execute(
+            f'PRAGMA index_list("{table}")'):
+        if not name or str(name).startswith("sqlite_"):
+            continue
+        indexed_cols = [
+            r[2] for r in con.execute(f'PRAGMA index_info("{name}")')
+            if r[2] is not None
         ]
-        indexes.append({"name": name, "sql": sql, "cols": info})
+        indexes.append({
+            "name": name,
+            "unique": int(unique),
+            "origin": origin,
+            "partial": int(partial),
+            "columns": indexed_cols,
+        })
     indexes.sort(key=lambda x: x["name"] or "")
-    create_sql = (con.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
-        [table],
-    ).fetchone() or [None])[0]
     return {
         "columns": col_shape,
         "pk_order": pk_order,
         "fks": sorted(fks, key=lambda x: (x["id"], x["seq"])),
         "indexes": indexes,
-        "create_sql": create_sql,
     }
+
+
+def _assert_check_probes(con: sqlite3.Connection) -> None:
+    """Provenance + derivation CHECK probes on a catalog that has probe rows."""
+    for bad in ("mirrored", "foo", ""):
+        _check_rejects(
+            con, "archived", "orig_sha256_provenance", bad,
+            "rfilename=?", ["weights.bin"])
+    for good in PROVENANCE_VALUES:
+        con.execute(
+            "UPDATE archived SET orig_sha256_provenance=? "
+            "WHERE rfilename='weights.bin'", [good])
+    con.execute(
+        "UPDATE archived SET orig_sha256_provenance=NULL "
+        "WHERE rfilename='weights.bin'")
+    for bad in ("ecfg:x", "arbitrary", ""):
+        _check_rejects(
+            con, "placement_proposals", "derivation_mode", bad,
+            "proposal_id=?", ["hist-opt"])
+    for good in DERIVATION_VALUES:
+        con.execute(
+            "UPDATE placement_proposals SET derivation_mode=? "
+            "WHERE proposal_id='hist-opt'", [good])
+    # historical NULL remains legal
+    con.execute(
+        "UPDATE placement_proposals SET derivation_mode=NULL "
+        "WHERE proposal_id='hist-p'")
+
+
+def _seed_fresh_check_probe_rows(con: sqlite3.Connection) -> None:
+    """Minimal legal rows so CHECK UPDATE probes can run on a fresh catalog."""
+    con.execute(
+        "INSERT OR IGNORE INTO models(repo_id,status,numcopies) "
+        "VALUES('org/m','archived',1)")
+    con.execute(
+        "INSERT OR IGNORE INTO files(repo_id,rfilename,size_bytes,sha256,format) "
+        "VALUES('org/m','weights.bin',100,?,'safetensors')", [_h("a")])
+    con.execute(
+        "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,"
+        "raid_backed,identity_epoch,identity_fingerprint,lifecycle,eligibility,"
+        "write_authority) "
+        "VALUES('d0',?,?, 'primary',0,1,?, 'active','enabled','unknown')",
+        [10**12, 10**12, _h("f")])
+    con.execute(
+        "INSERT OR IGNORE INTO archived(repo_id,rfilename,stored_name,stored_relpath,"
+        "drive_label,orig_sha256,orig_bytes,stored_bytes,compressed,"
+        "orig_sha256_provenance) "
+        "VALUES('org/m','weights.bin','weights.bin','weights.bin','d0',?,100,100,0,"
+        "'hub_confirmed')", [_h("a")])
+    con.execute(
+        "INSERT OR IGNORE INTO plans(plan_id,name,is_active,capacity_mode) "
+        "VALUES('ark','Ark',1,'guaranteed')")
+    con.execute(
+        "INSERT OR IGNORE INTO placement_proposals("
+        "proposal_id,plan_id,based_on_revision,lifecycle,canonical_hash,"
+        "mutation_kind,mutation_args_json,serializer_version,derivation_mode) "
+        "VALUES('hist-opt','ark',0,'draft',?,'adopt_current','[]','1','optimized')",
+        [_h("2")])
+    con.execute(
+        "INSERT OR IGNORE INTO placement_proposals("
+        "proposal_id,plan_id,based_on_revision,lifecycle,canonical_hash,"
+        "mutation_kind,mutation_args_json,serializer_version,derivation_mode) "
+        "VALUES('hist-p','ark',0,'draft',?,'adopt_current','[]','1',NULL)",
+        [_h("1")])
 
 
 def _check_rejects(con, table: str, col: str, bad_value, where_sql: str, where_params):
@@ -547,12 +612,19 @@ def test_m04_wal_snapshot_identity_and_manifest(tmp_path):
         assert _logical_identity(snap_con) == source_identity
     finally:
         _close(snap_con)
-    # Manifest exact validated status already required; re-check presence fields
+    # Independent clone_content_identity vs logical identity of reported clone
+    clone_con = _open_ro(Path(report["clone_catalog_path"]))
+    try:
+        assert report["clone_content_identity"] == _logical_identity(clone_con)
+    finally:
+        _close(clone_con)
+    # Manifest path/size/hash validated in _require_report; pin presence fields
     man = report["manifest"]
     if not isinstance(man, dict):
         man = json.loads(Path(report["manifest_path"]).read_text())
     assert man["source_db"]["present"] is True
-    assert man["source_db"]["sha256"] == _sha_file(path) or True  # may differ from WAL view
+    assert man["source_db"]["size"] == Path(man["source_db"]["path"]).stat().st_size
+    assert man["source_db"]["sha256"] == _sha_file(Path(man["source_db"]["path"]))
     # WAL artifact: present while keeper open
     assert man["source_wal"]["present"] is True
     assert man["source_wal"]["size"] > 0
@@ -562,7 +634,6 @@ def test_m04_wal_snapshot_identity_and_manifest(tmp_path):
 
 def test_m03_source_bytes_untouched(tmp_path):
     data = _seed_frozen_v6(tmp_path / "src")
-    # Close all connections; fingerprint main file
     path = _catalog(data)
     before = _fingerprint(path)
     id_con = _open_ro(path)
@@ -572,9 +643,16 @@ def test_m03_source_bytes_untouched(tmp_path):
         _close(id_con)
     work = tmp_path / "work"
     work.mkdir()
-    _require_report(_rehearse()(data, work, run_id="m03"), source_identity=ident)
-    assert _fingerprint(path)["sha256"] == before["sha256"]
-    assert _fingerprint(path)["size"] == before["size"]
+    report = _require_report(
+        _rehearse()(data, work, run_id="m03"), source_identity=ident)
+    # Entire source fingerprint (main + sidecars presence/size) unchanged
+    assert _fingerprint(path) == before
+    # Independent clone_content_identity vs logical identity of reported clone
+    clone_con = _open_ro(Path(report["clone_catalog_path"]))
+    try:
+        assert report["clone_content_identity"] == _logical_identity(clone_con)
+    finally:
+        _close(clone_con)
 
 
 def test_m05_full_preservation_empty_repair_state_and_semantic_parity(tmp_path):
@@ -607,86 +685,44 @@ def test_m05_full_preservation_empty_repair_state_and_semantic_parity(tmp_path):
             "hub_confirmed": 1, "legacy_unknown": 1,
             "null_digest": 1, "disagreement": 0,
         }
-        # Fresh empty target-schema catalog for semantic compare
-        empty_root = tmp_path / "empty-src"
-        empty_data = empty_root / "v6-data"
-        empty_data.mkdir(parents=True)
-        _apply_frozen_sql(empty_data / "catalog.sqlite")
-        # Minimal legal rows so FK graph can migrate
-        econ = _open_rw(empty_data / "catalog.sqlite")
+        # Fresh comparison catalog: empty dir + ordinary packaged db.connect()
+        # (target schema) — not a second v6 rehearsal.
+        fresh_dir = tmp_path / "fresh-target"
+        fresh_dir.mkdir()
+        db.configure(fresh_dir, fresh_dir / "state")
+        fresh = db.connect()
         try:
-            econ.execute(
-                "INSERT INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
-        finally:
-            _close(econ)
-        ework = tmp_path / "empty-work"
-        ework.mkdir()
-        empty_id = _logical_identity(_open_ro(empty_data / "catalog.sqlite"))
-        # close that identity connection
-        _close(_open_ro(empty_data / "catalog.sqlite"))
-        # recompute properly
-        eic = _open_ro(empty_data / "catalog.sqlite")
-        try:
-            empty_id = _logical_identity(eic)
-        finally:
-            _close(eic)
-        erep = _require_report(
-            _rehearse()(empty_data, ework, run_id="m05-empty"),
-            source_identity=empty_id,
-        )
-        fresh = _open_ro(Path(erep["clone_catalog_path"]))
-        try:
+            fresh_ver = int(fresh.execute("PRAGMA user_version").fetchone()[0])
+            mig_ver = int(dst.execute("PRAGMA user_version").fetchone()[0])
+            assert fresh_ver == mig_ver, (
+                f"fresh and migrated versions must match: {fresh_ver} vs {mig_ver}")
+            assert fresh_ver > FROZEN_V6 and mig_ver > FROZEN_V6, (
+                f"both must exceed frozen v6; fresh={fresh_ver} migrated={mig_ver}")
             for table in ("archived", "placement_proposals", "drive_hash_repair_state"):
                 a = _semantic_shape(dst, table)
                 b = _semantic_shape(fresh, table)
+                assert a["columns"] == b["columns"], table
                 assert a["pk_order"] == b["pk_order"], table
-                assert [c["name"] for c in a["columns"]] == [
-                    c["name"] for c in b["columns"]], table
-                assert [(c["name"], c["notnull"], c["pk"]) for c in a["columns"]] == [
-                    (c["name"], c["notnull"], c["pk"]) for c in b["columns"]], table
                 assert a["fks"] == b["fks"], table
-                # Index names and column sequences
-                assert [(i["name"], [
-                    c["name"] for c in i["cols"]]) for i in a["indexes"]] == [
-                    (i["name"], [c["name"] for c in i["cols"]]) for i in b["indexes"]
-                ], table
-            # CHECK behaviour: reject invalid provenance on both
-            for ccon in (dst, fresh):
-                # need a writable connection
-                pass
+                assert a["indexes"] == b["indexes"], table
         finally:
             _close(fresh)
-        # CHECK behaviour on migrated clone
-        wdst = _open_rw(Path(report["clone_catalog_path"]))
-        try:
-            for bad in ("mirrored", "foo", ""):
-                _check_rejects(
-                    wdst, "archived", "orig_sha256_provenance", bad,
-                    "rfilename=?", ["weights.bin"])
-            for good in PROVENANCE_VALUES:
-                wdst.execute(
-                    "UPDATE archived SET orig_sha256_provenance=? "
-                    "WHERE rfilename='weights.bin'", [good])
-            wdst.execute(
-                "UPDATE archived SET orig_sha256_provenance=NULL "
-                "WHERE rfilename='weights.bin'")
-            for bad in ("ecfg:x", "arbitrary", ""):
-                _check_rejects(
-                    wdst, "placement_proposals", "derivation_mode", bad,
-                    "proposal_id=?", ["hist-opt"])
-            for good in DERIVATION_VALUES:
-                wdst.execute(
-                    "UPDATE placement_proposals SET derivation_mode=? "
-                    "WHERE proposal_id='hist-opt'", [good])
-            # historical NULL remains legal
-            wdst.execute(
-                "UPDATE placement_proposals SET derivation_mode=NULL "
-                "WHERE proposal_id='hist-p'")
-        finally:
-            _close(wdst)
     finally:
         _close(src)
         _close(dst)
+
+    # CHECK probes against both migrated clone and fresh target-schema catalog
+    wdst = _open_rw(Path(report["clone_catalog_path"]))
+    try:
+        _assert_check_probes(wdst)
+    finally:
+        _close(wdst)
+    wfresh = _open_rw(fresh_dir / "catalog.sqlite")
+    try:
+        _seed_fresh_check_probe_rows(wfresh)
+        _assert_check_probes(wfresh)
+    finally:
+        _close(wfresh)
 
 
 def test_m05_app_open_plan_projection_without_bootstrap(tmp_path):
@@ -992,27 +1028,39 @@ def test_m08d_success_rollback_artifact_same_fs_atomic(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     dest = tmp_path / "dest-data"
+    publication_target = dest / "catalog.sqlite"
+    assert not publication_target.exists()
     src_fp = _fingerprint(src)
     report = _require_report(
         _rehearse()(data, work, run_id="p3"), source_identity=ident)
-    pub = _publish()(
-        work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
+    real_replace = os.replace
+    replace_calls: list[tuple[Path, Path]] = []
+
+    def spy_replace(src_p, dst_p):
+        replace_calls.append((Path(src_p), Path(dst_p)))
+        return real_replace(src_p, dst_p)
+
+    with mock.patch("os.replace", side_effect=spy_replace):
+        pub = _publish()(
+            work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
     assert _fingerprint(src) == src_fp
+    # Exact final replacement onto the (previously absent) publication target
+    final_dsts = [dst for _s, dst in replace_calls]
+    assert publication_target in final_dsts or dest in final_dsts, (
+        f"os.replace must land on absent publication target; calls={final_dsts}"
+    )
     assert "rollback_artifact" in pub
     rb = Path(pub["rollback_artifact"])
     assert rb.is_file()
-    # Rollback artifact hashes to retained original or snapshot
-    snap = Path(report["snapshot_path"])
-    rb_hash = _sha_file(rb)
-    assert rb_hash in (_sha_file(src), report["snapshot_sha256"], _sha_file(snap))
-    # Same filesystem
-    assert os.stat(src).st_dev == os.stat(rb).st_dev == os.stat(dest).st_dev or \
-        os.stat(src).st_dev == os.stat(rb).st_dev
-    dest_cat = dest / "catalog.sqlite"
-    if not dest_cat.is_file():
+    # Rollback artifact hash equals rehearsal snapshot hash exactly
+    assert _sha_file(rb) == report["snapshot_sha256"]
+    dest_cat = publication_target if publication_target.is_file() else None
+    if dest_cat is None:
         found = list(dest.rglob("catalog.sqlite"))
         assert found, "publication target missing catalog"
         dest_cat = found[0]
+    # Source, rollback artifact, and published target share st_dev
+    assert os.stat(src).st_dev == os.stat(rb).st_dev == os.stat(dest_cat).st_dev
     dcon = _open_ro(dest_cat)
     try:
         assert int(dcon.execute("PRAGMA user_version").fetchone()[0]) > FROZEN_V6
@@ -1021,8 +1069,7 @@ def test_m08d_success_rollback_artifact_same_fs_atomic(tmp_path):
         }
     finally:
         _close(dcon)
-    assert pub.get("manifest_status") == "validated" or Path(
-        pub.get("manifest_path", "")).is_file()
+    assert pub["manifest_status"] == "validated"
 
 
 def test_m08e_atomic_replace_failure_no_partial_dest(tmp_path):
@@ -1036,14 +1083,19 @@ def test_m08e_atomic_replace_failure_no_partial_dest(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     dest = tmp_path / "dest-fail"
+    publication_target = dest / "catalog.sqlite"
     src_fp = _fingerprint(src)
     report = _require_report(
         _rehearse()(data, work, run_id="p4"), source_identity=ident)
     real_replace = os.replace
+    final_replace_fired = {"yes": False}
 
     def boom(src_p, dst_p):
-        # Only fail the final publication replace onto dest
-        if Path(dst_p) == dest or Path(dst_p).name == dest.name:
+        dst = Path(dst_p)
+        # Final publication replace onto the publication destination
+        if dst == dest or dst == publication_target or (
+                dest in dst.parents and dst.name == "catalog.sqlite"):
+            final_replace_fired["yes"] = True
             raise OSError("injected atomic replace failure")
         return real_replace(src_p, dst_p)
 
@@ -1052,20 +1104,13 @@ def test_m08e_atomic_replace_failure_no_partial_dest(tmp_path):
             _publish()(
                 work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
         assert ei.type is not AssertionError or "export" in str(ei.value)
+    assert final_replace_fired["yes"] is True, (
+        "final publication os.replace hook must fire before failure"
+    )
     assert _fingerprint(src) == src_fp
-    # No successful published catalog at dest
-    if dest.exists():
-        cats = list(dest.rglob("catalog.sqlite"))
-        for c in cats:
-            # Partial staging names may exist; published dest must not be valid migrated
-            con = _open_ro(c)
-            try:
-                # If a catalog appears, it must not be the cutover success
-                pass
-            finally:
-                _close(con)
-        # Destination directory must not be the successful replace target
-        assert not (dest / "catalog.sqlite").is_file() or True
+    # Publication destination must not exist after failed replace
+    assert not publication_target.exists()
+    assert not dest.exists() or not any(dest.rglob("catalog.sqlite"))
     # Snapshot still intact
     assert Path(report["snapshot_path"]).is_file()
     assert _sha_file(Path(report["snapshot_path"])) == report["snapshot_sha256"]
@@ -1125,77 +1170,61 @@ def test_s08_preview_publish_three_modes_and_null_refused(tmp_path):
         _rehearse()(data, work, run_id="s08"), source_identity=ident)
     con = _open_rw(Path(report["clone_catalog_path"]))
     try:
-        # Optimized: real FEASIBLE preview
-        payload_opt = proposal_mod.preview_pure(con, "ark", ("adopt_current", ()))
-        assert payload_opt["header"]["derivation_mode"] == "optimized"
-        out = proposal_mod.publish_draft(con, payload_opt)
-        pid = out.get("proposal_id")
-        assert pid
-        assert con.execute(
-            "SELECT derivation_mode FROM placement_proposals WHERE proposal_id=?",
-            [pid],
-        ).fetchone()[0] == "optimized"
+        # Capture the real assignment function BEFORE any patch — never call a
+        # mocked function from its own side effect.
+        real_build_assignment = proposal_mod._build_assignment
 
-        # state_truncated: production must wire placement derivation into header.
-        # Drive three modes through real preview_pure by controlling only the
-        # assignment/placement inputs preview already consumes. Production must
-        # map placement derivation (including state_truncated) into the header.
-        modes_seen = []
-        for mode, gate in (
-            ("optimized", "FEASIBLE"),
-            ("canonical_fallback", "INFEASIBLE"),
-            ("state_truncated", "FEASIBLE"),
-        ):
-            def _ba(con_, plan_id, mutation, _gate=gate):
-                tasks, files, _g, pol = proposal_mod._build_assignment(
-                    con_, plan_id, mutation)
-                return tasks, files, _gate, pol
+        for mode in ("optimized", "canonical_fallback", "state_truncated"):
+            def _ba(con_, plan_id, mutation, _mode=mode, _real=real_build_assignment):
+                out = _real(con_, plan_id, mutation)
+                if isinstance(out, dict):
+                    tasks = out["tasks"]
+                    files = out["files"]
+                    gate = out.get("gate_b_code") or out.get("gate") or "FEASIBLE"
+                    pol = out.get("policy_gate")
+                else:
+                    tasks, files = out[0], out[1]
+                    gate = out[2] if len(out) > 2 else "FEASIBLE"
+                    pol = out[3] if len(out) > 3 else None
+                if _mode == "canonical_fallback":
+                    gate = "INFEASIBLE"
+                elif _mode in ("optimized", "state_truncated"):
+                    gate = "FEASIBLE"
+                # Locked assignment-result shape: fifth value carries derivation_mode
+                # from placement into preview_pure (structured result also acceptable
+                # in production; contracts pin the fifth-value form).
+                return tasks, files, gate, pol, _mode
 
-            with mock.patch.object(proposal_mod, "_build_assignment", side_effect=_ba):
-                # For state_truncated, production must obtain the mode from placement
-                # (e.g. PlacementResult.derivation_mode). Until that lands, preview
-                # will not emit state_truncated and this assertion fails (expected-red).
-                if mode == "state_truncated":
-                    # Placement truncation path: patch only a placement-facing seam
-                    # that production will consult — not the published header dict.
-                    place = importlib.import_module("modelark.placement")
-                    if hasattr(place, "PlacementResult"):
-                        # If assignment is later routed through place.plan, ensure mode
-                        pass
-                payload = proposal_mod.preview_pure(con, "ark", ("adopt_current", ()))
-            got_mode = payload["header"]["derivation_mode"]
-            modes_seen.append(got_mode)
+            with mock.patch.object(
+                    proposal_mod, "_build_assignment", side_effect=_ba):
+                payload = proposal_mod.preview_pure(
+                    con, "ark", ("adopt_current", ()))
+            assert payload["header"]["derivation_mode"] == mode, (
+                f"preview_pure must surface assignment derivation_mode={mode!r}; "
+                f"got {payload['header'].get('derivation_mode')!r}"
+            )
             published = proposal_mod.publish_draft(con, payload)
             ppid = published.get("proposal_id")
+            assert ppid
             stored = con.execute(
                 "SELECT derivation_mode FROM placement_proposals WHERE proposal_id=?",
                 [ppid],
             ).fetchone()[0]
-            assert stored == got_mode
-            assert stored is not None
-            assert stored in DERIVATION_VALUES
+            assert stored == mode
 
-        assert "optimized" in modes_seen
-        assert "canonical_fallback" in modes_seen
-        assert "state_truncated" in modes_seen, (
-            "preview_pure must emit state_truncated when placement truncates; "
-            f"saw {modes_seen}"
-        )
-
-        # New publish cannot persist NULL derivation_mode
+        # NULL publication must raise identifying invalid/missing derivation mode
         payload_null = proposal_mod.preview_pure(con, "ark", ("adopt_current", ()))
         payload_null["header"]["derivation_mode"] = None
         payload_null["canonical_hash"] = canonical.proposal_hash(
             payload_null["header"], payload_null["tasks"], payload_null["files"])
         with pytest.raises(Exception) as ei:
             proposal_mod.publish_draft(con, payload_null)
-        assert ei.type is not type(None)
-        # hist-p is historical; newest published row must not be null
-        newest = con.execute(
-            "SELECT derivation_mode FROM placement_proposals "
-            "ORDER BY rowid DESC LIMIT 1"
-        ).fetchone()[0]
-        assert newest is not None
+        msg = str(ei.value).lower()
+        assert "derivation" in msg, (
+            "NULL derivation_mode publish must identify invalid/missing "
+            f"derivation mode; got {ei.value!r}"
+        )
+        assert any(k in msg for k in ("invalid", "missing", "null", "required", "mode"))
     finally:
         _close(con)
 
@@ -1239,59 +1268,61 @@ def test_w01_w02_fetch_model_sets_provenance(tmp_path):
                 captured.append(dict(row))
             return real_upsert(c, table, row, pk=pk or [], touch=touch)
 
-        def fake_download(ctx, url, dest_path, *a, **k):
-            Path(dest_path).parent.mkdir(parents=True, exist_ok=True)
-            Path(dest_path).write_bytes(b"12345678")
-            return Path(dest_path)
+        def fake_download(ctx, repo_id, rfilename, download_dir, base, **k):
+            out = Path(download_dir) / Path(rfilename).name
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"12345678")
+            return out
 
-        # Drive fetch_model for hub.bin then nohub.bin via exact manifests
         from modelark import archive_manifest
         ctx = fetch.RunCtx(con=con)
 
         def run_one(rfilename, sha):
+            digest = sha or _h("m")
             mf = (archive_manifest.ManifestFile(
                 rfilename=rfilename, size_bytes=8, sha256=sha,
                 format="safetensors" if sha else "aux", quant="bf16" if sha else None,
                 storage_action="raw",
             ),)
+
+            def fake_publish(dest_p, staged, target, digest_p, rfn, annex, **kw):
+                target = Path(target)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if Path(staged).resolve() != target.resolve():
+                    os.replace(str(staged), str(target))
+                return target
+
             with mock.patch.object(db, "upsert", side_effect=spy_upsert), \
-                    mock.patch.object(fetch, "_download_shard", side_effect=fake_download), \
-                    mock.patch.object(fetch, "_publish_staged",
-                                      side_effect=lambda *a, **k: Path(a[1]) if a else Path(".")), \
+                    mock.patch.object(
+                        fetch, "_download_shard", side_effect=fake_download), \
+                    mock.patch.object(
+                        fetch, "_publish_staged", side_effect=fake_publish), \
                     mock.patch.object(fetch, "_annex_add", return_value=None), \
                     mock.patch.object(fetch, "_annex_metadata", return_value=None), \
                     mock.patch.object(fetch, "_sweep_incomplete", return_value=0), \
-                    mock.patch.object(fetch.compress, "sha256_file",
-                                      return_value=sha or _h("m")):
-                # _publish_staged signature varies — broader mock
-                with mock.patch.object(
-                    fetch, "_publish_staged",
-                    side_effect=lambda dest, stored, final, *rest, **kw: Path(final)
-                    if not callable(final) else stored,
-                ):
-                    try:
-                        fetch.fetch_model(
-                            ctx, "org/m", dest, "d0", False,
-                            {"max_compress_ram_gb": 4, "threads": 1},
-                            manifest=mf,
-                        )
-                    except Exception:
-                        # May still fail on path details; require captured upsert
-                        pass
+                    mock.patch.object(
+                        fetch.compress, "sha256_file", return_value=digest), \
+                    mock.patch.object(
+                        fetch.compress, "should_compress", return_value=False):
+                # Must complete normally — no broad except pass
+                result = fetch.fetch_model(
+                    ctx, "org/m", dest, "d0", False,
+                    {"max_compress_ram_gb": 4, "threads": 1},
+                    manifest=mf,
+                )
+                assert result["files"] == 1
 
         run_one("hub.bin", _h("n"))
         run_one("nohub.bin", None)
 
-        # Prefer rows written through upsert
         by_name = {r.get("rfilename"): r for r in captured}
-        if "hub.bin" not in by_name or "nohub.bin" not in by_name:
-            raise AssertionError(
-                "fetch_model must reach db.upsert for archived ingest rows "
-                f"(captured {list(by_name)})"
-            )
+        assert "hub.bin" in by_name and "nohub.bin" in by_name, (
+            "fetch_model must reach db.upsert for both archived ingest rows "
+            f"(captured {list(by_name)})"
+        )
         assert by_name["hub.bin"].get("orig_sha256_provenance") == "hub_confirmed"
         assert by_name["nohub.bin"].get("orig_sha256_provenance") == "ingestion_computed"
-        # Persisted
+        # Persisted provenance
         assert con.execute(
             "SELECT orig_sha256_provenance FROM archived WHERE rfilename='hub.bin'"
         ).fetchone()[0] == "hub_confirmed"
@@ -1595,9 +1626,6 @@ def test_w11_epoch2_needs_refetch_epoch1_unchanged(tmp_path):
     try:
         repair(con, "d0", identity_epoch=1, identity_fingerprint=_h("f"))
         assert _repair_status(con, "d0", 1) == "complete"
-        e1_rows = list(con.execute(
-            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
-            "WHERE drive_label='d0' ORDER BY rfilename"))
         e1_state = list(con.execute(
             "SELECT * FROM drive_hash_repair_state WHERE drive_label='d0' "
             "AND identity_epoch=1"))
@@ -1611,11 +1639,7 @@ def test_w11_epoch2_needs_refetch_epoch1_unchanged(tmp_path):
         rep2 = repair(con, "d0", identity_epoch=2, identity_fingerprint=_h("F"))
         assert (rep2.get("status") or _repair_status(con, "d0", 2)) == "needs_refetch"
         assert _repair_status(con, "d0", 1) == "complete"
-        assert list(con.execute(
-            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
-            "WHERE drive_label='d0' ORDER BY rfilename"
-        )) != e1_rows or True  # shard changed intentionally
-        # epoch1 state row unchanged
+        # Exact epoch-1 state row unchanged after epoch-2 needs_refetch work
         assert list(con.execute(
             "SELECT * FROM drive_hash_repair_state WHERE drive_label='d0' "
             "AND identity_epoch=1")) == e1_state
