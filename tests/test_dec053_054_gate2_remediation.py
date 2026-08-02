@@ -604,20 +604,42 @@ def test_connect_refuses_existing_populated_v0_unchanged(tmp_path):
 
 
 def test_repair_identity_race_rereads_under_lock(tmp_path):
-    """Identity change immediately before lock: repair must validate new identity."""
+    """Proxy-hook race: identity changes immediately before BEGIN IMMEDIATE."""
     con = _migrated_clone(tmp_path)
     try:
+        db_path = Path(con.execute("PRAGMA database_list").fetchone()[2])
         before = list(con.execute(
             "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
             "ORDER BY rfilename"))
-        # Simulate concurrent mutation racing just before lock acquisition by
-        # changing identity after caller syntax validation would pass, then
-        # invoking repair which re-reads under BEGIN IMMEDIATE.
-        con.execute(
-            "UPDATE drives SET identity_epoch=9, identity_fingerprint=? "
-            "WHERE drive_label='d0'", [_h("9")])
+        flipped = {"done": False}
+
+        class _RaceCon:
+            """Wrap the real connection; fire concurrent identity flip on BEGIN."""
+
+            def __init__(self, real):
+                self._real = real
+
+            def execute(self, sql, *a, **k):
+                s = str(sql).strip().upper()
+                if (not flipped["done"]) and s.startswith("BEGIN"):
+                    flipped["done"] = True
+                    other = sqlite3.connect(str(db_path), isolation_level=None)
+                    try:
+                        other.execute(
+                            "UPDATE drives SET identity_epoch=9, "
+                            "identity_fingerprint=? WHERE drive_label='d0'",
+                            [_h("9")],
+                        )
+                    finally:
+                        other.close()
+                return self._real.execute(sql, *a, **k)
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
         rep = hash_repair.run_explicit_drive_repair(
-            con, "d0", identity_epoch=1, identity_fingerprint=_h("f"))
+            _RaceCon(con), "d0", identity_epoch=1, identity_fingerprint=_h("f"))
+        assert flipped["done"] is True
         assert rep["status"] == "halted"
         detail = (rep.get("detail") or "").lower()
         assert "epoch" in detail or "fingerprint" in detail or "mismatch" in detail
@@ -629,45 +651,55 @@ def test_repair_identity_race_rereads_under_lock(tmp_path):
         con.close()
 
 
-def test_repair_non_hex_and_matching_non_hex_never_authorize(tmp_path):
-    """Caller non-hex refused; matching non-hex never authorizes archive evidence."""
+def test_repair_matching_nonhex_with_unresolved_never_completes(tmp_path):
+    """Matching non-hex fingerprints with unresolved work must halt, not complete."""
     con = _migrated_clone(tmp_path)
     try:
-        before = list(con.execute(
-            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
-            "ORDER BY rfilename"))
-        # Caller non-hex vs stored hex → mismatch halt (Gate-1 W17 class).
         bad = "Z" * 64
         assert not hash_repair._valid_identity_fingerprint(bad)
-        rep = hash_repair.run_explicit_drive_repair(
-            con, "d0", identity_epoch=1, identity_fingerprint=bad)
-        assert rep["status"] == "halted"
-        assert list(con.execute(
-            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
-            "ORDER BY rfilename")) == before
-
-        # Matching non-hex on both sides never authorizes evidence (no applied).
         con.execute(
             "UPDATE drives SET identity_fingerprint=? WHERE drive_label='d0'", [bad])
-        # Leave unresolved work so a false authorization would apply.
         con.execute(
             "UPDATE archived SET orig_sha256=NULL, annex_key=?, compressed=0, "
             "orig_sha256_provenance=NULL WHERE rfilename='shard.bin'",
             [f"SHA256E-s50--{_h('d')}"])
-        before2 = list(con.execute(
+        before = list(con.execute(
             "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
             "ORDER BY rfilename"))
-        rep2 = hash_repair.run_explicit_drive_repair(
+        rep = hash_repair.run_explicit_drive_repair(
             con, "d0", identity_epoch=1, identity_fingerprint=bad)
-        assert rep2.get("applied", 0) == 0
-        assert rep2["status"] != "complete"
+        assert rep["status"] == "halted"
+        assert rep.get("applied", 0) == 0
         assert list(con.execute(
             "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
-            "ORDER BY rfilename")) == before2
-        # Missing still refuses with HashRepairError.
-        with pytest.raises(hash_repair.HashRepairError):
-            hash_repair.run_explicit_drive_repair(
-                con, "d0", identity_epoch=1, identity_fingerprint=None)
+            "ORDER BY rfilename")) == before
+    finally:
+        con.close()
+
+
+def test_repair_matching_nonhex_zero_unresolved_never_completes(tmp_path):
+    """Matching non-hex with zero unresolved rows must halt, not complete."""
+    con = _migrated_clone(tmp_path)
+    try:
+        bad = "Z" * 64
+        # Resolve all digests first so unresolved count is zero.
+        hash_repair.run_explicit_drive_repair(
+            con, "d0", identity_epoch=1, identity_fingerprint=_h("f"))
+        assert con.execute(
+            "SELECT count(*) FROM archived WHERE drive_label='d0' AND orig_sha256 IS NULL"
+        ).fetchone()[0] == 0
+        con.execute(
+            "UPDATE drives SET identity_fingerprint=? WHERE drive_label='d0'", [bad])
+        before = list(con.execute(
+            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
+            "ORDER BY rfilename"))
+        rep = hash_repair.run_explicit_drive_repair(
+            con, "d0", identity_epoch=1, identity_fingerprint=bad)
+        assert rep["status"] == "halted"
+        assert rep["status"] != "complete"
+        assert list(con.execute(
+            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
+            "ORDER BY rfilename")) == before
     finally:
         con.close()
 
@@ -773,3 +805,87 @@ def test_publish_refuses_source_schema_drift_since_snapshot(tmp_path):
     msg = str(ei.value).lower()
     assert "schema" in msg or "drift" in msg or "source" in msg
     assert not (dest / "catalog.sqlite").exists()
+
+
+# ---------------------------------------------------------------------------
+# Remediation 3 — staging seam, WAL checkpoint, remigration validation
+# ---------------------------------------------------------------------------
+
+
+def test_publish_refuses_clone_mutation_at_staging_seam(tmp_path):
+    """Mutating the staged catalog at validation seam must refuse; dest absent."""
+    data, report, work = _rehearse_ok(tmp_path)
+    dest = tmp_path / "dest-seam"
+    real_metrics = db._catalog_snapshot_metrics
+    mutated = {"yes": False}
+
+    def evil_metrics(path):
+        p = Path(path)
+        if (not mutated["yes"]) and "publish-staging" in p.name:
+            mutated["yes"] = True
+            c = sqlite3.connect(str(p), isolation_level=None)
+            try:
+                c.execute(
+                    "INSERT INTO models(repo_id,status,numcopies) "
+                    "VALUES('org/stage-tamper','discovered',1)")
+            finally:
+                c.close()
+        return real_metrics(path)
+
+    with mock.patch.object(db, "_catalog_snapshot_metrics", side_effect=evil_metrics):
+        with pytest.raises(RuntimeError) as ei:
+            db.publish_provenance_migration(
+                work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
+    assert mutated["yes"] is True
+    msg = str(ei.value).lower()
+    assert any(k in msg for k in (
+        "staged", "identity", "remigrat", "row", "clone", "logical"))
+    assert not (dest / "catalog.sqlite").exists()
+
+
+def test_publish_succeeds_after_source_wal_checkpoint_without_logical_change(tmp_path):
+    """WAL checkpoint/truncate after rehearse must not block publication."""
+    from tests.test_dec053_054_gate1_contracts import (
+        _seed_frozen_v6, _catalog, _logical_identity, _close, _open_ro,
+        _require_report,
+    )
+    data = _seed_frozen_v6(tmp_path / "src", enable_wal=True)
+    path = _catalog(data)
+    # Leave a committed WAL-resident marker, then rehearse.
+    keeper = sqlite3.connect(str(path), isolation_level=None)
+    keeper.execute("PRAGMA journal_mode=WAL")
+    keeper.execute(
+        "INSERT INTO models(repo_id,status,numcopies) "
+        "VALUES('org/wal-pub','discovered',1)")
+    idc = _open_ro(path)
+    try:
+        ident = _logical_identity(idc)
+    finally:
+        _close(idc)
+    work = tmp_path / "work"
+    work.mkdir()
+    report = _require_report(
+        db.rehearse_provenance_migration(data, work, run_id="wal-pub"),
+        source_identity=ident,
+    )
+    _close(keeper)
+    # Checkpoint/truncate physical WAL without logical content change.
+    src = Path(report["source_catalog"])
+    c = sqlite3.connect(str(src), isolation_level=None)
+    try:
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        c.close()
+    dest = tmp_path / "dest-wal"
+    pub = db.publish_provenance_migration(
+        work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
+    assert pub["status"] == "ok"
+    assert (dest / "catalog.sqlite").is_file()
+    dcon = sqlite3.connect(
+        f"file:{(dest / 'catalog.sqlite').resolve().as_posix()}?mode=ro", uri=True)
+    try:
+        assert dcon.execute(
+            "SELECT 1 FROM models WHERE repo_id='org/wal-pub'").fetchone()
+        assert int(dcon.execute("PRAGMA user_version").fetchone()[0]) > 6
+    finally:
+        dcon.close()

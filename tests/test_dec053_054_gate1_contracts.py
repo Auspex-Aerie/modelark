@@ -404,10 +404,11 @@ def _seed_frozen_v6(
             "INSERT INTO files(repo_id,rfilename,size_bytes,sha256,format) "
             "VALUES('org/m','shard.bin',50,NULL,'safetensors')")
         for lab, fp, role in (
+            # Fingerprints must be 64-hex (DEC-053/054 repair identity).
             ("d0", _h("f"), "primary"),
-            ("d1", _h("g"), "replica"),
-            ("d-absent", _h("h"), "primary"),
-            ("d-lost-empty", _h("i"), "primary"),
+            ("d1", _h("e"), "replica"),
+            ("d-absent", _h("b"), "primary"),
+            ("d-lost-empty", _h("c"), "primary"),
         ):
             con.execute(
                 "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
@@ -1553,7 +1554,7 @@ def test_w15_blocked_absent(tmp_path):
     con = _open_rw(Path(report["clone_catalog_path"]))
     try:
         rep = repair(
-            con, "d-absent", identity_epoch=1, identity_fingerprint=_h("h"),
+            con, "d-absent", identity_epoch=1, identity_fingerprint=_h("b"),
             archive_resolver=lambda *a, **k: None)
         assert (rep.get("status") or _repair_status(con, "d-absent", 1)) == "blocked_absent"
     finally:
@@ -1719,7 +1720,7 @@ def test_w14_lost_drive_zero_archives_no_repair_obligation(tmp_path):
             return Path("/no/such/archive")
 
         rep = repair(
-            con, "d-lost-empty", identity_epoch=1, identity_fingerprint=_h("i"),
+            con, "d-lost-empty", identity_epoch=1, identity_fingerprint=_h("c"),
             archive_resolver=resolver)
         # No obligation: no state row required, or explicit no-op status without I/O
         st = rep.get("status") or _repair_status(con, "d-lost-empty", 1)

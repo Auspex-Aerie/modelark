@@ -1358,16 +1358,21 @@ def rehearse_provenance_migration(
     return report
 
 
-def _schema_shape(con: sqlite3.Connection) -> dict:
-    """Semantic schema shape: tables, columns/CHECK SQL, FKs, indexes, triggers, views."""
+def _full_catalog_identity(con: sqlite3.Connection) -> dict:
+    """Full semantic + row identity for publication comparison."""
     tables = sorted(
         r[0] for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type='table' "
             "AND name NOT LIKE 'sqlite_%'"
         )
     )
-    shape: dict = {"tables": {}, "indexes": [], "triggers": [], "views": []}
+    table_defs: dict = {}
+    rows: dict = {}
     for table in tables:
+        create_sql = (con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            [table],
+        ).fetchone() or [None])[0]
         cols = [
             {
                 "name": r[1], "type": (r[2] or "").upper(),
@@ -1382,125 +1387,139 @@ def _schema_shape(con: sqlite3.Connection) -> dict:
             }
             for r in con.execute(f'PRAGMA foreign_key_list("{table}")')
         ]
-        create_sql = (con.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
-            [table],
-        ).fetchone() or [None])[0]
-        shape["tables"][table] = {
+        col_order = ", ".join(f'"{c["name"]}"' for c in cols) if cols else "1"
+        data = list(con.execute(
+            f'SELECT {col_order} FROM "{table}" ORDER BY {col_order}'
+            if cols else f'SELECT 1 FROM "{table}"'
+        ))
+        table_defs[table] = {
+            "create_sql": create_sql,
             "columns": cols,
             "fks": sorted(fks, key=lambda x: (x["id"], x["seq"])),
-            "create_sql": create_sql,
         }
+        rows[table] = [tuple(r) for r in data]
+    indexes = []
     for name, sql, tbl in con.execute(
         "SELECT name, sql, tbl_name FROM sqlite_master WHERE type='index' "
         "AND name NOT LIKE 'sqlite_%' ORDER BY name"
     ):
-        info = list(con.execute(f'PRAGMA index_info("{name}")')) if name else []
-        ilist = list(con.execute(f'PRAGMA index_list("{tbl}")')) if tbl else []
-        meta = next((r for r in ilist if r[1] == name), None)
-        shape["indexes"].append({
-            "name": name, "tbl": tbl, "sql": sql,
-            "unique": int(meta[2]) if meta else None,
-            "origin": meta[3] if meta else None,
-            "partial": int(meta[4]) if meta else None,
-            "columns": [r[2] for r in info if r[2] is not None],
-        })
-    for name, sql in con.execute(
-        "SELECT name, sql FROM sqlite_master WHERE type='trigger' ORDER BY name"
-    ):
-        shape["triggers"].append({"name": name, "sql": sql})
-    for name, sql in con.execute(
-        "SELECT name, sql FROM sqlite_master WHERE type='view' ORDER BY name"
-    ):
-        shape["views"].append({"name": name, "sql": sql})
-    return shape
+        indexes.append({"name": name, "tbl": tbl, "sql": sql})
+    triggers = [
+        {"name": n, "sql": s}
+        for n, s in con.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='trigger' ORDER BY name"
+        )
+    ]
+    views = [
+        {"name": n, "sql": s}
+        for n, s in con.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='view' ORDER BY name"
+        )
+    ]
+    return {
+        "user_version": int(con.execute("PRAGMA user_version").fetchone()[0]),
+        "tables": table_defs,
+        "rows": rows,
+        "indexes": indexes,
+        "triggers": triggers,
+        "views": views,
+        "logical_identity": _logical_identity(con),
+    }
 
 
-def _schema_shape_file(path: Path) -> dict:
+def _full_catalog_identity_file(path: Path) -> dict:
     con = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)
     try:
         con.execute("PRAGMA query_only=ON")
-        return _schema_shape(con)
+        return _full_catalog_identity(con)
     finally:
         con.close()
 
 
-def _assert_clone_target_schema_parity(clone_path: Path) -> None:
-    """Require clone semantic schema parity with a fresh packaged v7 catalog."""
-    import tempfile
-    global CATALOG_DIR, DB_PATH, STATE_DIR
-    with tempfile.TemporaryDirectory(prefix="modelark-v7-shape-") as tmp:
-        tdir = Path(tmp)
-        old = CATALOG_DIR, DB_PATH, STATE_DIR
+def _remigrate_snapshot_to_expected(snapshot_path: Path, work: Path) -> Path:
+    """Deterministically remigrate a disposable copy of the rehearsal snapshot."""
+    expected = work / "expected-remigrate" / "catalog.sqlite"
+    expected.parent.mkdir(parents=True, exist_ok=True)
+    if expected.exists():
+        expected.unlink()
+    # Consistent copy of snapshot.
+    src = sqlite3.connect(f"file:{snapshot_path.resolve().as_posix()}?mode=ro", uri=True)
+    try:
+        dst = sqlite3.connect(str(expected), isolation_level=None)
         try:
-            configure(tdir, tdir / "state")
-            fcon = connect()
-            try:
-                fresh_shape = _schema_shape(fcon)
-                fresh_ver = int(fcon.execute("PRAGMA user_version").fetchone()[0])
-            finally:
-                fcon.close()
+            src.backup(dst)
         finally:
-            CATALOG_DIR, DB_PATH, STATE_DIR = old
+            dst.close()
+    finally:
+        src.close()
+    con = sqlite3.connect(str(expected), isolation_level=None)
+    try:
+        con.execute("PRAGMA foreign_keys=OFF")
+        ver = int(con.execute("PRAGMA user_version").fetchone()[0])
+        if ver < _EXECUTION_CONFIG_HASH_SCHEMA_VERSION:
+            _migrate(con, ver, backup_existing=False)
+            ver = int(con.execute("PRAGMA user_version").fetchone()[0])
+        if ver < _PROVENANCE_SCHEMA_VERSION:
+            _migrate_provenance_v7(con, backup_existing=False)
+        con.execute("PRAGMA foreign_keys=ON")
+        _validate_migrated_clone(con)
+    finally:
+        con.close()
+    return expected
 
-        clone_shape = _schema_shape_file(clone_path)
-        if fresh_ver != _SCHEMA_VERSION:
+
+def _assert_publication_matches_expected(artifact: Path, expected: Path) -> None:
+    """Full semantic + row identity between staged artifact and remigrated snapshot."""
+    a = _full_catalog_identity_file(artifact)
+    b = _full_catalog_identity_file(expected)
+    if a["user_version"] != b["user_version"]:
+        raise RuntimeError(
+            f"publication refused: staged version {a['user_version']} != "
+            f"expected remigrated {b['user_version']}"
+        )
+    if a["logical_identity"] != b["logical_identity"]:
+        raise RuntimeError(
+            "publication refused: staged logical identity differs from "
+            "deterministic remigration of the rehearsal snapshot"
+        )
+    if set(a["tables"]) != set(b["tables"]):
+        raise RuntimeError(
+            "publication refused: staged tables differ from remigrated expectation"
+        )
+    for table in sorted(b["tables"]):
+        if a["tables"][table]["create_sql"] != b["tables"][table]["create_sql"]:
             raise RuntimeError(
-                f"publication refused: fresh target schema version {fresh_ver} "
-                f"!= build v{_SCHEMA_VERSION}"
+                f"publication refused: staged CREATE for {table} differs from "
+                "remigrated expectation (CHECK/table definition)"
             )
-        if set(clone_shape["tables"]) != set(fresh_shape["tables"]):
+        if a["tables"][table]["columns"] != b["tables"][table]["columns"]:
             raise RuntimeError(
-                "publication refused: clone tables differ from v7 target schema "
-                f"(clone={sorted(clone_shape['tables'])} "
-                f"target={sorted(fresh_shape['tables'])})"
+                f"publication refused: staged columns for {table} differ from "
+                "remigrated expectation"
             )
-        for table in sorted(fresh_shape["tables"]):
-            a = clone_shape["tables"][table]
-            b = fresh_shape["tables"][table]
-            if a["columns"] != b["columns"]:
-                raise RuntimeError(
-                    f"publication refused: clone column shape for {table} "
-                    "differs from v7 target"
-                )
-            if a["fks"] != b["fks"]:
-                raise RuntimeError(
-                    f"publication refused: clone FK shape for {table} "
-                    "differs from v7 target"
-                )
-            a_sql = (a["create_sql"] or "").upper()
-            b_sql = (b["create_sql"] or "").upper()
-            # Require every CHECK-related token present on the target CREATE also
-            # appear on the clone CREATE for the same table.
-            for token in (
-                "ORIG_SHA256_PROVENANCE", "HUB_CONFIRMED", "INGESTION_COMPUTED",
-                "ANNEX_KEY", "ARCHIVE-HEAD-BLOB", "LEGACY_UNKNOWN",
-                "DERIVATION_MODE", "OPTIMIZED", "STATE_TRUNCATED",
-                "CANONICAL_FALLBACK", "BLOCKED_ABSENT", "NEEDS_REFETCH",
-            ):
-                if token in b_sql and token not in a_sql:
-                    raise RuntimeError(
-                        f"publication refused: clone CREATE for {table} "
-                        f"missing target CHECK/token {token}"
-                    )
-        def _idx_key(i):
-            return (i["name"], i["unique"], i["origin"], i["partial"],
-                    tuple(i["columns"] or []))
-        if sorted(_idx_key(i) for i in clone_shape["indexes"]) != sorted(
-                _idx_key(i) for i in fresh_shape["indexes"]):
+        if a["tables"][table]["fks"] != b["tables"][table]["fks"]:
             raise RuntimeError(
-                "publication refused: clone indexes differ from v7 target schema"
+                f"publication refused: staged FKs for {table} differ from "
+                "remigrated expectation"
             )
-        if {t["name"] for t in clone_shape["triggers"]} != {
-                t["name"] for t in fresh_shape["triggers"]}:
+        if a["rows"].get(table) != b["rows"].get(table):
             raise RuntimeError(
-                "publication refused: clone triggers differ from v7 target schema"
+                f"publication refused: staged row identity for {table} differs "
+                "from remigrated expectation"
             )
-        if {v["name"] for v in clone_shape["views"]} != {
-                v["name"] for v in fresh_shape["views"]}:
-            raise RuntimeError(
-                "publication refused: clone views differ from v7 target schema"
-            )
+    # Complete index SQL including partial predicates (sorted by name).
+    if a["indexes"] != b["indexes"]:
+        raise RuntimeError(
+            "publication refused: staged index SQL differs from remigrated expectation"
+        )
+    if a["triggers"] != b["triggers"]:
+        raise RuntimeError(
+            "publication refused: staged trigger SQL differs from remigrated expectation"
+        )
+    if a["views"] != b["views"]:
+        raise RuntimeError(
+            "publication refused: staged view SQL differs from remigrated expectation"
+        )
 
 
 def _resolve_rehearsal_layout(work_dir: Path) -> tuple[Path, dict, Path, Path, Path, Path]:
@@ -1596,6 +1615,17 @@ def _resolve_rehearsal_layout(work_dir: Path) -> tuple[Path, dict, Path, Path, P
         raise RuntimeError(
             "publication refused: manifest run_id disagrees with report"
         )
+    # On-disk manifest must agree with the report's embedded rehearsal manifest.
+    embedded = report.get("manifest")
+    if not isinstance(embedded, dict):
+        raise RuntimeError(
+            "publication refused: report embedded manifest missing or not an object"
+        )
+    if man != embedded:
+        raise RuntimeError(
+            "publication refused: on-disk manifest disagrees with report "
+            "embedded rehearsal manifest"
+        )
     src_from_report = Path(report.get("source_catalog") or "").resolve()
     src_from_man = Path((man.get("source_catalog") or "")).resolve() if man.get(
         "source_catalog") else None
@@ -1612,20 +1642,18 @@ def _resolve_rehearsal_layout(work_dir: Path) -> tuple[Path, dict, Path, Path, P
         raise RuntimeError(
             "publication refused: manifest source_db.path disagrees with report"
         )
-    # Manifest entry presence/hash consistency for source_db at minimum.
+    # Validate recorded path identity as rehearsal evidence only — do NOT rehash
+    # the live source file against source_db.sha256/size (WAL checkpoint may
+    # change physical representation without logical change).
     if src_db_entry.get("present") is True:
-        p = Path(src_db_entry["path"])
+        p = Path(src_db_entry.get("path") or "")
         if not p.is_file() or p.resolve() != src_from_report:
             raise RuntimeError(
                 "publication refused: manifest source_db path inconsistent"
             )
-        if int(src_db_entry.get("size") or -1) != p.stat().st_size:
+        if not src_db_entry.get("sha256") or len(str(src_db_entry.get("sha256"))) != 64:
             raise RuntimeError(
-                "publication refused: manifest source_db size inconsistent"
-            )
-        if src_db_entry.get("sha256") != _sha256_file(p):
-            raise RuntimeError(
-                "publication refused: manifest source_db sha256 inconsistent"
+                "publication refused: manifest source_db lacks rehearsal sha256 evidence"
             )
     return (
         run_root, report, expected_manifest, expected_snapshot,
@@ -1642,11 +1670,11 @@ def publish_provenance_migration(
 ) -> dict:
     """Operator-authorized publication of a rehearsed clone (DEC-059).
 
-    Treats the rehearsal report as untrusted: strict contained layout + manifest
-    cross-check, recomputed snapshot hash and live source/clone metrics, source
-    schema-drift detection, and clone semantic parity with the packaged v7 target
-    — all under a retained BEGIN IMMEDIATE on the source before any rollback
-    artifact, staging, or final os.replace.
+    Report is untrusted. Under a retained source BEGIN IMMEDIATE: revalidate
+    source vs consistent snapshot (logical identity/version/integrity/FK/schema),
+    build staging via consistent SQLite backup of the clone while holding a
+    clone write lock, validate the staged artifact against a deterministic
+    remigration of the snapshot, then atomic replace.
     """
     dest_dir = Path(dest_dir)
     if not confirm_stopped or str(confirm_stopped).strip() != "MODELARK-STOPPED":
@@ -1672,13 +1700,14 @@ def publish_provenance_migration(
             "will not overwrite"
         )
 
-    # Snapshot schema shape of source for drift detection (pre-lock RO is fine;
-    # re-checked under lock via content identity + version).
-    snapshot_schema = _schema_shape_file(snapshot_path)
+    # Deterministic remigration of the rehearsal snapshot (expected publication).
+    expected_path = _remigrate_snapshot_to_expected(
+        snapshot_path, work_dir / ".publication-expected")
 
     # Hold BEGIN IMMEDIATE on the source from revalidation through final replace.
     source_lock = sqlite3.connect(
         str(source_catalog), isolation_level=None, timeout=0.05)
+    clone_lock: sqlite3.Connection | None = None
     staging: Path | None = None
     try:
         try:
@@ -1689,12 +1718,14 @@ def publish_provenance_migration(
                 f"(quiescence proof failed): {exc}"
             ) from exc
 
-        # Recompute snapshot SHA and live source/clone metrics (report untrusted).
         live_snap_sha = _sha256_file(snapshot_path)
         if live_snap_sha != report.get("snapshot_sha256"):
             raise RuntimeError(
                 "publication refused: snapshot SHA-256 does not match rehearsal report"
             )
+
+        # Source vs consistent snapshot (logical — not physical main-file hash).
+        snap_metrics = _catalog_snapshot_metrics(snapshot_path)
         src_now = _catalog_snapshot_metrics(source_catalog)
         if src_now["integrity"] != "ok":
             raise RuntimeError(
@@ -1705,48 +1736,97 @@ def publish_provenance_migration(
                 "publication refused: source foreign-key violations "
                 f"{src_now['foreign_key_violations'][:12]}"
             )
+        if src_now["user_version"] != snap_metrics["user_version"]:
+            raise RuntimeError(
+                "publication refused: source user_version differs from snapshot "
+                f"({src_now['user_version']} != {snap_metrics['user_version']})"
+            )
         if src_now["user_version"] != report.get("source_user_version"):
             raise RuntimeError(
                 "publication refused: source user_version changed since rehearsal "
                 f"({src_now['user_version']} != {report.get('source_user_version')})"
             )
+        if src_now["content_identity"] != snap_metrics["content_identity"]:
+            raise RuntimeError(
+                "publication refused: source logical identity differs from "
+                "rehearsal snapshot"
+            )
         if src_now["content_identity"] != report.get("source_content_identity"):
             raise RuntimeError(
                 "publication refused: source logical identity changed since rehearsal"
             )
-        # Source schema drift since snapshot (columns/CHECKs/FKs/indexes/triggers/views).
-        src_schema_now = _schema_shape(source_lock)
-        if src_schema_now != snapshot_schema:
+        # Schema: compare source to snapshot (full CREATE/index/trigger/view SQL).
+        src_id = _full_catalog_identity(source_lock)
+        snap_id = _full_catalog_identity_file(snapshot_path)
+        if src_id["tables"] != snap_id["tables"] or src_id["indexes"] != snap_id[
+                "indexes"] or src_id["triggers"] != snap_id["triggers"] or src_id[
+                "views"] != snap_id["views"]:
             raise RuntimeError(
                 "publication refused: source schema drifted since rehearsal snapshot"
             )
 
-        clone_now = _catalog_snapshot_metrics(clone_path)
-        if clone_now["integrity"] != "ok":
+        # Prevent clone writers while staging: exclusive lock retained across
+        # COMMIT (locking_mode=EXCLUSIVE) so backup API can run without a
+        # mid-transaction hang and without concurrent writers.
+        clone_lock = sqlite3.connect(str(clone_path), isolation_level=None, timeout=0.05)
+        try:
+            clone_lock.execute("PRAGMA locking_mode=EXCLUSIVE")
+            clone_lock.execute("BEGIN EXCLUSIVE")
+            clone_lock.execute("COMMIT")
+        except sqlite3.OperationalError as exc:
             raise RuntimeError(
-                f"publication refused: clone integrity not ok: {clone_now['integrity']}"
-            )
-        if clone_now["foreign_key_violations"]:
+                "publication refused: clone catalog is busy (cannot stage safely): "
+                f"{exc}"
+            ) from exc
+
+        # Stage via consistent SQLite backup of the exclusively locked clone.
+        staging = dest_dir / ".catalog.sqlite.publish-staging"
+        if staging.exists():
+            staging.unlink()
+        stage_con = sqlite3.connect(str(staging), isolation_level=None)
+        try:
+            clone_lock.backup(stage_con)
+        finally:
+            stage_con.close()
+        if os.stat(staging).st_dev != os.stat(dest_dir).st_dev:
             raise RuntimeError(
-                "publication refused: clone foreign-key violations "
-                f"{clone_now['foreign_key_violations'][:12]}"
+                "publication refused: staging and destination are on different "
+                "filesystems"
             )
-        if clone_now["user_version"] != report.get("clone_user_version"):
+        if os.stat(source_catalog).st_dev != os.stat(staging).st_dev:
             raise RuntimeError(
-                "publication refused: clone user_version changed since rehearsal "
-                f"({clone_now['user_version']} != {report.get('clone_user_version')})"
+                "publication refused: source and destination are on different "
+                "filesystems"
             )
-        if clone_now["content_identity"] != report.get("clone_content_identity"):
+
+        # Validate the exact staged artifact (integrity/FK/version/identity/schema).
+        st_metrics = _catalog_snapshot_metrics(staging)
+        if st_metrics["integrity"] != "ok":
             raise RuntimeError(
-                "publication refused: clone logical identity changed since rehearsal "
-                "(modified clone)"
+                f"publication refused: staged catalog integrity not ok: "
+                f"{st_metrics['integrity']}"
             )
-        if int(clone_now["user_version"]) <= int(src_now["user_version"]):
+        if st_metrics["foreign_key_violations"]:
             raise RuntimeError(
-                "publication refused: clone is not a migrated successor of source"
+                "publication refused: staged catalog foreign-key violations "
+                f"{st_metrics['foreign_key_violations'][:12]}"
             )
-        # Independent clone semantic parity with packaged v7 target schema.
-        _assert_clone_target_schema_parity(clone_path)
+        if st_metrics["user_version"] != report.get("clone_user_version"):
+            raise RuntimeError(
+                "publication refused: staged user_version differs from rehearsal "
+                f"({st_metrics['user_version']} != {report.get('clone_user_version')})"
+            )
+        if int(st_metrics["user_version"]) <= int(src_now["user_version"]):
+            raise RuntimeError(
+                "publication refused: staged catalog is not a migrated successor "
+                "of source"
+            )
+        if st_metrics["content_identity"] != report.get("clone_content_identity"):
+            raise RuntimeError(
+                "publication refused: staged logical identity differs from "
+                "rehearsal clone (modified at staging seam)"
+            )
+        _assert_publication_matches_expected(staging, expected_path)
 
         # Rollback artifact under the held source lock.
         rollback_dir = work_dir / "rollback"
@@ -1760,24 +1840,9 @@ def publish_provenance_migration(
                 "publication refused: rollback artifact hash != snapshot hash"
             )
 
-        # Stage clone beside destination for same-FS atomic replace.
-        staging = dest_dir / ".catalog.sqlite.publish-staging"
-        if staging.exists():
-            staging.unlink()
-        shutil.copy2(clone_path, staging)
-        if os.stat(staging).st_dev != os.stat(dest_dir).st_dev:
-            raise RuntimeError(
-                "publication refused: staging and destination are on different "
-                "filesystems"
-            )
-        if os.stat(source_catalog).st_dev != os.stat(staging).st_dev:
-            raise RuntimeError(
-                "publication refused: source and destination are on different "
-                "filesystems"
-            )
-        # Final atomic replace while source lock is still held.
+        # Final atomic replace while source (and clone) locks are still held.
         os.replace(str(staging), str(dest_cat))
-        staging = None  # consumed by replace
+        staging = None
         return {
             "status": "ok",
             "rollback_artifact": str(rollback_artifact.resolve()),
@@ -1794,6 +1859,12 @@ def publish_provenance_migration(
                 pass
         raise
     finally:
+        if clone_lock is not None:
+            try:
+                clone_lock.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            clone_lock.close()
         try:
             source_lock.execute("ROLLBACK")
         except sqlite3.Error:

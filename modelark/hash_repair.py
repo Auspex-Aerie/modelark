@@ -578,31 +578,22 @@ def run_explicit_drive_repair(
                 "identity_epoch": epoch,
             }
 
-        # Exact epoch + 64-char token match under lock.
-        if drv_fp is None or not isinstance(drv_fp, str) or len(drv_fp) != 64:
-            return _halt("stored identity_fingerprint missing or invalid")
+        # Both fingerprints must be valid 64-hex before any running / needs_refetch /
+        # complete disposition. Invalid non-hex → halt immediately (W17 preserved).
+        # Matching non-hex never reaches those terminal paths.
+        if not _valid_identity_fingerprint(identity_fingerprint):
+            return _halt(
+                "caller identity_fingerprint is not valid 64-hex (refused; "
+                "never authorizes repair)"
+            )
+        if not _valid_identity_fingerprint(drv_fp):
+            return _halt("stored identity_fingerprint missing or invalid (non-hex)")
         if int(drv_epoch) != epoch:
             return _halt(
                 f"identity_epoch mismatch: requested={epoch} drive={int(drv_epoch)}"
             )
         if str(identity_fingerprint).lower() != str(drv_fp).lower():
             return _halt("identity_fingerprint mismatch")
-
-        # Hex validity via _valid_identity_fingerprint for both sides.
-        # Matching non-hex never authorizes archive evidence (annex / archive-head).
-        caller_hex = _valid_identity_fingerprint(identity_fingerprint)
-        stored_hex = _valid_identity_fingerprint(drv_fp)
-        authorize_evidence = caller_hex and stored_hex
-        if not caller_hex and not stored_hex:
-            # Both non-hex and matching: never authorize evidence; dispositions only.
-            authorize_evidence = False
-        elif not caller_hex:
-            return _halt(
-                "caller identity_fingerprint is not valid 64-hex (refused; "
-                "never authorizes repair)"
-            )
-        elif not stored_hex:
-            return _halt("stored identity_fingerprint missing or invalid (non-hex)")
 
         archive_path: Path | None = None
         drive_absent = False
@@ -624,30 +615,29 @@ def run_explicit_drive_repair(
         unresolved = _unresolved_null_digests(con, drive_label)
 
         planned: list[tuple[dict, str, str]] = []
-        if authorize_evidence:
-            for row in unresolved:
-                digest = None
-                evidence = None
-                if not row["compressed"]:
-                    digest = archive_hash.annex_sha256(row["annex_key"])
-                    if digest:
-                        evidence = "annex_key"
-                if digest is None and archive_path is not None:
-                    try:
-                        repair = _validate_candidate(row, archive_path)
-                    except HashRepairError:
-                        repair = None
-                    if repair is not None:
-                        digest = repair["sha256"]
-                        evidence = "archive-head-blob"
-                if digest is None or evidence is None:
-                    continue
-                if _hub_disagrees(row.get("catalog_sha"), digest):
-                    return _halt(
-                        f"hub digest disagreement on {row['repo_id']}/"
-                        f"{row['rfilename']} ({evidence})"
-                    )
-                planned.append((row, digest, evidence))
+        for row in unresolved:
+            digest = None
+            evidence = None
+            if not row["compressed"]:
+                digest = archive_hash.annex_sha256(row["annex_key"])
+                if digest:
+                    evidence = "annex_key"
+            if digest is None and archive_path is not None:
+                try:
+                    repair = _validate_candidate(row, archive_path)
+                except HashRepairError:
+                    repair = None
+                if repair is not None:
+                    digest = repair["sha256"]
+                    evidence = "archive-head-blob"
+            if digest is None or evidence is None:
+                continue
+            if _hub_disagrees(row.get("catalog_sha"), digest):
+                return _halt(
+                    f"hub digest disagreement on {row['repo_id']}/"
+                    f"{row['rfilename']} ({evidence})"
+                )
+            planned.append((row, digest, evidence))
 
         for row, digest, evidence in planned:
             cur = con.execute(
