@@ -1209,17 +1209,22 @@ def _contained_run_root(work_dir: Path, run_id: str) -> Path:
     return candidate
 
 
+def _catalog_snapshot_metrics_con(con: sqlite3.Connection) -> dict:
+    """Integrity, FK list, user_version, and logical identity on an open connection."""
+    return {
+        "user_version": int(con.execute("PRAGMA user_version").fetchone()[0]),
+        "integrity": _integrity_ok(con),
+        "foreign_key_violations": _fk_violations(con),
+        "content_identity": _logical_identity(con),
+    }
+
+
 def _catalog_snapshot_metrics(path: Path) -> dict:
     """Integrity, FK list, user_version, and logical identity for a catalog file."""
     con = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)
     try:
         con.execute("PRAGMA query_only=ON")
-        return {
-            "user_version": int(con.execute("PRAGMA user_version").fetchone()[0]),
-            "integrity": _integrity_ok(con),
-            "foreign_key_violations": _fk_violations(con),
-            "content_identity": _logical_identity(con),
-        }
+        return _catalog_snapshot_metrics_con(con)
     finally:
         con.close()
 
@@ -1468,9 +1473,18 @@ def _remigrate_snapshot_to_expected(snapshot_path: Path, work: Path) -> Path:
     return expected
 
 
-def _assert_publication_matches_expected(artifact: Path, expected: Path) -> None:
-    """Full semantic + row identity between staged artifact and remigrated snapshot."""
-    a = _full_catalog_identity_file(artifact)
+def _assert_publication_matches_expected(
+    artifact: Path | sqlite3.Connection, expected: Path,
+) -> None:
+    """Full semantic + row identity between staged artifact and remigrated snapshot.
+
+    ``artifact`` may be a path or an already-open (preferably exclusively locked)
+    connection so publication can validate without reopening the staging pathname.
+    """
+    if isinstance(artifact, sqlite3.Connection):
+        a = _full_catalog_identity(artifact)
+    else:
+        a = _full_catalog_identity_file(artifact)
     b = _full_catalog_identity_file(expected)
     if a["user_version"] != b["user_version"]:
         raise RuntimeError(
@@ -1708,6 +1722,7 @@ def publish_provenance_migration(
     source_lock = sqlite3.connect(
         str(source_catalog), isolation_level=None, timeout=0.05)
     clone_lock: sqlite3.Connection | None = None
+    stage_con: sqlite3.Connection | None = None
     staging: Path | None = None
     try:
         try:
@@ -1780,14 +1795,25 @@ def publish_provenance_migration(
             ) from exc
 
         # Stage via consistent SQLite backup of the exclusively locked clone.
+        # The staging connection retains EXCLUSIVE lock continuously through
+        # validation and final os.replace — never close and reopen the pathname.
         staging = dest_dir / ".catalog.sqlite.publish-staging"
         if staging.exists():
             staging.unlink()
         stage_con = sqlite3.connect(str(staging), isolation_level=None)
         try:
             clone_lock.backup(stage_con)
-        finally:
-            stage_con.close()
+            # Pin exclusive ownership of the exact staged database.
+            stage_con.execute("PRAGMA locking_mode=EXCLUSIVE")
+            stage_con.execute("BEGIN EXCLUSIVE")
+            stage_con.execute("COMMIT")  # retains exclusive under locking_mode=EXCLUSIVE
+        except Exception:
+            try:
+                stage_con.close()
+            except sqlite3.Error:
+                pass
+            stage_con = None
+            raise
         if os.stat(staging).st_dev != os.stat(dest_dir).st_dev:
             raise RuntimeError(
                 "publication refused: staging and destination are on different "
@@ -1799,8 +1825,8 @@ def publish_provenance_migration(
                 "filesystems"
             )
 
-        # Validate the exact staged artifact (integrity/FK/version/identity/schema).
-        st_metrics = _catalog_snapshot_metrics(staging)
+        # Validate the exact staged artifact through the retained locked connection.
+        st_metrics = _catalog_snapshot_metrics_con(stage_con)
         if st_metrics["integrity"] != "ok":
             raise RuntimeError(
                 f"publication refused: staged catalog integrity not ok: "
@@ -1826,7 +1852,7 @@ def publish_provenance_migration(
                 "publication refused: staged logical identity differs from "
                 "rehearsal clone (modified at staging seam)"
             )
-        _assert_publication_matches_expected(staging, expected_path)
+        _assert_publication_matches_expected(stage_con, expected_path)
 
         # Rollback artifact under the held source lock.
         rollback_dir = work_dir / "rollback"
@@ -1840,9 +1866,20 @@ def publish_provenance_migration(
                 "publication refused: rollback artifact hash != snapshot hash"
             )
 
-        # Final atomic replace while source (and clone) locks are still held.
-        os.replace(str(staging), str(dest_cat))
-        staging = None
+        # Final atomic replace while source, clone, and staging locks are held.
+        # On Linux, os.replace renames the inode; the open exclusive connection
+        # continues to reference that inode and blocks concurrent writers.
+        try:
+            os.replace(str(staging), str(dest_cat))
+        except OSError as exc:
+            # Fail closed if the platform cannot replace while the staging
+            # database remains exclusively locked — do not reopen the race.
+            raise RuntimeError(
+                "publication refused: cannot atomically replace staging while "
+                f"holding exclusive SQLite lock ({exc}); refuse rather than "
+                "release the staging lock before replacement"
+            ) from exc
+        staging = None  # successfully published (inode now at dest_cat)
         return {
             "status": "ok",
             "rollback_artifact": str(rollback_artifact.resolve()),
@@ -1859,12 +1896,24 @@ def publish_provenance_migration(
                 pass
         raise
     finally:
+        if stage_con is not None:
+            try:
+                stage_con.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            try:
+                stage_con.close()
+            except sqlite3.Error:
+                pass
         if clone_lock is not None:
             try:
                 clone_lock.execute("ROLLBACK")
             except sqlite3.Error:
                 pass
-            clone_lock.close()
+            try:
+                clone_lock.close()
+            except sqlite3.Error:
+                pass
         try:
             source_lock.execute("ROLLBACK")
         except sqlite3.Error:

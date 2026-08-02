@@ -816,23 +816,25 @@ def test_publish_refuses_clone_mutation_at_staging_seam(tmp_path):
     """Mutating the staged catalog at validation seam must refuse; dest absent."""
     data, report, work = _rehearse_ok(tmp_path)
     dest = tmp_path / "dest-seam"
-    real_metrics = db._catalog_snapshot_metrics
+    real_metrics = db._catalog_snapshot_metrics_con
     mutated = {"yes": False}
 
-    def evil_metrics(path):
-        p = Path(path)
-        if (not mutated["yes"]) and "publish-staging" in p.name:
-            mutated["yes"] = True
-            c = sqlite3.connect(str(p), isolation_level=None)
+    def evil_metrics(con):
+        # Staging validation uses the retained locked connection — corrupt via it.
+        if not mutated["yes"]:
             try:
-                c.execute(
+                db_list = con.execute("PRAGMA database_list").fetchone()
+                main_path = Path(db_list[2]) if db_list and db_list[2] else None
+            except Exception:
+                main_path = None
+            if main_path is not None and "publish-staging" in main_path.name:
+                mutated["yes"] = True
+                con.execute(
                     "INSERT INTO models(repo_id,status,numcopies) "
                     "VALUES('org/stage-tamper','discovered',1)")
-            finally:
-                c.close()
-        return real_metrics(path)
+        return real_metrics(con)
 
-    with mock.patch.object(db, "_catalog_snapshot_metrics", side_effect=evil_metrics):
+    with mock.patch.object(db, "_catalog_snapshot_metrics_con", side_effect=evil_metrics):
         with pytest.raises(RuntimeError) as ei:
             db.publish_provenance_migration(
                 work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
@@ -886,6 +888,59 @@ def test_publish_succeeds_after_source_wal_checkpoint_without_logical_change(tmp
     try:
         assert dcon.execute(
             "SELECT 1 FROM models WHERE repo_id='org/wal-pub'").fetchone()
+        assert int(dcon.execute("PRAGMA user_version").fetchone()[0]) > 6
+    finally:
+        dcon.close()
+
+
+def test_publish_staging_exclusive_lock_blocks_adversary_through_replace(tmp_path):
+    """Second SQLite writer is blocked on staging through final os.replace."""
+    data, report, work = _rehearse_ok(tmp_path)
+    dest = tmp_path / "dest-lock"
+    real_replace = os.replace
+    adversary = {"blocked": False, "altered": False, "staging": None}
+
+    def replace_hook(src_p, dst_p):
+        staging = Path(src_p)
+        adversary["staging"] = staging
+        # Adversary tries to open and mutate staging while publication still holds
+        # the exclusive SQLite lock on that exact database.
+        try:
+            evil = sqlite3.connect(str(staging), isolation_level=None, timeout=0.05)
+            try:
+                evil.execute("BEGIN IMMEDIATE")
+                evil.execute(
+                    "INSERT INTO models(repo_id,status,numcopies) "
+                    "VALUES('org/adversary','discovered',1)")
+                adversary["altered"] = True
+                evil.execute("COMMIT")
+            finally:
+                evil.close()
+        except sqlite3.OperationalError:
+            adversary["blocked"] = True
+        return real_replace(src_p, dst_p)
+
+    with mock.patch.object(os, "replace", side_effect=replace_hook):
+        # Also patch where publish looks it up (module-level os).
+        with mock.patch("modelark.core.db.os.replace", side_effect=replace_hook):
+            pub = db.publish_provenance_migration(
+                work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
+    assert pub["status"] == "ok"
+    assert adversary["blocked"] is True, (
+        "adversary must be busy/blocked while exclusive staging lock is held"
+    )
+    assert adversary["altered"] is False, (
+        "adversary must not alter the staging artifact"
+    )
+    dest_cat = dest / "catalog.sqlite"
+    assert dest_cat.is_file()
+    # Published catalog must be the original unmodified migration (no adversary row).
+    dcon = sqlite3.connect(
+        f"file:{dest_cat.resolve().as_posix()}?mode=ro", uri=True)
+    try:
+        assert dcon.execute(
+            "SELECT 1 FROM models WHERE repo_id='org/adversary'"
+        ).fetchone() is None
         assert int(dcon.execute("PRAGMA user_version").fetchone()[0]) > 6
     finally:
         dcon.close()
