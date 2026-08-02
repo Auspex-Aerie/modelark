@@ -149,6 +149,14 @@ CREATE TABLE IF NOT EXISTS archived (
     compressed   BOOLEAN NOT NULL CHECK (compressed IN (0, 1)),
     annex_key    VARCHAR,
     verified_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- DEC-053: how orig_sha256 was established. Positioned last so additive
+    -- ALTER TABLE … ADD COLUMN on a pre-v7 catalog matches fresh CREATE order.
+    orig_sha256_provenance VARCHAR CHECK (
+        orig_sha256_provenance IS NULL OR orig_sha256_provenance IN (
+            'hub_confirmed', 'ingestion_computed', 'annex_key',
+            'archive-head-blob', 'legacy_unknown'
+        )
+    ),
     PRIMARY KEY (repo_id, rfilename, drive_label),
     FOREIGN KEY (repo_id, rfilename) REFERENCES files(repo_id, rfilename)
         ON UPDATE CASCADE ON DELETE RESTRICT,
@@ -305,7 +313,12 @@ CREATE TABLE IF NOT EXISTS placement_proposals (
     policy_version         VARCHAR NOT NULL DEFAULT '1',
     solver_version         VARCHAR NOT NULL DEFAULT '1',
     gate_b_code            VARCHAR NOT NULL DEFAULT 'FEASIBLE',
-    derivation_mode        VARCHAR,
+    -- DEF-034 / DEC-060: historical NULL legal; non-null closed set only.
+    derivation_mode        VARCHAR CHECK (
+        derivation_mode IS NULL OR derivation_mode IN (
+            'optimized', 'state_truncated', 'canonical_fallback'
+        )
+    ),
     -- Graph-affecting execution-config binding (PR-09 / B7). Separate from derivation_mode.
     execution_config_hash  VARCHAR CHECK (execution_config_hash IS NULL
                                           OR length(execution_config_hash) = 64),
@@ -313,6 +326,24 @@ CREATE TABLE IF NOT EXISTS placement_proposals (
     approved_at            TIMESTAMP,
     superseded_at          TIMESTAMP,
     FOREIGN KEY (plan_id) REFERENCES plans(plan_id) ON UPDATE CASCADE ON DELETE RESTRICT
+);
+
+-- DEC-054 / DEC-060: explicit per-drive / per-identity hash-repair state.
+-- complete ⇔ zero unresolved candidates for that exact (drive_label, identity_epoch).
+CREATE TABLE IF NOT EXISTS drive_hash_repair_state (
+    drive_label            VARCHAR NOT NULL,
+    identity_epoch         INTEGER NOT NULL CHECK (identity_epoch >= 1),
+    identity_fingerprint   VARCHAR CHECK (
+        identity_fingerprint IS NULL OR length(identity_fingerprint) = 64
+    ),
+    status                 VARCHAR NOT NULL CHECK (status IN (
+        'pending', 'running', 'blocked_absent', 'needs_refetch', 'halted', 'complete'
+    )),
+    updated_at             TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    detail                 VARCHAR,
+    PRIMARY KEY (drive_label, identity_epoch),
+    FOREIGN KEY (drive_label) REFERENCES drives(drive_label)
+        ON UPDATE CASCADE ON DELETE RESTRICT
 );
 
 CREATE TABLE IF NOT EXISTS proposal_tasks (

@@ -200,17 +200,32 @@ def test_finding_35_null_execution_config_hash_refuses_start():
 
 
 def test_finding_35a_ecfg_derivation_mode_does_not_authorize_start():
-    """NULL execution_config_hash + derivation_mode=ecfg:<hash> must still refuse."""
+    """ecfg:<hash> cannot live in derivation_mode (DEF-034 CHECK); null config still refuses start.
+
+    Pre-DEF-034 this planted ``derivation_mode=ecfg:<hash>`` to prove config binding is not
+    smuggled through derivation_mode. With the closed-set CHECK, that plant is IntegrityError;
+    NULL execution_config_hash still refuses start with APPROVED_INPUT_CHANGED.
+    """
+    import sqlite3
     con = f.mem_con()
     f.seed_plan_selection(con, repos=("org/a",))
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
     _p, pid, loaded = f.create_and_approve(con)
     cfg = loaded.get("execution_config_hash")
     assert cfg and len(cfg) == 64
+    try:
+        con.execute(
+            "UPDATE placement_proposals SET derivation_mode=? WHERE proposal_id=?",
+            [f"ecfg:{cfg}", pid])
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError(
+            "derivation_mode CHECK must reject ecfg:<hash> (DEF-034 closed set)"
+        )
     con.execute(
-        "UPDATE placement_proposals SET execution_config_hash=NULL, "
-        "derivation_mode=? WHERE proposal_id=?",
-        [f"ecfg:{cfg}", pid])
+        "UPDATE placement_proposals SET execution_config_hash=NULL WHERE proposal_id=?",
+        [pid])
     sess = f.session_api()
     f.assert_refuses(
         lambda: sess.start_session(con, pid, None, f.default_services()),

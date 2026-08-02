@@ -512,7 +512,7 @@ def joint_capacity_shortfall(
 
 def _build_assignment(
         con, plan_id: str, mutation: tuple
-) -> tuple[list[dict], list[dict], str, dict | None]:
+) -> tuple[list[dict], list[dict], str, dict | None, str]:
     """Build tasks/files and gate_b_code for the hypothetical post-mutation selection.
 
     Joint model (preview ≡ approval authority):
@@ -523,7 +523,9 @@ def _build_assignment(
     - safety-adjusted free depleted across the whole assignment (not per-task vs full free);
     - acquisition-policy errors → INFEASIBLE + single-container MANIFEST_POLICY block.
 
-    Returns ``(tasks, files, gate_b_code, policy_gate_block_or_None)``.
+    Returns ``(tasks, files, gate_b_code, policy_gate_block_or_None, derivation_mode)``.
+    ``derivation_mode`` is placement audit evidence (optimized | state_truncated |
+    canonical_fallback) carried into preview_pure (DEF-034 / DEC-060).
     """
     drives = _plan_drives(con, plan_id)
     repos = _selected_repos(con, mutation)
@@ -535,7 +537,7 @@ def _build_assignment(
 
     if not repos:
         # Empty selection is still a valid adopt_current draft (diagnostic-feasible no-op set).
-        return tasks, files, gate, None
+        return tasks, files, gate, None, _derivation_mode_for_gate(gate)
 
     # One batch inspect for the whole draft — policy errors retained per repository.
     batch = archive_manifest.inspect_manifests_for_repos(con, repos)
@@ -566,7 +568,7 @@ def _build_assignment(
                 "identity_epoch": None,
             })
             _append_missing_files(con, files, rid, repo, planned=planned)
-        return tasks, files, gate, policy_gate
+        return tasks, files, gate, policy_gate, _derivation_mode_for_gate(gate)
 
     placeable_labels = {d[0] for d in drives}
     baseline_labels = _plan_baseline_labels(con, plan_id)
@@ -709,7 +711,15 @@ def _build_assignment(
     short = joint_capacity_shortfall(tasks, _admissible_map_from_drives(drives))
     if short is not None:
         gate = "INFEASIBLE"
-    return tasks, files, gate, policy_gate
+    return tasks, files, gate, policy_gate, _derivation_mode_for_gate(gate)
+
+
+_DERIVATION_MODES = frozenset({"optimized", "state_truncated", "canonical_fallback"})
+
+
+def _derivation_mode_for_gate(gate_b_code: str) -> str:
+    """Default placement derivation from gate; state_truncated is assignment-provided."""
+    return "optimized" if gate_b_code == "FEASIBLE" else "canonical_fallback"
 
 
 def _header_from_facts(
@@ -723,7 +733,9 @@ def _header_from_facts(
     selection_before: str,
     selection_after: str,
     semantic: str,
+    derivation_mode: str | None = None,
 ) -> dict:
+    mode = derivation_mode or _derivation_mode_for_gate(gate_b_code)
     return {
         "plan_id": plan_id,
         "based_on_revision": based_on,
@@ -739,8 +751,8 @@ def _header_from_facts(
         "serializer_version": canonical.SERIALIZER_VERSION,
         "gate_b_code": gate_b_code,
         # Placement audit evidence only (optimized | state_truncated | canonical_fallback).
-        # Never store config hashes here (finding 35).
-        "derivation_mode": "optimized" if gate_b_code == "FEASIBLE" else "canonical_fallback",
+        # Never store config hashes here (finding 35). Carried from assignment fifth result.
+        "derivation_mode": mode,
     }
 
 
@@ -765,7 +777,28 @@ def preview_pure(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", 
         sel_after = hashlib.sha256(payload.encode()).hexdigest()
     else:
         sel_after = sel_before
-    tasks, files, gate, policy_gate = _build_assignment(con, plan_id, mutation)
+    assignment = _build_assignment(con, plan_id, mutation)
+    # Support fifth derivation_mode (production) and legacy 4-tuple patches.
+    if isinstance(assignment, dict):
+        tasks = assignment["tasks"]
+        files = assignment["files"]
+        gate = assignment.get("gate_b_code") or assignment.get("gate") or "FEASIBLE"
+        policy_gate = assignment.get("policy_gate")
+        derivation_mode = assignment.get("derivation_mode") or _derivation_mode_for_gate(gate)
+    else:
+        tasks, files = assignment[0], assignment[1]
+        gate = assignment[2] if len(assignment) > 2 else "FEASIBLE"
+        policy_gate = assignment[3] if len(assignment) > 3 else None
+        if len(assignment) > 4 and assignment[4] is not None:
+            derivation_mode = assignment[4]
+        else:
+            derivation_mode = _derivation_mode_for_gate(gate)
+    if derivation_mode not in _DERIVATION_MODES:
+        raise Refusal(
+            "INVALID_DERIVATION_MODE",
+            {"derivation_mode": derivation_mode},
+            ("fix_assignment",),
+        )
     tasks_n = _normalize_tasks_for_hash(tasks)
     files_n = _normalize_files_for_hash(files)
     semantic = _semantic_input_hash(con, plan_id, mutation)
@@ -788,6 +821,7 @@ def preview_pure(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", 
         plan_id=plan_id, based_on=rev, mutation=mutation, tasks=tasks_n,
         capacity_mode=capacity_mode, gate_b_code=gate,
         selection_before=sel_before, selection_after=sel_after, semantic=semantic,
+        derivation_mode=derivation_mode,
     )
     # Authoritative config binding is its own header field (included in proposal_hash).
     # derivation_mode remains placement audit evidence only.
@@ -839,6 +873,20 @@ def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = Non
         tasks = list(payload["tasks"])
         files = list(payload["files"])
         digest = payload["canonical_hash"]
+        # DEC-060: every newly published proposal must have a named non-null derivation mode.
+        mode = header.get("derivation_mode")
+        if mode is None or mode == "":
+            raise Refusal(
+                "INVALID_DERIVATION_MODE",
+                {"derivation_mode": mode, "detail": "missing or null derivation_mode"},
+                ("set_named_derivation_mode",),
+            )
+        if mode not in _DERIVATION_MODES:
+            raise Refusal(
+                "INVALID_DERIVATION_MODE",
+                {"derivation_mode": mode, "detail": "invalid derivation_mode"},
+                ("set_named_derivation_mode",),
+            )
         # Recompute authority hash; never trust client-supplied overrides on the payload object
         # beyond the pure-preview shape (client kwargs are ignored at create_draft).
         recomputed = canonical.proposal_hash(header, tasks, files)
@@ -877,7 +925,7 @@ def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = Non
                     header.get("policy_version") or "1",
                     header.get("solver_version") or "1",
                     header.get("gate_b_code") or "FEASIBLE",
-                    header.get("derivation_mode"),
+                    mode,
                     header.get("execution_config_hash"),
                 ],
             )
@@ -903,7 +951,7 @@ def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = Non
                     header.get("policy_version") or "1",
                     header.get("solver_version") or "1",
                     header.get("gate_b_code") or "FEASIBLE",
-                    header.get("derivation_mode"),
+                    mode,
                 ],
             )
         for t in tasks:

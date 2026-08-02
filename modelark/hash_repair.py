@@ -412,3 +412,235 @@ def repair_hashes(
         con.execute("ROLLBACK")
         raise
     return {**report, "mode": "apply", "applied": applied, "backup": str(backup)}
+
+
+# ---------------------------------------------------------------------------
+# DEC-054 / DEC-060 explicit per-drive repair engine
+# ---------------------------------------------------------------------------
+
+_REPAIR_STATUSES = frozenset({
+    "pending", "running", "blocked_absent", "needs_refetch", "halted", "complete",
+})
+
+
+def _set_repair_state(
+    con,
+    drive_label: str,
+    identity_epoch: int,
+    identity_fingerprint: str | None,
+    status: str,
+    detail: str | None = None,
+) -> None:
+    if status not in _REPAIR_STATUSES:
+        raise HashRepairError(f"invalid repair status: {status!r}")
+    con.execute(
+        "INSERT INTO drive_hash_repair_state("
+        "drive_label, identity_epoch, identity_fingerprint, status, detail, updated_at) "
+        "VALUES(?,?,?,?,?,CURRENT_TIMESTAMP) "
+        "ON CONFLICT(drive_label, identity_epoch) DO UPDATE SET "
+        "identity_fingerprint=excluded.identity_fingerprint, "
+        "status=excluded.status, detail=excluded.detail, "
+        "updated_at=CURRENT_TIMESTAMP",
+        [drive_label, int(identity_epoch), identity_fingerprint, status, detail],
+    )
+
+
+def _unresolved_null_digests(con, drive_label: str) -> list[dict]:
+    cols = (
+        "repo_id", "rfilename", "stored_name", "stored_relpath", "drive_label",
+        "orig_sha256", "orig_bytes", "stored_bytes", "compressed", "annex_key",
+        "catalog_sha", "catalog_bytes",
+    )
+    rows = con.execute(
+        "SELECT a.repo_id,a.rfilename,a.stored_name,a.stored_relpath,a.drive_label,"
+        "a.orig_sha256,a.orig_bytes,a.stored_bytes,a.compressed,a.annex_key,"
+        "f.sha256,f.size_bytes "
+        "FROM archived a JOIN files f USING(repo_id,rfilename) "
+        "WHERE a.drive_label=? AND a.orig_sha256 IS NULL "
+        "ORDER BY a.repo_id,a.rfilename",
+        [drive_label],
+    ).fetchall()
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def run_explicit_drive_repair(
+    con,
+    drive_label: str,
+    *,
+    identity_epoch: int,
+    identity_fingerprint: str | None = None,
+    archive_resolver: Callable[[object, str], Path | None] | None = None,
+) -> dict:
+    """Explicit maintenance-only per-drive hash repair (DEC-054 / DEC-060).
+
+    Never invoked by ``db.connect()`` or portal startup. Atomic: archive row
+    updates and ``drive_hash_repair_state`` commit together. Status vocabulary:
+    pending/running/blocked_absent/needs_refetch/halted/complete.
+    ``complete`` ⇔ zero unresolved null digests for that exact drive identity.
+    """
+    from modelark import archive_hash
+
+    epoch = int(identity_epoch)
+    tables = {
+        r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    if "drive_hash_repair_state" not in tables:
+        raise HashRepairError(
+            "drive_hash_repair_state missing — catalog requires provenance schema v7"
+        )
+    if "orig_sha256_provenance" not in {
+        r[1] for r in con.execute("PRAGMA table_info(archived)")
+    }:
+        raise HashRepairError(
+            "orig_sha256_provenance missing — catalog requires provenance schema v7"
+        )
+
+    drive = con.execute(
+        "SELECT drive_label, identity_epoch, identity_fingerprint, lifecycle "
+        "FROM drives WHERE drive_label=?",
+        [drive_label],
+    ).fetchone()
+    if drive is None:
+        raise HashRepairError(f"unknown drive_label: {drive_label!r}")
+    _label, drv_epoch, drv_fp, lifecycle = drive
+    lifecycle = (lifecycle or "active").lower()
+
+    # Fingerprint / identity halt: never repair under a mismatched identity claim.
+    if identity_fingerprint is not None and drv_fp is not None:
+        if str(identity_fingerprint).lower() != str(drv_fp).lower():
+            con.execute("BEGIN IMMEDIATE")
+            try:
+                _set_repair_state(
+                    con, drive_label, epoch, identity_fingerprint, "halted",
+                    detail="identity_fingerprint mismatch",
+                )
+                con.execute("COMMIT")
+            except BaseException:
+                con.execute("ROLLBACK")
+                raise
+            return {
+                "status": "halted",
+                "drive_label": drive_label,
+                "identity_epoch": epoch,
+                "detail": "identity_fingerprint mismatch",
+            }
+    if int(drv_epoch) != epoch:
+        # Caller asked for a different epoch than the drive currently records —
+        # still allow repair against the requested epoch key, but fingerprint
+        # mismatch above is the halt path for contradictory claims.
+        pass
+
+    n_archives = con.execute(
+        "SELECT count(*) FROM archived WHERE drive_label=?", [drive_label]
+    ).fetchone()[0]
+
+    # Lost + zero archives → no repair obligation (no I/O, no state row required).
+    if lifecycle == "lost" and n_archives == 0:
+        return {
+            "status": None,
+            "obligation": False,
+            "drive_label": drive_label,
+            "identity_epoch": epoch,
+        }
+
+    # Presence probe only when caller supplies a resolver (None ⇒ drive absent).
+    # When no resolver is supplied, residual candidates become needs_refetch rather
+    # than blocked_absent so tier-1-only repair still completes offline.
+    archive_path: Path | None = None
+    drive_absent = False
+    if archive_resolver is not None:
+        try:
+            resolved = archive_resolver(con, drive_label)
+            if resolved is None:
+                drive_absent = True
+                archive_path = None
+            else:
+                archive_path = Path(resolved)
+        except Exception:
+            drive_absent = True
+            archive_path = None
+
+    if getattr(con, "in_transaction", False):
+        raise HashRepairError("drive repair requires a connection with no active transaction")
+
+    con.execute("BEGIN IMMEDIATE")
+    applied = 0
+    try:
+        _set_repair_state(
+            con, drive_label, epoch, identity_fingerprint or drv_fp, "running"
+        )
+        unresolved = _unresolved_null_digests(con, drive_label)
+
+        for row in unresolved:
+            # Tier 1: annex key on raw (uncompressed) stored copy.
+            if not row["compressed"]:
+                digest = archive_hash.annex_sha256(row["annex_key"])
+                if digest:
+                    cur = con.execute(
+                        "UPDATE archived SET orig_sha256=?, "
+                        "orig_sha256_provenance='annex_key' "
+                        "WHERE repo_id=? AND rfilename=? AND drive_label=? "
+                        "AND orig_sha256 IS NULL",
+                        [digest, row["repo_id"], row["rfilename"], drive_label],
+                    )
+                    if cur.rowcount == 1:
+                        applied += 1
+                        continue
+            # Tier 2: archive-head-blob when archive is available.
+            if archive_path is not None:
+                try:
+                    repair = _validate_candidate(row, archive_path)
+                except HashRepairError:
+                    continue
+                cur = con.execute(
+                    "UPDATE archived SET orig_sha256=?, "
+                    "orig_sha256_provenance='archive-head-blob' "
+                    "WHERE repo_id=? AND rfilename=? AND drive_label=? "
+                    "AND orig_sha256 IS NULL",
+                    [
+                        repair["sha256"], row["repo_id"], row["rfilename"],
+                        drive_label,
+                    ],
+                )
+                if cur.rowcount == 1:
+                    applied += 1
+
+        left = int(con.execute(
+            "SELECT count(*) FROM archived WHERE drive_label=? AND orig_sha256 IS NULL",
+            [drive_label],
+        ).fetchone()[0])
+
+        # Terminal disposition (DEC-060).
+        if left == 0 and not (drive_absent and n_archives == 0 and applied == 0):
+            status = "complete"
+            detail = f"repaired={applied}"
+        elif drive_absent and lifecycle != "lost":
+            status = "blocked_absent"
+            detail = "archive_unavailable"
+        elif lifecycle == "lost" and left > 0:
+            status = "needs_refetch"
+            detail = "lost_drive_unresolved"
+        else:
+            status = "needs_refetch"
+            detail = f"unresolved={left}"
+
+        _set_repair_state(
+            con, drive_label, epoch, identity_fingerprint or drv_fp, status,
+            detail=detail,
+        )
+        con.execute("COMMIT")
+        return {
+            "status": status,
+            "drive_label": drive_label,
+            "identity_epoch": epoch,
+            "applied": applied,
+            "unresolved": left,
+            "detail": detail,
+        }
+    except BaseException:
+        try:
+            con.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise

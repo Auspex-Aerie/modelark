@@ -233,6 +233,31 @@ def cmd_repair_hashes(args):
         raise SystemExit(1)
 
 
+def cmd_repair_drive(args):
+    """Explicit per-drive hash repair (DEC-054) — exact drive/epoch/fingerprint."""
+    from modelark import hash_repair
+    con = db.connect()
+    try:
+        try:
+            result = hash_repair.run_explicit_drive_repair(
+                con,
+                args.drive,
+                identity_epoch=int(args.identity_epoch),
+                identity_fingerprint=args.identity_fingerprint,
+            )
+        except hash_repair.HashRepairError as exc:
+            raise SystemExit(f"drive repair failed: {exc}") from exc
+    finally:
+        con.close()
+    print(
+        f"drive repair: drive={args.drive} epoch={args.identity_epoch} "
+        f"status={result.get('status')} applied={result.get('applied')} "
+        f"unresolved={result.get('unresolved')}"
+    )
+    if result.get("detail"):
+        print(f"  detail: {result['detail']}")
+
+
 def cmd_library_init(args):
     from modelark import register
     path = register.ensure_library(Path(args.path).expanduser() if args.path else None)
@@ -665,6 +690,21 @@ def main(argv=None):
         help="back up the catalog and apply every provable repair (default is read-only dry-run)",
     )
     rh.set_defaults(func=cmd_repair_hashes)
+
+    rd = sub.add_parser(
+        "repair-drive",
+        help="explicit per-drive hash repair (DEC-054; requires drive identity)",
+    )
+    rd.add_argument("--drive", required=True, help="drive label to repair")
+    rd.add_argument(
+        "--identity-epoch", required=True, type=int,
+        help="drive identity epoch the repair is bound to",
+    )
+    rd.add_argument(
+        "--identity-fingerprint", required=True,
+        help="64-hex identity fingerprint the repair is bound to",
+    )
+    rd.set_defaults(func=cmd_repair_drive)
 
     lib = sub.add_parser("library", help="the central git-annex map repo")
     libsub = lib.add_subparsers(dest="library_cmd", required=True)

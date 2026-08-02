@@ -873,12 +873,16 @@ def fetch_model(
             key = None
         stored_sz = stored.stat().st_size
         stored_relpath = _stored_relative_path(stored, model_dir)
+        # DEC-053: Hub-confirmed when the manifest carried a digest that matched the
+        # downloaded bytes; otherwise ingestion-computed from the local hash.
+        provenance = "hub_confirmed" if f.get("sha256") else "ingestion_computed"
         ctx.write(lambda c: db.upsert(c, "archived", {
             "repo_id": repo_id, "rfilename": f["rfilename"], "stored_name": stored.name,
             "stored_relpath": stored_relpath,
             "drive_label": drive_label, "orig_sha256": got, "znn_sha256": znn_sha,
             "orig_bytes": f["size"], "stored_bytes": stored_sz,
             "compressed": compressed, "annex_key": key,
+            "orig_sha256_provenance": provenance,
         }, pk=["repo_id", "rfilename", "drive_label"], touch=["verified_at"]))
         if mutation_writer is not None:
             # record the touched write set AFTER physical publication + the durable archived row, so
@@ -1369,17 +1373,31 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                                 })
                                 continue
                             stored_name, stored_relpath, orig_sha, znn_sha, orig_bytes, stored_bytes, compressed, _ = source_row
-                            ctx.write(lambda c, _task=task, _file=rfilename, _target=target, _values=(
-                                stored_name, stored_relpath, orig_sha, znn_sha, orig_bytes, stored_bytes,
-                                compressed, key,
-                            ): db.upsert(c, "archived", {
-                                "repo_id": _task.repo_id, "rfilename": _file,
-                                "stored_name": _values[0], "stored_relpath": _values[1],
-                                "drive_label": _target, "orig_sha256": _values[2],
-                                "znn_sha256": _values[3], "orig_bytes": _values[4],
-                                "stored_bytes": _values[5], "compressed": _values[6],
-                                "annex_key": _values[7],
-                            }, pk=["repo_id", "rfilename", "drive_label"], touch=["verified_at"]))
+                            arch_cols = {r[1] for r in con.execute("PRAGMA table_info(archived)")}
+                            src_prov = None
+                            if "orig_sha256_provenance" in arch_cols:
+                                prow = con.execute(
+                                    "SELECT orig_sha256_provenance FROM archived "
+                                    "WHERE drive_label=? AND repo_id=? AND rfilename=?",
+                                    [source, task.repo_id, rfilename],
+                                ).fetchone()
+                                if prow:
+                                    src_prov = prow[0]
+                            row_payload = {
+                                "repo_id": task.repo_id, "rfilename": rfilename,
+                                "stored_name": stored_name, "stored_relpath": stored_relpath,
+                                "drive_label": target, "orig_sha256": orig_sha,
+                                "znn_sha256": znn_sha, "orig_bytes": orig_bytes,
+                                "stored_bytes": stored_bytes, "compressed": compressed,
+                                "annex_key": key,
+                            }
+                            if "orig_sha256_provenance" in arch_cols:
+                                row_payload["orig_sha256_provenance"] = src_prov
+                            ctx.write(lambda c, _row=dict(row_payload): db.upsert(
+                                c, "archived", _row,
+                                pk=["repo_id", "rfilename", "drive_label"],
+                                touch=["verified_at"],
+                            ))
                             _writer.record_touched(
                                 target, paths=[f"{task.repo_id}/{stored_relpath}"], keys=[key])
                             result["copied_files"] += 1
@@ -1484,17 +1502,122 @@ def run_replica(replica_assign: dict, source: str | None, ctx: RunCtx | None = N
                 continue
             print("    ok")
             subprocess.run(["git", "-C", str(lib), "annex", "sync"], capture_output=True, text=True)
-            ctx.write(lambda c: c.execute(   # mirror source's archived rows onto this replica label
-                "INSERT INTO archived (repo_id, rfilename, stored_name, stored_relpath, drive_label, orig_sha256, "
-                "znn_sha256, orig_bytes, stored_bytes, compressed, annex_key, verified_at) "
-                "SELECT repo_id, rfilename, stored_name, stored_relpath, ?, orig_sha256, znn_sha256, orig_bytes, "
-                "stored_bytes, compressed, annex_key, CURRENT_TIMESTAMP FROM archived WHERE drive_label=? AND "
-                f"repo_id IN ({','.join(['?']*len(repos))}) "
-                "ON CONFLICT (repo_id, rfilename, drive_label) DO NOTHING",
-                [label, source, *repos]))
+            def _mirror(c, _label=label, _source=source, _repos=repos):
+                cols = {r[1] for r in c.execute("PRAGMA table_info(archived)")}
+                has_prov = "orig_sha256_provenance" in cols
+                if has_prov:
+                    c.execute(
+                        "INSERT INTO archived (repo_id, rfilename, stored_name, stored_relpath, "
+                        "drive_label, orig_sha256, znn_sha256, orig_bytes, stored_bytes, compressed, "
+                        "annex_key, orig_sha256_provenance, verified_at) "
+                        "SELECT repo_id, rfilename, stored_name, stored_relpath, ?, orig_sha256, "
+                        "znn_sha256, orig_bytes, stored_bytes, compressed, annex_key, "
+                        "orig_sha256_provenance, CURRENT_TIMESTAMP FROM archived "
+                        f"WHERE drive_label=? AND repo_id IN ({','.join(['?'] * len(_repos))}) "
+                        "ON CONFLICT (repo_id, rfilename, drive_label) DO NOTHING",
+                        [_label, _source, *_repos],
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO archived (repo_id, rfilename, stored_name, stored_relpath, "
+                        "drive_label, orig_sha256, znn_sha256, orig_bytes, stored_bytes, compressed, "
+                        "annex_key, verified_at) "
+                        "SELECT repo_id, rfilename, stored_name, stored_relpath, ?, orig_sha256, "
+                        "znn_sha256, orig_bytes, stored_bytes, compressed, annex_key, "
+                        "CURRENT_TIMESTAMP FROM archived "
+                        f"WHERE drive_label=? AND repo_id IN ({','.join(['?'] * len(_repos))}) "
+                        "ON CONFLICT (repo_id, rfilename, drive_label) DO NOTHING",
+                        [_label, _source, *_repos],
+                    )
+            ctx.write(_mirror)
             result["copied_targets"].append(label)
             ctx.on_progress({"phase": "replica", "drive": label, "say": f"    ✓ replica {label} ok"})
         return result
     finally:
         if own:
             con.close()
+
+
+class ReplicaHealError(RuntimeError):
+    """Targeted replica archived-row heal refused (digest mismatch or missing source)."""
+
+
+def heal_replica_archived_from_source(
+    con,
+    *,
+    source_drive: str,
+    target_drive: str,
+    repo_id: str,
+    rfilename: str,
+) -> dict:
+    """DEC-060 targeted replica heal: null fill, matching-digest provenance fill, mismatch halt.
+
+    Never invents a ``mirrored`` provenance class; never overwrites a non-null target digest
+    with a different source digest. Source provenance is copied verbatim when digests agree
+    or when the target digest is null.
+    """
+    cols = {r[1] for r in con.execute("PRAGMA table_info(archived)")}
+    if "orig_sha256_provenance" not in cols:
+        raise ReplicaHealError(
+            "archived.orig_sha256_provenance missing — catalog requires provenance schema"
+        )
+    src = con.execute(
+        "SELECT orig_sha256, orig_sha256_provenance FROM archived "
+        "WHERE drive_label=? AND repo_id=? AND rfilename=?",
+        [source_drive, repo_id, rfilename],
+    ).fetchone()
+    if src is None:
+        raise ReplicaHealError(
+            f"source archived row missing: {repo_id}/{rfilename} on {source_drive}"
+        )
+    src_digest, src_prov = src[0], src[1]
+    tgt = con.execute(
+        "SELECT orig_sha256, orig_sha256_provenance FROM archived "
+        "WHERE drive_label=? AND repo_id=? AND rfilename=?",
+        [target_drive, repo_id, rfilename],
+    ).fetchone()
+    if tgt is None:
+        raise ReplicaHealError(
+            f"target archived row missing: {repo_id}/{rfilename} on {target_drive}"
+        )
+    tgt_digest, tgt_prov = tgt[0], tgt[1]
+
+    # Mismatch of two non-null digests: halt without mutation.
+    if (
+        src_digest is not None
+        and tgt_digest is not None
+        and str(src_digest).lower() != str(tgt_digest).lower()
+    ):
+        raise ReplicaHealError(
+            f"replica heal halted: digest mismatch for {repo_id}/{rfilename} "
+            f"source={src_digest} target={tgt_digest}"
+        )
+
+    # Null target digest: copy digest + provenance from source.
+    if tgt_digest is None:
+        if src_digest is None and src_prov is None:
+            return {"status": "noop", "reason": "source_also_null"}
+        con.execute(
+            "UPDATE archived SET orig_sha256=?, orig_sha256_provenance=? "
+            "WHERE drive_label=? AND repo_id=? AND rfilename=?",
+            [src_digest, src_prov, target_drive, repo_id, rfilename],
+        )
+        return {
+            "status": "filled",
+            "orig_sha256": src_digest,
+            "orig_sha256_provenance": src_prov,
+        }
+
+    # Digests match (or source null): fill missing target provenance only.
+    if tgt_prov is None and src_prov is not None:
+        con.execute(
+            "UPDATE archived SET orig_sha256_provenance=? "
+            "WHERE drive_label=? AND repo_id=? AND rfilename=?",
+            [src_prov, target_drive, repo_id, rfilename],
+        )
+        return {
+            "status": "provenance_filled",
+            "orig_sha256": tgt_digest,
+            "orig_sha256_provenance": src_prov,
+        }
+    return {"status": "noop", "reason": "target_complete"}
