@@ -292,7 +292,7 @@ def test_rehearse_relative_and_absolute_escape_leave_sentinel(tmp_path):
 
 
 def test_rehearse_refuses_existing_run_directory(tmp_path):
-    from tests.test_dec053_054_gate1_contracts import (
+    from test_dec053_054_gate1_contracts import (
         _seed_frozen_v6, _catalog, _logical_identity, _close, _open_ro,
     )
     data = _seed_frozen_v6(tmp_path / "src")
@@ -315,7 +315,7 @@ def test_rehearse_refuses_existing_run_directory(tmp_path):
 
 
 def _rehearse_ok(tmp_path):
-    from tests.test_dec053_054_gate1_contracts import (
+    from test_dec053_054_gate1_contracts import (
         _seed_frozen_v6, _catalog, _logical_identity, _close, _open_ro,
         _require_report,
     )
@@ -422,7 +422,7 @@ def test_publish_holds_source_lock_through_replace_blocks_writer(tmp_path):
 
 
 def _migrated_clone(tmp_path):
-    from tests.test_dec053_054_gate1_contracts import (
+    from test_dec053_054_gate1_contracts import (
         _seed_frozen_v6, _catalog, _logical_identity, _close, _open_ro,
         _require_report,
     )
@@ -847,7 +847,7 @@ def test_publish_refuses_clone_mutation_at_staging_seam(tmp_path):
 
 def test_publish_succeeds_after_source_wal_checkpoint_without_logical_change(tmp_path):
     """WAL checkpoint/truncate after rehearse must not block publication."""
-    from tests.test_dec053_054_gate1_contracts import (
+    from test_dec053_054_gate1_contracts import (
         _seed_frozen_v6, _catalog, _logical_identity, _close, _open_ro,
         _require_report,
     )
