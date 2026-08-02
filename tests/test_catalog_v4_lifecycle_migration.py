@@ -146,7 +146,7 @@ def _seed_v3(tmp_path):
 
 def test_migrate_v3_to_v4_adds_lifecycle_eligibility_and_preserves_rows(tmp_path):
     _seed_v3(tmp_path)
-    con = db.connect()  # must run v3→v4 migration once implemented
+    con = db.migrate_existing_catalog()  # disposable fixture ladder
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
         f"connect must migrate through v4 to current schema v{db._SCHEMA_VERSION}")
 
@@ -177,7 +177,8 @@ def test_migrate_v3_to_v4_adds_lifecycle_eligibility_and_preserves_rows(tmp_path
 
 def test_v4_migration_is_idempotent(tmp_path):
     _seed_v3(tmp_path)
-    db.connect().close()
+    db.migrate_existing_catalog().close()
+    # Second open via ordinary connect (already at tip) must be a stable no-op.
     con = db.connect()
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
         f"idempotent path must land at current schema v{db._SCHEMA_VERSION}")
@@ -214,7 +215,7 @@ def test_v4_injected_failure_rolls_back_columns_and_user_version(tmp_path):
 
 def test_v4_domain_and_not_null_constraints(tmp_path):
     _seed_v3(tmp_path)
-    con = db.connect()
+    con = db.migrate_existing_catalog()
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
         f"v4 columns must exist under current schema v{db._SCHEMA_VERSION}")
 
@@ -266,7 +267,7 @@ def test_v0_to_v4_does_not_introduce_lifecycle_columns_during_integrity_rebuild(
     con.execute("PRAGMA user_version=0")
     con.close()
 
-    con = db.connect()
+    con = db.migrate_existing_catalog()
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
         f"full migration must land at current schema v{db._SCHEMA_VERSION}")
     dcols = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}

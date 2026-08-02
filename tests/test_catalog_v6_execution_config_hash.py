@@ -65,7 +65,7 @@ def _seed_v5(tmp_path):
 
 def test_v6_migration_rejects_short_hash_like_fresh_schema(tmp_path):
     _seed_v5(tmp_path)
-    con = db.connect()
+    con = db.migrate_existing_catalog()
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION
     assert db._placement_proposals_has_execution_config_hash_check(con)
     con.execute("INSERT OR IGNORE INTO plans(plan_id,name,is_active) VALUES('ark','Ark',1)")
@@ -104,6 +104,6 @@ def test_v6_backup_created_on_upgrade(tmp_path):
     raw = sqlite3.connect(str(db.DB_PATH), isolation_level=None)
     raw.execute("PRAGMA user_version=5")
     raw.close()
-    db.connect().close()
+    db.migrate_existing_catalog().close()
     bak = db.DB_PATH.with_name(db.DB_PATH.name + ".pre-execution-config-v6.bak")
     assert bak.is_file(), "backup-first v6 migration must create pre-execution-config-v6.bak"

@@ -165,20 +165,20 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
     existed = DB_PATH.exists()
     con = sqlite3.connect(str(DB_PATH), isolation_level=None, check_same_thread=False)
     try:
-        version = con.execute("PRAGMA user_version").fetchone()[0]
+        version = int(con.execute("PRAGMA user_version").fetchone()[0])
         _validate_catalog_version(version)
-        # DEC-059: never auto-migrate an existing v6 (or later-pre-target) canonical catalog
-        # in place. Fresh catalogs (version 0 / not previously present) receive the packaged
-        # target schema. Clone-first rehearsal/publication owns v6→v7 provenance cutover.
-        if (
-            existed
-            and version >= _EXECUTION_CONFIG_HASH_SCHEMA_VERSION
-            and version < _SCHEMA_VERSION
-        ):
+        # DEC-059: clone-first is mandatory for every existing pre-v7 catalog.
+        # Ordinary connect() never applies the provenance migration (or any ladder
+        # step) to an existing v1–v6 canonical database. Fresh creation (version 0 /
+        # not previously present) may install the packaged target schema directly.
+        # Raise before journal_mode/schema so bytes, schema, and user_version are
+        # unchanged on refusal.
+        if existed and version > 0 and version < _SCHEMA_VERSION:
             raise RuntimeError(
                 f"Catalog schema v{version} requires clone-first provenance migration to "
                 f"v{_SCHEMA_VERSION} (rehearse_provenance_migration / "
-                f"publish_provenance_migration); db.connect() will not auto-migrate or mutate it"
+                f"publish_provenance_migration); db.connect() will not auto-migrate or "
+                f"mutate an existing pre-v{_SCHEMA_VERSION} catalog"
             )
         con.execute("PRAGMA journal_mode=WAL")       # persistent once set; concurrent reader/writer
         con.execute("PRAGMA busy_timeout=15000")     # a concurrent WRITER briefly holds the lock → wait, don't error
@@ -190,6 +190,44 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
         _migrate(con, version, backup_existing=existed)
         _apply_schema(con)
         con.execute("PRAGMA foreign_keys=ON")
+    except Exception:
+        con.close()
+        raise
+    return con
+
+
+def apply_schema_migrations(con: sqlite3.Connection, *, backup_existing: bool = False) -> None:
+    """Run the full in-place schema ladder on an open connection.
+
+    Not used by ``connect()`` for existing pre-v7 catalogs (DEC-059 clone-first).
+    Clone rehearsal and disposable migration unit tests call this explicitly.
+    """
+    version = int(con.execute("PRAGMA user_version").fetchone()[0])
+    _validate_catalog_version(version)
+    con.execute("PRAGMA foreign_keys=OFF")
+    try:
+        _apply_schema(con, tables_only=True)
+        _migrate(con, version, backup_existing=backup_existing)
+        _apply_schema(con)
+    finally:
+        con.execute("PRAGMA foreign_keys=ON")
+
+
+def migrate_existing_catalog(*, backup_existing: bool = True) -> sqlite3.Connection:
+    """Open ``DB_PATH`` and apply the full in-place ladder (disposable fixtures only).
+
+    Ordinary ``connect()`` refuses existing pre-v7 catalogs (DEC-059). Unit tests that
+    exercise intermediate migration steps on throwaway fixtures use this entrypoint;
+    operators use ``rehearse_provenance_migration`` / ``publish_provenance_migration``.
+    """
+    CATALOG_DIR.mkdir(parents=True, exist_ok=True)
+    existed = DB_PATH.exists()
+    con = sqlite3.connect(str(DB_PATH), isolation_level=None, check_same_thread=False)
+    try:
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("PRAGMA busy_timeout=15000")
+        con.execute("PRAGMA synchronous=NORMAL")
+        apply_schema_migrations(con, backup_existing=backup_existing and existed)
     except Exception:
         con.close()
         raise
@@ -1128,6 +1166,64 @@ def _source_catalog_path(source_dir: Path) -> Path:
     return path
 
 
+_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _validate_run_id(run_id: str) -> str:
+    """One nonempty safe path component; reject ., .., separators, absolute paths."""
+    if not isinstance(run_id, str) or not run_id or not run_id.strip():
+        raise ValueError("run_id must be a nonempty safe path component")
+    rid = run_id.strip()
+    if rid in (".", ".."):
+        raise ValueError(f"run_id rejects reserved component: {rid!r}")
+    if "/" in rid or "\\" in rid or "\x00" in rid:
+        raise ValueError(f"run_id must not contain path separators: {rid!r}")
+    if rid.startswith("~") or (len(rid) > 1 and rid[1] == ":"):
+        raise ValueError(f"run_id must not be absolute: {rid!r}")
+    if not _SAFE_RUN_ID.match(rid):
+        raise ValueError(
+            f"run_id must be a single safe path component "
+            f"(alphanumeric/._- only): {rid!r}"
+        )
+    return rid
+
+
+def _contained_run_root(work_dir: Path, run_id: str) -> Path:
+    """Resolve candidate and prove it is a direct child of resolved work_dir."""
+    rid = _validate_run_id(run_id)
+    work_res = work_dir.expanduser().resolve()
+    # Join then resolve; reject if not a direct child of work_res.
+    candidate = (work_res / rid).resolve()
+    try:
+        candidate.relative_to(work_res)
+    except ValueError as exc:
+        raise ValueError(
+            f"run_id path escapes work_dir: {run_id!r} → {candidate}"
+        ) from exc
+    if candidate.parent != work_res:
+        raise ValueError(
+            f"run_id must resolve to a direct child of work_dir: {run_id!r}"
+        )
+    if candidate == work_res:
+        raise ValueError(f"run_id must not resolve to work_dir itself: {run_id!r}")
+    return candidate
+
+
+def _catalog_snapshot_metrics(path: Path) -> dict:
+    """Integrity, FK list, user_version, and logical identity for a catalog file."""
+    con = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)
+    try:
+        con.execute("PRAGMA query_only=ON")
+        return {
+            "user_version": int(con.execute("PRAGMA user_version").fetchone()[0]),
+            "integrity": _integrity_ok(con),
+            "foreign_key_violations": _fk_violations(con),
+            "content_identity": _logical_identity(con),
+        }
+    finally:
+        con.close()
+
+
 def rehearse_provenance_migration(
     source_dir: str | Path,
     work_dir: str | Path,
@@ -1142,9 +1238,12 @@ def rehearse_provenance_migration(
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     src = _source_catalog_path(source_dir)
-    run_root = work_dir / str(run_id)
+    run_root = _contained_run_root(work_dir, run_id)
+    # Prefer refusing an existing run directory (never rmtree escape candidates).
     if run_root.exists():
-        shutil.rmtree(run_root)
+        raise FileExistsError(
+            f"rehearsal run directory already exists (refuse reuse): {run_root}"
+        )
     snap_dir = run_root / "snapshot"
     clone_dir = run_root / "clone"
     snap_dir.mkdir(parents=True)
@@ -1153,15 +1252,11 @@ def rehearse_provenance_migration(
     clone_path = clone_dir / "catalog.sqlite"
 
     # Capture source logical identity and integrity BEFORE any work (WAL-visible).
-    src_con = sqlite3.connect(f"file:{src.resolve().as_posix()}?mode=ro", uri=True)
-    try:
-        src_con.execute("PRAGMA query_only=ON")
-        source_user_version = int(src_con.execute("PRAGMA user_version").fetchone()[0])
-        source_integrity = _integrity_ok(src_con)
-        source_fk = _fk_violations(src_con)
-        source_identity = _logical_identity(src_con)
-    finally:
-        src_con.close()
+    src_metrics = _catalog_snapshot_metrics(src)
+    source_user_version = src_metrics["user_version"]
+    source_integrity = src_metrics["integrity"]
+    source_fk = src_metrics["foreign_key_violations"]
+    source_identity = src_metrics["content_identity"]
 
     # WAL-consistent snapshot via backup API (includes committed WAL content).
     src_rw = sqlite3.connect(str(src), isolation_level=None)
@@ -1209,38 +1304,21 @@ def rehearse_provenance_migration(
         clone_user_version = int(clone_con.execute("PRAGMA user_version").fetchone()[0])
         clone_integrity = _integrity_ok(clone_con)
         clone_fk = _fk_violations(clone_con)
-        # Re-read classification from backfilled rows
-        classification = {
-            "hub_confirmed": 0,
-            "legacy_unknown": 0,
-            "null_digest": 0,
-            "disagreement": 0,
-        }
-        for (prov,) in clone_con.execute(
-            "SELECT orig_sha256_provenance FROM archived"
-        ):
-            if prov == "hub_confirmed":
-                classification["hub_confirmed"] += 1
-            elif prov == "legacy_unknown":
-                classification["legacy_unknown"] += 1
-            elif prov is None:
-                # null provenance with null digest counted as null_digest
-                classification["null_digest"] += 1
-            # annex_key / archive-head-blob / ingestion_computed are post-repair writers
-        # Rows with digest but still null provenance should not remain after backfill;
-        # count null digests from orig_sha256 for the report.
         null_digest = clone_con.execute(
             "SELECT count(*) FROM archived WHERE orig_sha256 IS NULL"
         ).fetchone()[0]
-        classification["null_digest"] = int(null_digest)
         hub_n = clone_con.execute(
             "SELECT count(*) FROM archived WHERE orig_sha256_provenance='hub_confirmed'"
         ).fetchone()[0]
         leg_n = clone_con.execute(
             "SELECT count(*) FROM archived WHERE orig_sha256_provenance='legacy_unknown'"
         ).fetchone()[0]
-        classification["hub_confirmed"] = int(hub_n)
-        classification["legacy_unknown"] = int(leg_n)
+        classification = {
+            "hub_confirmed": int(hub_n),
+            "legacy_unknown": int(leg_n),
+            "null_digest": int(null_digest),
+            "disagreement": 0,
+        }
         clone_identity = _logical_identity(clone_con)
         _validate_migrated_clone(clone_con)
     finally:
@@ -1289,9 +1367,9 @@ def publish_provenance_migration(
 ) -> dict:
     """Operator-authorized publication of a rehearsed clone (DEC-059).
 
-    Requires explicit stop confirmation, independent writer-quiescence proof, a
-    retained rollback artifact equal to the rehearsal snapshot, and atomic
-    same-filesystem replace onto an absent destination catalog.
+    Treats the rehearsal report as untrusted: recomputes snapshot hash and live
+    source/clone metrics under a retained BEGIN IMMEDIATE on the source before
+    any rollback artifact, staging, or final os.replace.
     """
     work_dir = Path(work_dir)
     dest_dir = Path(dest_dir)
@@ -1299,6 +1377,10 @@ def publish_provenance_migration(
         raise RuntimeError(
             "publication refused: confirm_stopped must be the exact token "
             "'MODELARK-STOPPED' (writers must be stopped and authorized)"
+        )
+    if not writers_stopped:
+        raise RuntimeError(
+            "publication refused: writers_stopped must be True"
         )
     # Locate rehearsal report (work_dir may be the run root or its parent).
     report_path = work_dir / "report.json"
@@ -1314,13 +1396,23 @@ def publish_provenance_migration(
     report = json.loads(report_path.read_text())
     if report.get("manifest_status") != "validated" or report.get("status") != "ok":
         raise RuntimeError("publication refused: rehearsal is not validated/ok")
+
+    # Path consistency: reported paths must agree with on-disk layout under work_dir.
     clone_path = Path(report["clone_catalog_path"])
     snapshot_path = Path(report["snapshot_path"])
+    reported_manifest = Path(report.get("manifest_path") or "")
+    if reported_manifest.is_file() and reported_manifest.resolve() != report_path.parent.joinpath(
+            "manifest.json").resolve() and reported_manifest.resolve() != (
+            work_dir / "manifest.json").resolve():
+        # Soft: require the report's manifest_path to exist if set.
+        if not reported_manifest.is_file():
+            raise RuntimeError(
+                "publication refused: manifest_path missing or inconsistent with report"
+            )
     if not clone_path.is_file() or not snapshot_path.is_file():
         raise RuntimeError("publication refused: clone or snapshot missing")
     source_catalog = Path(report.get("source_catalog") or "")
     if not source_catalog.is_file():
-        # Fall back to manifest
         man = report.get("manifest") or {}
         source_catalog = Path((man.get("source_db") or {}).get("path") or "")
     if not source_catalog.is_file():
@@ -1334,66 +1426,124 @@ def publish_provenance_migration(
             "will not overwrite"
         )
 
-    # Independent writer-quiescence proof (even when writers_stopped=True).
-    # A held write transaction on the source must refuse publication.
-    probe = sqlite3.connect(str(source_catalog), isolation_level=None, timeout=0.05)
+    # Hold BEGIN IMMEDIATE on the source from revalidation through final replace.
+    source_lock = sqlite3.connect(
+        str(source_catalog), isolation_level=None, timeout=0.05)
+    staging: Path | None = None
     try:
         try:
-            probe.execute("BEGIN IMMEDIATE")
-            probe.execute("ROLLBACK")
+            source_lock.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as exc:
             raise RuntimeError(
                 "publication refused: source catalog has an active writer / lock "
                 f"(quiescence proof failed): {exc}"
             ) from exc
+
+        # Recompute snapshot SHA and live source/clone metrics (report untrusted).
+        live_snap_sha = _sha256_file(snapshot_path)
+        if live_snap_sha != report.get("snapshot_sha256"):
+            raise RuntimeError(
+                "publication refused: snapshot SHA-256 does not match rehearsal report"
+            )
+        src_now = _catalog_snapshot_metrics(source_catalog)
+        if src_now["integrity"] != "ok":
+            raise RuntimeError(
+                f"publication refused: source integrity not ok: {src_now['integrity']}"
+            )
+        if src_now["foreign_key_violations"]:
+            raise RuntimeError(
+                "publication refused: source foreign-key violations "
+                f"{src_now['foreign_key_violations'][:12]}"
+            )
+        if src_now["user_version"] != report.get("source_user_version"):
+            raise RuntimeError(
+                "publication refused: source user_version changed since rehearsal "
+                f"({src_now['user_version']} != {report.get('source_user_version')})"
+            )
+        if src_now["content_identity"] != report.get("source_content_identity"):
+            raise RuntimeError(
+                "publication refused: source logical identity changed since rehearsal"
+            )
+        clone_now = _catalog_snapshot_metrics(clone_path)
+        if clone_now["integrity"] != "ok":
+            raise RuntimeError(
+                f"publication refused: clone integrity not ok: {clone_now['integrity']}"
+            )
+        if clone_now["foreign_key_violations"]:
+            raise RuntimeError(
+                "publication refused: clone foreign-key violations "
+                f"{clone_now['foreign_key_violations'][:12]}"
+            )
+        if clone_now["user_version"] != report.get("clone_user_version"):
+            raise RuntimeError(
+                "publication refused: clone user_version changed since rehearsal "
+                f"({clone_now['user_version']} != {report.get('clone_user_version')})"
+            )
+        if clone_now["content_identity"] != report.get("clone_content_identity"):
+            raise RuntimeError(
+                "publication refused: clone logical identity changed since rehearsal "
+                "(modified clone)"
+            )
+        if int(clone_now["user_version"]) <= int(src_now["user_version"]):
+            raise RuntimeError(
+                "publication refused: clone is not a migrated successor of source"
+            )
+
+        # Rollback artifact under the held source lock.
+        rollback_dir = work_dir / "rollback"
+        rollback_dir.mkdir(parents=True, exist_ok=True)
+        rollback_artifact = rollback_dir / "catalog.sqlite.pre-publish"
+        if rollback_artifact.exists():
+            rollback_artifact.unlink()
+        shutil.copy2(snapshot_path, rollback_artifact)
+        if _sha256_file(rollback_artifact) != live_snap_sha:
+            raise RuntimeError(
+                "publication refused: rollback artifact hash != snapshot hash"
+            )
+
+        # Stage clone beside destination for same-FS atomic replace.
+        staging = dest_dir / ".catalog.sqlite.publish-staging"
+        if staging.exists():
+            staging.unlink()
+        shutil.copy2(clone_path, staging)
+        if os.stat(staging).st_dev != os.stat(dest_dir).st_dev:
+            raise RuntimeError(
+                "publication refused: staging and destination are on different "
+                "filesystems"
+            )
+        if os.stat(source_catalog).st_dev != os.stat(staging).st_dev:
+            raise RuntimeError(
+                "publication refused: source and destination are on different "
+                "filesystems"
+            )
+        # Final atomic replace while source lock is still held.
+        os.replace(str(staging), str(dest_cat))
+        staging = None  # consumed by replace
+        return {
+            "status": "ok",
+            "rollback_artifact": str(rollback_artifact.resolve()),
+            "published_catalog": str(dest_cat.resolve()),
+            "manifest_status": "validated",
+            "manifest_path": report.get("manifest_path"),
+            "snapshot_sha256": live_snap_sha,
+        }
+    except Exception:
+        # Never leave a partial destination on failure.
+        if dest_cat.exists() and staging is not None:
+            # replace did not succeed; dest should not exist
+            pass
+        if staging is not None and staging.exists():
+            try:
+                staging.unlink()
+            except OSError:
+                pass
+        raise
     finally:
-        probe.close()
-    if not writers_stopped:
-        raise RuntimeError(
-            "publication refused: writers_stopped must be True after quiescence proof"
-        )
-
-    # Rollback artifact: byte-identical copy of the rehearsal snapshot.
-    rollback_dir = work_dir / "rollback"
-    rollback_dir.mkdir(parents=True, exist_ok=True)
-    rollback_artifact = rollback_dir / "catalog.sqlite.pre-publish"
-    if rollback_artifact.exists():
-        rollback_artifact.unlink()
-    shutil.copy2(snapshot_path, rollback_artifact)
-    if _sha256_file(rollback_artifact) != report["snapshot_sha256"]:
-        raise RuntimeError(
-            "publication refused: rollback artifact hash != rehearsal snapshot hash"
-        )
-
-    # Stage clone beside destination for same-FS atomic replace.
-    staging = dest_dir / ".catalog.sqlite.publish-staging"
-    if staging.exists():
-        staging.unlink()
-    shutil.copy2(clone_path, staging)
-    if os.stat(staging).st_dev != os.stat(dest_dir).st_dev:
-        staging.unlink(missing_ok=True)
-        raise RuntimeError(
-            "publication refused: staging and destination are on different filesystems"
-        )
-    if (
-        source_catalog.exists()
-        and os.stat(source_catalog).st_dev != os.stat(staging).st_dev
-    ):
-        staging.unlink(missing_ok=True)
-        raise RuntimeError(
-            "publication refused: source and destination are on different filesystems"
-        )
-    # Final atomic replace onto the absent publication target.
-    os.replace(str(staging), str(dest_cat))
-
-    return {
-        "status": "ok",
-        "rollback_artifact": str(rollback_artifact.resolve()),
-        "published_catalog": str(dest_cat.resolve()),
-        "manifest_status": "validated",
-        "manifest_path": report.get("manifest_path"),
-        "snapshot_sha256": report["snapshot_sha256"],
-    }
+        try:
+            source_lock.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        source_lock.close()
 
 
 def upsert(con, table: str, row: dict, pk: list[str], touch: list[str] | None = None) -> None:

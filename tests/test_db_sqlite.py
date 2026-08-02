@@ -283,7 +283,7 @@ def test_v1_capacity_modes_map_transactionally_and_idempotently(tmp_path):
     legacy.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('safe','drive-01')")
     legacy.close()
 
-    con = db.connect()
+    con = db.migrate_existing_catalog()  # disposable fixture ladder (not ordinary connect)
     assert con.execute(
         "SELECT plan_id,capacity_mode FROM plans ORDER BY plan_id"
     ).fetchall() == [("aware", "compression_aware"), ("safe", "guaranteed")]
@@ -299,7 +299,7 @@ def test_v1_capacity_modes_map_transactionally_and_idempotently(tmp_path):
     backup = db.DB_PATH.with_name(f"{db.DB_PATH.name}.pre-capacity-v2.bak")
     assert backup.is_file()
     before = backup.stat().st_mtime_ns
-    con = db.connect()
+    con = db.connect()  # already at tip — ordinary connect is a stable no-op
     assert con.execute("SELECT count(*) FROM plans").fetchone()[0] == 2
     con.close()
     assert backup.stat().st_mtime_ns == before, "the recovery backup must never be overwritten"
@@ -329,7 +329,7 @@ def test_v2_capacity_mode_migration_rolls_back_invalid_legacy_value(tmp_path):
     )
     legacy.close()
     try:
-        db.connect()
+        db.migrate_existing_catalog()  # disposable ladder must abort on invalid capacity
         raise AssertionError("invalid legacy capacity values must abort schema v2")
     except RuntimeError as exc:
         assert "schema v2 capacity modes" in str(exc) or "capacity" in str(exc), exc

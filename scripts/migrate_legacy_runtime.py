@@ -240,7 +240,9 @@ def _publish_current_catalog(source_kind: str, backup_catalog: Path, stage: Path
             import_report = _migrate_duckdb_copy(backup_catalog, target)
 
         db.configure(stage, stage / "state")
-        con = db.connect()
+        # Staged disposable destination: explicit ladder (not ordinary connect, which
+        # refuses auto-migrate of existing pre-v7 catalogs under DEC-059 clone-first).
+        con = db.migrate_existing_catalog(backup_existing=True)
         try:
             migrated_plan = plan.bootstrap(con)["plan_id"]
             integrity = con.execute("PRAGMA integrity_check").fetchone()[0]

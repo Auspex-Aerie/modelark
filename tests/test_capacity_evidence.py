@@ -148,7 +148,7 @@ def test_shadow_selects_current_epoch_anchor_not_a_higher_old_epoch_generation(t
     _require()
     db.CATALOG_DIR = tmp_path
     db.DB_PATH = tmp_path / "catalog.sqlite"
-    con = db.connect()
+    con = db.migrate_existing_catalog()
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, "fresh catalog must be at current schema version"
     fp = "a" * 64
     con.execute(

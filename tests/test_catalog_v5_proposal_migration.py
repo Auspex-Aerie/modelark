@@ -201,7 +201,7 @@ def _hash64(ch="a"):
 
 def test_migrate_v4_to_v5_adds_five_tables_and_seeds_planner_state(tmp_path):
     _seed_v4(tmp_path)
-    con = db.connect()
+    con = db.migrate_existing_catalog()
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
         f"v4→v5(+current) migration not implemented; expected v{db._SCHEMA_VERSION}")
 
@@ -233,7 +233,7 @@ def test_migrate_v4_to_v5_adds_five_tables_and_seeds_planner_state(tmp_path):
 
 def test_v5_backup_precedes_every_v5_object(tmp_path):
     _seed_v4(tmp_path)
-    db.connect().close()
+    db.migrate_existing_catalog().close()
     bak = db.DB_PATH.with_name(db.DB_PATH.name + ".pre-proposal-v5.bak")
     assert bak.is_file(), (
         "non-overwriting v4 backup must exist before any v5 object is created "
@@ -249,7 +249,8 @@ def test_v5_backup_precedes_every_v5_object(tmp_path):
 
 def test_v5_migration_is_idempotent(tmp_path):
     _seed_v4(tmp_path)
-    db.connect().close()
+    db.migrate_existing_catalog().close()
+    # Second open via ordinary connect (already at tip) must be a stable no-op.
     con = db.connect()
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
         f"idempotent full connect must land at v{db._SCHEMA_VERSION}")
@@ -316,7 +317,7 @@ def test_v5_tables_not_introduced_during_integrity_rebuild(tmp_path):
     con.execute("PRAGMA user_version=0")
     con.close()
 
-    con = db.connect()
+    con = db.migrate_existing_catalog()
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
         f"full migration must land at v{db._SCHEMA_VERSION}")
     tables = {r[0] for r in con.execute(
@@ -365,7 +366,7 @@ def _seed_minimal_approved_proposal(con, proposal_id="prop-1"):
 
 def test_proposal_lifecycle_and_task_row_kind_constraints(tmp_path):
     _seed_v4(tmp_path)
-    con = db.connect()
+    con = db.migrate_existing_catalog()
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
         f"schema v{db._SCHEMA_VERSION} required")
 
@@ -408,7 +409,7 @@ def test_proposal_lifecycle_and_task_row_kind_constraints(tmp_path):
 def test_execution_sessions_schema_constraints_with_synthetic_rows(tmp_path):
     """Complete schema pin: columns, FKs, state domain, worker-claim, live uniqueness."""
     _seed_v4(tmp_path)
-    con = db.connect()
+    con = db.migrate_existing_catalog()
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION, (
         f"schema v{db._SCHEMA_VERSION} required for execution_sessions")
     con.execute("PRAGMA foreign_keys=ON")
