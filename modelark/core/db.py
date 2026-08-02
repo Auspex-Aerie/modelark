@@ -167,13 +167,11 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
     try:
         version = int(con.execute("PRAGMA user_version").fetchone()[0])
         _validate_catalog_version(version)
-        # DEC-059: clone-first is mandatory for every existing pre-v7 catalog.
-        # Ordinary connect() never applies the provenance migration (or any ladder
-        # step) to an existing v1–v6 canonical database. Fresh creation (version 0 /
-        # not previously present) may install the packaged target schema directly.
-        # Raise before journal_mode/schema so bytes, schema, and user_version are
-        # unchanged on refusal.
-        if existed and version > 0 and version < _SCHEMA_VERSION:
+        # DEC-059: clone-first is mandatory for every existing pre-v7 catalog,
+        # including a populated legacy file stamped user_version=0. Only an
+        # *absent* catalog file counts as fresh creation. Raise before
+        # journal_mode/schema so bytes, schema, and user_version are unchanged.
+        if existed and version < _SCHEMA_VERSION:
             raise RuntimeError(
                 f"Catalog schema v{version} requires clone-first provenance migration to "
                 f"v{_SCHEMA_VERSION} (rehearse_provenance_migration / "
@@ -287,8 +285,10 @@ def _validate_catalog_version(version: int, *, read_only: bool = False) -> None:
         )
     if read_only and version < _SCHEMA_VERSION:
         raise RuntimeError(
-            f"Catalog schema v{version} requires a writable migration to v{_SCHEMA_VERSION}; "
-            "open it once with the current ModelArk CLI or service before read-only diagnostics."
+            f"Catalog schema v{version} requires clone-first provenance migration to "
+            f"v{_SCHEMA_VERSION} (rehearse_provenance_migration / "
+            f"publish_provenance_migration) before read-only diagnostics; ordinary "
+            f"db.connect() will not auto-migrate an existing pre-v{_SCHEMA_VERSION} catalog."
         )
 
 
@@ -1358,6 +1358,281 @@ def rehearse_provenance_migration(
     return report
 
 
+def _schema_shape(con: sqlite3.Connection) -> dict:
+    """Semantic schema shape: tables, columns/CHECK SQL, FKs, indexes, triggers, views."""
+    tables = sorted(
+        r[0] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'"
+        )
+    )
+    shape: dict = {"tables": {}, "indexes": [], "triggers": [], "views": []}
+    for table in tables:
+        cols = [
+            {
+                "name": r[1], "type": (r[2] or "").upper(),
+                "notnull": int(r[3]), "dflt": r[4], "pk": int(r[5]),
+            }
+            for r in con.execute(f'PRAGMA table_info("{table}")')
+        ]
+        fks = [
+            {
+                "id": r[0], "seq": r[1], "table": r[2], "from": r[3], "to": r[4],
+                "on_update": r[5], "on_delete": r[6],
+            }
+            for r in con.execute(f'PRAGMA foreign_key_list("{table}")')
+        ]
+        create_sql = (con.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            [table],
+        ).fetchone() or [None])[0]
+        shape["tables"][table] = {
+            "columns": cols,
+            "fks": sorted(fks, key=lambda x: (x["id"], x["seq"])),
+            "create_sql": create_sql,
+        }
+    for name, sql, tbl in con.execute(
+        "SELECT name, sql, tbl_name FROM sqlite_master WHERE type='index' "
+        "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    ):
+        info = list(con.execute(f'PRAGMA index_info("{name}")')) if name else []
+        ilist = list(con.execute(f'PRAGMA index_list("{tbl}")')) if tbl else []
+        meta = next((r for r in ilist if r[1] == name), None)
+        shape["indexes"].append({
+            "name": name, "tbl": tbl, "sql": sql,
+            "unique": int(meta[2]) if meta else None,
+            "origin": meta[3] if meta else None,
+            "partial": int(meta[4]) if meta else None,
+            "columns": [r[2] for r in info if r[2] is not None],
+        })
+    for name, sql in con.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='trigger' ORDER BY name"
+    ):
+        shape["triggers"].append({"name": name, "sql": sql})
+    for name, sql in con.execute(
+        "SELECT name, sql FROM sqlite_master WHERE type='view' ORDER BY name"
+    ):
+        shape["views"].append({"name": name, "sql": sql})
+    return shape
+
+
+def _schema_shape_file(path: Path) -> dict:
+    con = sqlite3.connect(f"file:{path.resolve().as_posix()}?mode=ro", uri=True)
+    try:
+        con.execute("PRAGMA query_only=ON")
+        return _schema_shape(con)
+    finally:
+        con.close()
+
+
+def _assert_clone_target_schema_parity(clone_path: Path) -> None:
+    """Require clone semantic schema parity with a fresh packaged v7 catalog."""
+    import tempfile
+    global CATALOG_DIR, DB_PATH, STATE_DIR
+    with tempfile.TemporaryDirectory(prefix="modelark-v7-shape-") as tmp:
+        tdir = Path(tmp)
+        old = CATALOG_DIR, DB_PATH, STATE_DIR
+        try:
+            configure(tdir, tdir / "state")
+            fcon = connect()
+            try:
+                fresh_shape = _schema_shape(fcon)
+                fresh_ver = int(fcon.execute("PRAGMA user_version").fetchone()[0])
+            finally:
+                fcon.close()
+        finally:
+            CATALOG_DIR, DB_PATH, STATE_DIR = old
+
+        clone_shape = _schema_shape_file(clone_path)
+        if fresh_ver != _SCHEMA_VERSION:
+            raise RuntimeError(
+                f"publication refused: fresh target schema version {fresh_ver} "
+                f"!= build v{_SCHEMA_VERSION}"
+            )
+        if set(clone_shape["tables"]) != set(fresh_shape["tables"]):
+            raise RuntimeError(
+                "publication refused: clone tables differ from v7 target schema "
+                f"(clone={sorted(clone_shape['tables'])} "
+                f"target={sorted(fresh_shape['tables'])})"
+            )
+        for table in sorted(fresh_shape["tables"]):
+            a = clone_shape["tables"][table]
+            b = fresh_shape["tables"][table]
+            if a["columns"] != b["columns"]:
+                raise RuntimeError(
+                    f"publication refused: clone column shape for {table} "
+                    "differs from v7 target"
+                )
+            if a["fks"] != b["fks"]:
+                raise RuntimeError(
+                    f"publication refused: clone FK shape for {table} "
+                    "differs from v7 target"
+                )
+            a_sql = (a["create_sql"] or "").upper()
+            b_sql = (b["create_sql"] or "").upper()
+            # Require every CHECK-related token present on the target CREATE also
+            # appear on the clone CREATE for the same table.
+            for token in (
+                "ORIG_SHA256_PROVENANCE", "HUB_CONFIRMED", "INGESTION_COMPUTED",
+                "ANNEX_KEY", "ARCHIVE-HEAD-BLOB", "LEGACY_UNKNOWN",
+                "DERIVATION_MODE", "OPTIMIZED", "STATE_TRUNCATED",
+                "CANONICAL_FALLBACK", "BLOCKED_ABSENT", "NEEDS_REFETCH",
+            ):
+                if token in b_sql and token not in a_sql:
+                    raise RuntimeError(
+                        f"publication refused: clone CREATE for {table} "
+                        f"missing target CHECK/token {token}"
+                    )
+        def _idx_key(i):
+            return (i["name"], i["unique"], i["origin"], i["partial"],
+                    tuple(i["columns"] or []))
+        if sorted(_idx_key(i) for i in clone_shape["indexes"]) != sorted(
+                _idx_key(i) for i in fresh_shape["indexes"]):
+            raise RuntimeError(
+                "publication refused: clone indexes differ from v7 target schema"
+            )
+        if {t["name"] for t in clone_shape["triggers"]} != {
+                t["name"] for t in fresh_shape["triggers"]}:
+            raise RuntimeError(
+                "publication refused: clone triggers differ from v7 target schema"
+            )
+        if {v["name"] for v in clone_shape["views"]} != {
+                v["name"] for v in fresh_shape["views"]}:
+            raise RuntimeError(
+                "publication refused: clone views differ from v7 target schema"
+            )
+
+
+def _resolve_rehearsal_layout(work_dir: Path) -> tuple[Path, dict, Path, Path, Path, Path]:
+    """Resolve run root and require exact contained layout; parse+cross-check manifest."""
+    work_dir = Path(work_dir).expanduser().resolve()
+    report_path = work_dir / "report.json"
+    run_root = work_dir
+    if not report_path.is_file():
+        candidates = sorted(work_dir.glob("*/report.json"))
+        if len(candidates) != 1:
+            raise RuntimeError(
+                f"publication refused: rehearsal report.json not found under {work_dir}"
+            )
+        report_path = candidates[0].resolve()
+        run_root = report_path.parent.resolve()
+        try:
+            run_root.relative_to(work_dir)
+        except ValueError as exc:
+            raise RuntimeError(
+                "publication refused: run root escapes work_dir"
+            ) from exc
+        if run_root.parent != work_dir:
+            raise RuntimeError(
+                "publication refused: run root must be a direct child of work_dir"
+            )
+    else:
+        report_path = report_path.resolve()
+        run_root = work_dir
+
+    report = json.loads(report_path.read_text())
+    if report.get("manifest_status") != "validated" or report.get("status") != "ok":
+        raise RuntimeError("publication refused: rehearsal is not validated/ok")
+
+    # Exact expected contained paths under run_root.
+    expected_report = (run_root / "report.json").resolve()
+    expected_manifest = (run_root / "manifest.json").resolve()
+    expected_snapshot = (run_root / "snapshot" / "catalog.sqlite").resolve()
+    expected_clone = (run_root / "clone" / "catalog.sqlite").resolve()
+    if report_path != expected_report:
+        raise RuntimeError(
+            "publication refused: report path is not the exact contained report.json"
+        )
+    for label, path in (
+        ("manifest", expected_manifest),
+        ("snapshot", expected_snapshot),
+        ("clone", expected_clone),
+    ):
+        if not path.is_file():
+            raise RuntimeError(
+                f"publication refused: missing exact contained {label} at {path}"
+            )
+        try:
+            path.relative_to(run_root)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"publication refused: {label} path escapes run root"
+            ) from exc
+
+    # Report path fields must agree with exact layout (no substituted/escaped paths).
+    for key, expected in (
+        ("manifest_path", expected_manifest),
+        ("snapshot_path", expected_snapshot),
+        ("clone_catalog_path", expected_clone),
+    ):
+        reported = Path(report.get(key) or "")
+        try:
+            resolved = reported.resolve()
+        except OSError as exc:
+            raise RuntimeError(
+                f"publication refused: report {key} is not resolvable"
+            ) from exc
+        if resolved != expected or not resolved.is_file():
+            raise RuntimeError(
+                f"publication refused: report {key} does not match exact "
+                f"contained path (reported={reported} expected={expected})"
+            )
+    work_reported = Path(report.get("work_dir") or "")
+    try:
+        work_resolved = work_reported.resolve()
+    except OSError as exc:
+        raise RuntimeError(
+            "publication refused: report work_dir is not resolvable"
+        ) from exc
+    if work_resolved != run_root or not work_resolved.is_dir():
+        raise RuntimeError(
+            "publication refused: report work_dir inconsistent with run root"
+        )
+
+    man = json.loads(expected_manifest.read_text())
+    if not isinstance(man, dict):
+        raise RuntimeError("publication refused: manifest.json is not an object")
+    if man.get("run_id") != report.get("run_id"):
+        raise RuntimeError(
+            "publication refused: manifest run_id disagrees with report"
+        )
+    src_from_report = Path(report.get("source_catalog") or "").resolve()
+    src_from_man = Path((man.get("source_catalog") or "")).resolve() if man.get(
+        "source_catalog") else None
+    src_db_entry = man.get("source_db") or {}
+    src_from_entry = Path(src_db_entry.get("path") or "").resolve() if src_db_entry.get(
+        "path") else None
+    if not src_from_report.is_file():
+        raise RuntimeError("publication refused: report source_catalog missing")
+    if src_from_man is not None and src_from_man != src_from_report:
+        raise RuntimeError(
+            "publication refused: manifest source_catalog disagrees with report"
+        )
+    if src_from_entry is not None and src_from_entry != src_from_report:
+        raise RuntimeError(
+            "publication refused: manifest source_db.path disagrees with report"
+        )
+    # Manifest entry presence/hash consistency for source_db at minimum.
+    if src_db_entry.get("present") is True:
+        p = Path(src_db_entry["path"])
+        if not p.is_file() or p.resolve() != src_from_report:
+            raise RuntimeError(
+                "publication refused: manifest source_db path inconsistent"
+            )
+        if int(src_db_entry.get("size") or -1) != p.stat().st_size:
+            raise RuntimeError(
+                "publication refused: manifest source_db size inconsistent"
+            )
+        if src_db_entry.get("sha256") != _sha256_file(p):
+            raise RuntimeError(
+                "publication refused: manifest source_db sha256 inconsistent"
+            )
+    return (
+        run_root, report, expected_manifest, expected_snapshot,
+        expected_clone, src_from_report,
+    )
+
+
 def publish_provenance_migration(
     work_dir: str | Path,
     dest_dir: str | Path,
@@ -1367,11 +1642,12 @@ def publish_provenance_migration(
 ) -> dict:
     """Operator-authorized publication of a rehearsed clone (DEC-059).
 
-    Treats the rehearsal report as untrusted: recomputes snapshot hash and live
-    source/clone metrics under a retained BEGIN IMMEDIATE on the source before
-    any rollback artifact, staging, or final os.replace.
+    Treats the rehearsal report as untrusted: strict contained layout + manifest
+    cross-check, recomputed snapshot hash and live source/clone metrics, source
+    schema-drift detection, and clone semantic parity with the packaged v7 target
+    — all under a retained BEGIN IMMEDIATE on the source before any rollback
+    artifact, staging, or final os.replace.
     """
-    work_dir = Path(work_dir)
     dest_dir = Path(dest_dir)
     if not confirm_stopped or str(confirm_stopped).strip() != "MODELARK-STOPPED":
         raise RuntimeError(
@@ -1382,41 +1658,11 @@ def publish_provenance_migration(
         raise RuntimeError(
             "publication refused: writers_stopped must be True"
         )
-    # Locate rehearsal report (work_dir may be the run root or its parent).
-    report_path = work_dir / "report.json"
-    if not report_path.is_file():
-        candidates = list(work_dir.glob("*/report.json"))
-        if len(candidates) == 1:
-            report_path = candidates[0]
-            work_dir = report_path.parent
-        else:
-            raise RuntimeError(
-                f"publication refused: rehearsal report.json not found under {work_dir}"
-            )
-    report = json.loads(report_path.read_text())
-    if report.get("manifest_status") != "validated" or report.get("status") != "ok":
-        raise RuntimeError("publication refused: rehearsal is not validated/ok")
 
-    # Path consistency: reported paths must agree with on-disk layout under work_dir.
-    clone_path = Path(report["clone_catalog_path"])
-    snapshot_path = Path(report["snapshot_path"])
-    reported_manifest = Path(report.get("manifest_path") or "")
-    if reported_manifest.is_file() and reported_manifest.resolve() != report_path.parent.joinpath(
-            "manifest.json").resolve() and reported_manifest.resolve() != (
-            work_dir / "manifest.json").resolve():
-        # Soft: require the report's manifest_path to exist if set.
-        if not reported_manifest.is_file():
-            raise RuntimeError(
-                "publication refused: manifest_path missing or inconsistent with report"
-            )
-    if not clone_path.is_file() or not snapshot_path.is_file():
-        raise RuntimeError("publication refused: clone or snapshot missing")
-    source_catalog = Path(report.get("source_catalog") or "")
-    if not source_catalog.is_file():
-        man = report.get("manifest") or {}
-        source_catalog = Path((man.get("source_db") or {}).get("path") or "")
-    if not source_catalog.is_file():
-        raise RuntimeError("publication refused: source catalog path unknown")
+    run_root, report, manifest_path, snapshot_path, clone_path, source_catalog = (
+        _resolve_rehearsal_layout(Path(work_dir))
+    )
+    work_dir = run_root
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_cat = dest_dir / "catalog.sqlite"
@@ -1425,6 +1671,10 @@ def publish_provenance_migration(
             f"publication refused: destination already exists ({dest_cat}); "
             "will not overwrite"
         )
+
+    # Snapshot schema shape of source for drift detection (pre-lock RO is fine;
+    # re-checked under lock via content identity + version).
+    snapshot_schema = _schema_shape_file(snapshot_path)
 
     # Hold BEGIN IMMEDIATE on the source from revalidation through final replace.
     source_lock = sqlite3.connect(
@@ -1464,6 +1714,13 @@ def publish_provenance_migration(
             raise RuntimeError(
                 "publication refused: source logical identity changed since rehearsal"
             )
+        # Source schema drift since snapshot (columns/CHECKs/FKs/indexes/triggers/views).
+        src_schema_now = _schema_shape(source_lock)
+        if src_schema_now != snapshot_schema:
+            raise RuntimeError(
+                "publication refused: source schema drifted since rehearsal snapshot"
+            )
+
         clone_now = _catalog_snapshot_metrics(clone_path)
         if clone_now["integrity"] != "ok":
             raise RuntimeError(
@@ -1488,6 +1745,8 @@ def publish_provenance_migration(
             raise RuntimeError(
                 "publication refused: clone is not a migrated successor of source"
             )
+        # Independent clone semantic parity with packaged v7 target schema.
+        _assert_clone_target_schema_parity(clone_path)
 
         # Rollback artifact under the held source lock.
         rollback_dir = work_dir / "rollback"
@@ -1524,14 +1783,10 @@ def publish_provenance_migration(
             "rollback_artifact": str(rollback_artifact.resolve()),
             "published_catalog": str(dest_cat.resolve()),
             "manifest_status": "validated",
-            "manifest_path": report.get("manifest_path"),
+            "manifest_path": str(manifest_path),
             "snapshot_sha256": live_snap_sha,
         }
     except Exception:
-        # Never leave a partial destination on failure.
-        if dest_cat.exists() and staging is not None:
-            # replace did not succeed; dest should not exist
-            pass
         if staging is not None and staging.exists():
             try:
                 staging.unlink()

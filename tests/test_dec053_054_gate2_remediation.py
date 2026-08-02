@@ -560,3 +560,216 @@ def test_repair_archive_head_hub_disagreement_halts(tmp_path):
         assert after == before
     finally:
         con.close()
+
+
+# ---------------------------------------------------------------------------
+# Remediation 2 — five independent permanent cases
+# ---------------------------------------------------------------------------
+
+
+def test_connect_refuses_existing_populated_v0_unchanged(tmp_path):
+    """Existing populated user_version=0 file is not fresh; refuse without mutation."""
+    data = tmp_path / "data"
+    data.mkdir()
+    path = data / "catalog.sqlite"
+    _seed_versioned(path, 0)
+    # Ensure it is populated (tables + rows), not an absent-file bootstrap.
+    con = sqlite3.connect(str(path), isolation_level=None)
+    try:
+        n = con.execute("SELECT count(*) FROM models").fetchone()[0]
+        assert n >= 1
+        con.execute("PRAGMA user_version=0")
+    finally:
+        con.close()
+    before = {
+        "sha256": _sha_file(path),
+        "size": path.stat().st_size,
+        "user_version": _user_version(path),
+        "tables": _tables(path),
+    }
+    assert before["user_version"] == 0
+    db.configure(data, data / "state")
+    with pytest.raises(RuntimeError) as ei:
+        c = db.connect()
+        c.close()
+    msg = str(ei.value).lower()
+    assert "clone-first" in msg or "rehearse" in msg or "will not auto-migrate" in msg
+    after = {
+        "sha256": _sha_file(path),
+        "size": path.stat().st_size,
+        "user_version": _user_version(path),
+        "tables": _tables(path),
+    }
+    assert after == before
+
+
+def test_repair_identity_race_rereads_under_lock(tmp_path):
+    """Identity change immediately before lock: repair must validate new identity."""
+    con = _migrated_clone(tmp_path)
+    try:
+        before = list(con.execute(
+            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
+            "ORDER BY rfilename"))
+        # Simulate concurrent mutation racing just before lock acquisition by
+        # changing identity after caller syntax validation would pass, then
+        # invoking repair which re-reads under BEGIN IMMEDIATE.
+        con.execute(
+            "UPDATE drives SET identity_epoch=9, identity_fingerprint=? "
+            "WHERE drive_label='d0'", [_h("9")])
+        rep = hash_repair.run_explicit_drive_repair(
+            con, "d0", identity_epoch=1, identity_fingerprint=_h("f"))
+        assert rep["status"] == "halted"
+        detail = (rep.get("detail") or "").lower()
+        assert "epoch" in detail or "fingerprint" in detail or "mismatch" in detail
+        after = list(con.execute(
+            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
+            "ORDER BY rfilename"))
+        assert after == before
+    finally:
+        con.close()
+
+
+def test_repair_non_hex_and_matching_non_hex_never_authorize(tmp_path):
+    """Caller non-hex refused; matching non-hex never authorizes archive evidence."""
+    con = _migrated_clone(tmp_path)
+    try:
+        before = list(con.execute(
+            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
+            "ORDER BY rfilename"))
+        # Caller non-hex vs stored hex → mismatch halt (Gate-1 W17 class).
+        bad = "Z" * 64
+        assert not hash_repair._valid_identity_fingerprint(bad)
+        rep = hash_repair.run_explicit_drive_repair(
+            con, "d0", identity_epoch=1, identity_fingerprint=bad)
+        assert rep["status"] == "halted"
+        assert list(con.execute(
+            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
+            "ORDER BY rfilename")) == before
+
+        # Matching non-hex on both sides never authorizes evidence (no applied).
+        con.execute(
+            "UPDATE drives SET identity_fingerprint=? WHERE drive_label='d0'", [bad])
+        # Leave unresolved work so a false authorization would apply.
+        con.execute(
+            "UPDATE archived SET orig_sha256=NULL, annex_key=?, compressed=0, "
+            "orig_sha256_provenance=NULL WHERE rfilename='shard.bin'",
+            [f"SHA256E-s50--{_h('d')}"])
+        before2 = list(con.execute(
+            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
+            "ORDER BY rfilename"))
+        rep2 = hash_repair.run_explicit_drive_repair(
+            con, "d0", identity_epoch=1, identity_fingerprint=bad)
+        assert rep2.get("applied", 0) == 0
+        assert rep2["status"] != "complete"
+        assert list(con.execute(
+            "SELECT rfilename,orig_sha256,orig_sha256_provenance FROM archived "
+            "ORDER BY rfilename")) == before2
+        # Missing still refuses with HashRepairError.
+        with pytest.raises(hash_repair.HashRepairError):
+            hash_repair.run_explicit_drive_repair(
+                con, "d0", identity_epoch=1, identity_fingerprint=None)
+    finally:
+        con.close()
+
+
+def test_publish_refuses_clone_index_drop_and_check_weaken(tmp_path):
+    """Dropping an index or weakening a CHECK after rehearsal blocks publication."""
+    data, report, work = _rehearse_ok(tmp_path)
+    dest = tmp_path / "dest-idx"
+    clone = Path(report["clone_catalog_path"])
+
+    # Case A: drop a secondary index on the clone.
+    c = sqlite3.connect(str(clone), isolation_level=None)
+    try:
+        c.execute("DROP INDEX IF EXISTS idx_placement_proposals_plan")
+    finally:
+        c.close()
+    with pytest.raises(RuntimeError) as ei:
+        db.publish_provenance_migration(
+            work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
+    assert "index" in str(ei.value).lower() or "schema" in str(ei.value).lower() \
+        or "clone" in str(ei.value).lower()
+    assert not (dest / "catalog.sqlite").exists()
+
+    # Restore via fresh rehearsal for CHECK weaken case.
+    data2, report2, work2 = _rehearse_ok(tmp_path / "check")
+    dest2 = tmp_path / "dest-check"
+    clone2 = Path(report2["clone_catalog_path"])
+    c2 = sqlite3.connect(str(clone2), isolation_level=None)
+    try:
+        # Rebuild placement_proposals without derivation_mode CHECK (weaken).
+        cols = [r[1] for r in c2.execute("PRAGMA table_info(placement_proposals)")]
+        rows = c2.execute(
+            f"SELECT {','.join(cols)} FROM placement_proposals").fetchall()
+        c2.execute("PRAGMA foreign_keys=OFF")
+        c2.execute(
+            "CREATE TABLE placement_proposals__weak ("
+            "proposal_id VARCHAR PRIMARY KEY NOT NULL,"
+            "plan_id VARCHAR NOT NULL,"
+            "based_on_revision INTEGER NOT NULL,"
+            "lifecycle VARCHAR NOT NULL,"
+            "canonical_hash VARCHAR NOT NULL,"
+            "mutation_kind VARCHAR NOT NULL,"
+            "mutation_args_json TEXT NOT NULL,"
+            "serializer_version VARCHAR NOT NULL,"
+            "derivation_mode VARCHAR,"  # unconstrained — CHECK removed
+            "execution_config_hash VARCHAR,"
+            "created_at TIMESTAMP,"
+            "approved_at TIMESTAMP,"
+            "superseded_at TIMESTAMP,"
+            "requirement_set_hash VARCHAR,"
+            "semantic_input_hash VARCHAR,"
+            "selection_before_hash VARCHAR,"
+            "selection_after_hash VARCHAR,"
+            "capacity_mode VARCHAR,"
+            "policy_version VARCHAR,"
+            "solver_version VARCHAR,"
+            "gate_b_code VARCHAR"
+            ")"
+        )
+        # Best-effort copy common columns.
+        weak_cols = [r[1] for r in c2.execute(
+            "PRAGMA table_info(placement_proposals__weak)")]
+        common = [c for c in cols if c in weak_cols]
+        for row in rows:
+            data_row = dict(zip(cols, row))
+            c2.execute(
+                f"INSERT INTO placement_proposals__weak({','.join(common)}) "
+                f"VALUES({','.join('?' for _ in common)})",
+                [data_row[c] for c in common],
+            )
+        c2.execute("DROP TABLE placement_proposals")
+        c2.execute(
+            "ALTER TABLE placement_proposals__weak RENAME TO placement_proposals")
+        c2.execute("PRAGMA foreign_keys=ON")
+    finally:
+        c2.close()
+    with pytest.raises(RuntimeError) as ei2:
+        db.publish_provenance_migration(
+            work2, dest2, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
+    assert any(k in str(ei2.value).lower() for k in (
+        "check", "derivation", "schema", "clone", "token", "column"))
+    assert not (dest2 / "catalog.sqlite").exists()
+
+
+def test_publish_refuses_source_schema_drift_since_snapshot(tmp_path):
+    """Source schema change after snapshot (drop index) refuses publication."""
+    data, report, work = _rehearse_ok(tmp_path)
+    src = Path(report["source_catalog"])
+    # Drop an index on the frozen-v6 source if present; otherwise add then drop a marker.
+    s = sqlite3.connect(str(src), isolation_level=None)
+    try:
+        s.execute(
+            "CREATE INDEX IF NOT EXISTS idx_models_status_drift ON models(status)")
+        s.execute("DROP INDEX idx_models_status_drift")
+        # Force a durable schema difference vs snapshot: leave a new empty table.
+        s.execute("CREATE TABLE IF NOT EXISTS schema_drift_marker(x INTEGER)")
+    finally:
+        s.close()
+    dest = tmp_path / "dest-src-drift"
+    with pytest.raises(RuntimeError) as ei:
+        db.publish_provenance_migration(
+            work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
+    msg = str(ei.value).lower()
+    assert "schema" in msg or "drift" in msg or "source" in msg
+    assert not (dest / "catalog.sqlite").exists()

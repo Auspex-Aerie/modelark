@@ -11,10 +11,10 @@ def _seed_v5(tmp_path):
     db.CATALOG_DIR = tmp_path
     db.DB_PATH = tmp_path / "catalog.sqlite"
     db.STATE_DIR = tmp_path / "state"
-    con = sqlite3.connect(str(db.DB_PATH), isolation_level=None)
-    # Build via full connect then strip column by rebuild if needed — instead seed manually.
-    con.close()
-    # Use normal connect to current schema then downgrade shape for the test.
+    # Fresh bootstrap (absent file), then downgrade shape for the test.
+    # Do not pre-create an empty catalog.sqlite — ordinary connect refuses
+    # existing user_version=0 files under DEC-059 clone-first.
+    assert not db.DB_PATH.exists()
     con = db.connect()
     con.close()
     raw = sqlite3.connect(str(db.DB_PATH), isolation_level=None)

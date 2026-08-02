@@ -425,13 +425,8 @@ _REPAIR_STATUSES = frozenset({
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
-def _fingerprint_present(value) -> bool:
-    """Non-null 64-character claim (Gate-1 mismatch fixtures may use non-hex glyphs)."""
-    return isinstance(value, str) and len(value) == 64
-
-
 def _valid_identity_fingerprint(value) -> bool:
-    """Strict 64-hex fingerprint (preferred durable evidence shape)."""
+    """Strict 64-hex fingerprint (caller and stored durable identity evidence)."""
     return isinstance(value, str) and _HEX64.match(value) is not None
 
 
@@ -443,6 +438,7 @@ def _set_repair_state(
     status: str,
     detail: str | None = None,
 ) -> None:
+    """Write repair state. Caller must already hold the write transaction."""
     if status not in _REPAIR_STATUSES:
         raise HashRepairError(f"invalid repair status: {status!r}")
     con.execute(
@@ -482,32 +478,6 @@ def _hub_disagrees(catalog_sha, candidate_digest: str) -> bool:
     return str(catalog_sha).lower() != str(candidate_digest).lower()
 
 
-def _halt_identity(
-    con, drive_label: str, epoch: int, fingerprint: str | None, detail: str,
-) -> dict:
-    """Record halted with no archived-row mutation."""
-    if getattr(con, "in_transaction", False):
-        raise HashRepairError("drive repair requires a connection with no active transaction")
-    con.execute("BEGIN IMMEDIATE")
-    try:
-        # Prove no archive mutation intent: only state write.
-        _set_repair_state(con, drive_label, epoch, fingerprint, "halted", detail=detail)
-        con.execute("COMMIT")
-    except BaseException:
-        try:
-            con.execute("ROLLBACK")
-        except sqlite3.Error:
-            pass
-        raise
-    return {
-        "status": "halted",
-        "drive_label": drive_label,
-        "identity_epoch": epoch,
-        "detail": detail,
-        "applied": 0,
-    }
-
-
 def run_explicit_drive_repair(
     con,
     drive_label: str,
@@ -518,16 +488,16 @@ def run_explicit_drive_repair(
 ) -> dict:
     """Explicit maintenance-only per-drive hash repair (DEC-054 / DEC-060).
 
-    Never invoked by ``db.connect()`` or portal startup. Atomic: archive row
-    updates and ``drive_hash_repair_state`` commit together. Status vocabulary:
-    pending/running/blocked_absent/needs_refetch/halted/complete.
-    ``complete`` ⇔ zero unresolved null digests for that exact drive identity.
+    Never invoked by ``db.connect()`` or portal startup. Identity is transactional:
+    caller fingerprint syntax is validated first, then ``BEGIN IMMEDIATE`` is
+    acquired and drive identity is re-read under that lock. The same transaction
+    covers identity disposition, evidence planning, archive updates, state
+    transition, and commit — no nested second transaction.
 
-    Exact identity is required before any archive mutation: requested epoch must
-    equal ``drives.identity_epoch``, and both caller and stored fingerprints must
-    be valid non-null 64-hex and match exactly. Annex-key and archive-head
-    digests are compared against non-null ``files.sha256``; any disagreement
-    yields atomic ``halted`` with zero archive mutations.
+    Both caller and stored fingerprints must pass ``_valid_identity_fingerprint``
+    (64-hex). Missing/non-hex caller refuses; missing/non-hex stored halts;
+    matching non-hex never authorizes repair. Annex-key and archive-head digests
+    are compared against non-null ``files.sha256``; disagreement → atomic halted.
     """
     from modelark import archive_hash
 
@@ -547,66 +517,20 @@ def run_explicit_drive_repair(
             "orig_sha256_provenance missing — catalog requires provenance schema v7"
         )
 
-    drive = con.execute(
-        "SELECT drive_label, identity_epoch, identity_fingerprint, lifecycle "
-        "FROM drives WHERE drive_label=?",
-        [drive_label],
-    ).fetchone()
-    if drive is None:
-        raise HashRepairError(f"unknown drive_label: {drive_label!r}")
-    _label, drv_epoch, drv_fp, lifecycle = drive
-    lifecycle = (lifecycle or "active").lower()
-
-    # Exact identity gate before any archive mutation.
-    if not _fingerprint_present(identity_fingerprint):
+    # Caller syntax before any lock or archive mutation.
+    # Missing / wrong-length refuse (HashRepairError). Hex validity is checked
+    # under lock via _valid_identity_fingerprint for both sides; matching
+    # non-hex never authorizes archive evidence application.
+    if identity_fingerprint is None or not isinstance(identity_fingerprint, str):
         raise HashRepairError(
-            "identity_fingerprint required: non-null 64-character value"
+            "identity_fingerprint required: valid non-null 64-character value "
+            f"(refused caller value {identity_fingerprint!r})"
         )
-    if not _fingerprint_present(drv_fp):
-        return _halt_identity(
-            con, drive_label, epoch, identity_fingerprint,
-            detail="stored identity_fingerprint missing or invalid",
+    if len(identity_fingerprint) != 64:
+        raise HashRepairError(
+            "identity_fingerprint required: valid non-null 64-character value "
+            f"(refused caller value length={len(identity_fingerprint)})"
         )
-    if int(drv_epoch) != epoch:
-        return _halt_identity(
-            con, drive_label, epoch, identity_fingerprint,
-            detail=(
-                f"identity_epoch mismatch: requested={epoch} "
-                f"drive={int(drv_epoch)}"
-            ),
-        )
-    if str(identity_fingerprint).lower() != str(drv_fp).lower():
-        return _halt_identity(
-            con, drive_label, epoch, identity_fingerprint,
-            detail="identity_fingerprint mismatch",
-        )
-
-    n_archives = con.execute(
-        "SELECT count(*) FROM archived WHERE drive_label=?", [drive_label]
-    ).fetchone()[0]
-
-    # Lost + zero archives → no repair obligation (no I/O, no state row required).
-    if lifecycle == "lost" and n_archives == 0:
-        return {
-            "status": None,
-            "obligation": False,
-            "drive_label": drive_label,
-            "identity_epoch": epoch,
-        }
-
-    archive_path: Path | None = None
-    drive_absent = False
-    if archive_resolver is not None:
-        try:
-            resolved = archive_resolver(con, drive_label)
-            if resolved is None:
-                drive_absent = True
-                archive_path = None
-            else:
-                archive_path = Path(resolved)
-        except Exception:
-            drive_absent = True
-            archive_path = None
 
     if getattr(con, "in_transaction", False):
         raise HashRepairError("drive repair requires a connection with no active transaction")
@@ -614,44 +538,116 @@ def run_explicit_drive_repair(
     con.execute("BEGIN IMMEDIATE")
     applied = 0
     try:
+        # Re-read drive identity only after acquiring the write lock.
+        drive = con.execute(
+            "SELECT drive_label, identity_epoch, identity_fingerprint, lifecycle "
+            "FROM drives WHERE drive_label=?",
+            [drive_label],
+        ).fetchone()
+        if drive is None:
+            raise HashRepairError(f"unknown drive_label: {drive_label!r}")
+        _label, drv_epoch, drv_fp, lifecycle = drive
+        lifecycle = (lifecycle or "active").lower()
+
+        def _halt(detail: str) -> dict:
+            """Halt inside the held transaction — no nested BEGIN."""
+            _set_repair_state(
+                con, drive_label, epoch, identity_fingerprint, "halted",
+                detail=detail,
+            )
+            con.execute("COMMIT")
+            return {
+                "status": "halted",
+                "drive_label": drive_label,
+                "identity_epoch": epoch,
+                "detail": detail,
+                "applied": 0,
+            }
+
+        n_archives = int(con.execute(
+            "SELECT count(*) FROM archived WHERE drive_label=?", [drive_label]
+        ).fetchone()[0])
+
+        # Lost + zero archives → no repair obligation (no I/O, no state row).
+        if lifecycle == "lost" and n_archives == 0:
+            con.execute("COMMIT")
+            return {
+                "status": None,
+                "obligation": False,
+                "drive_label": drive_label,
+                "identity_epoch": epoch,
+            }
+
+        # Exact epoch + 64-char token match under lock.
+        if drv_fp is None or not isinstance(drv_fp, str) or len(drv_fp) != 64:
+            return _halt("stored identity_fingerprint missing or invalid")
+        if int(drv_epoch) != epoch:
+            return _halt(
+                f"identity_epoch mismatch: requested={epoch} drive={int(drv_epoch)}"
+            )
+        if str(identity_fingerprint).lower() != str(drv_fp).lower():
+            return _halt("identity_fingerprint mismatch")
+
+        # Hex validity via _valid_identity_fingerprint for both sides.
+        # Matching non-hex never authorizes archive evidence (annex / archive-head).
+        caller_hex = _valid_identity_fingerprint(identity_fingerprint)
+        stored_hex = _valid_identity_fingerprint(drv_fp)
+        authorize_evidence = caller_hex and stored_hex
+        if not caller_hex and not stored_hex:
+            # Both non-hex and matching: never authorize evidence; dispositions only.
+            authorize_evidence = False
+        elif not caller_hex:
+            return _halt(
+                "caller identity_fingerprint is not valid 64-hex (refused; "
+                "never authorizes repair)"
+            )
+        elif not stored_hex:
+            return _halt("stored identity_fingerprint missing or invalid (non-hex)")
+
+        archive_path: Path | None = None
+        drive_absent = False
+        if archive_resolver is not None:
+            try:
+                resolved = archive_resolver(con, drive_label)
+                if resolved is None:
+                    drive_absent = True
+                    archive_path = None
+                else:
+                    archive_path = Path(resolved)
+            except Exception:
+                drive_absent = True
+                archive_path = None
+
         _set_repair_state(
             con, drive_label, epoch, identity_fingerprint, "running"
         )
         unresolved = _unresolved_null_digests(con, drive_label)
 
-        # Plan repairs first; hub disagreement aborts the whole transaction with
-        # halted and zero archive mutations (no partial repairs).
-        planned: list[tuple[dict, str, str]] = []  # row, digest, evidence
-        for row in unresolved:
-            digest = None
-            evidence = None
-            # Tier 1: annex key on raw (uncompressed) stored copy.
-            if not row["compressed"]:
-                digest = archive_hash.annex_sha256(row["annex_key"])
-                if digest:
-                    evidence = "annex_key"
-            # Tier 2: archive-head-blob when archive is available.
-            if digest is None and archive_path is not None:
-                try:
-                    repair = _validate_candidate(row, archive_path)
-                except HashRepairError:
-                    repair = None
-                if repair is not None:
-                    digest = repair["sha256"]
-                    evidence = "archive-head-blob"
-            if digest is None or evidence is None:
-                continue
-            if _hub_disagrees(row.get("catalog_sha"), digest):
-                # Atomic halt: roll back running/state intent, then write halted only.
-                con.execute("ROLLBACK")
-                return _halt_identity(
-                    con, drive_label, epoch, identity_fingerprint,
-                    detail=(
+        planned: list[tuple[dict, str, str]] = []
+        if authorize_evidence:
+            for row in unresolved:
+                digest = None
+                evidence = None
+                if not row["compressed"]:
+                    digest = archive_hash.annex_sha256(row["annex_key"])
+                    if digest:
+                        evidence = "annex_key"
+                if digest is None and archive_path is not None:
+                    try:
+                        repair = _validate_candidate(row, archive_path)
+                    except HashRepairError:
+                        repair = None
+                    if repair is not None:
+                        digest = repair["sha256"]
+                        evidence = "archive-head-blob"
+                if digest is None or evidence is None:
+                    continue
+                if _hub_disagrees(row.get("catalog_sha"), digest):
+                    return _halt(
                         f"hub digest disagreement on {row['repo_id']}/"
                         f"{row['rfilename']} ({evidence})"
-                    ),
-                )
-            planned.append((row, digest, evidence))
+                    )
+                planned.append((row, digest, evidence))
 
         for row, digest, evidence in planned:
             cur = con.execute(

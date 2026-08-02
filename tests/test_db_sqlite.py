@@ -208,7 +208,7 @@ def test_legacy_catalog_rebuild_preserves_rows_and_applies_migrations(tmp_path):
                 "VALUES('org/m','nested/model.safetensors','model.safetensors.znn','drive-01',1)")
     con.close()
 
-    con = db.connect()
+    con = db.migrate_existing_catalog()  # disposable v0 ladder (ordinary connect refuses pre-v7)
     assert con.execute("SELECT status FROM models WHERE repo_id='org/m'").fetchone()[0] == "inspected"
     got = con.execute("SELECT stored_relpath FROM archived").fetchone()[0]
     assert got == "nested/model.safetensors.znn", got
@@ -238,7 +238,7 @@ def test_v0_to_v3_migration_backs_up_a_genuine_v2_before_evidence(tmp_path):
                 "VALUES('drive-01',500,'primary',0)")
     con.close()
 
-    con = db.connect()
+    con = db.migrate_existing_catalog()  # disposable v0 ladder (ordinary connect refuses pre-v7)
     assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION
     drive_columns = {r[1] for r in con.execute("PRAGMA table_info(drives)").fetchall()}
     assert {"identity_epoch", "write_authority"} <= drive_columns
@@ -260,7 +260,7 @@ def test_legacy_orphans_abort_and_roll_back_integrity_rebuild(tmp_path):
     con.execute("INSERT INTO selection(repo_id) VALUES('missing/model')")
     con.close()
     try:
-        db.connect()
+        db.migrate_existing_catalog()  # disposable ladder must abort on orphans
         raise AssertionError("orphaned legacy rows must abort the migration")
     except RuntimeError as exc:
         assert "orphaned rows" in str(exc) and "selection" in str(exc), exc
@@ -375,7 +375,9 @@ def test_read_only_open_refuses_an_unmigrated_v1_catalog(tmp_path):
         db.connect(read_only=True)
         raise AssertionError("read-only diagnostics must not attempt a schema migration")
     except RuntimeError as exc:
-        assert "requires a writable migration" in str(exc), exc
+        msg = str(exc).lower()
+        assert "clone-first" in msg or "rehearse" in msg or "will not auto-migrate" in msg, exc
+        assert "writable migration" not in msg and "open it once" not in msg, exc
     raw = sqlite3.connect(str(db.DB_PATH))
     assert raw.execute("PRAGMA user_version").fetchone()[0] == 1
     assert "provisioning" in {
