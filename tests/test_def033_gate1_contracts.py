@@ -194,7 +194,17 @@ def _tree_inventory(root: Path) -> list[tuple[str, str]]:
 
 
 def _db_content_identity(con) -> str:
-    """Complete ordered database-content identity (all user tables, all columns)."""
+    """Database identity: user_version, ordered schema defs, ordered table contents."""
+    h = hashlib.sha256()
+    user_version = con.execute("PRAGMA user_version").fetchone()[0]
+    h.update(f"user_version={user_version}".encode())
+    # Ordered sqlite_master definitions for tables, indexes, triggers, and views.
+    for row in con.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_master "
+        "WHERE name NOT LIKE 'sqlite_%' "
+        "ORDER BY type, name, tbl_name, ifnull(sql, '')"
+    ).fetchall():
+        h.update(repr(tuple(row)).encode())
     tables = [
         row[0]
         for row in con.execute(
@@ -203,7 +213,6 @@ def _db_content_identity(con) -> str:
             "ORDER BY name"
         ).fetchall()
     ]
-    h = hashlib.sha256()
     for table in tables:
         cols = [
             row[1]
@@ -222,6 +231,25 @@ def _db_content_identity(con) -> str:
     return h.hexdigest()
 
 
+def _assert_policy_error_retained(r: dict, err: archive_manifest.ArchivePolicyError):
+    """Structured policy evidence survives even when status precedence is failed."""
+    pe = r.get("policy_error")
+    assert pe == {
+        "code": _POLICY_ERROR_CODE,
+        "detail": str(err),
+    }, (
+        f"policy_error must remain exactly "
+        f"{{'code': {_POLICY_ERROR_CODE!r}, 'detail': <original ArchivePolicyError text>}}; "
+        f"got {pe!r} (original err={str(err)!r}); status={r.get('status')!r}"
+    )
+    assert r.get("missing") is None, (
+        f"missing must be None when the required manifest is unknowable, "
+        f"not {r.get('missing')!r}"
+    )
+    for alt in ("archive_policy_error", "manifest_policy_error", "policy_errors"):
+        assert alt not in r or r[alt] is None, f"alternate key {alt} must not be used: {r.get(alt)!r}"
+
+
 def _assert_exact_policy_unknown(r: dict, err: archive_manifest.ArchivePolicyError):
     """Sole policy-unknown reverify shape for Gate 2."""
     assert r["status"] == "unknown", r
@@ -230,23 +258,18 @@ def _assert_exact_policy_unknown(r: dict, err: archive_manifest.ArchivePolicyErr
         f"record_ok must be None (unknowable), not {r.get('record_ok')!r} "
         f"(False would collapse unknown into known inconsistency)"
     )
-    assert r["missing"] is None, (
-        f"missing must be None when the required manifest is unknowable, "
-        f"not {r.get('missing')!r} ( [] would claim zero missing proven)"
+    _assert_policy_error_retained(r, err)
+
+
+def _assert_policy_reason_carries_batch_error(entry: dict, batch_err: Exception):
+    """suspects() reason list must include the original ManifestBatch.errors detail."""
+    reasons = entry.get("reasons") or []
+    assert reasons, f"policy unknown follow-up must have a non-empty reasons list: {entry}"
+    original = str(batch_err)
+    assert any(original in reason or reason == original for reason in reasons), (
+        f"reasons must carry original ManifestBatch.errors detail\n"
+        f"  expected to include: {original!r}\n  got reasons: {reasons!r}"
     )
-    pe = r.get("policy_error")
-    assert pe == {
-        "code": _POLICY_ERROR_CODE,
-        "detail": str(err),
-    }, (
-        f"policy_error must be exactly "
-        f"{{'code': {_POLICY_ERROR_CODE!r}, 'detail': <original ArchivePolicyError text>}}; "
-        f"got {pe!r} (original err={str(err)!r})"
-    )
-    assert isinstance(pe["detail"], str) and pe["detail"].strip(), pe
-    # No alternate evidence keys.
-    for alt in ("archive_policy_error", "manifest_policy_error", "policy_errors"):
-        assert alt not in r or r[alt] is None, f"alternate key {alt} must not be used: {r.get(alt)!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -430,23 +453,35 @@ def test_g07_live_shaped_fixture_is_four_catalog_three_archived():
 # ---------------------------------------------------------------------------
 
 def test_r01_policy_error_exact_unknown_even_when_physical_passes():
-    """Physical PASS cannot upgrade policy-unknown; exact result shape."""
+    """All three archived blobs must physically PASS; policy-unknown still dominates."""
     con = _mem()
     repo, archived = _seed_unsupported(con)
     err = _require_policy_error(con, repo)
+    archived_names = {rf for rf, _fmt, _data in archived}
+    assert len(archived_names) == 3
 
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _write_archived_tree(root, repo, archived)
-        assert len(_tree_inventory(root)) == 3  # three archived blobs present
+        assert len(_tree_inventory(root)) == 3
         with mock.patch.object(verifier.register, "archive_path", return_value=root):
             r = verifier.reverify(con, repo, deep=True)
 
+    # Prove physical PASS first (not tautological with status==unknown).
+    assert r.get("deep_ran") is True, r
+    checks = r.get("deep_checks") or []
+    checked_files = {c.get("file") for c in checks}
+    assert checked_files == archived_names, (
+        f"exactly the three archived blobs must be deep-checked; "
+        f"expected {sorted(archived_names)}, got {sorted(checked_files)}"
+    )
+    assert len(checks) == 3, f"expected 3 deep_checks entries, got {len(checks)}: {checks}"
+    assert all(c.get("ok") is True for c in checks), (
+        f"every archived blob deep check must pass before asserting policy dominance: {checks}"
+    )
+    # Then exact policy-unknown (physical PASS cannot upgrade).
     _assert_exact_policy_unknown(r, err)
     assert r.get("deep_ok") is not True
-    # Physical checks may have run and passed on available blobs — still unknown.
-    if r.get("deep_checks"):
-        assert all(c.get("ok") is not False for c in r["deep_checks"]) or r["status"] == "unknown"
 
 
 def test_r02_record_ok_none_and_missing_none_when_manifest_unknowable():
@@ -464,39 +499,34 @@ def test_r03_policy_error_field_exact_code_and_original_detail():
     repo, _archived = _seed_unsupported(con)
     err = _require_policy_error(con, repo)
     r = verifier.reverify(con, repo, deep=False)
-    pe = r.get("policy_error")
-    assert pe is not None, f"missing policy_error; keys={sorted(r)}"
-    assert pe.get("code") == _POLICY_ERROR_CODE, pe
-    assert pe.get("detail") == str(err), (
-        f"detail must be the original ArchivePolicyError text\n"
-        f"  expected: {str(err)!r}\n  got:      {pe.get('detail')!r}"
-    )
-    # Detail-only acceptance is forbidden — structured field required.
-    assert "policy_error" in r
-    for alt in ("archive_policy_error", "manifest_policy_error", "policy_errors"):
-        assert alt not in r, f"do not use alternate evidence key {alt}"
+    _assert_policy_error_retained(r, err)
+    assert r.get("status") == "unknown"
+    assert r.get("ok") is False
+    assert r.get("record_ok") is None
 
 
 def test_r04_sha_mismatch_under_policy_error_remains_failed():
-    """Digest disagreement → record_ok False, status failed (known evidence wins)."""
+    """Digest disagreement → failed; policy_error retained; record_ok False."""
     con = _mem()
     repo, _archived = _seed_unsupported(con)
-    _require_policy_error(con, repo)
+    err = _require_policy_error(con, repo)
     con.execute(
         "UPDATE archived SET orig_sha256=? WHERE repo_id=? AND rfilename='model.onnx'",
         ["0" * 64, repo],
     )
     r = verifier.reverify(con, repo, deep=False)
     assert "model.onnx" in r["sha_mismatch"]
-    assert r["record_ok"] is False
     assert r["status"] == "failed"
     assert r["ok"] is False
+    assert r["record_ok"] is False  # known digest inconsistency
+    _assert_policy_error_retained(r, err)
 
 
 def test_r05_missing_mounted_bytes_under_policy_error_remains_failed():
+    """Missing mounted bytes → failed; policy_error retained; record_ok None."""
     con = _mem()
     repo, _archived = _seed_unsupported(con)
-    _require_policy_error(con, repo)
+    err = _require_policy_error(con, repo)
     with tempfile.TemporaryDirectory() as td:
         with mock.patch.object(verifier.register, "archive_path", return_value=Path(td)):
             r = verifier.reverify(con, repo, deep=True)
@@ -505,13 +535,18 @@ def test_r05_missing_mounted_bytes_under_policy_error_remains_failed():
     )
     assert r["ok"] is False
     assert any(c.get("ok") is False for c in r.get("deep_checks") or [])
+    # No digest disagreement: record completeness remains unknowable (None).
+    assert r["record_ok"] is None, (
+        f"without digest disagreement, record_ok stays None (got {r.get('record_ok')!r})"
+    )
+    _assert_policy_error_retained(r, err)
 
 
 def test_r06_insufficient_copies_under_policy_error_remains_failed():
-    """numcopies=2 with one healthy mounted copy must still fail on insufficient."""
+    """numcopies=2 / one healthy copy → failed; policy_error retained; record_ok None."""
     con = _mem()
     repo, archived = _seed_unsupported(con, numcopies=2)
-    _require_policy_error(con, repo)
+    err = _require_policy_error(con, repo)
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _write_archived_tree(root, repo, archived)
@@ -523,6 +558,10 @@ def test_r06_insufficient_copies_under_policy_error_remains_failed():
     )
     assert r["ok"] is False
     assert r.get("insufficient"), "expected non-empty insufficient list for numcopies=2 / 1 copy"
+    assert r["record_ok"] is None, (
+        f"without digest disagreement, record_ok stays None (got {r.get('record_ok')!r})"
+    )
+    _assert_policy_error_retained(r, err)
 
 
 # ---------------------------------------------------------------------------
@@ -530,13 +569,14 @@ def test_r06_insufficient_copies_under_policy_error_remains_failed():
 # ---------------------------------------------------------------------------
 
 def test_r07_policy_only_followup_types_exactly_unknown():
-    """ManifestBatch.errors → types == ['unknown']; not integrity / partial."""
+    """ManifestBatch.errors → types == ['unknown'] + original error detail in reasons."""
     con = _mem()
     repo, _archived = _seed_unsupported(con, repo="org/aux-only")
     batch = archive_manifest.inspect_manifests_for_repos(
         con, [repo], archive_manifest.recovery_policy()
     )
     assert repo in batch.errors and repo not in batch.manifests
+    batch_err = batch.errors[repo]
 
     reps = {s["repo"]: s for s in verifier.suspects(con)}
     assert repo in reps, (
@@ -546,6 +586,7 @@ def test_r07_policy_only_followup_types_exactly_unknown():
     assert entry["types"] == [_UNKNOWN_TYPE], (
         f"policy-only follow-up types must be exactly ['unknown'], got {entry.get('types')!r}"
     )
+    _assert_policy_reason_carries_batch_error(entry, batch_err)
     reasons = " ".join(entry.get("reasons") or []).lower()
     assert "partial copy" not in reasons, (
         f"must not invent partial-copy solely from policy failure: {entry}"
@@ -553,7 +594,7 @@ def test_r07_policy_only_followup_types_exactly_unknown():
 
 
 def test_r08_multi_drive_policy_error_not_union_filename_false_suspect():
-    """Split archived names across drives under policy-error → types ['unknown']."""
+    """Split archived names across drives under policy-error → types ['unknown'] + detail."""
     con = _mem()
     repo = "org/split-foreign"
     con.execute("INSERT INTO models(repo_id,numcopies) VALUES(?,1)", [repo])
@@ -595,14 +636,17 @@ def test_r08_multi_drive_policy_error_not_union_filename_false_suspect():
         "SELECT count(*) FROM archived WHERE repo_id=?", [repo]
     ).fetchone()[0]
     assert (n_files, n_arch) == (4, 3)
-    assert repo in archive_manifest.inspect_manifests_for_repos(
+    batch = archive_manifest.inspect_manifests_for_repos(
         con, [repo], archive_manifest.recovery_policy()
-    ).errors
+    )
+    assert repo in batch.errors
+    batch_err = batch.errors[repo]
 
     reps = {s["repo"]: s for s in verifier.suspects(con)}
     assert repo in reps, "policy-error multi-drive repo must appear as unknown follow-up"
     entry = reps[repo]
     assert entry["types"] == [_UNKNOWN_TYPE], entry
+    _assert_policy_reason_carries_batch_error(entry, batch_err)
     reasons = " ".join(entry.get("reasons") or []).lower()
     assert "partial copy" not in reasons, (
         "union-of-filenames fallback must not flag multi-drive policy-error "
@@ -614,7 +658,11 @@ def test_r09_independent_integrity_suspects_remain_on_other_repos():
     """Disruption / raw-float stay integrity on their own repos."""
     con = _mem()
     policy_repo, _ = _seed_unsupported(con, repo="org/policy")
-    _require_policy_error(con, policy_repo)
+    batch = archive_manifest.inspect_manifests_for_repos(
+        con, [policy_repo], archive_manifest.recovery_policy()
+    )
+    assert policy_repo in batch.errors
+    batch_err = batch.errors[policy_repo]
 
     con.execute(
         "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
@@ -648,13 +696,18 @@ def test_r09_independent_integrity_suspects_remain_on_other_repos():
     assert "integrity" in reps["org/disrupt"]["types"]
     assert policy_repo in reps, f"policy unknown missing: {list(reps)}"
     assert reps[policy_repo]["types"] == [_UNKNOWN_TYPE], reps[policy_repo]
+    _assert_policy_reason_carries_batch_error(reps[policy_repo], batch_err)
 
 
 def test_r09b_same_repo_policy_plus_disruption_types_integrity_and_unknown():
-    """Same repository: policy failure + disruption → sorted types ['integrity','unknown']."""
+    """Same repository: policy + disruption → integrity+unknown; both reasons retained."""
     con = _mem()
     repo, _archived = _seed_unsupported(con, repo="org/mixed")
-    _require_policy_error(con, repo)
+    batch = archive_manifest.inspect_manifests_for_repos(
+        con, [repo], archive_manifest.recovery_policy()
+    )
+    assert repo in batch.errors
+    batch_err = batch.errors[repo]
     # Disruption within ±15 min of archived.verified_at (2026-07-11 10:00:00).
     con.execute(
         "INSERT INTO fetch_events(repo_id,event_at,outcome,detail) "
@@ -667,9 +720,12 @@ def test_r09b_same_repo_policy_plus_disruption_types_integrity_and_unknown():
     assert sorted(entry["types"]) == ["integrity", _UNKNOWN_TYPE], (
         f"mixed policy+disruption must be exactly integrity+unknown, got {entry.get('types')!r}"
     )
-    reasons = " ".join(entry.get("reasons") or []).lower()
-    assert "disruption" in reasons
-    assert "partial copy" not in reasons
+    _assert_policy_reason_carries_batch_error(entry, batch_err)
+    reasons_joined = " ".join(entry.get("reasons") or []).lower()
+    assert "disruption" in reasons_joined, (
+        f"mixed entry must retain independent integrity reason: {entry.get('reasons')!r}"
+    )
+    assert "partial copy" not in reasons_joined
 
 
 # ---------------------------------------------------------------------------
@@ -677,44 +733,53 @@ def test_r09b_same_repo_policy_plus_disruption_types_integrity_and_unknown():
 # ---------------------------------------------------------------------------
 
 def test_r10_operator_counts_and_renders_unknown_neutrally():
-    """verify.js must count type=='unknown' separately and badge it neutrally (mut)."""
+    """verify.js: exact type 'unknown' counted via ${unknown.length}; badge mut only for unknown."""
     js = Path("modelark/web/static/verify.js").read_text()
     html = Path("modelark/web/static/index.html").read_text()
 
-    # Separate count of unknown follow-ups (exact type name).
+    # Collect unknown by exact type name.
     assert re.search(
         r'includes\(\s*["\']unknown["\']\s*\)',
         js,
     ), "verify.js must filter follow-ups by exact type 'unknown'"
-    note_ok = bool(
-        re.search(r"unknown.*follow-up|unknown.*suspect|unknown\.length", js, re.I)
-    ) or (
-        "unknown" in js
-        and re.search(r"integrity suspect", js)
-        and re.search(r"unknown", js)
-    )
-    # Note text must report an unknown count alongside integrity/access.
-    assert re.search(
-        r"unknown",
-        next(
-            (ln for ln in js.splitlines() if "integrity suspect" in ln or "vfNote" in ln),
-            js,
-        ),
-        re.I,
-    ) or re.search(r"\$\{[^}]*unknown[^}]*\}", js), (
-        "vfNote must visibly count unknown follow-ups separately from integrity"
-    )
-    assert note_ok or "unknown" in js
 
-    # Neutral badge: type "unknown" maps to mut (not integrity "bad").
-    assert re.search(
-        r"""(?:t\s*===\s*["']unknown["']|["']unknown["']\s*===\s*t)"""
-        r"""|"""
-        r"""unknown["']\s*\?\s*["']mut["']"""
-        r"""|"""
-        r"""(?:access-gated|unknown)[^;]{0,80}mut""",
-        js,
-    ), "unknown type must render with neutral (mut) badge, not integrity bad-only"
+    # Displayed note must include the actual unknown collection's count.
+    assert "${unknown.length}" in js, (
+        "vfNote must include ${unknown.length} for the unknown follow-up count "
+        "(not a free-form 'unknown' substring elsewhere)"
+    )
+
+    # Neutral badge: only an explicit "unknown" → "mut" branch satisfies.
+    # access-gated-only mut styling (current code) does NOT satisfy this pin.
+    # Accept: t === "unknown" ? "mut"  or  (… || t === "unknown") ? "mut"
+    has_explicit_unknown_mut = bool(
+        re.search(
+            r"""t\s*===\s*["']unknown["']\s*\?\s*["']mut["']"""
+            r"""|"""
+            r"""["']unknown["']\s*===\s*t\s*\?\s*["']mut["']"""
+            r"""|"""
+            r"""\|\|\s*t\s*===\s*["']unknown["']\s*\)\s*\?\s*["']mut["']"""
+            r"""|"""
+            r"""t\s*===\s*["']access-gated["']\s*\|\|\s*t\s*===\s*["']unknown["']\s*\?\s*["']mut["']"""
+            r"""|"""
+            r"""t\s*===\s*["']unknown["']\s*\|\|\s*t\s*===\s*["']access-gated["']\s*\?\s*["']mut["']""",
+            js,
+        )
+    )
+    assert has_explicit_unknown_mut, (
+        "unknown type must map to mut via an explicit branch naming \"unknown\" "
+        "(access-gated-only mut styling does not satisfy this pin)"
+    )
+    # Current integrity-default badge must not be the only path: unknown must not fall through to "bad".
+    access_only_mut = bool(
+        re.search(
+            r"""t\s*===\s*["']access-gated["']\s*\?\s*["']mut["']\s*:\s*["']bad["']""",
+            js,
+        )
+    )
+    assert not access_only_mut or has_explicit_unknown_mut, (
+        "access-gated ? mut : bad without naming unknown leaves unknown as bad"
+    )
 
     assert "vfSuspects" in html or "Verify" in html
 
