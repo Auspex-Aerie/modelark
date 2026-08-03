@@ -1,5 +1,6 @@
 // Verify view (DEF-021): auto-surfaced disruption suspects + on-demand re-verify of archived copies.
 // Record consistency is checked offline; the decompress-canary runs server-side when a drive is mounted.
+// DEF-033: type "unknown" is a neutral policy follow-up (not integrity); counted via ${unknown.length}.
 (function () {
   const { api, post, toast, esc, hfRepoURL } = window.MA;
   const $ = id => document.getElementById(id);
@@ -8,7 +9,7 @@
   const suspectRow = s => {
     const types = s.types || ["integrity"];
     const integrity = types.includes("integrity"), access = types.includes("access-gated");
-    const badges = types.map(t => `<span class="vfbadge ${t === "access-gated" ? "mut" : "bad"}">${esc(t)}</span>`).join(" ");
+    const badges = types.map(t => `<span class="vfbadge ${t === "access-gated" || t === "unknown" ? "mut" : "bad"}">${esc(t)}</span>`).join(" ");
     const actions = (access ? `<a class="modal-link vfaccess" href="${esc(hfRepoURL(s.repo))}" target="_blank" rel="noopener noreferrer">get access</a>` : "")
       + (integrity ? `<button class="vfone" data-repo="${esc(s.repo)}">re-verify</button>` : "");
     return `<div class="vfsus">
@@ -48,9 +49,10 @@
     suspects = (d && d.suspects) || [];
     const integrity = suspects.filter(s => (s.types || ["integrity"]).includes("integrity"));
     const access = suspects.filter(s => (s.types || []).includes("access-gated"));
+    const unknown = suspects.filter(s => (s.types || []).includes("unknown"));
     $("vfNote").textContent = suspects.length
-      ? `${integrity.length} integrity suspect(s) · ${access.length} access follow-up(s)`
-      : "no follow-ups — no disrupted copies or deferred access";
+      ? `${integrity.length} integrity suspect(s) · ${access.length} access follow-up(s) · ${unknown.length} unknown follow-up(s)`
+      : "no follow-ups — no disrupted copies, deferred access, or policy unknowns";
     $("vfReverifyAll").disabled = !integrity.length;
     host.innerHTML = suspects.length ? suspects.map(suspectRow).join("")
       : '<div class="pcmut" style="padding:12px">No follow-ups. 🎉</div>';
