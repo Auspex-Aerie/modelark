@@ -395,7 +395,10 @@ def _catalog_projection_bundle(con, proposal, relevant, services, current_config
             ("reconcile_drive", "preview_again"))
 
     # Recompute manifests from catalog files (not proposal self-copy).
-    from modelark.proposal import _manifest_hash, _semantic_input_hash, _requirement_set_hash
+    from modelark.proposal import (
+        _baseline_file_evidence, _manifest_hash, _semantic_input_hash, _requirement_set_hash,
+    )
+    from modelark import proposal_canonical as canonical
     repos = sorted({t.get("repo_id") for t in (proposal.get("tasks") or ()) if t.get("repo_id")})
     manifests = {repo: _manifest_hash(con, repo) for repo in repos}
 
@@ -408,24 +411,44 @@ def _catalog_projection_bundle(con, proposal, relevant, services, current_config
     except Exception:
         current_semantic = proposal.get("semantic_input_hash")
 
-    # Certificates: prefer catalog archived presence as baseline proof when marked baseline.
+    # INC-027: recompute each baseline certificate from catalog authority.
+    # Never self-copy proposal.baseline_certificate after any-row presence.
     certificates = {}
     for t in (proposal.get("tasks") or ()):
         if t.get("row_kind") != "baseline_satisfied":
             continue
         rid = t["requirement_id"]
-        # Catalog authority: satisfying drive must still hold matching archived facts.
-        cert = t.get("baseline_certificate")
+        repo = t.get("repo_id")
         label = t.get("satisfying_drive") or t.get("target_drive")
-        if label:
+        if not label or not repo:
+            certificates[rid] = "__MISSING__"
+            continue
+        # Per-task archived-unfiltered evidence on the exact satisfying drive.
+        cert_files = _baseline_file_evidence(con, repo, label)
+        if not cert_files:
+            certificates[rid] = "__MISSING__"
+            continue
+        d = drives.get(label)
+        if d is not None:
+            epoch = int(getattr(d, "identity_epoch", 1) or 1)
+            fingerprint = getattr(d, "identity_fingerprint", None) or ("0" * 64)
+        else:
             row = con.execute(
-                "SELECT orig_sha256 FROM archived WHERE repo_id=? AND drive_label=? LIMIT 1",
-                [t.get("repo_id"), label]).fetchone()
-            if row:
-                certificates[rid] = cert or row[0]
-            else:
-                # Leave absent so project_pure refuses baseline_archive_missing.
+                "SELECT identity_fingerprint, identity_epoch FROM drives "
+                "WHERE drive_label=?", [label]).fetchone()
+            if not row or not row[0]:
                 certificates[rid] = "__MISSING__"
+                continue
+            fingerprint, epoch = row[0], int(row[1] or 1)
+        current_mh = manifests.get(repo) or _manifest_hash(con, repo)
+        certificates[rid] = canonical.baseline_satisfaction_certificate(
+            requirement_id=rid,
+            full_manifest_hash=current_mh,
+            drive_label=label,
+            identity_epoch=epoch,
+            identity_fingerprint=fingerprint,
+            files=cert_files,
+        )
 
     current_input = SimpleNamespace(
         manifests=manifests,

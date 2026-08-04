@@ -326,13 +326,15 @@ def project_pure(proposal, current_input, current_graph, session_overlay):
                 {"drive": label, "current_epoch": _epoch(drives[label])},
                 ("correct_mount", "preview_again"))
 
-    # Baseline certificates
+    # Baseline certificates (INC-027): compare stored vs recomputed current only.
+    # __MISSING__ is complete archive absence; any other missing/None/unequal cert is
+    # baseline_certificate_mismatch. No any-row scan; no model.safetensors special case.
     for t in prop_tasks:
         td = t if isinstance(t, Mapping) else _task_dict(t)
         if td.get("row_kind") != "baseline_satisfied":
             continue
         label = td.get("satisfying_drive") or td.get("target_drive")
-        cert = td.get("baseline_certificate")
+        stored_cert = td.get("baseline_certificate")
         if not label:
             return Refusal("APPROVAL_PROJECTION_VIOLATION",
                            {"reason": "missing_satisfying_drive"}, ("inspect_integrity",))
@@ -341,35 +343,22 @@ def project_pure(proposal, current_input, current_graph, session_overlay):
             return Refusal("APPROVAL_PROJECTION_VIOLATION",
                            {"reason": "baseline_drive_invalid", "drive": label},
                            ("inspect_integrity",))
-        # Certificate must still match stored when we have certs on input
         certs = _g(current_input, "certificates") or {}
-        got_cert = certs.get(td.get("requirement_id"))
+        rid = td.get("requirement_id")
+        got_cert = certs.get(rid) if isinstance(certs, Mapping) else None
         if got_cert == "__MISSING__":
             return Refusal(
                 "APPROVAL_PROJECTION_VIOLATION",
                 {"reason": "baseline_archive_missing", "drive": label,
                  "repo": td.get("repo_id")},
                 ("inspect_integrity",))
-        if cert and got_cert not in (None, cert):
-            return Refusal("APPROVAL_PROJECTION_VIOLATION",
-                           {"reason": "baseline_certificate"}, ("inspect_integrity",))
-        # Baseline archival evidence must still exist on the satisfying drive.
-        repo = td.get("repo_id")
-        if label and repo is not None:
-            row = None
-            if isinstance(archived, Mapping):
-                for k, v in archived.items():
-                    if isinstance(k, (list, tuple)) and len(k) >= 3:
-                        if k[0] == repo and k[2] == label:
-                            row = v
-                            break
-                    if k == (repo, "model.safetensors", label):
-                        row = v
-            if not row:
-                return Refusal(
-                    "APPROVAL_PROJECTION_VIOLATION",
-                    {"reason": "baseline_archive_missing", "drive": label, "repo": repo},
-                    ("inspect_integrity",))
+        # Missing stored cert, missing/None/absent current cert, or inequality → mismatch.
+        if (not stored_cert or got_cert is None or got_cert != stored_cert):
+            return Refusal(
+                "APPROVAL_PROJECTION_VIOLATION",
+                {"reason": "baseline_certificate_mismatch",
+                 "task": rid, "drive": label, "repo": td.get("repo_id")},
+                ("inspect_integrity",))
 
     # Frozen proposal.files groups — sole file authority for executable tasks.
     by_req = _proposal_file_groups(proposal)
