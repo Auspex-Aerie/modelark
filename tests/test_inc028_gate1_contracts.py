@@ -7,6 +7,7 @@ green the gate.  Production code is unchanged in Gate 1.
 from __future__ import annotations
 
 import inspect
+import sqlite3
 from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
@@ -271,11 +272,26 @@ def test_c06_explicit_fetch_refuses_unsatisfied_present_target_before_download(
     _seed_archived(
         con, orig=orig, compressed=compressed, annex_key=annex_key,
     )
+    target = tmp_path / FILE
+    target.write_bytes(b"preserve-existing-archive-bytes")
+    row_before = con.execute(
+        "SELECT * FROM archived WHERE repo_id=? AND rfilename=? AND drive_label='d0'",
+        [REPO, FILE],
+    ).fetchone()
+    bytes_before = target.read_bytes()
     trace = mock.Mock(return_value=False)
+    if code.endswith("UNPROVABLE"):
+        refusal_type = getattr(fetch, "FetchRequirementRefusal", None)
+        assert isinstance(refusal_type, type), (
+            "UNPROVABLE is a per-requirement refusal, not FetchTerminalError"
+        )
+        assert not issubclass(refusal_type, fetch.FetchTerminalError)
+    else:
+        refusal_type = fetch.FetchTerminalError
 
     with mock.patch.object(archive_hash, "content_satisfies", trace, create=True), \
             mock.patch.object(fetch, "_download_shard") as download:
-        with pytest.raises(fetch.FetchTerminalError) as ei:
+        with pytest.raises(refusal_type) as ei:
             fetch.fetch_model(
                 fetch.RunCtx(con=con), REPO, tmp_path, "d0", False,
                 {"max_compress_ram_gb": 4.0, "threads": 1},
@@ -302,6 +318,108 @@ def test_c06_explicit_fetch_refuses_unsatisfied_present_target_before_download(
     else:
         assert any("inspect" in action or "disposition" in action
                    for action in exc.actions), exc.actions
+    row_after = con.execute(
+        "SELECT * FROM archived WHERE repo_id=? AND rfilename=? AND drive_label='d0'",
+        [REPO, FILE],
+    ).fetchone()
+    assert row_after == row_before, "pre-download refusal must not launder archive metadata"
+    assert target.read_bytes() == bytes_before, "pre-download refusal must preserve worktree bytes"
+
+
+def test_c06b_unprovable_is_recorded_per_repo_and_fetch_continues(tmp_path):
+    refusal_type = getattr(fetch, "FetchRequirementRefusal", None)
+    assert isinstance(refusal_type, type), "define a non-terminal per-requirement refusal"
+    refusal = refusal_type(
+        "APPROVED_TARGET_DIGEST_UNPROVABLE",
+        "approved target digest cannot be resolved",
+        evidence={"repo_id": REPO, "rfilename": FILE, "drive_label": "d0"},
+        actions=("run_repair_drive", "resume_same_approval"),
+    )
+    other = "org/continues"
+    calls = []
+
+    def fake_fetch_model(_ctx, repo_id, *_args, **_kwargs):
+        calls.append(repo_id)
+        if repo_id == REPO:
+            raise refusal
+        return {"files": 1, "skipped": 0, "bytes": 100}
+
+    @contextmanager
+    def mutation_writer(*_args, **_kwargs):
+        yield SimpleNamespace(child_fence_fds=(), record_touched=lambda *_a, **_k: None)
+
+    con = f.mem_con()
+    with mock.patch.object(fetch, "fetch_model", side_effect=fake_fetch_model), \
+            mock.patch.object(fetch.drive_mutation, "drive_mutation", mutation_writer):
+        out = fetch.run(
+            dest=tmp_path, drive_label="d0", repos=[REPO, other],
+            max_24h_gb=0, ctx=fetch.RunCtx(con=con),
+        )
+
+    assert calls == [REPO, other], "one unprovable repo must not stop unrelated fetch work"
+    assert out["stored_repos"] == [other]
+    assert out.get("terminal_failure") is None
+    assert out.get("requirement_refusals") == [{
+        "repo_id": REPO,
+        "code": "APPROVED_TARGET_DIGEST_UNPROVABLE",
+        "message": "approved target digest cannot be resolved",
+        "evidence": {"repo_id": REPO, "rfilename": FILE, "drive_label": "d0"},
+        "actions": ["run_repair_drive", "resume_same_approval"],
+        "gate": "C",
+    }]
+
+
+def test_c06c_fill_parks_unprovable_requirement_after_other_work_completes():
+    other = "org/continues"
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=(REPO, other))
+    for repo in (REPO, other):
+        con.execute(
+            "UPDATE files SET rfilename=?,size_bytes=100,format='safetensors',"
+            "quant='bf16',sha256=? WHERE repo_id=?",
+            [FILE, APPROVED, repo],
+        )
+    projection = SimpleNamespace(tasks=(
+        _projection(repo=REPO, rid=RID).tasks[0],
+        _projection(repo=other, rid=f"primary:{other}").tasks[0],
+    ))
+    pfiles = _proposal_files() + _proposal_files(repo=other, rid=f"primary:{other}")
+    refusal = {
+        "repo_id": REPO,
+        "code": "APPROVED_TARGET_DIGEST_UNPROVABLE",
+        "message": "approved target digest cannot be resolved",
+        "evidence": {"repo_id": REPO, "rfilename": FILE, "drive_label": "d0"},
+        "actions": ["run_repair_drive", "resume_same_approval"],
+        "gate": "C",
+    }
+    calls = []
+
+    def fake_run(**_kwargs):
+        calls.append(tuple(_kwargs["repos"]))
+        if len(calls) > 1:
+            raise AssertionError("unprovable requirement was not parked")
+        # The unrelated repository really did become durably satisfied; do not
+        # let stored_repos stand in for the post-run derivation pinned by c08.
+        _seed_archived(con, repo=other, orig=APPROVED)
+        out = _fetch_outcome(stored=(other,))
+        out["requirement_refusals"] = [refusal]
+        return out
+
+    with mock.patch.object(fill_mod, "_mounted", return_value=(True, True)), \
+            mock.patch.object(fill_mod.fetch, "run", side_effect=fake_run), \
+            mock.patch.object(fill_mod, "_refresh_projection", return_value=projection), \
+            mock.patch("modelark.execution_session.heartbeat"):
+        result = fill_mod._drain_projection(
+            fetch.RunCtx(con=con), _session_start(projection, pfiles),
+            plan_id="ark", max_24h_gb=0, repo_scope=None,
+            guided=False, poll_secs=0.01, child_fds=(),
+        )
+
+    assert len(calls) == 1
+    assert result.get("state") == "done", result
+    assert result.get("code") == "PLAN_COMPLETE_WITH_FOLLOWUPS", result
+    assert result.get("evidence") == {"content_refusals": [refusal]}, result
+    assert result.get("code") not in {"FETCH_TASK_FAILED", "PLAN_SATISFIED"}
 
 
 def test_c07_explicit_fetch_matching_presence_calls_shared_rule_and_skips(tmp_path):
@@ -529,3 +647,98 @@ def test_c12_replica_aggregate_progress_cannot_blanket_complete_and_is_bounded()
     assert any(event == "content_satisfies" for event in events[last_replica + 1:]), events
     assert result.get("code") == "REPLICA_TASK_FAILED", result
     assert result.get("code") != "PLAN_SATISFIED", result
+
+
+class _RaceAfterFetchone:
+    def __init__(self, cursor, race):
+        self._cursor = cursor
+        self._race = race
+
+    def fetchone(self):
+        row = self._cursor.fetchone()
+        if not self._race.injected:
+            self._race.injected = True
+            try:
+                self._race.writer.execute(
+                    "UPDATE archived SET orig_sha256=?,orig_sha256_provenance=? "
+                    "WHERE drive_label='d1' AND repo_id=? AND rfilename=?",
+                    [OTHER, "legacy_unknown", REPO, FILE],
+                )
+            except sqlite3.OperationalError as exc:
+                assert "locked" in str(exc).lower(), exc
+                self._race.writer_blocked = True
+        return row
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class _HealRaceConnection:
+    def __init__(self, con, writer):
+        self._con = con
+        self.writer = writer
+        self.statements = []
+        self.injected = False
+        self.writer_blocked = False
+
+    def execute(self, sql, params=()):
+        self.statements.append(sql)
+        cursor = self._con.execute(sql, params)
+        normalized = " ".join(sql.upper().split())
+        if (normalized.startswith("SELECT ORIG_SHA256, ORIG_SHA256_PROVENANCE ")
+                and params and params[0] == "d1"):
+            return _RaceAfterFetchone(cursor, self)
+        return cursor
+
+    def __getattr__(self, name):
+        return getattr(self._con, name)
+
+
+def test_c13_replica_heal_serializes_and_compare_swaps_null_target(tmp_path):
+    seed = f.mem_con()
+    _seed_repo(seed)
+    _seed_archived(
+        seed, drive="d0", orig=APPROVED, provenance="hub_confirmed",
+    )
+    _seed_archived(seed, drive="d1", orig=None, provenance=None)
+    db_path = tmp_path / "heal-race.sqlite"
+    con = sqlite3.connect(db_path, isolation_level=None, timeout=0.05)
+    seed.backup(con)
+    writer = sqlite3.connect(db_path, isolation_level=None, timeout=0.0)
+    race = _HealRaceConnection(con, writer)
+    try:
+        out = fetch.heal_replica_archived_from_source(
+            race,
+            source_drive="d0", target_drive="d1",
+            repo_id=REPO, rfilename=FILE,
+        )
+        row = con.execute(
+            "SELECT orig_sha256,orig_sha256_provenance FROM archived "
+            "WHERE drive_label='d1' AND repo_id=? AND rfilename=?",
+            [REPO, FILE],
+        ).fetchone()
+    finally:
+        if con.in_transaction:
+            con.rollback()
+        writer.close()
+        con.close()
+
+    normalized = [" ".join(sql.upper().split()) for sql in race.statements]
+    begin = next((i for i, sql in enumerate(normalized)
+                  if sql.startswith("BEGIN IMMEDIATE")), None)
+    target_read = next((i for i, sql in enumerate(normalized)
+                        if sql.startswith("SELECT ORIG_SHA256, ORIG_SHA256_PROVENANCE")
+                        and "FROM ARCHIVED" in sql), None)
+    assert begin is not None and target_read is not None and begin < target_read, normalized
+    assert race.writer_blocked, "BEGIN IMMEDIATE must exclude the injected writer"
+    guarded_updates = [
+        sql for sql in normalized
+        if sql.startswith("UPDATE ARCHIVED SET ORIG_SHA256=")
+    ]
+    assert guarded_updates and all("ORIG_SHA256 IS NULL" in sql for sql in guarded_updates), \
+        guarded_updates
+    assert out == {
+        "status": "filled", "orig_sha256": APPROVED,
+        "orig_sha256_provenance": "hub_confirmed",
+    }
+    assert row == (APPROVED, "hub_confirmed")
