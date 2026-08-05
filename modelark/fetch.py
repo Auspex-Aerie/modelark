@@ -1443,7 +1443,8 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                                     [task.repo_id, rfilename, source],
                                 ).fetchone()
                                 target_row = con.execute(
-                                    "SELECT orig_sha256,compressed,annex_key FROM archived "
+                                    "SELECT orig_sha256,compressed,annex_key,"
+                                    "orig_sha256_provenance FROM archived "
                                     "WHERE repo_id=? AND rfilename=? AND drive_label=?",
                                     [task.repo_id, rfilename, target],
                                 ).fetchone()
@@ -1469,11 +1470,17 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                                 task_failed = True
                                 continue
                             if target_row is not None:
-                                if archive_hash.content_satisfies(
-                                        approved_sha256=source_digest,
-                                        orig_sha256=target_row[0],
-                                        compressed=bool(target_row[1]),
-                                        annex_key=target_row[2]):
+                                decision = _classify_replica_heal(
+                                    source_orig_sha256=source_row[2],
+                                    source_compressed=bool(source_row[6]),
+                                    source_annex_key=source_row[7],
+                                    source_provenance=source_row[8],
+                                    target_orig_sha256=target_row[0],
+                                    target_compressed=bool(target_row[1]),
+                                    target_annex_key=target_row[2],
+                                    target_provenance=target_row[3],
+                                )
+                                if decision.action == "satisfied":
                                     satisfied_files.add(rfilename)
                                     continue
                                 try:
@@ -1485,6 +1492,11 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                                             repo_id=task.repo_id,
                                             rfilename=rfilename,
                                         )
+                                        healed_target = con.execute(
+                                            "SELECT orig_sha256,compressed,annex_key FROM archived "
+                                            "WHERE repo_id=? AND rfilename=? AND drive_label=?",
+                                            [task.repo_id, rfilename, target],
+                                        ).fetchone()
                                 except ReplicaHealError as exc:
                                     result["failed"].append({
                                         "code": "REPLICA_DIGEST_MISMATCH",
@@ -1495,8 +1507,14 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                                     })
                                     task_failed = True
                                     continue
-                                if healed.get("status") in {"filled", "provenance_filled"}:
-                                    task_progressed = True
+                                if (healed_target is not None
+                                        and archive_hash.content_satisfies(
+                                            approved_sha256=source_digest,
+                                            orig_sha256=healed_target[0],
+                                            compressed=bool(healed_target[1]),
+                                            annex_key=healed_target[2])):
+                                    if healed.get("status") in {"filled", "provenance_filled"}:
+                                        task_progressed = True
                                     satisfied_files.add(rfilename)
                                     continue
                                 result["failed"].append({
@@ -1708,6 +1726,59 @@ class ReplicaHealError(RuntimeError):
     """Targeted replica archived-row heal refused (digest mismatch or missing source)."""
 
 
+@dataclass(frozen=True)
+class _ReplicaHealDecision:
+    action: str
+    source_resolved_sha256: str | None
+    target_resolved_sha256: str | None
+
+
+def _classify_replica_heal(
+    *,
+    source_orig_sha256: str | None,
+    source_compressed: bool,
+    source_annex_key: str | None,
+    source_provenance: str | None,
+    target_orig_sha256: str | None,
+    target_compressed: bool,
+    target_annex_key: str | None,
+    target_provenance: str | None,
+) -> _ReplicaHealDecision:
+    """Classify replica evidence without I/O, using the canonical digest resolver."""
+    source_resolved = archive_hash.expected_sha256(
+        catalog_sha=None,
+        orig_sha256=source_orig_sha256,
+        compressed=source_compressed,
+        annex_key=source_annex_key,
+    )
+    target_resolved = archive_hash.expected_sha256(
+        catalog_sha=None,
+        orig_sha256=target_orig_sha256,
+        compressed=target_compressed,
+        annex_key=target_annex_key,
+    )
+    if source_resolved is None:
+        action = "noop"
+    elif archive_hash.content_satisfies(
+            approved_sha256=source_resolved,
+            orig_sha256=target_orig_sha256,
+            compressed=target_compressed,
+            annex_key=target_annex_key):
+        action = (
+            "fill"
+            if target_provenance is None and source_provenance is not None
+            else "satisfied"
+        )
+    elif target_resolved is not None:
+        action = "halt_contradiction"
+    elif source_orig_sha256 is not None:
+        action = "fill"
+    else:
+        # A source digest derived only from its annex key cannot certify unproven target bytes.
+        action = "noop"
+    return _ReplicaHealDecision(action, source_resolved, target_resolved)
+
+
 def heal_replica_archived_from_source(
     con,
     *,
@@ -1716,21 +1787,21 @@ def heal_replica_archived_from_source(
     repo_id: str,
     rfilename: str,
 ) -> dict:
-    """DEC-060 targeted replica heal: null fill, matching-digest provenance fill, mismatch halt.
+    """DEC-060 targeted replica heal: evidence fill, provenance fill, or contradiction halt.
 
     Never invents a ``mirrored`` provenance class; never overwrites a non-null target digest
-    with a different source digest. Source provenance is copied verbatim when digests agree
-    or when the target digest is null.
+    with a different source digest. Source provenance is copied verbatim only when resolved
+    evidence agrees or the target has no resolvable original-byte digest evidence.
     """
-    con.execute("BEGIN IMMEDIATE")
     try:
+        con.execute("BEGIN IMMEDIATE")
         cols = {r[1] for r in con.execute("PRAGMA table_info(archived)")}
         if "orig_sha256_provenance" not in cols:
             raise ReplicaHealError(
                 "archived.orig_sha256_provenance missing — catalog requires provenance schema"
             )
         src = con.execute(
-            "SELECT orig_sha256, orig_sha256_provenance FROM archived "
+            "SELECT orig_sha256, orig_sha256_provenance, compressed, annex_key FROM archived "
             "WHERE drive_label=? AND repo_id=? AND rfilename=?",
             [source_drive, repo_id, rfilename],
         ).fetchone()
@@ -1738,9 +1809,9 @@ def heal_replica_archived_from_source(
             raise ReplicaHealError(
                 f"source archived row missing: {repo_id}/{rfilename} on {source_drive}"
             )
-        src_digest, src_prov = src[0], src[1]
+        src_digest, src_prov, src_compressed, src_annex_key = src
         tgt = con.execute(
-            "SELECT orig_sha256, orig_sha256_provenance FROM archived "
+            "SELECT orig_sha256, orig_sha256_provenance, compressed, annex_key FROM archived "
             "WHERE drive_label=? AND repo_id=? AND rfilename=?",
             [target_drive, repo_id, rfilename],
         ).fetchone()
@@ -1748,43 +1819,50 @@ def heal_replica_archived_from_source(
             raise ReplicaHealError(
                 f"target archived row missing: {repo_id}/{rfilename} on {target_drive}"
             )
-        tgt_digest, tgt_prov = tgt[0], tgt[1]
+        tgt_digest, tgt_prov, tgt_compressed, tgt_annex_key = tgt
+        decision = _classify_replica_heal(
+            source_orig_sha256=src_digest,
+            source_compressed=bool(src_compressed),
+            source_annex_key=src_annex_key,
+            source_provenance=src_prov,
+            target_orig_sha256=tgt_digest,
+            target_compressed=bool(tgt_compressed),
+            target_annex_key=tgt_annex_key,
+            target_provenance=tgt_prov,
+        )
 
-        if (
-            src_digest is not None
-            and tgt_digest is not None
-            and str(src_digest).lower() != str(tgt_digest).lower()
-        ):
+        if decision.action == "halt_contradiction":
             raise ReplicaHealError(
                 f"replica heal halted: digest mismatch for {repo_id}/{rfilename} "
-                f"source={src_digest} target={tgt_digest}"
+                f"source={decision.source_resolved_sha256} "
+                f"target={decision.target_resolved_sha256}"
             )
 
-        if tgt_digest is None:
-            if src_digest is None and src_prov is None:
-                result = {"status": "noop", "reason": "source_also_null"}
-            else:
-                updated = con.execute(
-                    "UPDATE archived SET orig_sha256=?, orig_sha256_provenance=? "
-                    "WHERE drive_label=? AND repo_id=? AND rfilename=? "
-                    "AND orig_sha256 IS NULL",
-                    [src_digest, src_prov, target_drive, repo_id, rfilename],
+        if decision.action == "fill" and decision.target_resolved_sha256 is None:
+            updated = con.execute(
+                "UPDATE archived SET orig_sha256=?, orig_sha256_provenance=? "
+                "WHERE drive_label=? AND repo_id=? AND rfilename=? "
+                "AND orig_sha256 IS NULL AND compressed=? AND annex_key IS ?",
+                [src_digest, src_prov, target_drive, repo_id, rfilename,
+                 int(bool(tgt_compressed)), tgt_annex_key],
+            )
+            if updated.rowcount != 1:
+                raise ReplicaHealError(
+                    f"replica heal halted: target changed for {repo_id}/{rfilename}"
                 )
-                if updated.rowcount != 1:
-                    raise ReplicaHealError(
-                        f"replica heal halted: target changed for {repo_id}/{rfilename}"
-                    )
-                result = {
-                    "status": "filled",
-                    "orig_sha256": src_digest,
-                    "orig_sha256_provenance": src_prov,
-                }
-        elif tgt_prov is None and src_prov is not None:
+            result = {
+                "status": "filled",
+                "orig_sha256": src_digest,
+                "orig_sha256_provenance": src_prov,
+            }
+        elif decision.action == "fill":
             updated = con.execute(
                 "UPDATE archived SET orig_sha256_provenance=? "
                 "WHERE drive_label=? AND repo_id=? AND rfilename=? "
-                "AND orig_sha256=? AND orig_sha256_provenance IS NULL",
-                [src_prov, target_drive, repo_id, rfilename, tgt_digest],
+                "AND orig_sha256 IS ? AND compressed=? AND annex_key IS ? "
+                "AND orig_sha256_provenance IS NULL",
+                [src_prov, target_drive, repo_id, rfilename, tgt_digest,
+                 int(bool(tgt_compressed)), tgt_annex_key],
             )
             if updated.rowcount != 1:
                 raise ReplicaHealError(
@@ -1795,10 +1873,15 @@ def heal_replica_archived_from_source(
                 "orig_sha256": tgt_digest,
                 "orig_sha256_provenance": src_prov,
             }
-        else:
+        elif decision.action == "satisfied":
             result = {"status": "noop", "reason": "target_complete"}
+        else:
+            result = {"status": "noop", "reason": "source_cannot_fill_target"}
         con.commit()
         return result
-    except Exception:
-        con.rollback()
+    except BaseException:
+        try:
+            con.rollback()
+        except BaseException:
+            pass
         raise

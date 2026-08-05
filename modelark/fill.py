@@ -904,11 +904,16 @@ def _drain_projection(
             and u.missing_files
         ]
         if not ready:
-            waiting = [u for u in remaining if (u.schedule_state or "") == "waiting_dependency"]
+            waiting = [
+                u for u in remaining
+                if (u.schedule_state or "") == "waiting_dependency"
+                and u.repo_id not in deferred_gated
+                and u.repo_id not in deferred_content
+            ]
             parked = [u for u in remaining if u.repo_id in deferred_gated
                       or u.repo_id in deferred_content
                       or (u.schedule_state or "") == "parked_gated"]
-            if parked and not waiting and not ready:
+            if parked and not ready:
                 gated_repos = sorted({
                     u.repo_id for u in parked
                     if u.repo_id in deferred_gated
@@ -922,6 +927,10 @@ def _drain_projection(
                     evidence["access_gated"] = gated_repos
                 if content_refusals:
                     evidence["content_refusals"] = content_refusals
+                if waiting:
+                    evidence["waiting_requirements"] = sorted(
+                        u.requirement_id for u in waiting
+                    )
                 count = len(gated_repos) + len(content_refusals)
                 message = (
                     f"fill complete with {count} operator follow-up(s); "
