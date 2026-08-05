@@ -28,3 +28,26 @@ def expected_sha256(
     if not compressed:
         return annex_sha256(annex_key)
     return None
+
+
+def content_satisfies(
+    *,
+    approved_sha256: str | None,
+    orig_sha256: str | None,
+    compressed: bool,
+    annex_key: str | None,
+) -> bool:
+    """Return whether supplied archive evidence satisfies supplied approved content.
+
+    This is deliberately a scalar-only approval predicate.  Resolver callers that need to know
+    which digest evidence exists continue to call :func:`expected_sha256` directly.
+    """
+    resolved = expected_sha256(
+        catalog_sha=None,
+        orig_sha256=orig_sha256,
+        compressed=bool(compressed),
+        annex_key=annex_key,
+    )
+    if approved_sha256:
+        return resolved is not None and str(resolved).lower() == str(approved_sha256).lower()
+    return resolved is not None and str(resolved) != ""

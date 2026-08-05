@@ -32,16 +32,30 @@ def test_successful_session_execute_never_calls_reconcile_or_plan_capacity():
         calls["reconcile_plan"] += 1
         raise AssertionError("LEGACY_OPTIMIZER_CALLED")
 
+    def stored_run(*, drive_label, repos, task_manifests, **_kwargs):
+        # The transport summary is not completion evidence.  Model the durable mutation that a
+        # successful real fetch performs so this test remains about optimizer authority.
+        for repo in repos:
+            for item in task_manifests[repo]:
+                con.execute(
+                    "INSERT OR REPLACE INTO archived("
+                    "repo_id,rfilename,drive_label,compressed,orig_bytes,stored_bytes,orig_sha256) "
+                    "VALUES(?,?,?,0,?,?,?)",
+                    [repo, item.rfilename, drive_label, item.size_bytes,
+                     item.size_bytes, item.sha256],
+                )
+        return {
+            "stored_repos": list(repos), "failed_repos": [], "capacity_failure": None,
+            "terminal_failure": None, "terminal_repo": None, "throttled": False,
+            "stopped": False, "drive_unwritable": False, "gated_repos": [],
+        }
+
     import modelark.execution_recovery as erec
     with mock.patch.object(fill, "_reconcile", side_effect=boom_reconcile), \
          mock.patch.object(capacity, "plan_capacity", side_effect=boom_pc), \
          mock.patch.object(reconcile, "reconcile_plan", side_effect=boom_rp), \
          mock.patch.object(erec, "inherit_drive_fence_fds", return_value=()), \
-         mock.patch.object(fill.fetch, "run", return_value={
-             "stored_repos": ["org/a"], "failed_repos": [], "capacity_failure": None,
-             "terminal_failure": None, "terminal_repo": None, "throttled": False,
-             "stopped": False, "drive_unwritable": False, "gated_repos": [],
-         }), \
+         mock.patch.object(fill.fetch, "run", side_effect=stored_run), \
          mock.patch.object(fill, "_await_drive", return_value=True), \
          mock.patch.object(fill, "_mounted", return_value=(True, True)):
         result = fill.execute(fetch.RunCtx(con=con), session_start=out, guided=True, max_24h_gb=0)

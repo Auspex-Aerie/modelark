@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from modelark import admission, capacity, fetch, plan, reconcile, register
+from modelark import admission, archive_hash, capacity, fetch, plan, reconcile, register
 
 _MAX_TASK_ATTEMPTS = 2
 _GATED_DECISION_TIMEOUT = 5 * 60
@@ -164,10 +164,16 @@ def _file_guard(ctx, plan_id: str, capacity_mode: str, task: capacity.AssignedTa
 
     def before_file(repo_id, item):
         with ctx.lock:
-            if ctx.con.execute(
-                "SELECT 1 FROM archived WHERE repo_id=? AND rfilename=? AND drive_label=?",
+            archived = ctx.con.execute(
+                "SELECT orig_sha256,compressed,annex_key FROM archived "
+                "WHERE repo_id=? AND rfilename=? AND drive_label=?",
                 [repo_id, item.rfilename, task.target_drive],
-            ).fetchone():
+            ).fetchone()
+            if archived is not None and archive_hash.content_satisfies(
+                    approved_sha256=item.sha256,
+                    orig_sha256=archived[0],
+                    compressed=bool(archived[1]),
+                    annex_key=archived[2]):
                 return False
             # Admit from a FRESH observation taken while the transport already holds the drive fence
             # (this runs inside the drive_mutation envelope): never reacquire a fence, never a legacy read.
@@ -519,17 +525,12 @@ def _archive_content_satisfies(
 
     if orig_sha256 is None and annex_key is None and archived_sha is not None:
         orig_sha256 = archived_sha
-    resolved = archive_hash.expected_sha256(
-        catalog_sha=None,
+    return archive_hash.content_satisfies(
+        approved_sha256=approved_sha,
         orig_sha256=orig_sha256,
         compressed=bool(compressed),
         annex_key=annex_key,
     )
-    if approved_sha:
-        if resolved is None:
-            return False
-        return str(resolved).lower() == str(approved_sha).lower()
-    return resolved is not None and str(resolved) != ""
 
 
 def _source_files_content_ready(con, repo_id, source_drive, proposal_files_for_req) -> bool:
@@ -876,7 +877,8 @@ def _drain_projection(
     attempts: dict[str, int] = {}
     gated_hits: dict[str, int] = {}
     deferred_gated: set[str] = set()
-    # Session-local progress by requirement_id (mock fetch may not write archived).
+    deferred_content: dict[str, dict] = {}
+    # Session-local completion cache by requirement_id, populated only after durable re-derivation.
     completed_reqs: set[str] = set()
     made_progress = False
     first = True
@@ -895,6 +897,7 @@ def _drain_projection(
         ready = [
             u for u in remaining
             if u.repo_id not in deferred_gated
+            and u.repo_id not in deferred_content
             and u.requirement_id not in completed_reqs
             and (u.schedule_state or "ready") == "ready"
             and u.kind is not None
@@ -903,16 +906,30 @@ def _drain_projection(
         if not ready:
             waiting = [u for u in remaining if (u.schedule_state or "") == "waiting_dependency"]
             parked = [u for u in remaining if u.repo_id in deferred_gated
+                      or u.repo_id in deferred_content
                       or (u.schedule_state or "") == "parked_gated"]
             if parked and not waiting and not ready:
-                repos = sorted({u.repo_id for u in parked})
+                gated_repos = sorted({
+                    u.repo_id for u in parked
+                    if u.repo_id in deferred_gated
+                    or (u.schedule_state or "") == "parked_gated"
+                })
+                content_refusals = [
+                    deferred_content[repo] for repo in sorted(deferred_content)
+                ]
+                evidence = {}
+                if gated_repos:
+                    evidence["access_gated"] = gated_repos
+                if content_refusals:
+                    evidence["content_refusals"] = content_refusals
+                count = len(gated_repos) + len(content_refusals)
                 message = (
-                    f"fill complete with {len(repos)} gated-access follow-up(s); "
+                    f"fill complete with {count} operator follow-up(s); "
                     "all other feasible work is safe"
                 )
                 return _terminal(
                     "done", message, code="PLAN_COMPLETE_WITH_FOLLOWUPS",
-                    evidence={"access_gated": repos},
+                    evidence=evidence,
                     actions=["review_followups", "start_fill"],
                 )
             if waiting and not ready:
@@ -1021,9 +1038,6 @@ def _drain_projection(
             )
             if outcome["stored_repos"]:
                 made_progress = True
-                for u in fetch_tasks:
-                    if u.repo_id in outcome["stored_repos"]:
-                        completed_reqs.add(u.requirement_id)
             if outcome["stopped"] or ctx.should_stop():
                 return _stop_terminal()
             if outcome.get("terminal_failure") is not None:
@@ -1055,7 +1069,37 @@ def _drain_projection(
                 )
             for item in outcome.get("gated_repos", []):
                 deferred_gated.add(item["repo"])
-            for repo_id in outcome["failed_repos"]:
+            for refusal in outcome.get("requirement_refusals", []):
+                deferred_content[refusal["repo_id"]] = refusal
+            if outcome["drive_unwritable"]:
+                return _terminal(
+                    "paused" if made_progress else "blocked",
+                    f"approved target drive {pinned_drive} is not writable",
+                    code="DRIVE_UNWRITABLE", gate="A",
+                    evidence={"drive": pinned_drive},
+                    actions=["mount_or_reseat_drive", "resume_same_approval"],
+                )
+
+            # Re-derive completion from durable facts after Fetch returns.  Transport summaries
+            # (`stored_repos`) are progress signals only and cannot satisfy a requirement.
+            with ctx.lock:
+                post_fetch = _projection_work_units(
+                    ctx.con, projection, repo_scope, proposal_files=proposal_files,
+                    require_proposal_files=require_proposal_files)
+            remaining_ids = {u.requirement_id for u in post_fetch}
+            for task in fetch_tasks:
+                if task.requirement_id not in remaining_ids:
+                    completed_reqs.add(task.requirement_id)
+
+            attempted_repos = set(outcome["failed_repos"]) | set(outcome["stored_repos"])
+            retry_fetch = False
+            for task in fetch_tasks:
+                repo_id = task.repo_id
+                if (task.requirement_id in completed_reqs
+                        or repo_id in deferred_gated
+                        or repo_id in deferred_content
+                        or repo_id not in attempted_repos):
+                    continue
                 attempts[repo_id] = attempts.get(repo_id, 0) + 1
                 if attempts[repo_id] >= _MAX_TASK_ATTEMPTS:
                     return _terminal(
@@ -1065,9 +1109,10 @@ def _drain_projection(
                         actions=["inspect_fetch_events", "retry_repo", "trim_selection"],
                         failed=[{"repo": repo_id, "attempts": attempts[repo_id]}],
                     )
+                retry_fetch = True
             if outcome.get("gated_retry"):
-                # Typed state-changing event: gated retry — refresh before continuing
-                # (RFC-002 batch/event cadence; finding 38).
+                # Count unrelated failed work before this typed state-changing event.  The gated
+                # repository itself is absent from attempted_repos and does not consume a retry.
                 if has_approval:
                     from modelark.proposal import Refusal as _Refusal
                     try:
@@ -1093,14 +1138,9 @@ def _drain_projection(
                         session_start.projection = refreshed
                         projection = refreshed
                 continue
-            if outcome["drive_unwritable"]:
-                return _terminal(
-                    "paused" if made_progress else "blocked",
-                    f"approved target drive {pinned_drive} is not writable",
-                    code="DRIVE_UNWRITABLE", gate="A",
-                    evidence={"drive": pinned_drive},
-                    actions=["mount_or_reseat_drive", "resume_same_approval"],
-                )
+            if retry_fetch:
+                pinned_drive = None
+                continue
 
         if replica_tasks:
             # Adapt units to AssignedTask-shaped objects for run_replica_tasks
@@ -1120,7 +1160,6 @@ def _drain_projection(
             outcome = fetch.run_replica_tasks(replica_assigned, ctx=ctx)
             if outcome["copied_files"]:
                 made_progress = True
-                completed_reqs.update(u.requirement_id for u in replica_tasks)
             if outcome["failed"]:
                 return _terminal(
                     "error",
@@ -1139,6 +1178,39 @@ def _drain_projection(
                               "deferred_targets": outcome["deferred_targets"]},
                     actions=["mount_or_reseat_drive", "start_fill"],
                 )
+
+            # Replica aggregates are also progress only.  Re-read exact durable evidence after
+            # the batch, then bound any requirement that remains unsatisfied despite an attempt.
+            with ctx.lock:
+                post_replica = _projection_work_units(
+                    ctx.con, projection, repo_scope, proposal_files=proposal_files,
+                    require_proposal_files=require_proposal_files)
+            remaining_ids = {u.requirement_id for u in post_replica}
+            for task in replica_tasks:
+                if task.requirement_id not in remaining_ids:
+                    completed_reqs.add(task.requirement_id)
+            attempted_reqs = set(outcome.get("progressed_requirements", ()))
+            if outcome["copied_files"]:
+                attempted_reqs.update(task.requirement_id for task in replica_tasks)
+            retry_replica = False
+            for task in replica_tasks:
+                rid = task.requirement_id
+                if rid in completed_reqs or rid not in attempted_reqs:
+                    continue
+                attempts[rid] = attempts.get(rid, 0) + 1
+                if attempts[rid] >= _MAX_TASK_ATTEMPTS:
+                    return _terminal(
+                        "error",
+                        f"replica task {rid} failed {_MAX_TASK_ATTEMPTS} times",
+                        code="REPLICA_TASK_FAILED", gate="C",
+                        evidence={"requirement_id": rid, "attempts": attempts[rid]},
+                        actions=["inspect_replica_evidence", "retry_replica"],
+                        failed=[{"requirement_id": rid, "attempts": attempts[rid]}],
+                    )
+                retry_replica = True
+            if retry_replica:
+                pinned_drive = None
+                continue
 
         pinned_drive = None
         # Heartbeat while running (finding 32/36) — fail closed on required heartbeat failure.

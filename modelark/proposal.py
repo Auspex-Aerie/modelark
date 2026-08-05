@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
-from modelark import archive_manifest, capacity, drive_fence, plan as plan_mod
+from modelark import archive_hash, archive_manifest, capacity, drive_fence, plan as plan_mod
 from modelark import proposal_canonical as canonical
 from modelark.core import db
 from modelark.web import fill_worker
@@ -264,6 +264,8 @@ def _archived_matches_manifest(
     file_size: int | None,
     arch_sha256: str | None,
     arch_bytes: int | None,
+    compressed: bool = False,
+    annex_key: str | None = None,
 ) -> bool:
     """Content-aware match of one archived row against the current files manifest.
 
@@ -274,10 +276,13 @@ def _archived_matches_manifest(
     # Fail closed: unproven catalog identity cannot claim durable content match.
     if not file_sha256 and file_size is None:
         return False
-    # Prefer hash identity when the catalog has one.
-    if file_sha256:
-        if not arch_sha256 or arch_sha256 != file_sha256:
-            return False
+    if not archive_hash.content_satisfies(
+        approved_sha256=file_sha256,
+        orig_sha256=arch_sha256,
+        compressed=compressed,
+        annex_key=annex_key,
+    ):
+        return False
     # Size must agree when both sides record it.
     if file_size is not None and arch_bytes is not None:
         if int(file_size) != int(arch_bytes):
@@ -309,21 +314,23 @@ def _complete_archived_plan_drives(
     complete = []
     for label in sorted(plan_labels):
         rows = con.execute(
-            "SELECT rfilename, orig_bytes, orig_sha256 FROM archived "
+            "SELECT rfilename, orig_bytes, orig_sha256, compressed, annex_key FROM archived "
             "WHERE repo_id=? AND drive_label=?",
             [repo_id, label]).fetchall()
-        by_name = {r[0]: (r[1], r[2]) for r in rows}
+        by_name = {r[0]: (r[1], r[2], bool(r[3]), r[4]) for r in rows}
         ok = True
         for rfilename, size_bytes, sha256 in needed:
             if rfilename not in by_name:
                 ok = False
                 break
-            arch_bytes, arch_sha = by_name[rfilename]
+            arch_bytes, arch_sha, compressed, annex_key = by_name[rfilename]
             if not _archived_matches_manifest(
                     file_sha256=sha256,
                     file_size=int(size_bytes) if size_bytes is not None else None,
                     arch_sha256=arch_sha,
-                    arch_bytes=int(arch_bytes) if arch_bytes is not None else None):
+                    arch_bytes=int(arch_bytes) if arch_bytes is not None else None,
+                    compressed=compressed,
+                    annex_key=annex_key):
                 ok = False
                 break
         if ok:

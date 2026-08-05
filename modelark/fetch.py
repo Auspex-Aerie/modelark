@@ -39,7 +39,8 @@ from huggingface_hub import HfApi, get_token
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
 from modelark.core import db
-from modelark import archive_manifest, capacity_evidence, compress, drive_mutation, register, wishlist
+from modelark import archive_hash, archive_manifest, capacity_evidence, compress, drive_mutation
+from modelark import register, wishlist
 
 # Download-stall resilience (INC-004 + the DEC-023 stage-2 watchdog). The built-in read timeout did
 # NOT catch a multi-hour hang (hf blocked/retried internally and never returned control; on 2026-07-09
@@ -87,6 +88,27 @@ class CapacityPreflightError(RuntimeError):
 
 class FetchTerminalError(RuntimeError):
     """A deterministic operator boundary that must not enter repo/network retry loops."""
+
+    def __init__(self, code: str, message: str, *, evidence: dict | None = None,
+                 actions: Sequence[str] = (), gate: str = "C"):
+        super().__init__(message)
+        self.code = code
+        self.evidence = evidence or {}
+        self.actions = tuple(actions)
+        self.gate = gate
+
+    def as_dict(self) -> dict:
+        return {
+            "code": self.code,
+            "message": str(self),
+            "evidence": dict(self.evidence),
+            "actions": list(self.actions),
+            "gate": self.gate,
+        }
+
+
+class FetchRequirementRefusal(RuntimeError):
+    """A typed repository-local refusal that does not stop unrelated fetch work."""
 
     def __init__(self, code: str, message: str, *, evidence: dict | None = None,
                  actions: Sequence[str] = (), gate: str = "C"):
@@ -763,12 +785,75 @@ def fetch_model(
             archive_manifest.manifest_for_repo(con, repo_id)
         )
         files = [item.as_fetch_record() for item in task_manifest]
-        have = {r[0] for r in con.execute(
-            "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
-            [repo_id, drive_label]).fetchall()}
+        archived_names = {
+            row[0] for row in con.execute(
+                "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
+                [repo_id, drive_label],
+            ).fetchall()
+        }
+        # Standalone resume needs only presence.  Approved execution needs proof evidence, but only
+        # for exact task files that are already present; this keeps the legacy standalone/minimal-
+        # schema seam usable without weakening the approved path.
+        present_task_names = {
+            item.rfilename for item in task_manifest if item.rfilename in archived_names
+        }
+        archived_by_name = {}
+        if manifest is not None and present_task_names:
+            archived_rows = con.execute(
+                "SELECT rfilename,orig_sha256,compressed,annex_key FROM archived "
+                "WHERE repo_id=? AND drive_label=?",
+                [repo_id, drive_label],
+            ).fetchall()
+            archived_by_name = {
+                row[0]: (row[1], bool(row[2]), row[3]) for row in archived_rows
+                if row[0] in present_task_names
+            }
         params = (con.execute("SELECT params_b FROM models WHERE repo_id=?",   # #14: for key metadata
                               [repo_id]).fetchone() or [None])[0]
-    todo = [f for f in files if f["rfilename"] not in have]      # file-level resume after a crash
+    todo = []
+    for item, record in zip(task_manifest, files):
+        if item.rfilename not in archived_names:
+            todo.append(record)
+            continue
+        if manifest is None:
+            continue  # standalone/legacy resume retains presence behavior
+        archived = archived_by_name[item.rfilename]
+        orig_sha256, compressed, annex_key = archived
+        if archive_hash.content_satisfies(
+                approved_sha256=item.sha256,
+                orig_sha256=orig_sha256,
+                compressed=compressed,
+                annex_key=annex_key):
+            continue
+        resolved = archive_hash.expected_sha256(
+            catalog_sha=None,
+            orig_sha256=orig_sha256,
+            compressed=compressed,
+            annex_key=annex_key,
+        )
+        evidence = {
+            "repo_id": repo_id,
+            "rfilename": item.rfilename,
+            "drive_label": drive_label,
+            "approved_sha256": item.sha256,
+            "resolved_sha256": resolved,
+            "archived_orig_sha256": orig_sha256,
+            "compressed": compressed,
+            "annex_key": annex_key,
+        }
+        if resolved is None:
+            raise FetchRequirementRefusal(
+                "APPROVED_TARGET_DIGEST_UNPROVABLE",
+                f"archived content for {repo_id}/{item.rfilename} cannot prove the approved digest",
+                evidence=evidence,
+                actions=("run_repair_drive", "resume_same_approval"),
+            )
+        raise FetchRequirementRefusal(
+            "APPROVED_TARGET_DIGEST_MISMATCH",
+            f"archived content for {repo_id}/{item.rfilename} differs from the approved digest",
+            evidence=evidence,
+            actions=("inspect_target", "disposition_required"),
+        )
     model_dir = dest / repo_id
     stage_dir = _download_stage_dir(dest, repo_id, annex)
     try:
@@ -910,14 +995,15 @@ def fetch_model(
     # A task may be only the missing suffix of a copy.  Mark the model archived only when the target
     # now contains the complete canonical manifest; task completion itself is never inferred from
     # this presentation status.
-    with ctx.lock:
-        canonical = archive_manifest.manifest_for_repo(con, repo_id)
-        present = {row[0] for row in con.execute(
-            "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
-            [repo_id, drive_label],
-        ).fetchall()}
-        if {item.rfilename for item in canonical} <= present:
-            con.execute("UPDATE models SET status='archived' WHERE repo_id=?", [repo_id])
+    if manifest is None:
+        with ctx.lock:
+            canonical = archive_manifest.manifest_for_repo(con, repo_id)
+            present = {row[0] for row in con.execute(
+                "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
+                [repo_id, drive_label],
+            ).fetchall()}
+            if {item.rfilename for item in canonical} <= present:
+                con.execute("UPDATE models SET status='archived' WHERE repo_id=?", [repo_id])
     if done == len(todo) and stage_dir.exists():
         shutil.rmtree(stage_dir, ignore_errors=True)
     return {"repo_id": repo_id, "files": done, "skipped": len(files) - len(todo), "bytes": dl_bytes}
@@ -954,7 +1040,7 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
     result = {"stored_repos": [], "failed_repos": [], "capacity_failure": None,
               "terminal_failure": None, "terminal_repo": None,
               "throttled": False, "stopped": False, "drive_unwritable": False,
-              "gated_repos": [], "gated_retry": None}
+              "gated_repos": [], "gated_retry": None, "requirement_refusals": []}
     own = ctx is None                               # CLI/plain-fetch path owns its connection
     con = db.connect() if own else ctx.con
     if own:
@@ -1086,6 +1172,18 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                                          "code": exc.failure.code.value,
                                          "say": f"  {drive_label} lacks safe workspace for {rid} — re-planning."})
                         break
+                    except FetchRequirementRefusal as exc:
+                        refusal = {"repo_id": rid, **exc.as_dict()}
+                        result["requirement_refusals"].append(refusal)
+                        print(f"  [{exc.code.lower():8}] {rid}: {exc}")
+                        event_detail = f"{exc.code}: {str(exc)[:150]}"
+                        ctx.write(lambda c: _event(
+                            c, rid, "error", detail=event_detail))
+                        ctx.on_progress({
+                            "phase": "fetch-followup", "repo": rid, "code": exc.code,
+                            "evidence": exc.evidence, "actions": list(exc.actions),
+                            "say": f"⚠ {exc}",
+                        })
                     except FetchTerminalError as exc:
                         result["terminal_failure"] = exc.as_dict()
                         result["terminal_repo"] = rid
@@ -1247,6 +1345,8 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
         "deferred_targets": [],
         "copied_targets": [],
         "copied_files": 0,
+        "completed_requirements": [],
+        "progressed_requirements": [],
         "failed": [],
     }
     try:
@@ -1331,24 +1431,87 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                     group_deferred = False
                     group_copied = False
                     for task in sorted(group, key=lambda item: item.requirement_id):
+                        task_failed = False
+                        task_progressed = False
+                        satisfied_files: set[str] = set()
                         for rfilename in task.budget.missing_files:
                             with ctx.lock:
-                                if con.execute(
-                                    "SELECT 1 FROM archived WHERE repo_id=? AND rfilename=? AND drive_label=?",
-                                    [task.repo_id, rfilename, target],
-                                ).fetchone():
-                                    continue
                                 source_row = con.execute(
                                     "SELECT stored_name,stored_relpath,orig_sha256,znn_sha256,orig_bytes,"
-                                    "stored_bytes,compressed,annex_key FROM archived "
+                                    "stored_bytes,compressed,annex_key,orig_sha256_provenance FROM archived "
                                     "WHERE repo_id=? AND rfilename=? AND drive_label=?",
                                     [task.repo_id, rfilename, source],
                                 ).fetchone()
-                            if source_row is None or not source_row[7]:
+                                target_row = con.execute(
+                                    "SELECT orig_sha256,compressed,annex_key FROM archived "
+                                    "WHERE repo_id=? AND rfilename=? AND drive_label=?",
+                                    [task.repo_id, rfilename, target],
+                                ).fetchone()
+                            if source_row is None:
+                                result["failed"].append({
+                                    "code": "SOURCE_ROW_MISSING", "requirement_id": task.requirement_id,
+                                    "repo": task.repo_id, "file": rfilename, "source": source,
+                                })
+                                task_failed = True
+                                continue
+                            source_digest = archive_hash.expected_sha256(
+                                catalog_sha=None,
+                                orig_sha256=source_row[2],
+                                compressed=bool(source_row[6]),
+                                annex_key=source_row[7],
+                            )
+                            if source_digest is None:
+                                result["failed"].append({
+                                    "code": "SOURCE_DIGEST_UNPROVABLE",
+                                    "requirement_id": task.requirement_id,
+                                    "repo": task.repo_id, "file": rfilename, "source": source,
+                                })
+                                task_failed = True
+                                continue
+                            if target_row is not None:
+                                if archive_hash.content_satisfies(
+                                        approved_sha256=source_digest,
+                                        orig_sha256=target_row[0],
+                                        compressed=bool(target_row[1]),
+                                        annex_key=target_row[2]):
+                                    satisfied_files.add(rfilename)
+                                    continue
+                                try:
+                                    with ctx.lock:
+                                        healed = heal_replica_archived_from_source(
+                                            con,
+                                            source_drive=source,
+                                            target_drive=target,
+                                            repo_id=task.repo_id,
+                                            rfilename=rfilename,
+                                        )
+                                except ReplicaHealError as exc:
+                                    result["failed"].append({
+                                        "code": "REPLICA_DIGEST_MISMATCH",
+                                        "requirement_id": task.requirement_id,
+                                        "repo": task.repo_id, "file": rfilename,
+                                        "source": source, "target": target,
+                                        "detail": str(exc),
+                                    })
+                                    task_failed = True
+                                    continue
+                                if healed.get("status") in {"filled", "provenance_filled"}:
+                                    task_progressed = True
+                                    satisfied_files.add(rfilename)
+                                    continue
+                                result["failed"].append({
+                                    "code": "REPLICA_TARGET_UNPROVABLE",
+                                    "requirement_id": task.requirement_id,
+                                    "repo": task.repo_id, "file": rfilename, "target": target,
+                                })
+                                task_failed = True
+                                continue
+                            if not source_row[7]:
                                 result["failed"].append({
                                     "code": "SOURCE_KEY_MISSING", "requirement_id": task.requirement_id,
                                     "repo": task.repo_id, "file": rfilename, "source": source,
                                 })
+                                task_failed = True
                                 continue
                             key = source_row[7]
                             copied = subprocess.run(
@@ -1365,24 +1528,18 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                                     "code": "ANNEX_COPY_FAILED", "requirement_id": task.requirement_id,
                                     "repo": task.repo_id, "file": rfilename, "target": target,
                                 })
+                                task_failed = True
                                 continue
                             if not _annex_key_on_uuid(source_repo, key, target_uuid):
                                 result["failed"].append({
                                     "code": "TARGET_KEY_UNVERIFIED", "requirement_id": task.requirement_id,
                                     "repo": task.repo_id, "file": rfilename, "target": target,
                                 })
+                                task_failed = True
                                 continue
-                            stored_name, stored_relpath, orig_sha, znn_sha, orig_bytes, stored_bytes, compressed, _ = source_row
+                            (stored_name, stored_relpath, orig_sha, znn_sha, orig_bytes,
+                             stored_bytes, compressed, _, src_prov) = source_row
                             arch_cols = {r[1] for r in con.execute("PRAGMA table_info(archived)")}
-                            src_prov = None
-                            if "orig_sha256_provenance" in arch_cols:
-                                prow = con.execute(
-                                    "SELECT orig_sha256_provenance FROM archived "
-                                    "WHERE drive_label=? AND repo_id=? AND rfilename=?",
-                                    [source, task.repo_id, rfilename],
-                                ).fetchone()
-                                if prow:
-                                    src_prov = prow[0]
                             row_payload = {
                                 "repo_id": task.repo_id, "rfilename": rfilename,
                                 "stored_name": stored_name, "stored_relpath": stored_relpath,
@@ -1402,8 +1559,15 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                                 target, paths=[f"{task.repo_id}/{stored_relpath}"], keys=[key])
                             result["copied_files"] += 1
                             group_copied = True
+                            task_progressed = True
+                            satisfied_files.add(rfilename)
                         if group_deferred:
                             break
+                        if task_progressed:
+                            result["progressed_requirements"].append(task.requirement_id)
+                        if (not task_failed
+                                and set(task.budget.missing_files) <= satisfied_files):
+                            result["completed_requirements"].append(task.requirement_id)
                     if group_copied and not group_deferred:
                         # Propagate the landed copies into the central map, naming ONLY this group's
                         # source+target remotes. This is now pair-scoped and per-group — rather than one
@@ -1426,6 +1590,8 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                 })
         result["deferred_targets"] = sorted(set(result["deferred_targets"]))
         result["copied_targets"] = sorted(set(result["copied_targets"]))
+        result["completed_requirements"] = sorted(set(result["completed_requirements"]))
+        result["progressed_requirements"] = sorted(set(result["progressed_requirements"]))
         return result
     finally:
         if own:
@@ -1556,68 +1722,83 @@ def heal_replica_archived_from_source(
     with a different source digest. Source provenance is copied verbatim when digests agree
     or when the target digest is null.
     """
-    cols = {r[1] for r in con.execute("PRAGMA table_info(archived)")}
-    if "orig_sha256_provenance" not in cols:
-        raise ReplicaHealError(
-            "archived.orig_sha256_provenance missing — catalog requires provenance schema"
-        )
-    src = con.execute(
-        "SELECT orig_sha256, orig_sha256_provenance FROM archived "
-        "WHERE drive_label=? AND repo_id=? AND rfilename=?",
-        [source_drive, repo_id, rfilename],
-    ).fetchone()
-    if src is None:
-        raise ReplicaHealError(
-            f"source archived row missing: {repo_id}/{rfilename} on {source_drive}"
-        )
-    src_digest, src_prov = src[0], src[1]
-    tgt = con.execute(
-        "SELECT orig_sha256, orig_sha256_provenance FROM archived "
-        "WHERE drive_label=? AND repo_id=? AND rfilename=?",
-        [target_drive, repo_id, rfilename],
-    ).fetchone()
-    if tgt is None:
-        raise ReplicaHealError(
-            f"target archived row missing: {repo_id}/{rfilename} on {target_drive}"
-        )
-    tgt_digest, tgt_prov = tgt[0], tgt[1]
-
-    # Mismatch of two non-null digests: halt without mutation.
-    if (
-        src_digest is not None
-        and tgt_digest is not None
-        and str(src_digest).lower() != str(tgt_digest).lower()
-    ):
-        raise ReplicaHealError(
-            f"replica heal halted: digest mismatch for {repo_id}/{rfilename} "
-            f"source={src_digest} target={tgt_digest}"
-        )
-
-    # Null target digest: copy digest + provenance from source.
-    if tgt_digest is None:
-        if src_digest is None and src_prov is None:
-            return {"status": "noop", "reason": "source_also_null"}
-        con.execute(
-            "UPDATE archived SET orig_sha256=?, orig_sha256_provenance=? "
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        cols = {r[1] for r in con.execute("PRAGMA table_info(archived)")}
+        if "orig_sha256_provenance" not in cols:
+            raise ReplicaHealError(
+                "archived.orig_sha256_provenance missing — catalog requires provenance schema"
+            )
+        src = con.execute(
+            "SELECT orig_sha256, orig_sha256_provenance FROM archived "
             "WHERE drive_label=? AND repo_id=? AND rfilename=?",
-            [src_digest, src_prov, target_drive, repo_id, rfilename],
-        )
-        return {
-            "status": "filled",
-            "orig_sha256": src_digest,
-            "orig_sha256_provenance": src_prov,
-        }
-
-    # Digests match (or source null): fill missing target provenance only.
-    if tgt_prov is None and src_prov is not None:
-        con.execute(
-            "UPDATE archived SET orig_sha256_provenance=? "
+            [source_drive, repo_id, rfilename],
+        ).fetchone()
+        if src is None:
+            raise ReplicaHealError(
+                f"source archived row missing: {repo_id}/{rfilename} on {source_drive}"
+            )
+        src_digest, src_prov = src[0], src[1]
+        tgt = con.execute(
+            "SELECT orig_sha256, orig_sha256_provenance FROM archived "
             "WHERE drive_label=? AND repo_id=? AND rfilename=?",
-            [src_prov, target_drive, repo_id, rfilename],
-        )
-        return {
-            "status": "provenance_filled",
-            "orig_sha256": tgt_digest,
-            "orig_sha256_provenance": src_prov,
-        }
-    return {"status": "noop", "reason": "target_complete"}
+            [target_drive, repo_id, rfilename],
+        ).fetchone()
+        if tgt is None:
+            raise ReplicaHealError(
+                f"target archived row missing: {repo_id}/{rfilename} on {target_drive}"
+            )
+        tgt_digest, tgt_prov = tgt[0], tgt[1]
+
+        if (
+            src_digest is not None
+            and tgt_digest is not None
+            and str(src_digest).lower() != str(tgt_digest).lower()
+        ):
+            raise ReplicaHealError(
+                f"replica heal halted: digest mismatch for {repo_id}/{rfilename} "
+                f"source={src_digest} target={tgt_digest}"
+            )
+
+        if tgt_digest is None:
+            if src_digest is None and src_prov is None:
+                result = {"status": "noop", "reason": "source_also_null"}
+            else:
+                updated = con.execute(
+                    "UPDATE archived SET orig_sha256=?, orig_sha256_provenance=? "
+                    "WHERE drive_label=? AND repo_id=? AND rfilename=? "
+                    "AND orig_sha256 IS NULL",
+                    [src_digest, src_prov, target_drive, repo_id, rfilename],
+                )
+                if updated.rowcount != 1:
+                    raise ReplicaHealError(
+                        f"replica heal halted: target changed for {repo_id}/{rfilename}"
+                    )
+                result = {
+                    "status": "filled",
+                    "orig_sha256": src_digest,
+                    "orig_sha256_provenance": src_prov,
+                }
+        elif tgt_prov is None and src_prov is not None:
+            updated = con.execute(
+                "UPDATE archived SET orig_sha256_provenance=? "
+                "WHERE drive_label=? AND repo_id=? AND rfilename=? "
+                "AND orig_sha256=? AND orig_sha256_provenance IS NULL",
+                [src_prov, target_drive, repo_id, rfilename, tgt_digest],
+            )
+            if updated.rowcount != 1:
+                raise ReplicaHealError(
+                    f"replica heal halted: target changed for {repo_id}/{rfilename}"
+                )
+            result = {
+                "status": "provenance_filled",
+                "orig_sha256": tgt_digest,
+                "orig_sha256_provenance": src_prov,
+            }
+        else:
+            result = {"status": "noop", "reason": "target_complete"}
+        con.commit()
+        return result
+    except Exception:
+        con.rollback()
+        raise

@@ -72,17 +72,12 @@ def _file_content_satisfied(archived, repo, rfilename, drive, approved_sha) -> b
     row = _arch_key_match(archived or {}, repo, rfilename, drive)
     if not row:
         return False
-    resolved = archive_hash.expected_sha256(
-        catalog_sha=None,
+    return archive_hash.content_satisfies(
+        approved_sha256=approved_sha,
         orig_sha256=_row_field(row, "orig_sha256"),
         compressed=bool(_row_field(row, "compressed", False)),
         annex_key=_row_field(row, "annex_key"),
     )
-    if approved_sha:
-        if resolved is None:
-            return False
-        return str(resolved).lower() == str(approved_sha).lower()
-    return resolved is not None and str(resolved) != ""
 
 
 def _stored_bytes(archived, repo, rfilename, drive) -> int:
