@@ -584,7 +584,10 @@ def test_c08_stored_repo_without_durable_change_cannot_complete_and_is_bounded()
 
     assert events.count("fetch.run") == fill_mod._MAX_TASK_ATTEMPTS, events
     assert "content_satisfies" in events, "completion must re-derive durable satisfaction"
-    assert events.index("content_satisfies") > events.index("fetch.run"), events
+    fetch_positions = [i for i, event in enumerate(events) if event == "fetch.run"]
+    for n, position in enumerate(fetch_positions):
+        end = fetch_positions[n + 1] if n + 1 < len(fetch_positions) else len(events)
+        assert "content_satisfies" in events[position + 1:end], events
     assert result.get("code") == "FETCH_TASK_FAILED", result
     assert result.get("code") != "PLAN_SATISFIED", result
 
