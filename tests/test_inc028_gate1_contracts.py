@@ -15,7 +15,7 @@ from unittest import mock
 import pytest
 
 import _pr09_gate1_fixtures as f
-from modelark import archive_hash, archive_manifest, fetch, proposal, wishlist
+from modelark import archive_hash, archive_manifest, execution_projection, fetch, proposal, wishlist
 from modelark import fill as fill_mod
 from modelark.core import db
 
@@ -162,13 +162,48 @@ def test_c02_shared_predicate_matrix_and_no_live_lookup(monkeypatch):
     assert _call_shared(approved=APPROVED, orig=APPROVED) is True
     assert _call_shared(approved=APPROVED, orig=OTHER) is False
     assert _call_shared(approved=APPROVED, orig=None, compressed=True) is False
+    approved_key = f"SHA256E-s100--{APPROVED}.bin"
     raw_key = f"SHA256E-s100--{OTHER}.bin"
+    assert _call_shared(approved=APPROVED, orig=None, compressed=False,
+                        annex_key=approved_key) is True
+    assert _call_shared(approved=APPROVED, orig=None, compressed=False,
+                        annex_key=raw_key) is False
     assert _call_shared(approved=None, orig=None, compressed=False,
                         annex_key=raw_key) is True
     assert _call_shared(approved=None, orig=None, compressed=True,
                         annex_key=raw_key) is False
     assert _call_shared(approved=None, orig=None, compressed=False,
                         annex_key="MD5E-s100--deadbeef.bin") is False
+
+
+def test_c02b_existing_content_rules_delegate_to_shared_predicate(monkeypatch):
+    raw_key = f"SHA256E-s100--{APPROVED}.bin"
+    trace = mock.Mock(side_effect=[True, False])
+    monkeypatch.setattr(archive_hash, "content_satisfies", trace, raising=False)
+
+    fill_result = fill_mod._archive_content_satisfies(
+        APPROVED, orig_sha256=None, compressed=False, annex_key=raw_key,
+    )
+    projection_result = execution_projection._file_content_satisfied(
+        {(REPO, FILE, "d0"): {
+            "orig_sha256": None, "compressed": False, "annex_key": raw_key,
+        }},
+        REPO, FILE, "d0", APPROVED,
+    )
+
+    assert fill_result is True
+    assert projection_result is False, "spy return must control the existing projection helper"
+    assert trace.call_args_list == [mock.call(
+        approved_sha256=APPROVED,
+        orig_sha256=None,
+        compressed=False,
+        annex_key=raw_key,
+    ), mock.call(
+        approved_sha256=APPROVED,
+        orig_sha256=None,
+        compressed=False,
+        annex_key=raw_key,
+    )]
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +295,8 @@ def test_c05_fill_file_guard_uses_shared_rule_not_presence(monkeypatch):
     ("orig", "compressed", "annex_key", "code", "resolved"),
     [
         (OTHER, False, None, "APPROVED_TARGET_DIGEST_MISMATCH", OTHER),
+        (None, False, f"SHA256E-s100--{OTHER}.bin",
+         "APPROVED_TARGET_DIGEST_MISMATCH", OTHER),
         (None, True, None, "APPROVED_TARGET_DIGEST_UNPROVABLE", None),
         (None, False, "MD5E-s100--deadbeef.bin",
          "APPROVED_TARGET_DIGEST_UNPROVABLE", None),
@@ -280,14 +317,11 @@ def test_c06_explicit_fetch_refuses_unsatisfied_present_target_before_download(
     ).fetchone()
     bytes_before = target.read_bytes()
     trace = mock.Mock(return_value=False)
-    if code.endswith("UNPROVABLE"):
-        refusal_type = getattr(fetch, "FetchRequirementRefusal", None)
-        assert isinstance(refusal_type, type), (
-            "UNPROVABLE is a per-requirement refusal, not FetchTerminalError"
-        )
-        assert not issubclass(refusal_type, fetch.FetchTerminalError)
-    else:
-        refusal_type = fetch.FetchTerminalError
+    refusal_type = getattr(fetch, "FetchRequirementRefusal", None)
+    assert isinstance(refusal_type, type), (
+        "approved-target conflicts are per-requirement refusals, not run terminals"
+    )
+    assert not issubclass(refusal_type, fetch.FetchTerminalError)
 
     with mock.patch.object(archive_hash, "content_satisfies", trace, create=True), \
             mock.patch.object(fetch, "_download_shard") as download:
@@ -326,14 +360,22 @@ def test_c06_explicit_fetch_refuses_unsatisfied_present_target_before_download(
     assert target.read_bytes() == bytes_before, "pre-download refusal must preserve worktree bytes"
 
 
-def test_c06b_unprovable_is_recorded_per_repo_and_fetch_continues(tmp_path):
+@pytest.mark.parametrize(
+    ("code", "actions"),
+    [
+        ("APPROVED_TARGET_DIGEST_MISMATCH", ("inspect_target", "disposition_required")),
+        ("APPROVED_TARGET_DIGEST_UNPROVABLE", ("run_repair_drive", "resume_same_approval")),
+    ],
+)
+def test_c06b_conflict_is_recorded_per_repo_and_fetch_continues(
+        tmp_path, code, actions):
     refusal_type = getattr(fetch, "FetchRequirementRefusal", None)
     assert isinstance(refusal_type, type), "define a non-terminal per-requirement refusal"
     refusal = refusal_type(
-        "APPROVED_TARGET_DIGEST_UNPROVABLE",
-        "approved target digest cannot be resolved",
+        code,
+        "approved target content requires operator disposition",
         evidence={"repo_id": REPO, "rfilename": FILE, "drive_label": "d0"},
-        actions=("run_repair_drive", "resume_same_approval"),
+        actions=actions,
     )
     other = "org/continues"
     calls = []
@@ -361,15 +403,19 @@ def test_c06b_unprovable_is_recorded_per_repo_and_fetch_continues(tmp_path):
     assert out.get("terminal_failure") is None
     assert out.get("requirement_refusals") == [{
         "repo_id": REPO,
-        "code": "APPROVED_TARGET_DIGEST_UNPROVABLE",
-        "message": "approved target digest cannot be resolved",
+        "code": code,
+        "message": "approved target content requires operator disposition",
         "evidence": {"repo_id": REPO, "rfilename": FILE, "drive_label": "d0"},
-        "actions": ["run_repair_drive", "resume_same_approval"],
+        "actions": list(actions),
         "gate": "C",
     }]
 
 
-def test_c06c_fill_parks_unprovable_requirement_after_other_work_completes():
+@pytest.mark.parametrize("code", [
+    "APPROVED_TARGET_DIGEST_MISMATCH",
+    "APPROVED_TARGET_DIGEST_UNPROVABLE",
+])
+def test_c06c_fill_parks_conflicted_requirement_after_other_work_completes(code):
     other = "org/continues"
     con = f.mem_con()
     f.seed_plan_selection(con, repos=(REPO, other))
@@ -386,10 +432,12 @@ def test_c06c_fill_parks_unprovable_requirement_after_other_work_completes():
     pfiles = _proposal_files() + _proposal_files(repo=other, rid=f"primary:{other}")
     refusal = {
         "repo_id": REPO,
-        "code": "APPROVED_TARGET_DIGEST_UNPROVABLE",
-        "message": "approved target digest cannot be resolved",
+        "code": code,
+        "message": "approved target content requires operator disposition",
         "evidence": {"repo_id": REPO, "rfilename": FILE, "drive_label": "d0"},
-        "actions": ["run_repair_drive", "resume_same_approval"],
+        "actions": (["run_repair_drive", "resume_same_approval"]
+                    if code.endswith("UNPROVABLE")
+                    else ["inspect_target", "disposition_required"]),
         "gate": "C",
     }
     calls = []
@@ -397,7 +445,7 @@ def test_c06c_fill_parks_unprovable_requirement_after_other_work_completes():
     def fake_run(**_kwargs):
         calls.append(tuple(_kwargs["repos"]))
         if len(calls) > 1:
-            raise AssertionError("unprovable requirement was not parked")
+            raise AssertionError("conflicted requirement was not parked")
         # The unrelated repository really did become durably satisfied; do not
         # let stored_repos stand in for the post-run derivation pinned by c08.
         _seed_archived(con, repo=other, orig=APPROVED)
