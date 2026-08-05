@@ -350,8 +350,7 @@ def test_c06_explicit_fetch_refuses_unsatisfied_present_target_before_download(
         assert exc.actions[0] == "run_repair_drive", exc.actions
         assert not any("refetch" in action for action in exc.actions[:1])
     else:
-        assert any("inspect" in action or "disposition" in action
-                   for action in exc.actions), exc.actions
+        assert exc.actions[:2] == ("inspect_target", "disposition_required"), exc.actions
     row_after = con.execute(
         "SELECT * FROM archived WHERE repo_id=? AND rfilename=? AND drive_label='d0'",
         [REPO, FILE],
@@ -468,6 +467,66 @@ def test_c06c_fill_parks_conflicted_requirement_after_other_work_completes(code)
     assert result.get("code") == "PLAN_COMPLETE_WITH_FOLLOWUPS", result
     assert result.get("evidence") == {"content_refusals": [refusal]}, result
     assert result.get("code") not in {"FETCH_TASK_FAILED", "PLAN_SATISFIED"}
+
+
+def test_c06d_gated_and_content_followups_coexist_without_evidence_loss():
+    other = "org/continues"
+    gated = "org/gated"
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=(REPO, other, gated))
+    for repo in (REPO, other, gated):
+        con.execute(
+            "UPDATE files SET rfilename=?,size_bytes=100,format='safetensors',"
+            "quant='bf16',sha256=? WHERE repo_id=?",
+            [FILE, APPROVED, repo],
+        )
+    projection = SimpleNamespace(tasks=(
+        _projection(repo=REPO, rid=RID).tasks[0],
+        _projection(repo=other, rid=f"primary:{other}").tasks[0],
+        _projection(repo=gated, rid=f"primary:{gated}").tasks[0],
+    ))
+    pfiles = (
+        _proposal_files()
+        + _proposal_files(repo=other, rid=f"primary:{other}")
+        + _proposal_files(repo=gated, rid=f"primary:{gated}")
+    )
+    refusal = {
+        "repo_id": REPO,
+        "code": "APPROVED_TARGET_DIGEST_UNPROVABLE",
+        "message": "approved target content requires operator disposition",
+        "evidence": {"repo_id": REPO, "rfilename": FILE, "drive_label": "d0"},
+        "actions": ["run_repair_drive", "resume_same_approval"],
+        "gate": "C",
+    }
+    calls = []
+
+    def fake_run(**_kwargs):
+        calls.append(tuple(_kwargs["repos"]))
+        if len(calls) > 1:
+            raise AssertionError("one follow-up category was not parked")
+        _seed_archived(con, repo=other, orig=APPROVED)
+        out = _fetch_outcome(stored=(other,))
+        out["gated_repos"] = [{"repo": gated, "resolution": "skip"}]
+        out["requirement_refusals"] = [refusal]
+        return out
+
+    with mock.patch.object(fill_mod, "_mounted", return_value=(True, True)), \
+            mock.patch.object(fill_mod.fetch, "run", side_effect=fake_run), \
+            mock.patch.object(fill_mod, "_refresh_projection", return_value=projection), \
+            mock.patch("modelark.execution_session.heartbeat"):
+        result = fill_mod._drain_projection(
+            fetch.RunCtx(con=con), _session_start(projection, pfiles),
+            plan_id="ark", max_24h_gb=0, repo_scope=None,
+            guided=False, poll_secs=0.01, child_fds=(),
+        )
+
+    assert len(calls) == 1
+    assert result.get("state") == "done", result
+    assert result.get("code") == "PLAN_COMPLETE_WITH_FOLLOWUPS", result
+    assert result.get("evidence") == {
+        "access_gated": [gated],
+        "content_refusals": [refusal],
+    }, result
 
 
 def test_c07_explicit_fetch_matching_presence_calls_shared_rule_and_skips(tmp_path):
@@ -634,6 +693,7 @@ def test_c10_replica_digest_mismatch_halts_before_copy_or_upsert(tmp_path):
     assert after == before
     assert _annex_copy_calls(proc) == []
     assert out.get("completed_requirements") == [], out
+    assert con.in_transaction is False, "mismatch refusal must roll back and release its lock"
     failures = out.get("failed") or []
     assert any(item.get("requirement_id") == f"replica:{REPO}"
                and "MISMATCH" in str(item.get("code", "")) for item in failures), failures
@@ -754,6 +814,8 @@ def test_c13_replica_heal_serializes_and_compare_swaps_null_target(tmp_path):
     seed.backup(con)
     writer = sqlite3.connect(db_path, isolation_level=None, timeout=0.0)
     race = _HealRaceConnection(con, writer)
+    committed = None
+    transaction_open = None
     try:
         out = fetch.heal_replica_archived_from_source(
             race,
@@ -765,6 +827,16 @@ def test_c13_replica_heal_serializes_and_compare_swaps_null_target(tmp_path):
             "WHERE drive_label='d1' AND repo_id=? AND rfilename=?",
             [REPO, FILE],
         ).fetchone()
+        transaction_open = con.in_transaction
+        observer = sqlite3.connect(db_path, isolation_level=None, timeout=0.05)
+        try:
+            committed = observer.execute(
+                "SELECT orig_sha256,orig_sha256_provenance FROM archived "
+                "WHERE drive_label='d1' AND repo_id=? AND rfilename=?",
+                [REPO, FILE],
+            ).fetchone()
+        finally:
+            observer.close()
     finally:
         if con.in_transaction:
             con.rollback()
@@ -779,6 +851,7 @@ def test_c13_replica_heal_serializes_and_compare_swaps_null_target(tmp_path):
                         and "FROM ARCHIVED" in sql), None)
     assert begin is not None and target_read is not None and begin < target_read, normalized
     assert race.writer_blocked, "BEGIN IMMEDIATE must exclude the injected writer"
+    assert transaction_open is False, "successful heal must commit and release its write lock"
     guarded_updates = [
         sql for sql in normalized
         if sql.startswith("UPDATE ARCHIVED SET ORIG_SHA256=")
@@ -790,3 +863,4 @@ def test_c13_replica_heal_serializes_and_compare_swaps_null_target(tmp_path):
         "orig_sha256_provenance": "hub_confirmed",
     }
     assert row == (APPROVED, "hub_confirmed")
+    assert committed == row, "heal must be visible from a fresh connection before it returns"
