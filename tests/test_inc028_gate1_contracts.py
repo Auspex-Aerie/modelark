@@ -643,7 +643,7 @@ def _run_replica_with_present_target(tmp_path, *, source_digest=APPROVED,
     paths = {"d0": source, "d1": target}
     real_heal = fetch.heal_replica_archived_from_source
     heal_spy = mock.Mock(wraps=real_heal)
-    content_spy = mock.Mock(return_value=(target_digest == source_digest))
+    content_spy = mock.Mock(wraps=archive_hash.content_satisfies)
     completed = mock.Mock(returncode=0, stdout="", stderr="")
 
     patches = (
@@ -760,30 +760,6 @@ def test_c12_replica_aggregate_progress_cannot_blanket_complete_and_is_bounded()
     assert result.get("code") != "PLAN_SATISFIED", result
 
 
-class _RaceAfterFetchone:
-    def __init__(self, cursor, race):
-        self._cursor = cursor
-        self._race = race
-
-    def fetchone(self):
-        row = self._cursor.fetchone()
-        if not self._race.injected:
-            self._race.injected = True
-            try:
-                self._race.writer.execute(
-                    "UPDATE archived SET orig_sha256=?,orig_sha256_provenance=? "
-                    "WHERE drive_label='d1' AND repo_id=? AND rfilename=?",
-                    [OTHER, "legacy_unknown", REPO, FILE],
-                )
-            except sqlite3.OperationalError as exc:
-                assert "locked" in str(exc).lower(), exc
-                self._race.writer_blocked = True
-        return row
-
-    def __getattr__(self, name):
-        return getattr(self._cursor, name)
-
-
 class _HealRaceConnection:
     def __init__(self, con, writer):
         self._con = con
@@ -796,9 +772,17 @@ class _HealRaceConnection:
         self.statements.append(sql)
         cursor = self._con.execute(sql, params)
         normalized = " ".join(sql.upper().split())
-        if (normalized.startswith("SELECT ORIG_SHA256, ORIG_SHA256_PROVENANCE ")
-                and params and params[0] == "d1"):
-            return _RaceAfterFetchone(cursor, self)
+        if normalized.startswith("BEGIN IMMEDIATE"):
+            self.injected = True
+            try:
+                self.writer.execute(
+                    "UPDATE archived SET orig_sha256=?,orig_sha256_provenance=? "
+                    "WHERE drive_label='d1' AND repo_id=? AND rfilename=?",
+                    [OTHER, "legacy_unknown", REPO, FILE],
+                )
+            except sqlite3.OperationalError as exc:
+                assert "locked" in str(exc).lower(), exc
+                self.writer_blocked = True
         return cursor
 
     def __getattr__(self, name):
@@ -849,10 +833,8 @@ def test_c13_replica_heal_serializes_and_compare_swaps_null_target(tmp_path):
     normalized = [" ".join(sql.upper().split()) for sql in race.statements]
     begin = next((i for i, sql in enumerate(normalized)
                   if sql.startswith("BEGIN IMMEDIATE")), None)
-    target_read = next((i for i, sql in enumerate(normalized)
-                        if sql.startswith("SELECT ORIG_SHA256, ORIG_SHA256_PROVENANCE")
-                        and "FROM ARCHIVED" in sql), None)
-    assert begin is not None and target_read is not None and begin < target_read, normalized
+    assert begin is not None, normalized
+    assert race.injected, "race harness must fail loudly if injection stops executing"
     assert race.writer_blocked, "BEGIN IMMEDIATE must exclude the injected writer"
     assert transaction_open is False, "successful heal must commit and release its write lock"
     guarded_updates = [
@@ -867,3 +849,110 @@ def test_c13_replica_heal_serializes_and_compare_swaps_null_target(tmp_path):
     }
     assert row == (APPROVED, "hub_confirmed")
     assert committed == row, "heal must be visible from a fresh connection before it returns"
+
+
+def test_c14_replica_divergent_raw_annex_target_halts_without_stamp(tmp_path):
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=(REPO,))
+    con.execute(
+        "UPDATE files SET rfilename=?,size_bytes=100,sha256=? WHERE repo_id=?",
+        [FILE, APPROVED, REPO],
+    )
+    con.execute("UPDATE drives SET annex_uuid='uuid-d1' WHERE drive_label='d1'")
+    _seed_archived(
+        con, drive="d0", orig=APPROVED,
+        annex_key=f"SHA256E-s100--{APPROVED}.bin", provenance="hub_confirmed",
+    )
+    _seed_archived(
+        con, drive="d1", orig=None,
+        annex_key=f"SHA256E-s100--{OTHER}.bin", provenance=None,
+    )
+    before = con.execute(
+        "SELECT * FROM archived WHERE repo_id=? AND rfilename=? AND drive_label='d1'",
+        [REPO, FILE],
+    ).fetchone()
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    library = tmp_path / "library"
+    source.mkdir()
+    target.mkdir()
+    library.mkdir()
+    paths = {"d0": source, "d1": target}
+    content_spy = mock.Mock(wraps=archive_hash.content_satisfies)
+    heal_spy = mock.Mock(wraps=fetch.heal_replica_archived_from_source)
+    completed = mock.Mock(returncode=0, stdout="", stderr="")
+
+    with mock.patch.object(fetch.register, "archive_path",
+                           side_effect=lambda _c, label: paths[label]), \
+            mock.patch.object(fetch.register, "library_root", return_value=library), \
+            mock.patch.object(fetch.drive_mutation, "drive_mutation",
+                              return_value=_fake_mutation_writer()), \
+            mock.patch.object(fetch, "_dest_writable", return_value=True), \
+            mock.patch.object(fetch.subprocess, "run", return_value=completed), \
+            mock.patch.object(fetch, "heal_replica_archived_from_source", heal_spy), \
+            mock.patch.object(archive_hash, "content_satisfies", content_spy):
+        out = fetch.run_replica_tasks([_replica_task()], ctx=fetch.RunCtx(con=con))
+
+    after = con.execute(
+        "SELECT * FROM archived WHERE repo_id=? AND rfilename=? AND drive_label='d1'",
+        [REPO, FILE],
+    ).fetchone()
+    assert content_spy.call_count >= 1
+    assert heal_spy.call_count == 1
+    assert after == before, "annex-derived contradiction must halt without metadata stamping"
+    assert con.in_transaction is False
+    assert out.get("completed_requirements") == [], out
+    assert _annex_copy_calls(completed) == []
+    failures = out.get("failed") or []
+    assert any(item.get("requirement_id") == f"replica:{REPO}"
+               and "MISMATCH" in str(item.get("code", "")) for item in failures), failures
+
+
+def test_c15_numcopies_two_refusal_survives_waiting_replica_dependency():
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=(REPO,))
+    con.execute("UPDATE models SET numcopies=2 WHERE repo_id=?", [REPO])
+    con.execute(
+        "UPDATE files SET rfilename=?,size_bytes=100,format='safetensors',"
+        "quant='bf16',sha256=? WHERE repo_id=?",
+        [FILE, APPROVED, REPO],
+    )
+    replica_rid = f"replica:{REPO}"
+    projection = SimpleNamespace(tasks=(
+        _projection(rid=RID, target="d0").tasks[0],
+        _projection(rid=replica_rid, source="d0", target="d1").tasks[0],
+    ))
+    pfiles = _proposal_files(rid=RID) + _proposal_files(rid=replica_rid)
+    refusal = {
+        "repo_id": REPO,
+        "code": "APPROVED_TARGET_DIGEST_UNPROVABLE",
+        "message": "approved target content requires operator disposition",
+        "evidence": {"repo_id": REPO, "rfilename": FILE, "drive_label": "d0"},
+        "actions": ["run_repair_drive", "resume_same_approval"],
+        "gate": "C",
+    }
+    calls = []
+
+    def fake_run(**kwargs):
+        calls.append(tuple(kwargs["repos"]))
+        if len(calls) > 1:
+            raise AssertionError("refused primary was not parked")
+        out = _fetch_outcome()
+        out["requirement_refusals"] = [refusal]
+        return out
+
+    with mock.patch.object(fill_mod, "_mounted", return_value=(True, True)), \
+            mock.patch.object(fill_mod.fetch, "run", side_effect=fake_run), \
+            mock.patch.object(fill_mod, "_refresh_projection", return_value=projection), \
+            mock.patch("modelark.execution_session.heartbeat"):
+        result = fill_mod._drain_projection(
+            fetch.RunCtx(con=con), _session_start(projection, pfiles),
+            plan_id="ark", max_24h_gb=0, repo_scope=None,
+            guided=False, poll_secs=0.01, child_fds=(),
+        )
+
+    assert calls == [(REPO,)]
+    assert result.get("state") == "done", result
+    assert result.get("code") == "PLAN_COMPLETE_WITH_FOLLOWUPS", result
+    assert result.get("evidence") == {"content_refusals": [refusal]}, result
+    assert result.get("code") != "WAITING_DEPENDENCY"
