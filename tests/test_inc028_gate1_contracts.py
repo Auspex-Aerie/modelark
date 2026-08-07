@@ -614,7 +614,8 @@ def _replica_task(*, repo=REPO, rid=f"replica:{REPO}"):
 
 
 def _run_replica_with_present_target(tmp_path, *, source_digest=APPROVED,
-                                     target_digest=None, target_provenance=None):
+                                     target_digest=None, target_provenance=None,
+                                     target_annex_key=None):
     con = f.mem_con()
     f.seed_plan_selection(con, repos=(REPO,))
     con.execute(
@@ -627,7 +628,7 @@ def _run_replica_with_present_target(tmp_path, *, source_digest=APPROVED,
         provenance="hub_confirmed",
     )
     _seed_archived(
-        con, drive="d1", orig=target_digest, annex_key=None,
+        con, drive="d1", orig=target_digest, annex_key=target_annex_key,
         provenance=target_provenance,
     )
     target_before = con.execute(
@@ -956,3 +957,65 @@ def test_c15_numcopies_two_refusal_survives_waiting_replica_dependency():
     assert result.get("code") == "PLAN_COMPLETE_WITH_FOLLOWUPS", result
     assert result.get("evidence") == {"content_refusals": [refusal]}, result
     assert result.get("code") != "WAITING_DEPENDENCY"
+
+
+def test_c16_matching_raw_annex_target_fills_digest_and_provenance_together(tmp_path):
+    key = f"SHA256E-s100--{APPROVED}.bin"
+    con, out, heal, _content, proc, _before = _run_replica_with_present_target(
+        tmp_path,
+        target_digest=None,
+        target_provenance=None,
+        target_annex_key=key,
+    )
+
+    row = con.execute(
+        "SELECT orig_sha256,orig_sha256_provenance,annex_key FROM archived "
+        "WHERE repo_id=? AND rfilename=? AND drive_label='d1'",
+        [REPO, FILE],
+    ).fetchone()
+    assert heal.call_count == 1
+    assert row == (APPROVED, "hub_confirmed", key), (
+        "matching annex evidence may enrich the digest column, but provenance must never be "
+        "written while orig_sha256 remains NULL",
+        row,
+    )
+    assert out.get("completed_requirements") == [f"replica:{REPO}"], out
+    assert _annex_copy_calls(proc) == [], "safe metadata enrichment must not copy bytes"
+
+
+def test_c17_replica_heal_classifier_matrix_names_fill_kind():
+    key_a = f"SHA256E-s100--{APPROVED}.bin"
+    key_b = f"SHA256E-s100--{OTHER}.bin"
+    cases = [
+        # Matching key plus a source column digest safely enriches both target fields.
+        (APPROVED, key_a, "hub_confirmed", None, key_a, None, "fill", "digest"),
+        # A populated matching target digest may receive provenance alone.
+        (APPROVED, key_a, "hub_confirmed", APPROVED, key_a, None,
+         "fill", "provenance"),
+        # Complete matching evidence needs no mutation.
+        (APPROVED, key_a, "hub_confirmed", APPROVED, key_a, "hub_confirmed",
+         "satisfied", None),
+        # Key-only source evidence cannot certify otherwise-unproven target bytes.
+        (None, key_a, None, None, None, None, "noop", None),
+        # Independently resolvable disagreement always halts.
+        (APPROVED, key_a, "hub_confirmed", None, key_b, None,
+         "halt_contradiction", None),
+        # No target evidence can be filled from a real source column digest.
+        (APPROVED, key_a, "hub_confirmed", None, None, None, "fill", "digest"),
+    ]
+    observed = []
+    for (source_orig, source_key, source_prov, target_orig, target_key, target_prov,
+         _action, _fill_kind) in cases:
+        decision = fetch._classify_replica_heal(
+            source_orig_sha256=source_orig,
+            source_compressed=False,
+            source_annex_key=source_key,
+            source_provenance=source_prov,
+            target_orig_sha256=target_orig,
+            target_compressed=False,
+            target_annex_key=target_key,
+            target_provenance=target_prov,
+        )
+        observed.append((decision.action, getattr(decision, "fill_kind", None)))
+
+    assert observed == [(case[-2], case[-1]) for case in cases], observed
