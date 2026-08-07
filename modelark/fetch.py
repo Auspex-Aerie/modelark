@@ -1729,6 +1729,7 @@ class ReplicaHealError(RuntimeError):
 @dataclass(frozen=True)
 class _ReplicaHealDecision:
     action: str
+    fill_kind: str | None
     source_resolved_sha256: str | None
     target_resolved_sha256: str | None
 
@@ -1759,24 +1760,39 @@ def _classify_replica_heal(
     )
     if source_resolved is None:
         action = "noop"
+        fill_kind = None
     elif archive_hash.content_satisfies(
             approved_sha256=source_resolved,
             orig_sha256=target_orig_sha256,
             compressed=target_compressed,
             annex_key=target_annex_key):
-        action = (
-            "fill"
-            if target_provenance is None and source_provenance is not None
-            else "satisfied"
-        )
+        if target_orig_sha256 is None and source_orig_sha256:
+            action = "fill"
+            fill_kind = "digest"
+        elif (target_orig_sha256
+              and target_provenance is None
+              and source_provenance is not None):
+            action = "fill"
+            fill_kind = "provenance"
+        else:
+            action = "satisfied"
+            fill_kind = None
     elif target_resolved is not None:
         action = "halt_contradiction"
-    elif source_orig_sha256 is not None:
+        fill_kind = None
+    elif source_orig_sha256:
         action = "fill"
+        fill_kind = "digest"
     else:
         # A source digest derived only from its annex key cannot certify unproven target bytes.
         action = "noop"
-    return _ReplicaHealDecision(action, source_resolved, target_resolved)
+        fill_kind = None
+    return _ReplicaHealDecision(
+        action=action,
+        fill_kind=fill_kind,
+        source_resolved_sha256=source_resolved,
+        target_resolved_sha256=target_resolved,
+    )
 
 
 def heal_replica_archived_from_source(
@@ -1791,7 +1807,8 @@ def heal_replica_archived_from_source(
 
     Never invents a ``mirrored`` provenance class; never overwrites a non-null target digest
     with a different source digest. Source provenance is copied verbatim only when resolved
-    evidence agrees or the target has no resolvable original-byte digest evidence.
+    evidence agrees or the target has no resolvable original-byte digest evidence. The pure
+    classifier also names whether a safe fill enriches digest+provenance or provenance alone.
     """
     try:
         con.execute("BEGIN IMMEDIATE")
@@ -1838,7 +1855,7 @@ def heal_replica_archived_from_source(
                 f"target={decision.target_resolved_sha256}"
             )
 
-        if decision.action == "fill" and decision.target_resolved_sha256 is None:
+        if decision.action == "fill" and decision.fill_kind == "digest":
             updated = con.execute(
                 "UPDATE archived SET orig_sha256=?, orig_sha256_provenance=? "
                 "WHERE drive_label=? AND repo_id=? AND rfilename=? "
@@ -1855,7 +1872,7 @@ def heal_replica_archived_from_source(
                 "orig_sha256": src_digest,
                 "orig_sha256_provenance": src_prov,
             }
-        elif decision.action == "fill":
+        elif decision.action == "fill" and decision.fill_kind == "provenance":
             updated = con.execute(
                 "UPDATE archived SET orig_sha256_provenance=? "
                 "WHERE drive_label=? AND repo_id=? AND rfilename=? "
@@ -1873,6 +1890,11 @@ def heal_replica_archived_from_source(
                 "orig_sha256": tgt_digest,
                 "orig_sha256_provenance": src_prov,
             }
+        elif decision.action == "fill":
+            raise ReplicaHealError(
+                f"replica heal halted: unknown fill kind {decision.fill_kind!r} "
+                f"for {repo_id}/{rfilename}"
+            )
         elif decision.action == "satisfied":
             result = {"status": "noop", "reason": "target_complete"}
         else:
