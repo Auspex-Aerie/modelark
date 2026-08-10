@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -18,7 +19,7 @@ from unittest import mock
 import pytest
 
 from modelark.core import db
-from test_dec053_054_gate1_contracts import _catalog, _seed_frozen_v6
+from test_dec053_054_gate1_contracts import _catalog, _logical_identity, _seed_frozen_v6
 from test_dec053_054_gate2_remediation import _rehearse_ok
 
 
@@ -74,6 +75,29 @@ os._exit(0)
     assert before["source_wal"] is not None, "fixture must contain a stopped-writer hot WAL"
     assert before["source_shm"] is not None, "fixture must retain the stopped writer SHM"
     return data, catalog, before
+
+
+def _logically_unchanged_stopped_wal(catalog: Path) -> dict[str, bytes | None]:
+    """Add a real WAL transaction that leaves user-table identity unchanged."""
+    script = """
+import os
+import sqlite3
+import sys
+
+con = sqlite3.connect(sys.argv[1], isolation_level=None)
+assert con.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() == "wal"
+con.execute("PRAGMA wal_autocheckpoint=0")
+con.execute("BEGIN IMMEDIATE")
+con.execute("UPDATE models SET status='discovered' WHERE repo_id='org/m'")
+con.execute("UPDATE models SET status='archived' WHERE repo_id='org/m'")
+con.execute("COMMIT")
+assert con.total_changes == 2
+os._exit(0)
+"""
+    subprocess.run([sys.executable, "-c", script, str(catalog)], check=True)
+    before = _bundle_bytes(catalog)
+    assert all(before.values()), "fixture must retain a stopped main/WAL/SHM bundle"
+    return before
 
 
 @pytest.mark.parametrize("suffix", _SIDECAR_SUFFIXES)
@@ -262,6 +286,89 @@ def test_b02_rehearsal_never_opens_canonical_source_recovery_capable(tmp_path):
         ).fetchone() == (1,)
     finally:
         clone.close()
+
+
+@pytest.mark.parametrize("outcome", ("success", "late_refusal"))
+def test_b03_publication_preserves_verified_exact_prelock_rollback_bundle(
+    tmp_path, outcome,
+):
+    """Publication preserves and validates exact pre-lock bytes for every outcome."""
+    data, report, work = _rehearse_ok(tmp_path)
+    catalog = _catalog(data)
+    before = _logically_unchanged_stopped_wal(catalog)
+    dest = tmp_path / "dest"
+    dest_catalog = dest / "catalog.sqlite"
+    real_replace = os.replace
+    attacked = {"yes": False}
+
+    def replace_then_inject_late_refusal(src, dst):
+        result = real_replace(src, dst)
+        if outcome == "late_refusal" and Path(dst) == dest_catalog:
+            _sidecar(dest_catalog, "-wal").write_bytes(b"foreign-post-replace-wal")
+            attacked["yes"] = True
+        return result
+
+    published = None
+    error = None
+    with mock.patch.object(db.os, "replace", side_effect=replace_then_inject_late_refusal):
+        try:
+            published = db.publish_provenance_migration(
+                work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True
+            )
+        except RuntimeError as exc:
+            error = exc
+
+    if outcome == "success":
+        assert error is None
+        assert published is not None and published["status"] == "ok"
+    else:
+        assert attacked["yes"] is True, "contract must reach the post-replace refusal seam"
+        assert error is not None, "late destination conflict must refuse publication"
+        assert published is None
+
+    bundle_dir = Path(report["work_dir"]) / "rollback" / "source-bundle.pre-publish"
+    manifest_path = bundle_dir / "manifest.json"
+    assert manifest_path.is_file(), "publication must retain a verified bundle manifest"
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["status"] == "validated"
+    assert manifest["source_content_identity"] == report["source_content_identity"]
+
+    source_paths = {
+        "source_db": catalog,
+        "source_wal": _sidecar(catalog, "-wal"),
+        "source_shm": _sidecar(catalog, "-shm"),
+    }
+    copied_paths = {
+        "source_db": bundle_dir / "catalog.sqlite",
+        "source_wal": bundle_dir / "catalog.sqlite-wal",
+        "source_shm": bundle_dir / "catalog.sqlite-shm",
+    }
+    for key, copied in copied_paths.items():
+        entry = manifest["artifacts"][key]
+        assert entry["source_path"] == str(source_paths[key].resolve())
+        assert Path(entry["rollback_path"]).resolve() == copied.resolve()
+        assert entry["present"] is True
+        assert entry["size"] == len(before[key])
+        assert entry["sha256"] == hashlib.sha256(before[key]).hexdigest()
+        assert copied.read_bytes() == before[key]
+
+    # Recover only a disposable copy. The exact retained rollback bundle must
+    # remain byte-identical after the recoverability proof.
+    recovery_dir = tmp_path / f"rollback-recovery-{outcome}"
+    recovery_dir.mkdir()
+    for copied in copied_paths.values():
+        shutil.copy2(copied, recovery_dir / copied.name)
+    recovered = sqlite3.connect(str(recovery_dir / "catalog.sqlite"), isolation_level=None)
+    try:
+        assert recovered.execute(
+            "SELECT status FROM models WHERE repo_id='org/m'"
+        ).fetchone() == ("archived",)
+        assert _logical_identity(recovered) == report["source_content_identity"]
+    finally:
+        recovered.close()
+    assert {
+        key: copied.read_bytes() for key, copied in copied_paths.items()
+    } == before
 
 
 def test_c01_rehearsal_report_consumes_backfill_returned_classification(tmp_path):
