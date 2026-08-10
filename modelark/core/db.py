@@ -1115,15 +1115,25 @@ def _validate_migrated_clone(con: sqlite3.Connection) -> None:
         )
 
 
-def _migrate_provenance_v7(con: sqlite3.Connection, *, backup_existing: bool) -> None:
-    """Apply v7 provenance schema + backfill on an open connection (clone or ladder)."""
+def _migrate_provenance_v7(con: sqlite3.Connection, *, backup_existing: bool) -> dict[str, int]:
+    """Apply v7 provenance schema + backfill on an open connection (clone or ladder).
+
+    Returns the measured backfill classification counts from
+    :func:`_apply_provenance_backfill` (including ``disagreement``).
+    """
+    empty = {
+        "hub_confirmed": 0,
+        "legacy_unknown": 0,
+        "null_digest": 0,
+        "disagreement": 0,
+    }
     if (
         _archived_has_provenance_column(con)
         and _placement_has_derivation_check(con)
         and int(con.execute("PRAGMA user_version").fetchone()[0])
         >= _PROVENANCE_SCHEMA_VERSION
     ):
-        return
+        return empty
     if backup_existing:
         _backup_before_migration(con, "pre-provenance-v7")
     fk_on = con.execute("PRAGMA foreign_keys").fetchone()[0]
@@ -1133,10 +1143,11 @@ def _migrate_provenance_v7(con: sqlite3.Connection, *, backup_existing: bool) ->
         con.execute("BEGIN IMMEDIATE")
         try:
             _apply_provenance_schema_objects(con)
-            _apply_provenance_backfill(con)
+            counts = _apply_provenance_backfill(con)
             con.execute(f"PRAGMA user_version={_PROVENANCE_SCHEMA_VERSION}")
             _validate_migrated_clone(con)
             con.execute("COMMIT")
+            return counts
         except Exception:
             try:
                 con.execute("ROLLBACK")
@@ -1157,6 +1168,134 @@ def _manifest_entry(path: Path | None) -> dict:
             "present": True,
         }
     return {"path": str(path) if path else None, "size": None, "sha256": None, "present": False}
+
+
+_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def _sqlite_sidecar_paths(catalog: Path) -> tuple[Path, ...]:
+    return tuple(catalog.with_name(catalog.name + suffix) for suffix in _SQLITE_SIDECAR_SUFFIXES)
+
+
+def _refuse_destination_sidecars(dest_cat: Path, *, when: str) -> None:
+    """Refuse publication when destination SQLite sidecars are present (INC-029 / Finding 2)."""
+    present = [path for path in _sqlite_sidecar_paths(dest_cat) if path.exists()]
+    if present:
+        names = ", ".join(path.name for path in present)
+        raise RuntimeError(
+            f"publication refused: destination SQLite sidecar(s) present {when}: {names}"
+        )
+
+
+def _sqlite_bundle_members(catalog: Path) -> dict[str, Path]:
+    """Map logical bundle keys to paths beside a catalog main file."""
+    return {
+        "source_db": catalog,
+        "source_wal": catalog.with_name(catalog.name + "-wal"),
+        "source_shm": catalog.with_name(catalog.name + "-shm"),
+    }
+
+
+def _read_sqlite_bundle_bytes(catalog: Path) -> dict[str, bytes | None]:
+    members = _sqlite_bundle_members(catalog)
+    return {
+        key: path.read_bytes() if path.is_file() else None
+        for key, path in members.items()
+    }
+
+
+def _write_sqlite_bundle_bytes(dest_dir: Path, bundle: dict[str, bytes | None]) -> dict[str, Path]:
+    """Materialize main/WAL/SHM bytes under dest_dir; return paths written or expected."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "source_db": dest_dir / "catalog.sqlite",
+        "source_wal": dest_dir / "catalog.sqlite-wal",
+        "source_shm": dest_dir / "catalog.sqlite-shm",
+    }
+    for key, path in paths.items():
+        payload = bundle.get(key)
+        if payload is not None:
+            path.write_bytes(payload)
+        elif path.exists():
+            path.unlink()
+    return paths
+
+
+def _bundle_artifact_entry(
+    *,
+    source_path: Path,
+    rollback_path: Path,
+    payload: bytes | None,
+) -> dict:
+    return {
+        "source_path": str(source_path.resolve()),
+        "rollback_path": str(rollback_path.resolve()),
+        "present": payload is not None,
+        "size": len(payload) if payload is not None else None,
+        "sha256": hashlib.sha256(payload).hexdigest() if payload is not None else None,
+    }
+
+
+def _capture_and_validate_source_rollback_bundle(
+    source_catalog: Path,
+    *,
+    work_dir: Path,
+    expected_content_identity: str,
+) -> tuple[Path, dict]:
+    """Preserve exact pre-lock main/WAL/SHM and prove recoverability on a disposable copy.
+
+    Must run before any recovery-capable open of the canonical source (INC-029 B03).
+    """
+    members = _sqlite_bundle_members(source_catalog)
+    if not source_catalog.is_file():
+        raise RuntimeError(
+            f"publication refused: source catalog missing for rollback capture: {source_catalog}"
+        )
+    bundle_bytes = _read_sqlite_bundle_bytes(source_catalog)
+    bundle_dir = work_dir / "rollback" / "source-bundle.pre-publish"
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir)
+    written = _write_sqlite_bundle_bytes(bundle_dir, bundle_bytes)
+
+    # Recover only a disposable copy — never open the retained rollback files for recovery.
+    validate_dir = work_dir / "rollback" / ".source-bundle-validate"
+    if validate_dir.exists():
+        shutil.rmtree(validate_dir)
+    validate_paths = _write_sqlite_bundle_bytes(validate_dir, bundle_bytes)
+    recovered_identity: str
+    try:
+        recovered = sqlite3.connect(
+            str(validate_paths["source_db"]), isolation_level=None
+        )
+        try:
+            recovered_identity = _logical_identity(recovered)
+        finally:
+            recovered.close()
+    finally:
+        shutil.rmtree(validate_dir, ignore_errors=True)
+
+    if recovered_identity != expected_content_identity:
+        raise RuntimeError(
+            "publication refused: recovered pre-lock source bundle identity "
+            "differs from rehearsal source_content_identity"
+        )
+
+    artifacts = {
+        key: _bundle_artifact_entry(
+            source_path=members[key],
+            rollback_path=written[key],
+            payload=bundle_bytes[key],
+        )
+        for key in ("source_db", "source_wal", "source_shm")
+    }
+    manifest = {
+        "status": "validated",
+        "source_content_identity": recovered_identity,
+        "artifacts": artifacts,
+    }
+    manifest_path = bundle_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+    return bundle_dir, manifest
 
 
 def _source_catalog_path(source_dir: Path) -> Path:
@@ -1256,15 +1395,47 @@ def rehearse_provenance_migration(
     snapshot_path = snap_dir / "catalog.sqlite"
     clone_path = clone_dir / "catalog.sqlite"
 
-    # Capture source logical identity and integrity BEFORE any work (WAL-visible).
-    src_metrics = _catalog_snapshot_metrics(src)
+    # Exact pre-work physical bundle first — no SQLite open of the canonical path
+    # (even mode=ro can rewrite *-shm and fail the stopped-writer byte pin).
+    # All recovery-capable work uses a disposable copy (INC-029 / Finding 6).
+    pre_work_bytes = _read_sqlite_bundle_bytes(src)
+    if pre_work_bytes["source_db"] is None:
+        raise FileNotFoundError(f"source catalog missing: {src}")
+    members = _sqlite_bundle_members(src)
+    manifest = {
+        "run_id": run_id,
+        "source_dir": str(source_dir.resolve()),
+        "source_catalog": str(src.resolve()),
+    }
+    for key, path in members.items():
+        payload = pre_work_bytes[key]
+        if payload is not None:
+            manifest[key] = {
+                "path": str(path.resolve()),
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "present": True,
+            }
+        else:
+            manifest[key] = {
+                "path": str(path.resolve()),
+                "size": None,
+                "sha256": None,
+                "present": False,
+            }
+
+    capture_dir = run_root / "source-capture"
+    capture_paths = _write_sqlite_bundle_bytes(capture_dir, pre_work_bytes)
+    capture_main = capture_paths["source_db"]
+
+    # Logical metrics and WAL-consistent snapshot from the copy only.
+    src_metrics = _catalog_snapshot_metrics(capture_main)
     source_user_version = src_metrics["user_version"]
     source_integrity = src_metrics["integrity"]
     source_fk = src_metrics["foreign_key_violations"]
     source_identity = src_metrics["content_identity"]
 
-    # WAL-consistent snapshot via backup API (includes committed WAL content).
-    src_rw = sqlite3.connect(str(src), isolation_level=None)
+    src_rw = sqlite3.connect(str(capture_main), isolation_level=None)
     try:
         snap = sqlite3.connect(str(snapshot_path), isolation_level=None)
         try:
@@ -1274,17 +1445,12 @@ def rehearse_provenance_migration(
     finally:
         src_rw.close()
 
-    # Manifest of source artifacts at snapshot time (path/size/sha of live files).
-    wal = src.parent / f"{src.name}-wal"
-    shm = src.parent / f"{src.name}-shm"
-    manifest = {
-        "source_db": _manifest_entry(src),
-        "source_wal": _manifest_entry(wal if wal.is_file() else None),
-        "source_shm": _manifest_entry(shm if shm.is_file() else None),
-        "run_id": run_id,
-        "source_dir": str(source_dir.resolve()),
-        "source_catalog": str(src.resolve()),
-    }
+    # Canonical source must still match the pre-work fingerprint (byte-exact).
+    if _read_sqlite_bundle_bytes(src) != pre_work_bytes:
+        raise RuntimeError(
+            "rehearsal refused: canonical source bundle changed during capture"
+        )
+
     manifest_path = run_root / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
     snapshot_sha256 = _sha256_file(snapshot_path)
@@ -1303,27 +1469,30 @@ def rehearse_provenance_migration(
         if ver < _EXECUTION_CONFIG_HASH_SCHEMA_VERSION:
             _migrate(clone_con, ver, backup_existing=False)
             ver = int(clone_con.execute("PRAGMA user_version").fetchone()[0])
+        classification: dict[str, int]
         if ver < _PROVENANCE_SCHEMA_VERSION:
-            _migrate_provenance_v7(clone_con, backup_existing=False)
+            classification = _migrate_provenance_v7(clone_con, backup_existing=False)
+        else:
+            # Already at provenance schema: report live counts; disagreement is unknown
+            # without a full re-backfill and is reported as zero only when no re-class runs.
+            classification = {
+                "hub_confirmed": int(clone_con.execute(
+                    "SELECT count(*) FROM archived "
+                    "WHERE orig_sha256_provenance='hub_confirmed'"
+                ).fetchone()[0]),
+                "legacy_unknown": int(clone_con.execute(
+                    "SELECT count(*) FROM archived "
+                    "WHERE orig_sha256_provenance='legacy_unknown'"
+                ).fetchone()[0]),
+                "null_digest": int(clone_con.execute(
+                    "SELECT count(*) FROM archived WHERE orig_sha256 IS NULL"
+                ).fetchone()[0]),
+                "disagreement": 0,
+            }
         clone_con.execute("PRAGMA foreign_keys=ON")
         clone_user_version = int(clone_con.execute("PRAGMA user_version").fetchone()[0])
         clone_integrity = _integrity_ok(clone_con)
         clone_fk = _fk_violations(clone_con)
-        null_digest = clone_con.execute(
-            "SELECT count(*) FROM archived WHERE orig_sha256 IS NULL"
-        ).fetchone()[0]
-        hub_n = clone_con.execute(
-            "SELECT count(*) FROM archived WHERE orig_sha256_provenance='hub_confirmed'"
-        ).fetchone()[0]
-        leg_n = clone_con.execute(
-            "SELECT count(*) FROM archived WHERE orig_sha256_provenance='legacy_unknown'"
-        ).fetchone()[0]
-        classification = {
-            "hub_confirmed": int(hub_n),
-            "legacy_unknown": int(leg_n),
-            "null_digest": int(null_digest),
-            "disagreement": 0,
-        }
         clone_identity = _logical_identity(clone_con)
         _validate_migrated_clone(clone_con)
     finally:
@@ -1713,12 +1882,31 @@ def publish_provenance_migration(
             f"publication refused: destination already exists ({dest_cat}); "
             "will not overwrite"
         )
+    # Finding 2 / INC-029 A: refuse foreign destination sidecars before any staging.
+    _refuse_destination_sidecars(dest_cat, when="before staging")
 
     # Deterministic remigration of the rehearsal snapshot (expected publication).
     expected_path = _remigrate_snapshot_to_expected(
         snapshot_path, work_dir / ".publication-expected")
 
+    expected_source_identity = report.get("source_content_identity")
+    if not isinstance(expected_source_identity, str) or not expected_source_identity:
+        raise RuntimeError(
+            "publication refused: rehearsal report lacks source_content_identity"
+        )
+
+    # INC-029 B03: exact pre-lock source bundle before any recovery-capable open.
+    _source_bundle_dir, source_bundle_manifest = (
+        _capture_and_validate_source_rollback_bundle(
+            source_catalog,
+            work_dir=work_dir,
+            expected_content_identity=expected_source_identity,
+        )
+    )
+
     # Hold BEGIN IMMEDIATE on the source from revalidation through final replace.
+    # Canonical physical files may normalize under this lock; exact pre-lock bytes
+    # are already retained and proven recoverable above.
     source_lock = sqlite3.connect(
         str(source_catalog), isolation_level=None, timeout=0.05)
     clone_lock: sqlite3.Connection | None = None
@@ -1741,7 +1929,7 @@ def publish_provenance_migration(
 
         # Source vs consistent snapshot (logical — not physical main-file hash).
         snap_metrics = _catalog_snapshot_metrics(snapshot_path)
-        src_now = _catalog_snapshot_metrics(source_catalog)
+        src_now = _catalog_snapshot_metrics_con(source_lock)
         if src_now["integrity"] != "ok":
             raise RuntimeError(
                 f"publication refused: source integrity not ok: {src_now['integrity']}"
@@ -1766,9 +1954,14 @@ def publish_provenance_migration(
                 "publication refused: source logical identity differs from "
                 "rehearsal snapshot"
             )
-        if src_now["content_identity"] != report.get("source_content_identity"):
+        if src_now["content_identity"] != expected_source_identity:
             raise RuntimeError(
                 "publication refused: source logical identity changed since rehearsal"
+            )
+        if src_now["content_identity"] != source_bundle_manifest["source_content_identity"]:
+            raise RuntimeError(
+                "publication refused: locked source identity differs from "
+                "validated pre-lock rollback bundle"
             )
         # Schema: compare source to snapshot (full CREATE/index/trigger/view SQL).
         src_id = _full_catalog_identity(source_lock)
@@ -1800,6 +1993,8 @@ def publish_provenance_migration(
         staging = dest_dir / ".catalog.sqlite.publish-staging"
         if staging.exists():
             staging.unlink()
+        # Refuse leftover staging sidecars from a prior attempt.
+        _refuse_destination_sidecars(staging, when="on publish-staging path")
         stage_con = sqlite3.connect(str(staging), isolation_level=None)
         try:
             clone_lock.backup(stage_con)
@@ -1854,7 +2049,7 @@ def publish_provenance_migration(
             )
         _assert_publication_matches_expected(stage_con, expected_path)
 
-        # Rollback artifact under the held source lock.
+        # Snapshot rollback artifact under the held source lock (clone-side safety).
         rollback_dir = work_dir / "rollback"
         rollback_dir.mkdir(parents=True, exist_ok=True)
         rollback_artifact = rollback_dir / "catalog.sqlite.pre-publish"
@@ -1866,9 +2061,15 @@ def publish_provenance_migration(
                 "publication refused: rollback artifact hash != snapshot hash"
             )
 
+        # Finding 2 second guard: recheck immediately before replace (TOCTOU).
+        _refuse_destination_sidecars(dest_cat, when="immediately before replace")
+
         # Final atomic replace while source, clone, and staging locks are held.
         # On Linux, os.replace renames the inode; the open exclusive connection
         # continues to reference that inode and blocks concurrent writers.
+        # Record the staging inode *before* replace so a post-hook rival
+        # os.replace onto dest_cat cannot be mistaken for our published file.
+        staging_ino = staging.stat().st_ino
         try:
             os.replace(str(staging), str(dest_cat))
         except OSError as exc:
@@ -1880,9 +2081,41 @@ def publish_provenance_migration(
                 "release the staging lock before replacement"
             ) from exc
         staging = None  # successfully published (inode now at dest_cat)
+
+        # Post-replace pathname hygiene under retained locks (INC-029 A03):
+        # foreign sidecars or a rival replace of the destination path cannot
+        # be reported as success. Identity is re-checked on the retained
+        # staging connection (same inode); path/inode drift is refused.
+        _refuse_destination_sidecars(dest_cat, when="after replace")
+        if not dest_cat.is_file() or dest_cat.stat().st_ino != staging_ino:
+            raise RuntimeError(
+                "publication refused: published destination path no longer "
+                "references the validated staging inode"
+            )
+        post_metrics = _catalog_snapshot_metrics_con(stage_con)
+        if post_metrics["user_version"] != report.get("clone_user_version"):
+            raise RuntimeError(
+                "publication refused: published catalog user_version drifted "
+                "after replace under retained lock"
+            )
+        if post_metrics["content_identity"] != report.get("clone_content_identity"):
+            raise RuntimeError(
+                "publication refused: published catalog identity drifted "
+                "after replace under retained lock"
+            )
+        # Re-check path/inode and sidecars once more immediately before success
+        # so a late pathname attack during the identity re-read cannot pass.
+        if not dest_cat.is_file() or dest_cat.stat().st_ino != staging_ino:
+            raise RuntimeError(
+                "publication refused: published destination path was replaced "
+                "after validation"
+            )
+        _refuse_destination_sidecars(dest_cat, when="before success return")
+
         return {
             "status": "ok",
             "rollback_artifact": str(rollback_artifact.resolve()),
+            "source_rollback_bundle": str(_source_bundle_dir.resolve()),
             "published_catalog": str(dest_cat.resolve()),
             "manifest_status": "validated",
             "manifest_path": str(manifest_path),
@@ -1919,7 +2152,6 @@ def publish_provenance_migration(
         except sqlite3.Error:
             pass
         source_lock.close()
-
 
 def upsert(con, table: str, row: dict, pk: list[str], touch: list[str] | None = None) -> None:
     """Insert or update one row keyed by `pk`. `touch` columns are set to CURRENT_TIMESTAMP on update."""
