@@ -235,7 +235,7 @@ def cmd_repair_hashes(args):
 
 def cmd_repair_drive(args):
     """Explicit per-drive hash repair (DEC-054) — exact drive/epoch/fingerprint."""
-    from modelark import hash_repair
+    from modelark import hash_repair, register
     con = db.connect()
     try:
         try:
@@ -244,6 +244,7 @@ def cmd_repair_drive(args):
                 args.drive,
                 identity_epoch=int(args.identity_epoch),
                 identity_fingerprint=args.identity_fingerprint,
+                archive_resolver=register.archive_path,
             )
         except hash_repair.HashRepairError as exc:
             raise SystemExit(f"drive repair failed: {exc}") from exc
