@@ -279,6 +279,14 @@ def _blocked_selection_flow(pg) -> None:
                     "refused": False,
                 }),
             )
+        elif mode == "error500":
+            # INC-031 c02: HTTP 500 {error} without refused — must not re-preview.
+            route.fulfill(
+                status=500, content_type="application/json",
+                body=json.dumps({
+                    "error": "FILL_SESSION_ACTIVE: {'session_id': 'sess-cli'}",
+                }),
+            )
         else:
             record_mutation(route, "selection_bulk")
 
@@ -371,6 +379,36 @@ def _blocked_selection_flow(pg) -> None:
         f"Dismiss ids must be exact policy-blocked set, got {body['ids']!r}")
     assert len(body["ids"]) == 2, "no duplicates or extras in Dismiss ids"
     print("  blocked-selection PREVIEW_STALE + exact Dismiss CAS body")
+
+    # --- INC-031 c02: 500 {error} without refused must toast and not re-preview ---
+    route_mode["preview"] = "pass"
+    route_mode["bulk"] = "error500"
+    traffic["bulk_post"].clear()
+    before_preview = traffic["preview_get"]
+    before_list = pg.inner_text("#blockedSelectionList")
+    before_ids = set(
+        pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+            "els => els.map(e => e.getAttribute('data-repo-id'))"))
+    pg.click("#blockedDismiss")
+    for _ in range(40):
+        t = pg.inner_text("#toast") if pg.locator("#toast").count() else ""
+        if "FILL_SESSION_ACTIVE" in t or "sess-cli" in t:
+            break
+        time.sleep(0.05)
+    toast = pg.inner_text("#toast") if pg.locator("#toast").count() else ""
+    assert "FILL_SESSION_ACTIVE" in toast or "sess-cli" in toast, (
+        f"INC-031 c02: 500 error body must toast, toast={toast!r}")
+    assert pg.inner_text("#blockedSelectionList") == before_list, (
+        "INC-031 c02: 500 error body must retain blocked-notice evidence")
+    assert set(
+        pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+            "els => els.map(e => e.getAttribute('data-repo-id'))")
+    ) == before_ids
+    assert traffic["preview_get"] == before_preview, (
+        f"INC-031 c02: 500 error body must not auto re-preview, "
+        f"before={before_preview} after={traffic['preview_get']}")
+    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
+    print("  blocked-selection INC-031 500 error body: toast, retain, no re-preview")
 
     # --- Successful Dismiss: auto re-preview; notice clears; capacity remains ---
     traffic["bulk_post"].clear()
