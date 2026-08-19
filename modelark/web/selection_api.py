@@ -230,10 +230,19 @@ def bulk(ids=None, on=None, **kwargs) -> dict:
             c.executemany("DELETE FROM selection WHERE repo_id=?", [[i] for i in ids])
             return _summary_on(c)
 
+        from modelark.proposal import Refusal
+
         try:
             return _with_revision(body)
         except _PreviewStale as exc:
             return exc.body
+        except Refusal as exc:
+            # DB/CLI live session: graph_write raises before/inside the TX.
+            # Map the existing sibling (WORKER `_FILL_ACTIVE_REFUSAL`) so
+            # `_selection_result` emits HTTP 409 instead of server 500 `{error}`.
+            if getattr(exc, "code", None) != "FILL_SESSION_ACTIVE":
+                raise
+            return dict(_FILL_ACTIVE_REFUSAL)
 
     return _guarded(mutate)
 

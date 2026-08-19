@@ -675,6 +675,14 @@
         // Retain displayed evidence on PREVIEW_STALE / FILL_SESSION_ACTIVE.
         return;
       }
+      // INC-031: HTTP 500 `{error}` has no `refused` and no `ok`. Treat as
+      // failure: toast, retain notice, restore controls, do not re-preview.
+      if (r && r.error) {
+        MA.toast(String(r.error));
+        blockedInFlight = false;
+        setBlockedControls(false);
+        return;
+      }
       // Successful Dismiss: automatically re-preview (DEC-058).
       // Keep controls disabled through the follow-up GET, then clear in finally.
       const token = {};

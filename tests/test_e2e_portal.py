@@ -404,10 +404,18 @@ def _blocked_selection_flow(pg) -> None:
         pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
             "els => els.map(e => e.getAttribute('data-repo-id'))")
     ) == before_ids
+    # Wait for the error branch to restore controls, then drain late GETs
+    # before asserting no re-preview (Codex Gate-1 MEDIUM / Gate-2 required).
+    for _ in range(40):
+        if pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan"):
+            break
+        time.sleep(0.05)
+    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
+    for _ in range(10):
+        time.sleep(0.05)
     assert traffic["preview_get"] == before_preview, (
         f"INC-031 c02: 500 error body must not auto re-preview, "
         f"before={before_preview} after={traffic['preview_get']}")
-    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
     print("  blocked-selection INC-031 500 error body: toast, retain, no re-preview")
 
     # --- Successful Dismiss: auto re-preview; notice clears; capacity remains ---
