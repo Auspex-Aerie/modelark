@@ -377,9 +377,10 @@ def test_publish_holds_source_lock_through_replace_blocks_writer(tmp_path):
     dest = tmp_path / "dest"
     src = Path(report["source_catalog"])
     real_replace = os.replace
+    real_link = os.link
     writer_saw_busy = {"yes": False}
 
-    def slow_replace(src_p, dst_p):
+    def slow_publish(src_p, dst_p, real):
         # While publish holds the source lock, a concurrent writer must fail.
         barrier = threading.Barrier(2, timeout=5)
         result = {"err": None}
@@ -400,13 +401,19 @@ def test_publish_holds_source_lock_through_replace_blocks_writer(tmp_path):
         t.start()
         barrier.wait()
         time.sleep(0.1)  # give rival a chance while we still hold the lock
-        out = real_replace(src_p, dst_p)
+        out = real(src_p, dst_p)
         t.join(timeout=5)
         if result["err"] is not None:
             writer_saw_busy["yes"] = True
         return out
 
-    with mock.patch("os.replace", side_effect=slow_replace):
+    with mock.patch.object(
+        os, "replace",
+        side_effect=lambda src, dst: slow_publish(src, dst, real_replace),
+    ), mock.patch.object(
+        os, "link",
+        side_effect=lambda src, dst: slow_publish(src, dst, real_link),
+    ):
         pub = db.publish_provenance_migration(
             work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
     assert pub["status"] == "ok"
@@ -898,9 +905,10 @@ def test_publish_staging_exclusive_lock_blocks_adversary_through_replace(tmp_pat
     data, report, work = _rehearse_ok(tmp_path)
     dest = tmp_path / "dest-lock"
     real_replace = os.replace
+    real_link = os.link
     adversary = {"blocked": False, "altered": False, "staging": None}
 
-    def replace_hook(src_p, dst_p):
+    def publish_hook(src_p, dst_p, real):
         staging = Path(src_p)
         adversary["staging"] = staging
         # Adversary tries to open and mutate staging while publication still holds
@@ -918,13 +926,17 @@ def test_publish_staging_exclusive_lock_blocks_adversary_through_replace(tmp_pat
                 evil.close()
         except sqlite3.OperationalError:
             adversary["blocked"] = True
-        return real_replace(src_p, dst_p)
+        return real(src_p, dst_p)
 
-    with mock.patch.object(os, "replace", side_effect=replace_hook):
-        # Also patch where publish looks it up (module-level os).
-        with mock.patch("modelark.core.db.os.replace", side_effect=replace_hook):
-            pub = db.publish_provenance_migration(
-                work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
+    with mock.patch.object(
+        os, "replace",
+        side_effect=lambda src, dst: publish_hook(src, dst, real_replace),
+    ), mock.patch.object(
+        os, "link",
+        side_effect=lambda src, dst: publish_hook(src, dst, real_link),
+    ):
+        pub = db.publish_provenance_migration(
+            work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
     assert pub["status"] == "ok"
     assert adversary["blocked"] is True, (
         "adversary must be busy/blocked while exclusive staging lock is held"

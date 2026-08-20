@@ -113,9 +113,11 @@ def test_a01_publish_refuses_preexisting_destination_sidecar_before_staging(
     sentinel_bytes = f"foreign{suffix}".encode()
     sentinel.write_bytes(sentinel_bytes)
     real_replace = os.replace
+    real_link = os.link
 
     error = None
-    with mock.patch.object(db.os, "replace", wraps=real_replace) as replace_spy:
+    with mock.patch.object(db.os, "replace", wraps=real_replace) as replace_spy, \
+            mock.patch.object(db.os, "link", wraps=real_link) as link_spy:
         try:
             db.publish_provenance_migration(
                 work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True
@@ -125,6 +127,7 @@ def test_a01_publish_refuses_preexisting_destination_sidecar_before_staging(
 
     assert error is not None, f"sidecar-only destination {suffix} must be refused"
     assert replace_spy.call_count == 0, "refusal must happen before atomic publication"
+    assert link_spy.call_count == 0, "refusal must happen before atomic publication"
     assert sentinel.read_bytes() == sentinel_bytes
     assert not dest_catalog.exists()
     assert not (dest / ".catalog.sqlite.publish-staging").exists()
@@ -139,6 +142,7 @@ def test_a02_publish_rechecks_destination_sidecars_immediately_before_replace(tm
     sentinel_bytes = b"foreign-wal-after-first-guard"
     real_remigrate = db._remigrate_snapshot_to_expected
     real_replace = os.replace
+    real_link = os.link
     injected = {"yes": False}
     evidence_paths = [
         Path(report["snapshot_path"]),
@@ -157,7 +161,8 @@ def test_a02_publish_rechecks_destination_sidecars_immediately_before_replace(tm
     error = None
     with mock.patch.object(
         db, "_remigrate_snapshot_to_expected", side_effect=inject_after_initial_guard
-    ), mock.patch.object(db.os, "replace", wraps=real_replace) as replace_spy:
+    ), mock.patch.object(db.os, "replace", wraps=real_replace) as replace_spy, \
+            mock.patch.object(db.os, "link", wraps=real_link) as link_spy:
         try:
             db.publish_provenance_migration(
                 work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True
@@ -168,6 +173,7 @@ def test_a02_publish_rechecks_destination_sidecars_immediately_before_replace(tm
     assert injected["yes"] is True, "contract must inject after the first destination guard"
     assert error is not None, "late destination sidecar must be refused"
     assert replace_spy.call_count == 0, "late guard must run immediately before replace"
+    assert link_spy.call_count == 0, "late guard must run immediately before publish"
     assert sentinel.read_bytes() == sentinel_bytes
     assert not dest_catalog.exists()
     assert {path: path.read_bytes() for path in evidence_paths} == evidence_before
@@ -184,10 +190,11 @@ def test_a03_publish_revalidates_exact_destination_path_before_releasing_staging
     dest = tmp_path / "dest"
     dest_catalog = dest / "catalog.sqlite"
     real_replace = os.replace
+    real_link = os.link
     attacked = {"yes": False}
 
-    def replace_then_attack(src, dst):
-        out = real_replace(src, dst)
+    def publish_then_attack(src, dst, real):
+        out = real(src, dst)
         if Path(dst) == dest_catalog:
             if attack == "foreign_sidecar":
                 _sidecar(dest_catalog, "-wal").write_bytes(b"foreign-post-replace-wal")
@@ -204,7 +211,13 @@ def test_a03_publish_revalidates_exact_destination_path_before_releasing_staging
         return out
 
     error = None
-    with mock.patch.object(db.os, "replace", side_effect=replace_then_attack):
+    with mock.patch.object(
+        db.os, "replace",
+        side_effect=lambda src, dst: publish_then_attack(src, dst, real_replace),
+    ), mock.patch.object(
+        db.os, "link",
+        side_effect=lambda src, dst: publish_then_attack(src, dst, real_link),
+    ):
         try:
             db.publish_provenance_migration(
                 work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True
@@ -299,10 +312,11 @@ def test_b03_publication_preserves_verified_exact_prelock_rollback_bundle(
     dest = tmp_path / "dest"
     dest_catalog = dest / "catalog.sqlite"
     real_replace = os.replace
+    real_link = os.link
     attacked = {"yes": False}
 
-    def replace_then_inject_late_refusal(src, dst):
-        result = real_replace(src, dst)
+    def publish_then_inject_late_refusal(src, dst, real):
+        result = real(src, dst)
         if outcome == "late_refusal" and Path(dst) == dest_catalog:
             _sidecar(dest_catalog, "-wal").write_bytes(b"foreign-post-replace-wal")
             attacked["yes"] = True
@@ -310,7 +324,17 @@ def test_b03_publication_preserves_verified_exact_prelock_rollback_bundle(
 
     published = None
     error = None
-    with mock.patch.object(db.os, "replace", side_effect=replace_then_inject_late_refusal):
+    with mock.patch.object(
+        db.os, "replace",
+        side_effect=lambda src, dst: publish_then_inject_late_refusal(
+            src, dst, real_replace
+        ),
+    ), mock.patch.object(
+        db.os, "link",
+        side_effect=lambda src, dst: publish_then_inject_late_refusal(
+            src, dst, real_link
+        ),
+    ):
         try:
             published = db.publish_provenance_migration(
                 work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True

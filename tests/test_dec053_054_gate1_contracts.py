@@ -1035,20 +1035,28 @@ def test_m08d_success_rollback_artifact_same_fs_atomic(tmp_path):
     report = _require_report(
         _rehearse()(data, work, run_id="p3"), source_identity=ident)
     real_replace = os.replace
+    real_link = os.link
     replace_calls: list[tuple[Path, Path]] = []
+    publish_dsts: list[Path] = []
 
     def spy_replace(src_p, dst_p):
         replace_calls.append((Path(src_p), Path(dst_p)))
+        publish_dsts.append(Path(dst_p))
         return real_replace(src_p, dst_p)
 
-    with mock.patch("os.replace", side_effect=spy_replace):
+    def spy_link(src_p, dst_p):
+        publish_dsts.append(Path(dst_p))
+        return real_link(src_p, dst_p)
+
+    with mock.patch.object(db.os, "replace", side_effect=spy_replace), \
+            mock.patch.object(db.os, "link", side_effect=spy_link):
         pub = _publish()(
             work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
     assert _fingerprint(src) == src_fp
-    # Exact final replacement onto the (previously absent) publication target
-    final_dsts = [dst for _s, dst in replace_calls]
+    # Exact final publication onto the (previously absent) publication target
+    final_dsts = [dst for _s, dst in replace_calls] + publish_dsts
     assert publication_target in final_dsts or dest in final_dsts, (
-        f"os.replace must land on absent publication target; calls={final_dsts}"
+        f"publish primitive must land on absent publication target; calls={final_dsts}"
     )
     assert "rollback_artifact" in pub
     rb = Path(pub["rollback_artifact"])
@@ -1089,24 +1097,31 @@ def test_m08e_atomic_replace_failure_no_partial_dest(tmp_path):
     report = _require_report(
         _rehearse()(data, work, run_id="p4"), source_identity=ident)
     real_replace = os.replace
-    final_replace_fired = {"yes": False}
+    real_link = os.link
+    final_publish_fired = {"yes": False}
 
-    def boom(src_p, dst_p):
+    def boom(src_p, dst_p, real):
         dst = Path(dst_p)
-        # Final publication replace onto the publication destination
+        # Final publication primitive onto the publication destination
         if dst == dest or dst == publication_target or (
                 dest in dst.parents and dst.name == "catalog.sqlite"):
-            final_replace_fired["yes"] = True
-            raise OSError("injected atomic replace failure")
-        return real_replace(src_p, dst_p)
+            final_publish_fired["yes"] = True
+            raise OSError("injected atomic publish failure")
+        return real(src_p, dst_p)
 
-    with mock.patch("os.replace", side_effect=boom):
+    with mock.patch.object(
+        db.os, "replace",
+        side_effect=lambda src, dst: boom(src, dst, real_replace),
+    ), mock.patch.object(
+        db.os, "link",
+        side_effect=lambda src, dst: boom(src, dst, real_link),
+    ):
         with pytest.raises(Exception) as ei:
             _publish()(
                 work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
         assert ei.type is not AssertionError or "export" in str(ei.value)
-    assert final_replace_fired["yes"] is True, (
-        "final publication os.replace hook must fire before failure"
+    assert final_publish_fired["yes"] is True, (
+        "final publication primitive hook must fire before failure"
     )
     assert _fingerprint(src) == src_fp
     # Publication destination must not exist after failed replace

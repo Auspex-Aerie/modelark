@@ -9,6 +9,7 @@ support `con.execute(sql, params).fetchone()/.fetchall()`, `?` placeholders, and
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -1187,6 +1188,58 @@ def _refuse_destination_sidecars(dest_cat: Path, *, when: str) -> None:
         )
 
 
+_NOCLOBBER_UNSUPPORTED = frozenset(
+    err
+    for err in (
+        errno.EXDEV,
+        errno.ENOSYS,
+        getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EOPNOTSUPP", None),
+    )
+    if err is not None
+)
+
+
+def _publish_staging_no_clobber(staging: Path, dest_cat: Path) -> None:
+    """Name dest_cat as staging's inode without replacing an existing dest (INC-034).
+
+    Hard-link, then drop the staging pathname. ``os.link`` fails with EEXIST when
+    dest_cat already exists, so a late rival main is preserved. Same filesystem
+    is already required. Never falls back to ``os.replace``.
+    """
+    try:
+        os.link(str(staging), str(dest_cat))
+    except OSError as exc:
+        err = getattr(exc, "errno", None)
+        if err == errno.EEXIST:
+            raise RuntimeError(
+                f"publication refused: destination already exists ({dest_cat}); "
+                "will not overwrite"
+            ) from exc
+        if err == errno.EPERM:
+            raise RuntimeError(
+                "publication refused: atomic no-clobber publish denied "
+                f"({exc}); refuse rather than clobber"
+            ) from exc
+        if err in _NOCLOBBER_UNSUPPORTED:
+            raise RuntimeError(
+                "publication refused: atomic no-clobber publish unsupported "
+                f"({exc}); refuse rather than clobber"
+            ) from exc
+        raise RuntimeError(
+            "publication refused: cannot atomically publish staging while "
+            f"holding exclusive SQLite lock ({exc}); refuse rather than "
+            "release the staging lock before publication"
+        ) from exc
+    try:
+        os.unlink(str(staging))
+    except OSError as exc:
+        raise RuntimeError(
+            "publication refused: destination linked but staging pathname "
+            f"could not be released ({exc})"
+        ) from exc
+
+
 def _sqlite_bundle_members(catalog: Path) -> dict[str, Path]:
     """Map logical bundle keys to paths beside a catalog main file."""
     return {
@@ -1857,7 +1910,7 @@ def publish_provenance_migration(
     source vs consistent snapshot (logical identity/version/integrity/FK/schema),
     build staging via consistent SQLite backup of the clone while holding a
     clone write lock, validate the staged artifact against a deterministic
-    remigration of the snapshot, then atomic replace.
+    remigration of the snapshot, then atomic no-clobber publish.
     """
     dest_dir = Path(dest_dir)
     if not confirm_stopped or str(confirm_stopped).strip() != "MODELARK-STOPPED":
@@ -1904,7 +1957,7 @@ def publish_provenance_migration(
         )
     )
 
-    # Hold BEGIN IMMEDIATE on the source from revalidation through final replace.
+    # Hold BEGIN IMMEDIATE on the source from revalidation through final publish.
     # Canonical physical files may normalize under this lock; exact pre-lock bytes
     # are already retained and proven recoverable above.
     source_lock = sqlite3.connect(
@@ -1989,7 +2042,7 @@ def publish_provenance_migration(
 
         # Stage via consistent SQLite backup of the exclusively locked clone.
         # The staging connection retains EXCLUSIVE lock continuously through
-        # validation and final os.replace — never close and reopen the pathname.
+        # validation and final no-clobber publish — never close and reopen the pathname.
         staging = dest_dir / ".catalog.sqlite.publish-staging"
         if staging.exists():
             staging.unlink()
@@ -2061,28 +2114,20 @@ def publish_provenance_migration(
                 "publication refused: rollback artifact hash != snapshot hash"
             )
 
-        # Finding 2 second guard: recheck immediately before replace (TOCTOU).
+        # Finding 2 second guard: recheck immediately before publish (TOCTOU).
         _refuse_destination_sidecars(dest_cat, when="immediately before replace")
 
-        # Final atomic replace while source, clone, and staging locks are held.
-        # On Linux, os.replace renames the inode; the open exclusive connection
-        # continues to reference that inode and blocks concurrent writers.
-        # Record the staging inode *before* replace so a post-hook rival
+        # Final atomic no-clobber publish while source, clone, and staging
+        # locks are held. os.link names dest_cat as the staging inode and
+        # fails with EEXIST if a late rival main is already there (INC-034).
+        # The open exclusive connection continues to reference that inode.
+        # Record the staging inode *before* publish so a post-hook rival
         # os.replace onto dest_cat cannot be mistaken for our published file.
         staging_ino = staging.stat().st_ino
-        try:
-            os.replace(str(staging), str(dest_cat))
-        except OSError as exc:
-            # Fail closed if the platform cannot replace while the staging
-            # database remains exclusively locked — do not reopen the race.
-            raise RuntimeError(
-                "publication refused: cannot atomically replace staging while "
-                f"holding exclusive SQLite lock ({exc}); refuse rather than "
-                "release the staging lock before replacement"
-            ) from exc
+        _publish_staging_no_clobber(staging, dest_cat)
         staging = None  # successfully published (inode now at dest_cat)
 
-        # Post-replace pathname hygiene under retained locks (INC-029 A03):
+        # Post-publish pathname hygiene under retained locks (INC-029 A03):
         # foreign sidecars or a rival replace of the destination path cannot
         # be reported as success. Identity is re-checked on the retained
         # staging connection (same inode); path/inode drift is refused.
