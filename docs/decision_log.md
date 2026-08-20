@@ -1239,6 +1239,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - contracts: `test_c01_late_rival_main_at_publish_syscall_is_refused_and_preserved` wraps both `os.replace` and `os.link` on `modelark.core.db.os`. When the dest path is the publication `catalog.sqlite`, it writes a unique sentinel then calls through. Requires `RuntimeError`, no `status=ok`, dest bytes identical to the sentinel, injection actually ran, and no dest sidecars. Expected-red at production-unchanged tip: `os.replace` clobbers the just-injected sentinel and publish returns `ok`.
 - scope_boundary: Gate 1 added contracts and append-only bookkeeping only. It authorizes no `db.py` production edit, live rehearsal/publication/migration, INC-032/033, DEF-035/036, Gate 3, PR-state change, ready/merge, Fill, repair, drive, or operator-catalog operation.
 - UPDATE 2026-08-20 — Operator authorized Gate 2 production from Gate 1 tip `5a4f5a2` (address INC-034 dest-main clobber). Gate 1 contracts stay at that tip.
+- UPDATE 2026-08-20 — **INC-034 Gate 1 accepted at `5a4f5a2`.** Operator accepted the Gate 2 production that those contracts pin. c01 was expected-red at that tip and is green at the frozen Gate 2 tip.
 
 ### INC-034 Gate-2 UPDATE: Destination no-clobber publication
 - date: 2026-08-20 / status: Gate 2 production implemented; pending reviewer acceptance / triggered_by: operator instruction to address INC-034 after Gate 1 contracts at `5a4f5a2` plus Codex ×3 (ACCEPT / AMEND / ACCEPT-AS-AMENDED) / related: INC-034, INC-029, DEC-059, DEC-061, modelark/core/db.py, tests/test_inc034_gate1_contracts.py, tests/test_inc029_gate1_contracts.py / docs_updated: docs/decision_log.md, modelark/core/db.py, tests/test_inc029_gate1_contracts.py, tests/test_dec053_054_gate1_contracts.py, tests/test_dec053_054_gate2_remediation.py
@@ -1246,6 +1247,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - contracts: c01 greens at the publish syscall (wraps `os.replace` and `os.link`; sentinel dest main preserved). A01–A03 / B03 / m08c keep their assertions; hooks now observe `os.link` as well as `os.replace`. m08d/m08e and the staging/source lock characterizations retarget the same primitive.
 - evidence: focused INC-034/INC-029/m08c–e/lock contracts 17 passed; publication/migration suites 70 passed; full non-E2E 826 passed, 5 warnings after the unlink-failure and EPERM-message amendments. Codex pass 1 ACCEPT, pass 2 AMEND (swallowed unlink + EPERM wording), pass 3 ACCEPT-AS-AMENDED. Ruff and `git diff --check` clean on touched files.
 - scope_boundary: Gate 2 changed the publication primitive, the matching test hooks, and append-only bookkeeping only. It authorizes no live rehearsal/publication/migration, INC-032/033, DEF-035/036, Gate 3, PR-state change, ready/merge, Fill, repair, drive, or operator-catalog operation. INC-029 remains closed.
+- UPDATE 2026-08-20 — **Gate 2 accepted; production frozen at `2a48f51`.** Operator accept after Codex ×3 (ACCEPT / AMEND / ACCEPT-AS-AMENDED). Frozen production tip: `9a5648e`; bookkeeping tip: `2a48f51` (`2a48f511dad0739f1d1a7d8f2272199ac510e48f`). Further INC-034 production requires a new gate cycle. This does not authorize INC-032+, DEF-035/036, Gate 3, PR ready/merge, or live catalog/Fill/drive work.
 
 ### INC-031 Gate-1 UPDATE: Bound Dismiss expected-red contracts
 - date: 2026-08-17 / status: Gate 1 contracts implemented; pending reviewer acceptance; Gate 2 not authorized / triggered_by: Codex ACCEPT of Gate 0 at `a6e3a9d` plus clear-gate continue / related: INC-031, DEC-058, tests/test_inc031_gate1_contracts.py, tests/test_e2e_portal.py / docs_updated: docs/decision_log.md, tests/test_inc031_gate1_contracts.py, tests/test_e2e_portal.py
@@ -1261,7 +1263,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - scope_boundary: Gate 2 changed Dismiss client discrimination, the bulk Refusal envelope, the c02 barrier, and append-only bookkeeping only. It authorizes no `MA.post` rewrite, catalog.js change, live portal, INC-032/033/034, DEF-035/036, Gate 3, PR-state change, ready/merge, Fill, migration, drive, or operator-catalog operation.
 
 ### DEC-061: A Greptile green check without an answer is a partial review
-- date: 2026-08-19 / status: accepted / triggered_by: operator instruction on PR #55 comment 5338007077 after INC-034 Gate 0 targeted pings (5337864936, 5337886599, 5337907947) returned only a green Greptile Review check / thumbs-up and restated INC-032 / related: DEC-057, INC-034, INC-032 / docs_updated: docs/decision_log.md
+- date: 2026-08-19 / status: accepted; remaining PR #55 Greptile use superseded by DEC-062 / triggered_by: operator instruction on PR #55 comment 5338007077 after INC-034 Gate 0 targeted pings (5337864936, 5337886599, 5337907947) returned only a green Greptile Review check / thumbs-up and restated INC-032 / related: DEC-057, INC-034, INC-032 / docs_updated: docs/decision_log.md
 - decision:
   1. A Greptile run that completes green (or thumbs-up) but does **not** answer the targeted question — no inline on the named files, summary still the prior whole-PR writeup — is a **partial review**, not a disposition.
   2. Do not treat that badge as “looked at and found nothing.” Fall back immediately to **local procedure**: this-seat review plus Codex. Stop spending further Greptile pings on the same unanswered question in that gate (cap still applies; unused slots are unused).
@@ -1269,3 +1271,13 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - rationale: INC-034 Gate 0 asked three times whether `publish_provenance_migration` can `os.replace` over a late dest main. Greptile never commented on `db.py`; it restated the queued INC-032 drain/config-skip items. Waiting on a fourth ping would have been the same non-answer. DEC-057 already forbids inferring gate evidence from a badge; this entry names the Greptile-specific form of that failure.
 - impact: INC-034 Gate 0 disposition stands on local review + Codex ×3 (ACCEPT-AS-AMENDED). Future targeted Greptile pings follow this partial-review rule. No production change.
 - scope_boundary: Process only. Authorizes no production, no Greptile product change, no gate skip of local/Codex review.
+
+### DEC-062: Omit Greptile from remaining PR #55 residual gates
+- date: 2026-08-20 / status: accepted / triggered_by: operator instruction after INC-034 Gate 2 Greptile ping 1 (comment 5357570766, check 96469501271) completed green on `2a48f51` while restating INC-032 / related: DEC-057, DEC-061, INC-032, INC-034 / docs_updated: docs/decision_log.md
+- decision:
+  1. Do not request, wait on, or iterate Greptile for remaining PR #55 residual gates (INC-032, INC-033, DEF-035/036, Gate 3 bookkeeping).
+  2. Gate review for those residuals is **local + Codex**. A Greptile green check is not a disposition.
+  3. DEC-061 remains the rule if Greptile is ever used again on this repository: a green check with no answer to the targeted question is partial, not “looked at and found nothing.”
+- rationale: Targeted pings on this draft PR repeatedly returned the queued whole-PR writeup (`execution_benchmark.py` / `tests/test_pr10_gate1_contracts.py`) instead of answering the named dest-main question. The operator judged the PR too large for Greptile to stay on-target. Local + Codex already closed INC-034 Gate 2.
+- impact: Implementer handbacks and reviewer dispositions no longer include a Greptile loop for this PR. Does not skip local or Codex review. Does not mark ready, merge, or authorize live ops.
+- scope_boundary: Process only for the remainder of PR #55. Authorizes no production, no INC-032 start by itself, no Gate 3, no PR-state change.
