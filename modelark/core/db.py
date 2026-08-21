@@ -1902,7 +1902,7 @@ def publish_provenance_migration(
     dest_dir: str | Path,
     *,
     confirm_stopped: str,
-    writers_stopped: bool = True,
+    writers_stopped: bool,
 ) -> dict:
     """Operator-authorized publication of a rehearsed clone (DEC-059).
 
@@ -1913,7 +1913,7 @@ def publish_provenance_migration(
     remigration of the snapshot, then atomic no-clobber publish.
     """
     dest_dir = Path(dest_dir)
-    if not confirm_stopped or str(confirm_stopped).strip() != "MODELARK-STOPPED":
+    if confirm_stopped != "MODELARK-STOPPED":
         raise RuntimeError(
             "publication refused: confirm_stopped must be the exact token "
             "'MODELARK-STOPPED' (writers must be stopped and authorized)"
@@ -1927,6 +1927,14 @@ def publish_provenance_migration(
         _resolve_rehearsal_layout(Path(work_dir))
     )
     work_dir = run_root
+
+    dest_resolved = dest_dir.expanduser().resolve()
+    source_parent = Path(source_catalog).expanduser().resolve().parent
+    if dest_resolved == source_parent:
+        raise RuntimeError(
+            "publication refused: destination resolves to the rehearsal source "
+            f"directory ({dest_resolved})"
+        )
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_cat = dest_dir / "catalog.sqlite"

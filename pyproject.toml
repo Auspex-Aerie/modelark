@@ -58,6 +58,7 @@ Security = "https://github.com/Auspex-Aerie/modelark/security/policy"
 [project.scripts]
 modelark = "modelark.cli:main"
 modelark-migrate = "scripts.migrate_legacy_runtime:main"
+modelark-provenance-migrate = "scripts.migrate_provenance:main"
 modelark-deploy = "scripts.deploy:main"
 
 [tool.setuptools.packages.find]

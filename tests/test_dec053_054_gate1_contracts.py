@@ -273,7 +273,7 @@ def _publish():
     if not callable(fn):
         raise AssertionError(
             "export modelark.core.db.publish_provenance_migration("
-            "work_dir, dest_dir, *, confirm_stopped, writers_stopped=True)"
+            "work_dir, dest_dir, *, confirm_stopped, writers_stopped)"
         )
     return fn
 

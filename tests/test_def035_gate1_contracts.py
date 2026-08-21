@@ -1,8 +1,7 @@
 """DEF-035 Gate-1 contracts — installed provenance migrate command.
 
-Contracts only. Production is unchanged, so c01/c02/c03/c04/c04b/c06 stay
-red until Gate 2 adds ``modelark-provenance-migrate`` and drops the
-``writers_stopped`` default.
+Gate-1 contracts for DEF-035. Gate 2 greens c01–c04/c04b/c06 by adding
+``modelark-provenance-migrate`` and requiring ``writers_stopped``.
 """
 from __future__ import annotations
 
@@ -107,6 +106,15 @@ def test_c02_argparse_subcommands_and_confirm_token(tmp_path):
                     "--confirm-stopped", "WRONG",
                 ])
             assert wrong.value.code not in (0, None)
+            pub.assert_not_called()
+            with pytest.raises(SystemExit) as padded:
+                main([
+                    "publish",
+                    "--work-dir", str(work),
+                    "--dest-dir", str(dest),
+                    "--confirm-stopped", f" {_TOKEN} ",
+                ])
+            assert padded.value.code not in (0, None)
             pub.assert_not_called()
 
         with pytest.raises(SystemExit) as rehearse_token:
