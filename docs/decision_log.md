@@ -1349,6 +1349,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - date: 2026-08-21 / status: Gate 1 contracts implemented; pending reviewer acceptance; Gate 2 not authorized / triggered_by: operator ACCEPT of Gate 0 at `8a1387a` / related: INC-033, DEC-055, tests/test_inc033_gate1_contracts.py, modelark/archive_hash.py / docs_updated: docs/decision_log.md, tests/test_inc033_gate1_contracts.py
 - contracts: **c01** orig A + annex B must not `content_satisfies(A)` or `expected_sha256` return A. **c02** conflict visible with both digests (helper or raise). **c03** retained-green agree / only-column / only-annex. **c04** malformed orig does not annex-fallback or approve.
 - scope_boundary: Contracts and bookkeeping only. No `archive_hash.py` production, live catalog, INC-035 production, DEF-036, Fill, repair, Gate 3.
+- UPDATE 2026-08-21 — **INC-033 Gate 1 accepted at `8798633`.** Operator proceed. Gate 2 authorized.
+
+### INC-033 Gate-2 UPDATE: Fail-closed digest conflict
+- date: 2026-08-21 / status: Gate 2 production implemented; pending reviewer acceptance / triggered_by: operator ACCEPT of Gate 1 at `8798633` / related: INC-033, DEC-055, modelark/archive_hash.py / docs_updated: docs/decision_log.md, modelark/archive_hash.py, modelark/fetch.py
+- production: `expected_sha256` raises `DigestEvidenceConflict` when two 64-hex original-byte sources disagree; `content_satisfies` returns False. Malformed orig with a resolvable annex raises `DigestEvidenceInvalid` (c04). Malformed orig/catalog alone still returns the legacy string. `compressed` accepts exact bool or int 0/1 only. Fetch/heal halt on `DigestEvidenceError`.
+- evidence: INC-033/034/035 contracts 6 passed; full non-E2E **846 passed**, 5 warnings. Codex pass 1 AMEND (compressed types, applied), pass 2 **ACCEPT**, pass 3 **AMEND** (raise on all malformed orig — **not applied**; would break non-hex test hashes). Live catalog not opened.
+- scope_boundary: Resolver + fetch/heal halt only. No live catalog, DEF-036, Gate 3, ready/merge.
+- UPDATE 2026-08-21 — **Gate 2 accepted; production frozen at `4aa5550`.** Operator accept after Codex ×3 (AMEND applied / ACCEPT / AMEND not applied). Frozen production tip: `4aa5550` (`4aa555004945977b499a336fc6b8d113bdbe7c97`). Further INC-033 production requires a new gate cycle. Does not authorize live catalog, DEF-036, Gate 3, ready/merge, Fill, or drives. Greptile omitted (DEC-062).
 
 ### INC-035 Gate-0 UPDATE: Staging fd-anchored publish inventory
 - date: 2026-08-21 / status: Gate 0 inventory complete; pending reviewer/operator acceptance; Gate 1 not authorized / triggered_by: operator skip of DEF-036 in favor of INC-033/035 / related: INC-035, INC-034, modelark/core/db.py / docs_updated: docs/decision_log.md
@@ -1361,3 +1369,11 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - date: 2026-08-21 / status: Gate 1 contracts implemented; pending reviewer acceptance; Gate 2 not authorized / triggered_by: operator ACCEPT of Gate 0 at `8a1387a` / related: INC-035, INC-034, tests/test_inc035_gate1_contracts.py, modelark/core/db.py / docs_updated: docs/decision_log.md, tests/test_inc035_gate1_contracts.py
 - contracts: **c01** at the publish `os.link` seam, replace the staging pathname with sentinel bytes; dest must not become those bytes; publication must not return `status=ok`. Retain INC-034 c01 / A01–A03 / m08c.
 - scope_boundary: Contracts and bookkeeping only. No `db.py` production, live catalog, INC-033 production, DEF-036, Fill, Gate 3.
+- UPDATE 2026-08-21 — **INC-035 Gate 1 accepted at `8798633`.** Operator proceed. Gate 2 authorized.
+
+### INC-035 Gate-2 UPDATE: Fd-anchored no-clobber publish
+- date: 2026-08-21 / status: Gate 2 production implemented; pending reviewer acceptance / triggered_by: operator ACCEPT of Gate 1 at `8798633` / related: INC-035, INC-034, modelark/core/db.py / docs_updated: docs/decision_log.md, modelark/core/db.py, tests/test_inc035_gate1_contracts.py, tests/test_inc034_gate1_contracts.py, tests/test_inc029_gate1_contracts.py, tests/test_dec053_054_gate1_contracts.py, tests/test_dec053_054_gate2_remediation.py
+- production: Open staging fd before sqlite connect; abort if pathname inode drifts. Publish via `linkat(AT_FDCWD, /proc/self/fd/<fd>, dest_dirfd, name, AT_SYMLINK_FOLLOW)` (not pathname `os.link`; not AT_EMPTY_PATH which needs CAP_DAC_READ_SEARCH). Dest `(st_dev, st_ino)` must match `fstat(fd)`. Staging pathname is **not** unlinked. Leftover staging at start is refused. Pathname `_publish_staging_no_clobber` is a hard error.
+- evidence: focused contracts green; full non-E2E **846 passed**. Codex pass 1 **ACCEPT**, pass 2 **ACCEPT**, pass 3 **ACCEPT-AS-AMENDED**. Live catalog not opened.
+- scope_boundary: Publication primitive only. No live catalog, DEF-036, Gate 3, ready/merge.
+- UPDATE 2026-08-21 — **Gate 2 accepted; production frozen at `4aa5550`.** Operator accept after Codex ×3 (ACCEPT / ACCEPT / ACCEPT-AS-AMENDED). Frozen production tip: `4aa5550` (`4aa555004945977b499a336fc6b8d113bdbe7c97`). Further INC-035 production requires a new gate cycle. Staging leftover cleanup is a later residual. Does not authorize live catalog, DEF-036, Gate 3, ready/merge, Fill, or drives. Greptile omitted (DEC-062).
