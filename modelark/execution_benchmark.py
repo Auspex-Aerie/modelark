@@ -31,16 +31,27 @@ def resolve_acceptance_fixture_path(*, config: Mapping[str, Any] | None = None):
     Returns ``(path_or_None, typed_reason_or_None)``. When the path is absent or
     the configured file is missing, callers must skip measurement and set
     ``skipped_measurement`` rather than synthesizing a fixture.
+
+    ``config is None`` loads ``wishlist.acceptance()``. A supplied mapping,
+    including ``{}``, is used as-is. Load/type failures raise
+    ``Refusal("ACCEPTANCE_CONFIG_UNREADABLE")`` (INC-032).
     """
-    cfg = dict(config or {})
-    if not cfg:
+    if config is None:
+        from modelark import wishlist
         try:
-            from modelark import wishlist
-            loaded = wishlist.load() or {}
-            cfg = dict(loaded.get("acceptance") or {})
-        except Exception:
-            cfg = {}
-    raw = cfg.get("fixture_sqlite_path") or cfg.get("sqlite_path")
+            cfg = dict(wishlist.acceptance())
+        except Exception as exc:
+            raise Refusal(
+                "ACCEPTANCE_CONFIG_UNREADABLE",
+                {"reason": "unreadable", "error": str(exc)[:200]},
+                (),
+            ) from exc
+    else:
+        cfg = dict(config)
+    if "fixture_sqlite_path" in cfg:
+        raw = cfg.get("fixture_sqlite_path")
+    else:
+        raw = cfg.get("sqlite_path")
     if raw is None or str(raw).strip() == "":
         return None, "acceptance_fixture_path_absent"
     path = Path(str(raw)).expanduser()

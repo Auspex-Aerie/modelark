@@ -1,9 +1,9 @@
 """INC-032 Gate-1 contracts — acceptance skip vs fail.
 
-Contracts only. Production is unchanged, so c01/c01b/c02/c03b/c04 stay red until
-Gate 2 routes omitted config through ``wishlist.acceptance()``, treats ``{}`` as
-authoritative empty, and drops generic exceptions from the DEC-052 immutability
-tuple.
+Gate-1 contracts for INC-032. Gate 2 greens c01/c01b/c02/c03b/c04 by routing
+omitted config through ``wishlist.acceptance()``, treating ``{}`` as
+authoritative empty, and dropping generic exceptions from the DEC-052
+immutability tuple.
 """
 from __future__ import annotations
 
@@ -96,6 +96,27 @@ def test_c01b_omitted_config_uses_acceptance_success_not_load():
     assert reason == "acceptance_fixture_path_absent"
 
 
+def test_c01c_acceptance_refusal_is_normalized_to_unreadable():
+    """Any Refusal from acceptance() must become ACCEPTANCE_CONFIG_UNREADABLE."""
+    inner = Refusal("SOMETHING_ELSE", {"reason": "inner"}, ())
+    hits = {"n": 0}
+
+    def boom():
+        hits["n"] += 1
+        raise inner
+
+    error = None
+    with mock.patch.object(wishlist, "acceptance", side_effect=boom):
+        try:
+            bench.resolve_acceptance_fixture_path()
+        except Refusal as exc:
+            error = exc
+    assert hits["n"] >= 1
+    assert error is not None
+    assert error.code == "ACCEPTANCE_CONFIG_UNREADABLE", error
+    assert error.__cause__ is inner
+
+
 def test_c02_wall_clock_does_not_skip_ok_on_load_failure():
     """Omitted acceptance_config must not return ok skipped_measurement on load failure."""
     hits = {"n": 0}
@@ -139,6 +160,22 @@ def test_c03_null_key_skips_without_wishlist():
     assert reason == "acceptance_fixture_path_absent"
     assert result.get("skipped_measurement") is True, result
     assert result.get("skip_reason") == "acceptance_fixture_path_absent", result
+
+
+def test_c03d_null_fixture_key_wins_over_legacy_sqlite_path():
+    """Explicit fixture_sqlite_path=None is absence even if sqlite_path is set."""
+    cfg = {
+        "fixture_sqlite_path": None,
+        "sqlite_path": "/no/such/inc032-legacy.sqlite",
+    }
+    with mock.patch.object(wishlist, "acceptance") as acc_spy, mock.patch.object(
+        wishlist, "load"
+    ) as load_spy:
+        path, reason = bench.resolve_acceptance_fixture_path(config=cfg)
+    assert acc_spy.call_count == 0
+    assert load_spy.call_count == 0
+    assert path is None
+    assert reason == "acceptance_fixture_path_absent"
 
 
 def test_c03b_empty_mapping_is_authoritative_and_does_not_load_wishlist():

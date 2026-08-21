@@ -468,7 +468,7 @@ def test_dec052_measure_refresh_leaves_evidence_bytes_unchanged(tmp_path):
 
     if err is not None:
         from modelark.proposal import Refusal
-        assert isinstance(err, (Refusal, RuntimeError, sqlite3.Error, OSError, ValueError)), (
+        assert isinstance(err, (Refusal,)), (
             f"unexpected measure failure type {type(err).__name__}: {err!r}"
         )
     else:
