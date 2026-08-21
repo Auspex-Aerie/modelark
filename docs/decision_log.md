@@ -1117,7 +1117,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - boundary: A typed skip is valid only for genuine absence. No benchmark production edit is authorized in INC-028 Gate 1.
 
 ### DEF-035: Provide an installed rehearsal/publication command before live provenance cutover
-- date: 2026-08-04 / status: deferred to the pre-cutover delivery gate / triggered_by: PR #55 whole-PR review / related: DEC-059, INC-029, modelark/core/db.py, pyproject.toml / docs_updated: docs/decision_log.md
+- date: 2026-08-04 / status: installed command implemented at `89744d5`; live cutover still deferred until backup-first authorization / triggered_by: PR #55 whole-PR review / related: DEC-059, INC-029, modelark/core/db.py, pyproject.toml / docs_updated: docs/decision_log.md
 - decision: The absence of a command surface is recorded, not designed here. `db.connect()` refuses pre-v7 catalogs and names the Python rehearsal/publication functions, while the installed `modelark-migrate` command still targets the legacy-runtime migration. A reviewed installed command and runbook ownership are required before live cutover; no CLI shape or DEC-061 is invented by this deferral.
 - revisit_when: before any operator rehearsal or publication of an existing pre-v7 catalog, and before declaring the series operationally complete.
 - UPDATE 2026-08-21 — Operator: the live operator catalog file is **off-limits** until an explicit backup-first authorization. Lost-drive / mid-plan recovery and provenance-migration tests run on disposable copies, fixtures, and simulated-failure trees only. Do not open, copy, or publish against the live catalog.
@@ -1329,6 +1329,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - evidence: DEF-035 contracts 7 passed; publication/migration related 77 passed; full non-E2E **841 passed**, 5 warnings. Codex pass 1 AMEND (CLI exact token), pass 2 AMEND (API exact token), pass 3 AMEND on staging-pathname TOCTOU **held out of this gate** as INC-035 (pre-existing, not a DEF-035 regression). Ruff and `git diff --check` clean. No live catalog file was opened.
 - scope_boundary: Gate 2 changed the installed wrapper, publication dest-identity and token exactness, and `writers_stopped` requiredness only. It authorizes no live catalog, Fill, drives, DEF-036, INC-033/035 production, Gate 3, ready/merge, or operator-catalog backup/cutover.
 - UPDATE 2026-08-21 — Codex re-review ×3 at `5feb596`: pass 1 **ACCEPT**, pass 2 **AMEND** (`Path.samefile` in addition to `resolve()` for existing dest; fail closed on `OSError`), pass 3 **ACCEPT-AS-AMENDED**. INC-035 not re-raised. Live catalog still off-limits.
+- UPDATE 2026-08-21 — **Gate 2 accepted; production frozen at `89744d5`.** Operator accept after Codex re-review ACCEPT-AS-AMENDED. Frozen production tip: `89744d5` (`89744d5f367de3cbdc3bb4d647847f7c71b097e5`). Further DEF-035 production requires a new gate cycle. Does not authorize live catalog, DEF-036, INC-033/035, Gate 3, ready/merge, Fill, or drives. Greptile omitted (DEC-062).
 
 ### INC-035: Validated staging pathname can be swapped before no-clobber publish
 - date: 2026-08-21 / status: active — recorded for a later publication-hardening gate / triggered_by: DEF-035 Gate 2 Codex pass 3 / related: INC-034, DEC-059, modelark/core/db.py / docs_updated: docs/decision_log.md
