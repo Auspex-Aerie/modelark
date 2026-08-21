@@ -407,12 +407,20 @@ def test_publish_holds_source_lock_through_replace_blocks_writer(tmp_path):
             writer_saw_busy["yes"] = True
         return out
 
+    real_fd = db._link_fd_no_clobber
+
+    def slow_fd(fd, dest_cat):
+        staging = Path(dest_cat).parent / ".catalog.sqlite.publish-staging"
+        return slow_publish(str(staging), str(dest_cat), lambda _s, _d: real_fd(fd, dest_cat))
+
     with mock.patch.object(
         os, "replace",
         side_effect=lambda src, dst: slow_publish(src, dst, real_replace),
     ), mock.patch.object(
         os, "link",
         side_effect=lambda src, dst: slow_publish(src, dst, real_link),
+    ), mock.patch.object(
+        db, "_link_fd_no_clobber", side_effect=slow_fd,
     ):
         pub = db.publish_provenance_migration(
             work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
@@ -928,12 +936,20 @@ def test_publish_staging_exclusive_lock_blocks_adversary_through_replace(tmp_pat
             adversary["blocked"] = True
         return real(src_p, dst_p)
 
+    real_fd = db._link_fd_no_clobber
+
+    def fd_hook(fd, dest_cat):
+        staging = Path(dest_cat).parent / ".catalog.sqlite.publish-staging"
+        return publish_hook(str(staging), str(dest_cat), lambda _s, _d: real_fd(fd, dest_cat))
+
     with mock.patch.object(
         os, "replace",
         side_effect=lambda src, dst: publish_hook(src, dst, real_replace),
     ), mock.patch.object(
         os, "link",
         side_effect=lambda src, dst: publish_hook(src, dst, real_link),
+    ), mock.patch.object(
+        db, "_link_fd_no_clobber", side_effect=fd_hook,
     ):
         pub = db.publish_provenance_migration(
             work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)

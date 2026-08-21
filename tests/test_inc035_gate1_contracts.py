@@ -24,22 +24,38 @@ def test_c01_staging_pathname_swap_at_link_must_not_publish_sentinel(tmp_path):
     staging = dest / ".catalog.sqlite.publish-staging"
     injected = {"yes": False, "after_link": None}
     real_link = os.link
+    real_fd = db._link_fd_no_clobber
 
-    def link_hook(src, dst, *args, **kwargs):
-        dst_p = Path(dst)
-        if dst_p.resolve() == dest_catalog.resolve() and staging.exists():
+    def _swap_staging():
+        if staging.exists():
             rival = tmp_path / "inc035-rival"
             rival.write_bytes(_SENTINEL)
             os.replace(str(rival), str(staging))
             injected["yes"] = True
-        out = real_link(src, dst, *args, **kwargs)
-        if dst_p.resolve() == dest_catalog.resolve() and dest_catalog.is_file():
+
+    def _capture(dst):
+        if Path(dst).resolve() == dest_catalog.resolve() and dest_catalog.is_file():
             injected["after_link"] = dest_catalog.read_bytes()
+
+    def link_hook(src, dst, *args, **kwargs):
+        if Path(dst).resolve() == dest_catalog.resolve():
+            _swap_staging()
+        out = real_link(src, dst, *args, **kwargs)
+        _capture(dst)
+        return out
+
+    def fd_hook(fd, dest_cat, *args, **kwargs):
+        if Path(dest_cat).resolve() == dest_catalog.resolve():
+            _swap_staging()
+        out = real_fd(fd, dest_cat)
+        _capture(dest_cat)
         return out
 
     error = None
     published = None
-    with mock.patch.object(db.os, "link", side_effect=link_hook):
+    with mock.patch.object(db.os, "link", side_effect=link_hook), mock.patch.object(
+        db, "_link_fd_no_clobber", side_effect=fd_hook
+    ):
         try:
             published = db.publish_provenance_migration(
                 work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True

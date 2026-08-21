@@ -9,6 +9,8 @@ support `con.execute(sql, params).fetchone()/.fetchall()`, `?` placeholders, and
 """
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import errno
 import hashlib
 import json
@@ -16,6 +18,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -1200,17 +1203,47 @@ _NOCLOBBER_UNSUPPORTED = frozenset(
 )
 
 
-def _publish_staging_no_clobber(staging: Path, dest_cat: Path) -> None:
-    """Name dest_cat as staging's inode without replacing an existing dest (INC-034).
+_AT_FDCWD = -100
+_AT_SYMLINK_FOLLOW = 0x400
 
-    Hard-link, then drop the staging pathname. ``os.link`` fails with EEXIST when
-    dest_cat already exists, so a late rival main is preserved. Same filesystem
-    is already required. Never falls back to ``os.replace``.
+
+def _file_id(st) -> tuple[int, int]:
+    return (int(st.st_dev), int(st.st_ino))
+
+
+def _link_fd_no_clobber(src_fd: int, dest_cat: Path) -> None:
+    """Hard-link dest_cat to the inode of ``src_fd`` without clobber (INC-034/035).
+
+    Uses ``linkat(..., AT_SYMLINK_FOLLOW)`` on ``/proc/self/fd/<fd>`` so the
+    link is the fd's inode, not a later staging pathname. Never falls back to
+    pathname ``os.link`` / ``os.replace``. Does not unlink the staging name.
     """
+    dest_cat = Path(dest_cat)
+    libc_name = ctypes.util.find_library("c")
+    if not libc_name:
+        raise RuntimeError(
+            "publication refused: atomic no-clobber publish unsupported "
+            "(libc not found); refuse rather than clobber"
+        )
+    libc = ctypes.CDLL(libc_name, use_errno=True)
+    libc.linkat.argtypes = [
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_int,
+    ]
+    libc.linkat.restype = ctypes.c_int
+    proc = f"/proc/self/fd/{int(src_fd)}".encode("ascii")
+    dir_fd = os.open(
+        str(dest_cat.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC,
+    )
     try:
-        os.link(str(staging), str(dest_cat))
-    except OSError as exc:
-        err = getattr(exc, "errno", None)
+        ctypes.set_errno(0)
+        rc = libc.linkat(
+            _AT_FDCWD, proc, dir_fd, dest_cat.name.encode("utf-8"),
+            _AT_SYMLINK_FOLLOW,
+        )
+        if rc == 0:
+            return
+        err = ctypes.get_errno()
+        exc = OSError(err, os.strerror(err))
         if err == errno.EEXIST:
             raise RuntimeError(
                 f"publication refused: destination already exists ({dest_cat}); "
@@ -1231,13 +1264,15 @@ def _publish_staging_no_clobber(staging: Path, dest_cat: Path) -> None:
             f"holding exclusive SQLite lock ({exc}); refuse rather than "
             "release the staging lock before publication"
         ) from exc
-    try:
-        os.unlink(str(staging))
-    except OSError as exc:
-        raise RuntimeError(
-            "publication refused: destination linked but staging pathname "
-            f"could not be released ({exc})"
-        ) from exc
+    finally:
+        os.close(dir_fd)
+
+
+def _publish_staging_no_clobber(staging: Path, dest_cat: Path) -> None:
+    """Legacy pathname helper; INC-035 publish uses ``_link_fd_no_clobber``."""
+    raise RuntimeError(
+        "publication refused: pathname os.link publish is not used (INC-035)"
+    )
 
 
 def _sqlite_bundle_members(catalog: Path) -> dict[str, Path]:
@@ -1987,6 +2022,7 @@ def publish_provenance_migration(
     clone_lock: sqlite3.Connection | None = None
     stage_con: sqlite3.Connection | None = None
     staging: Path | None = None
+    staging_fd: int | None = None
     try:
         try:
             source_lock.execute("BEGIN IMMEDIATE")
@@ -2067,9 +2103,20 @@ def publish_provenance_migration(
         # validation and final no-clobber publish — never close and reopen the pathname.
         staging = dest_dir / ".catalog.sqlite.publish-staging"
         if staging.exists():
-            staging.unlink()
+            raise RuntimeError(
+                "publication refused: leftover staging pathname present "
+                f"({staging}); will not unlink by path (INC-035)"
+            )
         # Refuse leftover staging sidecars from a prior attempt.
         _refuse_destination_sidecars(staging, when="on publish-staging path")
+        open_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            open_flags |= os.O_NOFOLLOW
+        staging_fd = os.open(str(staging), open_flags, 0o600)
+        if not stat.S_ISREG(os.fstat(staging_fd).st_mode):
+            raise RuntimeError(
+                "publication refused: staging path is not a regular file"
+            )
         stage_con = sqlite3.connect(str(staging), isolation_level=None)
         try:
             clone_lock.backup(stage_con)
@@ -2084,6 +2131,13 @@ def publish_provenance_migration(
                 pass
             stage_con = None
             raise
+        if staging_fd is None:
+            raise RuntimeError("publication refused: staging fd missing")
+        if _file_id(os.fstat(staging_fd)) != _file_id(os.stat(staging)):
+            raise RuntimeError(
+                "publication refused: staging pathname no longer matches the "
+                "fd opened before SQLite connect"
+            )
         if os.stat(staging).st_dev != os.stat(dest_dir).st_dev:
             raise RuntimeError(
                 "publication refused: staging and destination are on different "
@@ -2140,21 +2194,25 @@ def publish_provenance_migration(
         _refuse_destination_sidecars(dest_cat, when="immediately before replace")
 
         # Final atomic no-clobber publish while source, clone, and staging
-        # locks are held. os.link names dest_cat as the staging inode and
-        # fails with EEXIST if a late rival main is already there (INC-034).
-        # The open exclusive connection continues to reference that inode.
-        # Record the staging inode *before* publish so a post-hook rival
-        # os.replace onto dest_cat cannot be mistaken for our published file.
-        staging_ino = staging.stat().st_ino
-        _publish_staging_no_clobber(staging, dest_cat)
-        staging = None  # successfully published (inode now at dest_cat)
+        # locks are held. linkat follows /proc/self/fd so dest names the
+        # fd's inode (INC-035), not a later staging pathname. EEXIST
+        # preserves a late dest main (INC-034). Do not unlink the staging name.
+        if staging_fd is None:
+            raise RuntimeError("publication refused: staging fd missing")
+        if _file_id(os.fstat(staging_fd)) != _file_id(os.stat(staging)):
+            raise RuntimeError(
+                "publication refused: staging pathname no longer matches the "
+                "validated fd before publish"
+            )
+        staging_id = _file_id(os.fstat(staging_fd))
+        _link_fd_no_clobber(staging_fd, dest_cat)
 
         # Post-publish pathname hygiene under retained locks (INC-029 A03):
         # foreign sidecars or a rival replace of the destination path cannot
         # be reported as success. Identity is re-checked on the retained
         # staging connection (same inode); path/inode drift is refused.
         _refuse_destination_sidecars(dest_cat, when="after replace")
-        if not dest_cat.is_file() or dest_cat.stat().st_ino != staging_ino:
+        if not dest_cat.is_file() or _file_id(dest_cat.stat()) != staging_id:
             raise RuntimeError(
                 "publication refused: published destination path no longer "
                 "references the validated staging inode"
@@ -2172,7 +2230,7 @@ def publish_provenance_migration(
             )
         # Re-check path/inode and sidecars once more immediately before success
         # so a late pathname attack during the identity re-read cannot pass.
-        if not dest_cat.is_file() or dest_cat.stat().st_ino != staging_ino:
+        if not dest_cat.is_file() or _file_id(dest_cat.stat()) != staging_id:
             raise RuntimeError(
                 "publication refused: published destination path was replaced "
                 "after validation"
@@ -2188,13 +2246,6 @@ def publish_provenance_migration(
             "manifest_path": str(manifest_path),
             "snapshot_sha256": live_snap_sha,
         }
-    except Exception:
-        if staging is not None and staging.exists():
-            try:
-                staging.unlink()
-            except OSError:
-                pass
-        raise
     finally:
         if stage_con is not None:
             try:
@@ -2204,6 +2255,11 @@ def publish_provenance_migration(
             try:
                 stage_con.close()
             except sqlite3.Error:
+                pass
+        if staging_fd is not None:
+            try:
+                os.close(staging_fd)
+            except OSError:
                 pass
         if clone_lock is not None:
             try:

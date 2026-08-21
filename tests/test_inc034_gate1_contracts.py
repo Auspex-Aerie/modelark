@@ -29,6 +29,7 @@ def test_c01_late_rival_main_at_publish_syscall_is_refused_and_preserved(tmp_pat
     injected = {"yes": False}
     real_replace = os.replace
     real_link = os.link
+    real_fd = db._link_fd_no_clobber
 
     def _maybe_inject(dst):
         if Path(dst) == dest_catalog:
@@ -43,11 +44,15 @@ def test_c01_late_rival_main_at_publish_syscall_is_refused_and_preserved(tmp_pat
         _maybe_inject(dst)
         return real_link(src, dst, *args, **kwargs)
 
+    def fd_hook(fd, dest_cat, *args, **kwargs):
+        _maybe_inject(dest_cat)
+        return real_fd(fd, dest_cat)
+
     error = None
     published = None
     with mock.patch.object(db.os, "replace", side_effect=replace_hook), mock.patch.object(
         db.os, "link", side_effect=link_hook
-    ):
+    ), mock.patch.object(db, "_link_fd_no_clobber", side_effect=fd_hook):
         try:
             published = db.publish_provenance_migration(
                 work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True

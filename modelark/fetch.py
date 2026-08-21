@@ -825,12 +825,26 @@ def fetch_model(
                 compressed=compressed,
                 annex_key=annex_key):
             continue
-        resolved = archive_hash.expected_sha256(
-            catalog_sha=None,
-            orig_sha256=orig_sha256,
-            compressed=compressed,
-            annex_key=annex_key,
-        )
+        try:
+            resolved = archive_hash.expected_sha256(
+                catalog_sha=None,
+                orig_sha256=orig_sha256,
+                compressed=compressed,
+                annex_key=annex_key,
+            )
+        except archive_hash.DigestEvidenceError as exc:
+            raise FetchRequirementRefusal(
+                "APPROVED_TARGET_DIGEST_MISMATCH",
+                f"archived content for {repo_id}/{item.rfilename} has conflicting digest evidence",
+                evidence={
+                    "repo_id": repo_id,
+                    "rfilename": item.rfilename,
+                    "drive_label": drive_label,
+                    "approved_sha256": item.sha256,
+                    "conflict": str(exc),
+                },
+                actions=("inspect_target", "disposition_required"),
+            ) from exc
         evidence = {
             "repo_id": repo_id,
             "rfilename": item.rfilename,
@@ -1455,12 +1469,21 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                                 })
                                 task_failed = True
                                 continue
-                            source_digest = archive_hash.expected_sha256(
-                                catalog_sha=None,
-                                orig_sha256=source_row[2],
-                                compressed=bool(source_row[6]),
-                                annex_key=source_row[7],
-                            )
+                            try:
+                                source_digest = archive_hash.expected_sha256(
+                                    catalog_sha=None,
+                                    orig_sha256=source_row[2],
+                                    compressed=bool(source_row[6]),
+                                    annex_key=source_row[7],
+                                )
+                            except archive_hash.DigestEvidenceError:
+                                result["failed"].append({
+                                    "code": "SOURCE_DIGEST_CONFLICT",
+                                    "requirement_id": task.requirement_id,
+                                    "repo": task.repo_id, "file": rfilename, "source": source,
+                                })
+                                task_failed = True
+                                continue
                             if source_digest is None:
                                 result["failed"].append({
                                     "code": "SOURCE_DIGEST_UNPROVABLE",
@@ -1746,18 +1769,26 @@ def _classify_replica_heal(
     target_provenance: str | None,
 ) -> _ReplicaHealDecision:
     """Classify replica evidence without I/O, using the canonical digest resolver."""
-    source_resolved = archive_hash.expected_sha256(
-        catalog_sha=None,
-        orig_sha256=source_orig_sha256,
-        compressed=source_compressed,
-        annex_key=source_annex_key,
-    )
-    target_resolved = archive_hash.expected_sha256(
-        catalog_sha=None,
-        orig_sha256=target_orig_sha256,
-        compressed=target_compressed,
-        annex_key=target_annex_key,
-    )
+    try:
+        source_resolved = archive_hash.expected_sha256(
+            catalog_sha=None,
+            orig_sha256=source_orig_sha256,
+            compressed=source_compressed,
+            annex_key=source_annex_key,
+        )
+        target_resolved = archive_hash.expected_sha256(
+            catalog_sha=None,
+            orig_sha256=target_orig_sha256,
+            compressed=target_compressed,
+            annex_key=target_annex_key,
+        )
+    except archive_hash.DigestEvidenceError:
+        return _ReplicaHealDecision(
+            action="halt_contradiction",
+            fill_kind=None,
+            source_resolved_sha256=None,
+            target_resolved_sha256=None,
+        )
     if source_resolved is None:
         action = "noop"
         fill_kind = None

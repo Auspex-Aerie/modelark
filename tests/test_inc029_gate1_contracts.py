@@ -117,7 +117,8 @@ def test_a01_publish_refuses_preexisting_destination_sidecar_before_staging(
 
     error = None
     with mock.patch.object(db.os, "replace", wraps=real_replace) as replace_spy, \
-            mock.patch.object(db.os, "link", wraps=real_link) as link_spy:
+            mock.patch.object(db.os, "link", wraps=real_link) as link_spy, \
+            mock.patch.object(db, "_link_fd_no_clobber", wraps=db._link_fd_no_clobber) as fd_spy:
         try:
             db.publish_provenance_migration(
                 work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True
@@ -128,6 +129,7 @@ def test_a01_publish_refuses_preexisting_destination_sidecar_before_staging(
     assert error is not None, f"sidecar-only destination {suffix} must be refused"
     assert replace_spy.call_count == 0, "refusal must happen before atomic publication"
     assert link_spy.call_count == 0, "refusal must happen before atomic publication"
+    assert fd_spy.call_count == 0, "refusal must happen before atomic publication"
     assert sentinel.read_bytes() == sentinel_bytes
     assert not dest_catalog.exists()
     assert not (dest / ".catalog.sqlite.publish-staging").exists()
@@ -162,7 +164,8 @@ def test_a02_publish_rechecks_destination_sidecars_immediately_before_replace(tm
     with mock.patch.object(
         db, "_remigrate_snapshot_to_expected", side_effect=inject_after_initial_guard
     ), mock.patch.object(db.os, "replace", wraps=real_replace) as replace_spy, \
-            mock.patch.object(db.os, "link", wraps=real_link) as link_spy:
+            mock.patch.object(db.os, "link", wraps=real_link) as link_spy, \
+            mock.patch.object(db, "_link_fd_no_clobber", wraps=db._link_fd_no_clobber) as fd_spy:
         try:
             db.publish_provenance_migration(
                 work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True
@@ -174,6 +177,7 @@ def test_a02_publish_rechecks_destination_sidecars_immediately_before_replace(tm
     assert error is not None, "late destination sidecar must be refused"
     assert replace_spy.call_count == 0, "late guard must run immediately before replace"
     assert link_spy.call_count == 0, "late guard must run immediately before publish"
+    assert fd_spy.call_count == 0, "late guard must run immediately before publish"
     assert sentinel.read_bytes() == sentinel_bytes
     assert not dest_catalog.exists()
     assert {path: path.read_bytes() for path in evidence_paths} == evidence_before
@@ -191,6 +195,7 @@ def test_a03_publish_revalidates_exact_destination_path_before_releasing_staging
     dest_catalog = dest / "catalog.sqlite"
     real_replace = os.replace
     real_link = os.link
+    real_fd = db._link_fd_no_clobber
     attacked = {"yes": False}
 
     def publish_then_attack(src, dst, real):
@@ -217,6 +222,9 @@ def test_a03_publish_revalidates_exact_destination_path_before_releasing_staging
     ), mock.patch.object(
         db.os, "link",
         side_effect=lambda src, dst: publish_then_attack(src, dst, real_link),
+    ), mock.patch.object(
+        db, "_link_fd_no_clobber",
+        side_effect=lambda fd, dest_cat: publish_then_attack(fd, dest_cat, real_fd),
     ):
         try:
             db.publish_provenance_migration(
@@ -313,6 +321,7 @@ def test_b03_publication_preserves_verified_exact_prelock_rollback_bundle(
     dest_catalog = dest / "catalog.sqlite"
     real_replace = os.replace
     real_link = os.link
+    real_fd = db._link_fd_no_clobber
     attacked = {"yes": False}
 
     def publish_then_inject_late_refusal(src, dst, real):
@@ -333,6 +342,11 @@ def test_b03_publication_preserves_verified_exact_prelock_rollback_bundle(
         db.os, "link",
         side_effect=lambda src, dst: publish_then_inject_late_refusal(
             src, dst, real_link
+        ),
+    ), mock.patch.object(
+        db, "_link_fd_no_clobber",
+        side_effect=lambda fd, dest_cat: publish_then_inject_late_refusal(
+            fd, dest_cat, real_fd
         ),
     ):
         try:

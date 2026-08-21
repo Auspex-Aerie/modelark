@@ -1048,8 +1048,15 @@ def test_m08d_success_rollback_artifact_same_fs_atomic(tmp_path):
         publish_dsts.append(Path(dst_p))
         return real_link(src_p, dst_p)
 
+    real_fd = db._link_fd_no_clobber
+
+    def spy_fd(fd, dest_cat):
+        publish_dsts.append(Path(dest_cat))
+        return real_fd(fd, dest_cat)
+
     with mock.patch.object(db.os, "replace", side_effect=spy_replace), \
-            mock.patch.object(db.os, "link", side_effect=spy_link):
+            mock.patch.object(db.os, "link", side_effect=spy_link), \
+            mock.patch.object(db, "_link_fd_no_clobber", side_effect=spy_fd):
         pub = _publish()(
             work, dest, confirm_stopped="MODELARK-STOPPED", writers_stopped=True)
     assert _fingerprint(src) == src_fp
@@ -1098,6 +1105,7 @@ def test_m08e_atomic_replace_failure_no_partial_dest(tmp_path):
         _rehearse()(data, work, run_id="p4"), source_identity=ident)
     real_replace = os.replace
     real_link = os.link
+    real_fd = db._link_fd_no_clobber
     final_publish_fired = {"yes": False}
 
     def boom(src_p, dst_p, real):
@@ -1109,12 +1117,22 @@ def test_m08e_atomic_replace_failure_no_partial_dest(tmp_path):
             raise OSError("injected atomic publish failure")
         return real(src_p, dst_p)
 
+    def boom_fd(fd, dest_cat):
+        dst = Path(dest_cat)
+        if dst == dest or dst == publication_target or (
+                dest in dst.parents and dst.name == "catalog.sqlite"):
+            final_publish_fired["yes"] = True
+            raise OSError("injected atomic publish failure")
+        return real_fd(fd, dest_cat)
+
     with mock.patch.object(
         db.os, "replace",
         side_effect=lambda src, dst: boom(src, dst, real_replace),
     ), mock.patch.object(
         db.os, "link",
         side_effect=lambda src, dst: boom(src, dst, real_link),
+    ), mock.patch.object(
+        db, "_link_fd_no_clobber", side_effect=boom_fd,
     ):
         with pytest.raises(Exception) as ei:
             _publish()(
