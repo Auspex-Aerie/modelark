@@ -1928,13 +1928,27 @@ def publish_provenance_migration(
     )
     work_dir = run_root
 
-    dest_resolved = dest_dir.expanduser().resolve()
+    dest_path = dest_dir.expanduser()
+    dest_resolved = dest_path.resolve()
     source_parent = Path(source_catalog).expanduser().resolve().parent
     if dest_resolved == source_parent:
         raise RuntimeError(
             "publication refused: destination resolves to the rehearsal source "
             f"directory ({dest_resolved})"
         )
+    if dest_path.exists() and source_parent.exists():
+        try:
+            same_inode = dest_path.samefile(source_parent)
+        except OSError as exc:
+            raise RuntimeError(
+                "publication refused: cannot compare destination to rehearsal "
+                f"source ({exc})"
+            ) from exc
+        if same_inode:
+            raise RuntimeError(
+                "publication refused: destination resolves to the rehearsal source "
+                f"directory ({dest_resolved})"
+            )
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_cat = dest_dir / "catalog.sqlite"
