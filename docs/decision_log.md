@@ -1126,6 +1126,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - date: 2026-08-04 / status: deferred to the pre-cutover delivery gate / triggered_by: PR #55 whole-PR review / related: RFC-002, DEC-049, DEF-035, modelark/proposal.py, modelark/web/plan_api.py, modelark/web/fill_api.py / docs_updated: docs/decision_log.md
 - decision: `proposal.approve()` exists and is tested, but the installed portal/CLI exposes preview and start without an operator-facing approval action. RFC-002 requires one explicit `adopt_current` preview/approval after migration. The surface and UX remain a product decision; this entry prevents the requirement from disappearing without allocating DEC-061 prematurely.
 - revisit_when: before the attended post-migration preview/approval and before any Fill can resume on the migrated catalog.
+- UPDATE 2026-08-21 — Operator skipped DEF-036 for now and authorized INC-033 / INC-035 next. RFC-002 `adopt_current` after migration remains required before Fill resume; the installed approve surface is not this cycle.
 
 ### INC-028 Gate-1 reviewer amendment: refusal granularity, non-mutation, and heal serialization
 - date: 2026-08-04 / status: accepted contract correction before Gate 2 / triggered_by: independent review of INC-028 Gate 1 at `2695f5f` / related: INC-028, DEC-054, DEC-060, modelark/fetch.py, modelark/fill.py, tests/test_inc028_gate1_contracts.py / docs_updated: docs/decision_log.md, tests/test_inc028_gate1_contracts.py
@@ -1335,3 +1336,16 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - date: 2026-08-21 / status: active — recorded for a later publication-hardening gate / triggered_by: DEF-035 Gate 2 Codex pass 3 / related: INC-034, DEC-059, modelark/core/db.py / docs_updated: docs/decision_log.md
 - symptom: `publish_provenance_migration` records `staging_ino` from the staging pathname after validation; a rival can replace that pathname before `_publish_staging_no_clobber`. Post-publish checks use `stage_con` (original inode) plus dest `st_ino`, so an unvalidated artifact could be published while metrics still describe the retained connection.
 - boundary: Pre-existing relative to DEF-035. Do not fold fd/`fstat` anchoring into the DEF-035 wrapper gate. No live catalog, Fill, or drive work.
+
+### INC-033 Gate-0 UPDATE: Column vs annex-key disagreement inventory
+- date: 2026-08-21 / status: Gate 0 inventory complete; pending reviewer/operator acceptance; Gate 1 not authorized / triggered_by: operator skip of DEF-036 in favor of INC-033/035 / related: INC-033, DEC-055, modelark/archive_hash.py / docs_updated: docs/decision_log.md
+- reproduced: synthetic `orig_sha256=A`, uncompressed annex B → `expected_sha256` returns A; `content_satisfies(approved=A)` is True. Live catalog not queried.
+- chosen_gate2_shape: Fail closed **in the resolver**. `expected_sha256` must not return a winner on conflict (typed error / conflict object). Pairwise valid 64-hex `catalog_sha`, `orig_sha256`, and uncompressed annex extract. Malformed present `orig_sha256` or indeterminate `compressed` is error, not annex fallback. Happy-path precedence unchanged when sources agree or only one exists. `content_satisfies` False because the resolver refuses. Fleet count later on a **copy** only.
+- proposed_gate1: `tests/test_inc033_gate1_contracts.py` c01–c04 as in `~/PycharmProjects/modelark-inc033-gate0-handback.md`.
+- scope_boundary: Bookkeeping only. No live catalog, no `archive_hash.py` production, no DEF-036, no INC-035 production. Codex ×3: ACCEPT / REJECT (applied) / ACCEPT.
+
+### INC-035 Gate-0 UPDATE: Staging fd-anchored publish inventory
+- date: 2026-08-21 / status: Gate 0 inventory complete; pending reviewer/operator acceptance; Gate 1 not authorized / triggered_by: operator skip of DEF-036 in favor of INC-033/035 / related: INC-035, INC-034, modelark/core/db.py / docs_updated: docs/decision_log.md
+- chosen_gate2_shape: Open staging fd **before** sqlite connect; abort if `fstat(fd)` != `stat(path)` after exclusive lock. Validate on `stage_con`. Publish with `linkat(AT_EMPTY_PATH)` (measured: `os.link("/proc/self/fd/N", dest)` is EXDEV). Dest `(st_dev, st_ino)` must equal `fstat(fd)`. Keep fd through dest verification. **Never unlink** the staging pathname in this gate. No pathname `os.link` fallback.
+- proposed_gate1: `tests/test_inc035_gate1_contracts.py` inject at fd-link; dest must not receive sentinel bytes. Retain INC-034 c01 / A01–A03 / m08c.
+- scope_boundary: Bookkeeping only. No live catalog, no `db.py` production, no DEF-036. Codex ×3: AMEND / REJECT (applied) / ACCEPT.
