@@ -1343,9 +1343,21 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - chosen_gate2_shape: Fail closed **in the resolver**. `expected_sha256` must not return a winner on conflict (typed error / conflict object). Pairwise valid 64-hex `catalog_sha`, `orig_sha256`, and uncompressed annex extract. Malformed present `orig_sha256` or indeterminate `compressed` is error, not annex fallback. Happy-path precedence unchanged when sources agree or only one exists. `content_satisfies` False because the resolver refuses. Fleet count later on a **copy** only.
 - proposed_gate1: `tests/test_inc033_gate1_contracts.py` c01–c04 as in `~/PycharmProjects/modelark-inc033-gate0-handback.md`.
 - scope_boundary: Bookkeeping only. No live catalog, no `archive_hash.py` production, no DEF-036, no INC-035 production. Codex ×3: ACCEPT / REJECT (applied) / ACCEPT.
+- UPDATE 2026-08-21 — **INC-033 Gate 0 accepted at `8a1387a`.** Operator proceed. Gate 1 authorized. Live catalog still off-limits.
+
+### INC-033 Gate-1 UPDATE: Evidence-conflict expected-red contracts
+- date: 2026-08-21 / status: Gate 1 contracts implemented; pending reviewer acceptance; Gate 2 not authorized / triggered_by: operator ACCEPT of Gate 0 at `8a1387a` / related: INC-033, DEC-055, tests/test_inc033_gate1_contracts.py, modelark/archive_hash.py / docs_updated: docs/decision_log.md, tests/test_inc033_gate1_contracts.py
+- contracts: **c01** orig A + annex B must not `content_satisfies(A)` or `expected_sha256` return A. **c02** conflict visible with both digests (helper or raise). **c03** retained-green agree / only-column / only-annex. **c04** malformed orig does not annex-fallback or approve.
+- scope_boundary: Contracts and bookkeeping only. No `archive_hash.py` production, live catalog, INC-035 production, DEF-036, Fill, repair, Gate 3.
 
 ### INC-035 Gate-0 UPDATE: Staging fd-anchored publish inventory
 - date: 2026-08-21 / status: Gate 0 inventory complete; pending reviewer/operator acceptance; Gate 1 not authorized / triggered_by: operator skip of DEF-036 in favor of INC-033/035 / related: INC-035, INC-034, modelark/core/db.py / docs_updated: docs/decision_log.md
 - chosen_gate2_shape: Open staging fd **before** sqlite connect; abort if `fstat(fd)` != `stat(path)` after exclusive lock. Validate on `stage_con`. Publish with `linkat(AT_EMPTY_PATH)` (measured: `os.link("/proc/self/fd/N", dest)` is EXDEV). Dest `(st_dev, st_ino)` must equal `fstat(fd)`. Keep fd through dest verification. **Never unlink** the staging pathname in this gate. No pathname `os.link` fallback.
 - proposed_gate1: `tests/test_inc035_gate1_contracts.py` inject at fd-link; dest must not receive sentinel bytes. Retain INC-034 c01 / A01–A03 / m08c.
 - scope_boundary: Bookkeeping only. No live catalog, no `db.py` production, no DEF-036. Codex ×3: AMEND / REJECT (applied) / ACCEPT.
+- UPDATE 2026-08-21 — **INC-035 Gate 0 accepted at `8a1387a`.** Operator proceed. Gate 1 authorized. Live catalog still off-limits.
+
+### INC-035 Gate-1 UPDATE: Staging pathname-swap expected-red contract
+- date: 2026-08-21 / status: Gate 1 contracts implemented; pending reviewer acceptance; Gate 2 not authorized / triggered_by: operator ACCEPT of Gate 0 at `8a1387a` / related: INC-035, INC-034, tests/test_inc035_gate1_contracts.py, modelark/core/db.py / docs_updated: docs/decision_log.md, tests/test_inc035_gate1_contracts.py
+- contracts: **c01** at the publish `os.link` seam, replace the staging pathname with sentinel bytes; dest must not become those bytes; publication must not return `status=ok`. Retain INC-034 c01 / A01–A03 / m08c.
+- scope_boundary: Contracts and bookkeeping only. No `db.py` production, live catalog, INC-033 production, DEF-036, Fill, Gate 3.
