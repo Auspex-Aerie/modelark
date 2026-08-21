@@ -1112,7 +1112,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - boundary: Server rollback remains correct. No UI production edit is authorized in INC-028 Gate 1.
 
 ### INC-032: Acceptance fixture resolution masks configuration-load failures as measurement skips
-- date: 2026-08-04 / status: active — recorded for later fix or explicit deferral / triggered_by: independent whole-PR review of PR #55 at `c21bd78` / related: DEC-052, INC-026, modelark/execution_benchmark.py / docs_updated: docs/decision_log.md
+- date: 2026-08-04 / status: remediated by INC-032 Gate 2 at `06615e7` / triggered_by: independent whole-PR review of PR #55 at `c21bd78` / related: DEC-052, INC-026, modelark/execution_benchmark.py / docs_updated: docs/decision_log.md
 - symptom: `resolve_acceptance_fixture_path` catches every exception from wishlist/config loading and reports `acceptance_fixture_path_absent`, so malformed or unreadable configuration can silently disable the acceptance measurement.
 - boundary: A typed skip is valid only for genuine absence. No benchmark production edit is authorized in INC-028 Gate 1.
 
@@ -1305,3 +1305,4 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - contracts: c01/c01b/c01c/c02/c03/c03b/c03d/c04 green. c01c: inner Refusal from `acceptance()` is normalized. c03d: null primary key wins over legacy path.
 - evidence: focused INC-032 + DEC-052 skip/immutability 10 passed; full non-E2E **834 passed**, 5 warnings after c01c/c03d. Ruff and `git diff --check` clean. Codex pass 1 AMEND, pass 2 AMEND, pass 3 ACCEPT.
 - scope_boundary: Gate 2 changed the fixture resolver, the DEC-052 accepted-outcome tuple, and append-only bookkeeping only. It authorizes no live catalog, INC-033, DEF-035/036, Gate 3, PR-state change, ready/merge, Fill, migration, drive, or synthesizing fixtures. Greptile omitted (DEC-062).
+- UPDATE 2026-08-21 — **Gate 2 accepted; production frozen at `06615e7`.** Operator accept at bookkeeping tip `39206f4` (`39206f408c004b3a520968c1a0f18b2f170d29f1`). Frozen production tip: `06615e7`. Further INC-032 production requires a new gate cycle. This does not authorize DEF-035/036, INC-033, Gate 3, PR ready/merge, or live catalog/Fill/drive work.
