@@ -179,9 +179,10 @@ def test_c04_occupied_unique_main_refuses_once_then_recovers(tmp_path):
     free = dest / ".catalog.sqlite.publish-staging.c04free"
     snap = _identity(occupied)
     paths = [occupied, free]
-    calls = {"n": 0}
+    calls = {"n": 0, "dirs": []}
 
     def stub(dest_dir):
+        calls["dirs"].append(Path(dest_dir).resolve())
         idx = calls["n"]
         calls["n"] += 1
         return paths[idx]
@@ -194,6 +195,7 @@ def test_c04_occupied_unique_main_refuses_once_then_recovers(tmp_path):
         except RuntimeError as exc:
             first_error = exc
     assert calls["n"] == 1, "collision invocation must call the factory exactly once"
+    assert calls["dirs"] == [dest.resolve()]
     assert first_error is not None
     assert not dest_catalog.exists()
     assert not free.exists(), "free path must stay untouched on the refusing call"
@@ -203,8 +205,11 @@ def test_c04_occupied_unique_main_refuses_once_then_recovers(tmp_path):
     with mock.patch.object(db, "_publish_staging_path", side_effect=stub):
         published = _publish(work, dest)
     assert calls["n"] == 2, "recovery invocation must make exactly the next factory call"
+    assert calls["dirs"] == [dest.resolve(), dest.resolve()]
     assert published.get("status") == "ok"
     assert dest_catalog.is_file()
+    assert free.exists()
+    assert _identity(free) == _identity(dest_catalog)
     assert _identity(occupied) == snap
 
 
@@ -218,15 +223,16 @@ def test_c05_occupied_unique_sidecar_refuses_once_then_recovers(tmp_path, suffix
     _data, _report, work = _rehearse_ok(tmp_path)
     dest = tmp_path / "dest"
     dest.mkdir()
-    occupied_main = dest / f".catalog.sqlite.publish-staging.c05{suffix}"
+    occupied_main = dest / ".catalog.sqlite.publish-staging.c05occ"
     sidecar = occupied_main.with_name(occupied_main.name + suffix)
     sidecar.write_bytes(f"inc036-c05-occupant{suffix}".encode())
-    free = dest / f".catalog.sqlite.publish-staging.c05free{suffix}"
+    free = dest / ".catalog.sqlite.publish-staging.c05free"
     snap = _identity(sidecar)
     paths = [occupied_main, free]
-    calls = {"n": 0}
+    calls = {"n": 0, "dirs": []}
 
     def stub(dest_dir):
+        calls["dirs"].append(Path(dest_dir).resolve())
         idx = calls["n"]
         calls["n"] += 1
         return paths[idx]
@@ -239,6 +245,7 @@ def test_c05_occupied_unique_sidecar_refuses_once_then_recovers(tmp_path, suffix
         except RuntimeError as exc:
             first_error = exc
     assert calls["n"] == 1, "collision invocation must call the factory exactly once"
+    assert calls["dirs"] == [dest.resolve()]
     assert first_error is not None
     assert not dest_catalog.exists()
     assert not occupied_main.exists()
@@ -249,8 +256,11 @@ def test_c05_occupied_unique_sidecar_refuses_once_then_recovers(tmp_path, suffix
     with mock.patch.object(db, "_publish_staging_path", side_effect=stub):
         published = _publish(work, dest)
     assert calls["n"] == 2
+    assert calls["dirs"] == [dest.resolve(), dest.resolve()]
     assert published.get("status") == "ok"
     assert dest_catalog.is_file()
+    assert free.exists()
+    assert _identity(free) == _identity(dest_catalog)
     assert _identity(sidecar) == snap
 
 
@@ -264,11 +274,15 @@ def test_c06_same_dest_retry_is_occupancy_and_creates_no_extra_staging(tmp_path)
     snap = _identity(dest_catalog)
     names_after = _staging_set(dest)
     error = None
-    try:
-        _publish(work, dest)
-    except RuntimeError as exc:
-        error = exc
+    with mock.patch.object(
+        db, "_publish_staging_path", create=True, side_effect=AssertionError("occupancy must not allocate a staging name")
+    ) as factory:
+        try:
+            _publish(work, dest)
+        except RuntimeError as exc:
+            error = exc
     assert error is not None
     assert "already exists" in str(error).lower() or "overwrite" in str(error).lower()
+    assert factory.call_count == 0, "same-dest occupancy must refuse before allocating a staging name"
     assert _identity(dest_catalog) == snap
     assert _staging_set(dest) == names_after
