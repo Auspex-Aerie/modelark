@@ -1407,4 +1407,5 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - red_evidence: focused INC-036 file is **6 failed, 2 passed** at production-unchanged `4aa5550`: c01/c02 leftover-refuse; c04/c05 missing factory. c03 and c06 green. INC-034 c01, INC-035 c01, A01, and m08c remain green. Unchanged suite excluding this file: **846 passed**, 5 warnings.
 - scope_boundary: Gate 1 added contracts and append-only bookkeeping only. It authorizes no `db.py` production, live catalog, DEF-036, Fill, Gate 3, ready/merge, or drives.
 - UPDATE 2026-08-21 — Codex ×3 on Gate 1: pass 1 **ACCEPT**; pass 2 **AMEND** (applied: recovery free path must be dest inode; factory dest_dir; c06 zero factory calls; c05 names not sidecar-suffixed); pass 3 **ACCEPT-AS-AMENDED**. Reviews in gitignored `claudedocs/operator-scratch/`. No production.
+- UPDATE 2026-08-21 — **Gate 1 accepted at `704d2f2`.** Operator accept after Codex ACCEPT-AS-AMENDED. Contracts-only tip; production still `4aa5550`. Gate 2 authorized. Operator asked for the unique-name factory explanation before production. Live catalog still off-limits.
 
