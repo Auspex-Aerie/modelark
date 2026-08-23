@@ -7,6 +7,7 @@ already true at the frozen primitive.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import stat
@@ -58,10 +59,12 @@ def _staging_report(payload) -> dict | None:
 
 
 def _member_for(members: list, path: Path) -> dict:
-    want = path.resolve()
+    want = Path(path)
     for member in members:
         assert isinstance(member, dict)
-        if Path(member["path"]).resolve() == want:
+        reported = Path(member["path"])
+        if reported == want or reported.name == want.name:
+            assert reported == want, f"member path must be the lexical reserved path, got {reported}"
             return member
     raise AssertionError(f"staging_report members missing {want}")
 
@@ -83,11 +86,23 @@ def _assert_durable_install(seams: _SlotSeams, state_path: Path, run_root: Path)
 
 
 def _assert_member_identity(member: dict, path: Path) -> None:
-    st = path.stat()
+    st = path.lstat()
     assert int(member["st_dev"]) == int(st.st_dev)
     assert int(member["st_ino"]) == int(st.st_ino)
     assert int(member["st_nlink"]) == int(st.st_nlink)
     assert int(member["allocated_bytes_estimate"]) == int(st.st_blocks) * 512
+
+
+def _assert_state_matches_report(work: Path, report: dict, path: Path, *, dest_relation: str) -> None:
+    assert report.get("dest_relation") == dest_relation
+    state = json.loads(_slot_state_path(work).read_text())
+    state_report = state.get("staging_report") if isinstance(state.get("staging_report"), dict) else state
+    assert (state_report.get("dest_relation") or state.get("dest_relation")) == dest_relation
+    attached = _member_for(report["members"], path)
+    durable = _member_for(state_report["members"], path)
+    _assert_member_identity(attached, path)
+    _assert_member_identity(durable, path)
+    assert durable == attached
 
 
 class _SlotSeams:
@@ -95,28 +110,46 @@ class _SlotSeams:
         self.dest = dest.resolve()
         self.state_path = state_path.resolve() if state_path is not None else None
         self.open_excl = 0
+        self.open_excl_suffix = 0
         self.unlink = 0
         self.ftruncate = 0
+        self.plant_before_excl: bytes | None = None
+        self.planted_at_excl = False
+        self.planted_lstat = None
+        self.planted_bytes: bytes | None = None
         self.fsync_events: list[tuple[str, int, bytes]] = []
         self._real_open = os.open
         self._real_unlink = os.unlink
         self._real_ftruncate = os.ftruncate
         self._real_fsync = os.fsync
 
-    def _is_reserved(self, path) -> bool:
-        p = Path(path)
+    def _in_dest_dir(self, path) -> bool:
         try:
-            return p.name == _RESERVED and p.resolve().parent == self.dest
+            return Path(path).parent.resolve() == self.dest
         except OSError:
-            return p.name == _RESERVED
+            return False
+
+    def _is_reserved_prefix(self, path) -> bool:
+        return Path(path).name.startswith(_RESERVED) and self._in_dest_dir(path)
 
     def open_hook(self, path, flags, *args, **kwargs):
-        if self._is_reserved(path) and flags & os.O_CREAT and flags & os.O_EXCL:
-            self.open_excl += 1
+        name = Path(path).name
+        if self._is_reserved_prefix(path) and flags & os.O_CREAT and flags & os.O_EXCL:
+            if name == _RESERVED:
+                self.open_excl += 1
+                if self.plant_before_excl is not None:
+                    target = Path(path)
+                    if not target.exists():
+                        target.write_bytes(self.plant_before_excl)
+                        self.planted_lstat = target.lstat()
+                        self.planted_bytes = target.read_bytes()
+                        self.planted_at_excl = True
+            else:
+                self.open_excl_suffix += 1
         return self._real_open(path, flags, *args, **kwargs)
 
     def unlink_hook(self, path, *args, **kwargs):
-        if self._is_reserved(path):
+        if self._is_reserved_prefix(path):
             self.unlink += 1
         return self._real_unlink(path, *args, **kwargs)
 
@@ -125,7 +158,7 @@ class _SlotSeams:
             name = os.readlink(f"/proc/self/fd/{int(fd)}")
         except OSError:
             name = ""
-        if Path(name).name == _RESERVED:
+        if Path(name).name.startswith(_RESERVED) and self._in_dest_dir(name):
             self.ftruncate += 1
         return self._real_ftruncate(fd, length)
 
@@ -191,6 +224,7 @@ def test_c02_reserved_sidecar_refuses_before_main_mutation(tmp_path, suffix):
     sidecar.write_bytes(f"inc036-sidecar{suffix}".encode())
     snap = _identity(sidecar)
     dest_catalog = dest / "catalog.sqlite"
+    names_before = _staging_names(dest)
     state_path = _slot_state_path(work)
     seams = _SlotSeams(dest, state_path)
     error = None
@@ -200,7 +234,9 @@ def test_c02_reserved_sidecar_refuses_before_main_mutation(tmp_path, suffix):
         except RuntimeError as exc:
             error = exc
     assert error is not None
-    assert seams.open_excl == 0 and seams.unlink == 0 and seams.ftruncate == 0
+    assert seams.open_excl == 0 and seams.open_excl_suffix == 0
+    assert seams.unlink == 0 and seams.ftruncate == 0
+    assert _staging_names(dest) == names_before
     report = _staging_report(error)
     assert isinstance(report, dict)
     member = _member_for(report["members"], sidecar)
@@ -300,11 +336,13 @@ def test_c05_occupied_refuse_carries_structured_staging_report(tmp_path):
         side = leftover.with_name(leftover.name + suffix)
         side.write_bytes(f"inc036-neighbor{suffix}".encode())
         planted.append(side)
+    names_before = _staging_names(dest)
     error = None
     try:
         _publish(work, dest)
     except RuntimeError as exc:
         error = exc
+    assert _staging_names(dest) == names_before
     assert error is not None
     report = _staging_report(error)
     assert isinstance(report, dict), (
@@ -338,11 +376,21 @@ def test_c06_same_dest_retry_is_occupancy_and_creates_no_extra_staging(tmp_path)
     assert published.get("status") == "ok"
     snap = _identity(dest_catalog)
     names_after = _staging_names(dest)
+    dest_res = dest.resolve()
+    real_statvfs = os.statvfs
     error = None
-    try:
-        _publish(work, dest)
-    except RuntimeError as exc:
-        error = exc
+
+    def vfs(path):
+        p = Path(path).resolve()
+        if p == dest_res or dest_res in p.parents:
+            raise AssertionError("dest occupancy must refuse before dest statvfs")
+        return real_statvfs(path)
+
+    with mock.patch.object(os, "statvfs", side_effect=vfs):
+        try:
+            _publish(work, dest)
+        except RuntimeError as exc:
+            error = exc
     assert error is not None
     assert "already exists" in str(error).lower() or "overwrite" in str(error).lower()
     assert _identity(dest_catalog) == snap
@@ -391,17 +439,23 @@ def test_c07_low_dest_free_space_refuses_before_creating_staging(tmp_path):
     assert error is not None, f"low free space must refuse, got {published!r}"
     assert seen_dest["yes"] is True, "capacity check must statvfs the destination filesystem"
     assert "capacity" in str(error).lower() or "free" in str(error).lower()
-    assert seams.open_excl == 0 and seams.unlink == 0
+    assert seams.open_excl == 0 and seams.open_excl_suffix == 0 and seams.unlink == 0
     assert not dest_catalog.exists()
     assert not leftover.exists()
+    assert not _staging_names(dest)
 
 
 def test_c08_success_includes_staging_report(tmp_path):
     """Success dict must include staging_report (path, dest relation, member sizes)."""
     _data, _report, work = _rehearse_ok(tmp_path)
     dest = tmp_path / "dest"
-    published = _publish(work, dest)
+    seams = _SlotSeams(dest)
+    with seams.patch():
+        published = _publish(work, dest)
     assert published.get("status") == "ok"
+    assert seams.open_excl == 1, "success must O_EXCL the exact reserved name once"
+    assert seams.open_excl_suffix == 0
+    assert seams.unlink == 0 and seams.ftruncate == 0
     dest_catalog = dest / "catalog.sqlite"
     leftover = dest / _RESERVED
     report = _staging_report(published)
@@ -436,7 +490,9 @@ def test_c09_dest_renamed_away_does_not_truncate_slot(tmp_path):
     snap = _identity(leftover)
     backup = dest / "catalog.sqlite.moved"
     dest_catalog.rename(backup)
-    seams = _SlotSeams(dest)
+    assert leftover.lstat().st_nlink == 2
+    state_path = _slot_state_path(work)
+    seams = _SlotSeams(dest, state_path)
     error = None
     with seams.patch():
         try:
@@ -449,3 +505,144 @@ def test_c09_dest_renamed_away_does_not_truncate_slot(tmp_path):
     assert _identity(leftover) == snap
     assert backup.exists()
     assert _identity(backup) == snap
+    report = _staging_report(error)
+    assert isinstance(report, dict)
+    _assert_state_matches_report(work, report, leftover, dest_relation="absent")
+    assert int(_member_for(report["members"], leftover)["st_nlink"]) == 2
+    _assert_durable_install(seams, state_path, _run_root(work))
+
+
+def test_c10_excl_race_refuses_with_review_record(tmp_path):
+    """A reserved entry created at O_EXCL time must refuse with durable review, not a bare EEXIST."""
+    _data, _report, work = _rehearse_ok(tmp_path)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    dest_catalog = dest / "catalog.sqlite"
+    leftover = dest / _RESERVED
+    state_path = _slot_state_path(work)
+    seams = _SlotSeams(dest, state_path)
+    seams.plant_before_excl = b"inc036-excl-race"
+    error = None
+    with seams.patch():
+        try:
+            _publish(work, dest)
+        except Exception as exc:
+            error = exc
+    assert seams.planted_at_excl is True
+    assert seams.open_excl == 1 and seams.open_excl_suffix == 0
+    assert seams.unlink == 0 and seams.ftruncate == 0
+    assert error is not None
+    assert not dest_catalog.exists()
+    assert leftover.exists()
+    planted = seams.planted_lstat
+    now = leftover.lstat()
+    assert (now.st_dev, now.st_ino, now.st_nlink, now.st_size, now.st_blocks) == (
+        planted.st_dev, planted.st_ino, planted.st_nlink, planted.st_size, planted.st_blocks,
+    )
+    assert leftover.read_bytes() == seams.planted_bytes
+    assert _staging_names(dest) == {_RESERVED}
+    report = _staging_report(error)
+    assert isinstance(report, dict)
+    _assert_state_matches_report(work, report, leftover, dest_relation="absent")
+    _assert_durable_install(seams, state_path, _run_root(work))
+
+
+def test_c11_dangling_symlink_occupant_uses_lstat_identity(tmp_path):
+    """Occupied dangling symlink must be reported by lstat identity and left unchanged."""
+    _data, _report, work = _rehearse_ok(tmp_path)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    leftover = dest / _RESERVED
+    leftover.symlink_to(dest / "missing-target")
+    snap = leftover.lstat()
+    dest_catalog = dest / "catalog.sqlite"
+    state_path = _slot_state_path(work)
+    seams = _SlotSeams(dest, state_path)
+    error = None
+    with seams.patch():
+        try:
+            _publish(work, dest)
+        except Exception as exc:
+            error = exc
+    assert error is not None
+    assert leftover.is_symlink()
+    assert leftover.lstat().st_ino == snap.st_ino
+    assert not dest_catalog.exists()
+    report = _staging_report(error)
+    assert isinstance(report, dict)
+    _assert_state_matches_report(work, report, leftover, dest_relation="absent")
+    _assert_durable_install(seams, state_path, _run_root(work))
+
+
+def test_c12_dest_statvfs_error_refuses_before_staging_create(tmp_path):
+    """Dest filesystem measurement failure must refuse before creating the reserved slot."""
+    _data, _report, work = _rehearse_ok(tmp_path)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    dest_catalog = dest / "catalog.sqlite"
+    dest_res = dest.resolve()
+    real_statvfs = os.statvfs
+    seams = _SlotSeams(dest)
+
+    def vfs(path):
+        p = Path(path).resolve()
+        if p == dest_res or dest_res in p.parents:
+            raise OSError(errno.EIO, "dest statvfs failed")
+        return real_statvfs(path)
+
+    error = None
+    with mock.patch.object(os, "statvfs", side_effect=vfs), seams.patch():
+        try:
+            _publish(work, dest)
+        except RuntimeError as exc:
+            error = exc
+    assert error is not None
+    assert seams.open_excl == 0 and seams.open_excl_suffix == 0
+    assert seams.unlink == 0 and seams.ftruncate == 0
+    assert not dest_catalog.exists()
+    assert not (dest / _RESERVED).exists()
+    assert not _staging_names(dest)
+
+
+def test_c13_free_space_just_below_clone_size_refuses(tmp_path):
+    """Dest free just below the clone catalog size must refuse before creating staging."""
+    _data, _report, work = _rehearse_ok(tmp_path)
+    clone = _run_root(work) / "clone" / "catalog.sqlite"
+    need = int(clone.stat().st_size)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    dest_res = dest.resolve()
+    dest_catalog = dest / "catalog.sqlite"
+
+    class _JustBelow:
+        f_frsize = 1
+        f_bsize = 1
+        f_bavail = max(need - 1, 0)
+        f_bfree = max(need - 1, 0)
+        f_blocks = need + 10**9
+
+    class _Ample:
+        f_frsize = 1
+        f_bsize = 1
+        f_bavail = need + 64 * 1024 * 1024
+        f_bfree = need + 64 * 1024 * 1024
+        f_blocks = need + 10**9
+
+    def vfs(path):
+        p = Path(path).resolve()
+        if p == dest_res or dest_res in p.parents:
+            return _JustBelow()
+        return _Ample()
+
+    seams = _SlotSeams(dest)
+    error = None
+    with mock.patch.object(os, "statvfs", side_effect=vfs), seams.patch():
+        try:
+            _publish(work, dest)
+        except RuntimeError as exc:
+            error = exc
+    assert error is not None
+    assert seams.open_excl == 0 and seams.open_excl_suffix == 0
+    assert seams.unlink == 0 and seams.ftruncate == 0
+    assert not dest_catalog.exists()
+    assert not _staging_names(dest)
