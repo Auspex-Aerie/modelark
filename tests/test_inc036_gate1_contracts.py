@@ -646,3 +646,118 @@ def test_c13_free_space_just_below_clone_size_refuses(tmp_path):
     assert seams.unlink == 0 and seams.ftruncate == 0
     assert not dest_catalog.exists()
     assert not _staging_names(dest)
+
+
+def _seam_fail_once():
+    real_metrics = db._catalog_snapshot_metrics_con
+    mutated = {"yes": False}
+
+    def evil_metrics(con):
+        if not mutated["yes"]:
+            try:
+                db_list = con.execute("PRAGMA database_list").fetchone()
+                main_path = Path(db_list[2]) if db_list and db_list[2] else None
+            except Exception:
+                main_path = None
+            if main_path is not None and "publish-staging" in main_path.name:
+                mutated["yes"] = True
+                con.execute(
+                    "INSERT INTO models(repo_id,status,numcopies) "
+                    "VALUES('org/inc036-post-create','discovered',1)"
+                )
+        return real_metrics(con)
+
+    return mutated, evil_metrics
+
+
+def test_c14_post_create_failure_installs_durable_report(tmp_path):
+    """Backup/validation failure after O_EXCL must still write the leftover review record."""
+    _data, _report, work = _rehearse_ok(tmp_path)
+    dest = tmp_path / "dest"
+    dest_catalog = dest / "catalog.sqlite"
+    leftover = dest / _RESERVED
+    state_path = _slot_state_path(work)
+    mutated, evil = _seam_fail_once()
+    seams = _SlotSeams(dest, state_path)
+    error = None
+    with mock.patch.object(db, "_catalog_snapshot_metrics_con", side_effect=evil), seams.patch():
+        try:
+            _publish(work, dest)
+        except RuntimeError as exc:
+            error = exc
+    assert mutated["yes"] is True
+    assert error is not None
+    assert leftover.exists()
+    assert not dest_catalog.exists()
+    report = _staging_report(error)
+    assert isinstance(report, dict)
+    _assert_state_matches_report(work, report, leftover, dest_relation="absent")
+    _assert_durable_install(seams, state_path, _run_root(work))
+
+
+def test_c15_success_installs_durable_slot_state(tmp_path):
+    """Successful publish must fsync slot-state (file then run dir) with dest same inode."""
+    _data, _report, work = _rehearse_ok(tmp_path)
+    dest = tmp_path / "dest"
+    leftover = dest / _RESERVED
+    state_path = _slot_state_path(work)
+    seams = _SlotSeams(dest, state_path)
+    with seams.patch():
+        published = _publish(work, dest)
+    assert published.get("status") == "ok"
+    report = _staging_report(published)
+    assert isinstance(report, dict)
+    _assert_state_matches_report(work, report, leftover, dest_relation="same_attempt_inode")
+    _assert_durable_install(seams, state_path, _run_root(work))
+
+
+def test_c16_slot_state_write_failure_is_not_swallowed(tmp_path):
+    """A failed leftover-record fsync must surface, not return ok or a fake durable report."""
+    _data, _report, work = _rehearse_ok(tmp_path)
+    dest = tmp_path / "dest"
+    real_fsync = os.fsync
+
+    def fsync_hook(fd):
+        try:
+            name = os.readlink(f"/proc/self/fd/{int(fd)}")
+        except OSError:
+            name = ""
+        if Path(name).name == _SLOT_STATE:
+            raise OSError(errno.EIO, "slot-state fsync failed")
+        return real_fsync(fd)
+
+    error = None
+    published = None
+    with mock.patch.object(os, "fsync", side_effect=fsync_hook):
+        try:
+            published = _publish(work, dest)
+        except RuntimeError as exc:
+            error = exc
+    assert published is None or published.get("status") != "ok"
+    assert error is not None
+    assert "not durable" in str(error).lower() or "slot-state" in str(error).lower()
+    assert _staging_report(error) is None
+
+
+def test_c17_slot_state_symlink_does_not_clobber_dest(tmp_path):
+    """A symlink at the slot-state path must not become dest catalog bytes."""
+    _data, _report, work = _rehearse_ok(tmp_path)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    dest_catalog = dest / "catalog.sqlite"
+    state_path = _slot_state_path(work)
+    state_path.symlink_to(dest_catalog)
+    error = None
+    published = None
+    try:
+        published = _publish(work, dest)
+    except RuntimeError as exc:
+        error = exc
+    if dest_catalog.is_file() and not dest_catalog.is_symlink():
+        assert not dest_catalog.read_bytes().lstrip().startswith(b"{")
+        assert dest_catalog.read_bytes()[:16] != b'{\n  "dest_relat'
+    if published is not None and published.get("status") == "ok":
+        assert dest_catalog.is_file()
+        assert not dest_catalog.read_bytes().lstrip().startswith(b"{")
+    else:
+        assert error is not None

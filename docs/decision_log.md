@@ -1432,3 +1432,15 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - impact: Headless publish prints/refuses with the record. Portal/CLI walk-through wait until the record exists.
 - revisit_when: INC-036 Gate 2 has frozen a durable leftover record on copies/fixtures, then add list+neighbors+size+step-through dispose as its own gate (CLI first; portal if dest_dir is an operator path the portal already knows).
 
+### DEC-063: Publication leftover is one reserved slot, refuse-and-review, operator dispose
+- date: 2026-08-25 / status: accepted / triggered_by: INC-036 leftover-size review; operator freeze of Codex ACCEPT-AS-AMENDED this-pass resolution / related: INC-035, INC-036, DEF-037, DEF-038, DEC-059, modelark/core/db.py / docs_updated: docs/decision_log.md, modelark/core/db.py, tests/test_inc036_gate1_contracts.py
+- decision: Keep INC-035 fd-link dest. One reserved `.catalog.sqlite.publish-staging`. Occupied bundle (main, sidecars, dangling symlink, dest-renamed hardlink) refuses without mutate. Dest occupancy is `lstat` of `catalog.sqlite` first. Dest free-space estimate (clone size) before `O_EXCL`. `EEXIST` at `O_EXCL` is occupied refuse. Every controlled post-create exit and success writes `publication-slot-state.json` (fsync file then run dir) and the same `staging_report` (`lstat` identity, `st_blocks*512`). Retry is operator-gated. No unlink/truncate/unique names/nameless sqlite.
+- rationale: Auto-wipe can destroy dest. Unique names unbounded leftover size. Nameless sqlite does not bind stdlib sqlite3 to the retained fd. Codex decision review ACCEPT-AS-AMENDED: report every post-create exit, not only pre-create occupancy.
+- impact: Failed publish stays stuck until the operator removes the leftover. DEF-037/038 remain later.
+
+### INC-036 Gate-2 UPDATE: Refuse-and-review production
+- date: 2026-08-25 / status: Gate 2 production implemented; pending reviewer acceptance after Codex ×3 / triggered_by: DEC-063 / related: INC-036, DEC-063, modelark/core/db.py / docs_updated: docs/decision_log.md, modelark/core/db.py
+- production: `PublicationStagingRefusal`, durable slot-state, dest `lstat` occupancy, reserved-bundle occupancy, dest capacity estimate, `O_EXCL` `EEXIST` review, post-create report attach. Slot-state open uses `O_NOFOLLOW`. Fd-link dest unchanged. Live catalog not opened.
+- scope_boundary: Publication leftover review only. No DEF-037 reclaim, DEF-038 UI, live catalog, Fill, Gate 3, ready/merge.
+- UPDATE 2026-08-25 — Codex ×3 on Gate 2: pass 1 **AMEND** (applied: complete writes, do not swallow slot-state `OSError`); pass 2 **ACCEPT-AS-AMENDED**; pass 3 aborted by reviewer tooling — applied dest-safe `O_NOFOLLOW` on slot-state open so a planted symlink cannot clobber dest. Focused INC-036 **19 passed**. Full non-E2E before last pin: **861 passed**. Live catalog not opened.
+

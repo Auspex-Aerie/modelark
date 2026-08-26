@@ -1191,6 +1191,154 @@ def _refuse_destination_sidecars(dest_cat: Path, *, when: str) -> None:
         )
 
 
+PUBLICATION_SLOT_STATE_NAME = "publication-slot-state.json"
+_PUBLICATION_STAGING_NAME = ".catalog.sqlite.publish-staging"
+
+
+class PublicationStagingRefusal(RuntimeError):
+    """Publication refuse that carries a durable leftover review report (INC-036)."""
+
+    def __init__(self, message: str, staging_report: dict):
+        super().__init__(message)
+        self.staging_report = staging_report
+
+
+def _path_lexists(path: Path) -> bool:
+    try:
+        os.lstat(path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def _staging_member_dict(path: Path) -> dict:
+    st = os.lstat(path)
+    return {
+        "path": str(path),
+        "st_dev": int(st.st_dev),
+        "st_ino": int(st.st_ino),
+        "st_nlink": int(st.st_nlink),
+        "allocated_bytes_estimate": int(st.st_blocks) * 512,
+    }
+
+
+def _reserved_bundle_paths(staging: Path) -> tuple[Path, ...]:
+    return (staging,) + _sqlite_sidecar_paths(staging)
+
+
+def _staging_report_for(staging: Path, dest_cat: Path) -> dict:
+    members = [
+        _staging_member_dict(path)
+        for path in _reserved_bundle_paths(staging)
+        if _path_lexists(path)
+    ]
+    dest_relation = "absent"
+    if _path_lexists(dest_cat) and _path_lexists(staging):
+        if _file_id(os.lstat(dest_cat)) == _file_id(os.lstat(staging)):
+            dest_relation = "same_attempt_inode"
+        else:
+            dest_relation = "different_inode"
+    elif _path_lexists(dest_cat):
+        dest_relation = "different_inode"
+    return {
+        "dest_relation": dest_relation,
+        "members": members,
+        "staging_path": str(staging),
+    }
+
+
+def _write_publication_slot_state(run_root: Path, report: dict) -> None:
+    path = run_root / PUBLICATION_SLOT_STATE_NAME
+    payload = {
+        "dest_relation": report.get("dest_relation"),
+        "staging_path": report.get("staging_path"),
+        "staging_report": report,
+    }
+    data = json.dumps(payload, indent=2, sort_keys=True).encode()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        written = 0
+        while written < len(data):
+            n = os.write(fd, data[written:])
+            if n <= 0:
+                raise OSError(errno.EIO, "short write of publication slot-state")
+            written += n
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    dir_fd = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _raise_staging_review(message: str, staging: Path, dest_cat: Path, run_root: Path):
+    report = _staging_report_for(staging, dest_cat)
+    _write_publication_slot_state(run_root, report)
+    raise PublicationStagingRefusal(message, report)
+
+
+def _attach_post_create_review(exc: BaseException, staging: Path, dest_cat: Path, run_root: Path) -> BaseException:
+    if isinstance(exc, PublicationStagingRefusal):
+        return exc
+    report = _staging_report_for(staging, dest_cat)
+    try:
+        _write_publication_slot_state(run_root, report)
+    except OSError as write_exc:
+        chained = RuntimeError(
+            f"{exc}; leftover review record not durable: {write_exc}"
+        )
+        chained.__cause__ = exc
+        return chained
+    if isinstance(exc, RuntimeError):
+        exc.staging_report = report
+        return exc
+    wrapped = PublicationStagingRefusal(str(exc), report)
+    wrapped.__cause__ = exc
+    return wrapped
+
+
+def _refuse_dest_catalog_occupied(dest_cat: Path) -> None:
+    try:
+        os.lstat(dest_cat)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(
+            f"publication refused: cannot observe destination ({dest_cat}): {exc}"
+        ) from exc
+    raise RuntimeError(
+        f"publication refused: destination already exists ({dest_cat}); "
+        "will not overwrite"
+    )
+
+
+def _refuse_dest_capacity(dest_dir: Path, clone_path: Path, staging: Path, dest_cat: Path, run_root: Path) -> None:
+    try:
+        vfs = os.statvfs(dest_dir)
+    except OSError as exc:
+        _raise_staging_review(
+            f"publication refused: dest free-space/capacity check failed: {exc}",
+            staging,
+            dest_cat,
+            run_root,
+        )
+    estimate = int(clone_path.stat().st_size)
+    frsize = int(vfs.f_frsize or vfs.f_bsize or 1)
+    avail = int(vfs.f_bavail) * frsize
+    if avail < estimate:
+        _raise_staging_review(
+            f"publication refused: dest free {avail} below catalog size estimate {estimate}",
+            staging,
+            dest_cat,
+            run_root,
+        )
+
+
 _NOCLOBBER_UNSUPPORTED = frozenset(
     err
     for err in (
@@ -1987,13 +2135,19 @@ def publish_provenance_migration(
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_cat = dest_dir / "catalog.sqlite"
-    if dest_cat.exists():
-        raise RuntimeError(
-            f"publication refused: destination already exists ({dest_cat}); "
-            "will not overwrite"
-        )
+    _refuse_dest_catalog_occupied(dest_cat)
     # Finding 2 / INC-029 A: refuse foreign destination sidecars before any staging.
     _refuse_destination_sidecars(dest_cat, when="before staging")
+    staging = dest_dir / _PUBLICATION_STAGING_NAME
+    occupants = [path for path in _reserved_bundle_paths(staging) if _path_lexists(path)]
+    if occupants:
+        _raise_staging_review(
+            "publication refused: leftover staging pathname present "
+            f"({staging}); will not unlink by path (INC-035)",
+            staging,
+            dest_cat,
+            run_root,
+        )
 
     # Deterministic remigration of the rehearsal snapshot (expected publication).
     expected_path = _remigrate_snapshot_to_expected(
@@ -2021,8 +2175,8 @@ def publish_provenance_migration(
         str(source_catalog), isolation_level=None, timeout=0.05)
     clone_lock: sqlite3.Connection | None = None
     stage_con: sqlite3.Connection | None = None
-    staging: Path | None = None
     staging_fd: int | None = None
+    slot_created = False
     try:
         try:
             source_lock.execute("BEGIN IMMEDIATE")
@@ -2098,21 +2252,37 @@ def publish_provenance_migration(
                 f"{exc}"
             ) from exc
 
+        if os.stat(source_catalog).st_dev != os.stat(dest_dir).st_dev:
+            raise RuntimeError(
+                "publication refused: source and destination are on different "
+                "filesystems"
+            )
+        if os.stat(clone_path).st_dev != os.stat(dest_dir).st_dev:
+            raise RuntimeError(
+                "publication refused: clone and destination are on different "
+                "filesystems"
+            )
+        _refuse_dest_capacity(dest_dir, clone_path, staging, dest_cat, run_root)
+
         # Stage via consistent SQLite backup of the exclusively locked clone.
         # The staging connection retains EXCLUSIVE lock continuously through
         # validation and final no-clobber publish — never close and reopen the pathname.
-        staging = dest_dir / ".catalog.sqlite.publish-staging"
-        if staging.exists():
-            raise RuntimeError(
-                "publication refused: leftover staging pathname present "
-                f"({staging}); will not unlink by path (INC-035)"
-            )
-        # Refuse leftover staging sidecars from a prior attempt.
-        _refuse_destination_sidecars(staging, when="on publish-staging path")
         open_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
         if hasattr(os, "O_NOFOLLOW"):
             open_flags |= os.O_NOFOLLOW
-        staging_fd = os.open(str(staging), open_flags, 0o600)
+        try:
+            staging_fd = os.open(str(staging), open_flags, 0o600)
+        except OSError as exc:
+            if exc.errno == errno.EEXIST:
+                _raise_staging_review(
+                    "publication refused: leftover staging pathname present "
+                    f"({staging}); will not unlink by path (INC-035)",
+                    staging,
+                    dest_cat,
+                    run_root,
+                )
+            raise
+        slot_created = True
         if not stat.S_ISREG(os.fstat(staging_fd).st_mode):
             raise RuntimeError(
                 "publication refused: staging path is not a regular file"
@@ -2237,6 +2407,8 @@ def publish_provenance_migration(
             )
         _refuse_destination_sidecars(dest_cat, when="before success return")
 
+        report_out = _staging_report_for(staging, dest_cat)
+        _write_publication_slot_state(run_root, report_out)
         return {
             "status": "ok",
             "rollback_artifact": str(rollback_artifact.resolve()),
@@ -2245,7 +2417,14 @@ def publish_provenance_migration(
             "manifest_status": "validated",
             "manifest_path": str(manifest_path),
             "snapshot_sha256": live_snap_sha,
+            "staging_report": report_out,
         }
+    except Exception as exc:
+        if slot_created:
+            attached = _attach_post_create_review(exc, staging, dest_cat, run_root)
+            if attached is not exc:
+                raise attached from exc
+        raise
     finally:
         if stage_con is not None:
             try:
