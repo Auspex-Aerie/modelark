@@ -1339,6 +1339,194 @@ def _refuse_dest_capacity(dest_dir: Path, clone_path: Path, staging: Path, dest_
         )
 
 
+_LEFTOVER_LIVE_NAMES = (
+    "catalog.sqlite",
+    _PUBLICATION_STAGING_NAME,
+    f"{_PUBLICATION_STAGING_NAME}-wal",
+    f"{_PUBLICATION_STAGING_NAME}-shm",
+    f"{_PUBLICATION_STAGING_NAME}-journal",
+)
+_SLOT_STATE_MAX_BYTES = 1_048_576
+
+
+def _open_nofollow_read(dir_fd: int, name: str, extra_flags: int = 0) -> int:
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | extra_flags
+    return os.open(name, flags, dir_fd=dir_fd)
+
+
+def _read_regular_json_fd(fd: int) -> dict:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        raise RuntimeError(
+            "publication leftover list refused: slot-state is not a regular file"
+        )
+    if int(st.st_size) > _SLOT_STATE_MAX_BYTES:
+        raise RuntimeError("publication leftover list refused: slot-state too large")
+    chunks: list[bytes] = []
+    remaining = int(st.st_size)
+    while remaining > 0:
+        buf = os.read(fd, remaining)
+        if not buf:
+            break
+        chunks.append(buf)
+        remaining -= len(buf)
+    try:
+        payload = json.loads(b"".join(chunks))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "publication leftover list refused: slot-state is not JSON"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("publication leftover list refused: slot-state is not an object")
+    return payload
+
+
+def list_publication_leftovers(work_dir: Path, dest_dir: Path) -> dict:
+    """Read-only leftover review JSON (DEF-038). Never mutates dest or binds the catalog."""
+    dest = Path(dest_dir)
+    work = Path(work_dir)
+    work_fd = os.open(str(work), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    state_fd: int | None = None
+    child_fds: list[int] = []
+    try:
+        try:
+            names = os.listdir(work_fd)
+        except TypeError:
+            names = os.listdir(str(work))
+        hits = 0
+        if PUBLICATION_SLOT_STATE_NAME in names:
+            try:
+                state_fd = _open_nofollow_read(work_fd, PUBLICATION_SLOT_STATE_NAME)
+                hits += 1
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    raise RuntimeError(
+                        "publication leftover list refused: slot-state symlink"
+                    ) from exc
+                if exc.errno != errno.ENOENT:
+                    raise RuntimeError(
+                        f"publication leftover list refused: cannot open slot-state: {exc}"
+                    ) from exc
+        for name in names:
+            if name in (".", "..", PUBLICATION_SLOT_STATE_NAME):
+                continue
+            try:
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                    dir_fd=work_fd,
+                )
+            except OSError as exc:
+                if exc.errno in (errno.ENOTDIR, errno.ENOENT, errno.EINVAL):
+                    continue
+                if exc.errno == errno.ELOOP:
+                    raise RuntimeError(
+                        "publication leftover list refused: run-dir symlink"
+                    ) from exc
+                raise RuntimeError(
+                    f"publication leftover list refused: cannot observe run dir {name}: {exc}"
+                ) from exc
+            child_fds.append(child_fd)
+            try:
+                nested = _open_nofollow_read(child_fd, PUBLICATION_SLOT_STATE_NAME)
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    continue
+                if exc.errno == errno.ELOOP:
+                    raise RuntimeError(
+                        "publication leftover list refused: slot-state symlink"
+                    ) from exc
+                raise RuntimeError(
+                    f"publication leftover list refused: cannot open nested slot-state: {exc}"
+                ) from exc
+            hits += 1
+            if state_fd is not None:
+                os.close(nested)
+                raise RuntimeError(
+                    "publication leftover list refused: ambiguous publication-slot-state.json"
+                )
+            state_fd = nested
+        if state_fd is None or hits == 0:
+            raise RuntimeError(
+                "publication leftover list refused: publication-slot-state.json not found"
+            )
+        raw = _read_regular_json_fd(state_fd)
+    finally:
+        if state_fd is not None:
+            os.close(state_fd)
+        for fd in child_fds:
+            os.close(fd)
+        os.close(work_fd)
+
+    report = raw.get("staging_report") if isinstance(raw.get("staging_report"), dict) else raw
+    members = list(report.get("members") or [])
+    seen: set[str] = set()
+    for member in members:
+        key = str(member.get("path", ""))
+        if key in seen:
+            raise RuntimeError(
+                "publication leftover list refused: duplicate recorded members"
+            )
+        seen.add(key)
+    allowed = {dest / name for name in _LEFTOVER_LIVE_NAMES}
+    recorded_members = []
+    for member in members:
+        rec = dict(member)
+        try:
+            recorded_path = Path(str(member.get("path", "")))
+        except TypeError:
+            recorded_path = Path("")
+        if recorded_path not in allowed:
+            rec["unbound"] = True
+        recorded_members.append(rec)
+    recorded = dict(report)
+    recorded["members"] = recorded_members
+
+    dest_cat = dest / "catalog.sqlite"
+    dest_id = None
+    try:
+        dest_st = os.lstat(dest_cat)
+        dest_id = (int(dest_st.st_dev), int(dest_st.st_ino))
+    except FileNotFoundError:
+        dest_id = None
+    except OSError as exc:
+        raise RuntimeError(
+            f"publication leftover list refused: cannot observe destination: {exc}"
+        ) from exc
+
+    live = []
+    for name in _LEFTOVER_LIVE_NAMES:
+        path = dest / name
+        row: dict = {"path": str(path)}
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            row["present"] = False
+            row["missing"] = True
+            row["dest_relation"] = "absent"
+            live.append(row)
+            continue
+        except OSError as exc:
+            raise RuntimeError(
+                f"publication leftover list refused: cannot observe {path}: {exc}"
+            ) from exc
+        row["present"] = True
+        row["missing"] = False
+        row["st_dev"] = int(st.st_dev)
+        row["st_ino"] = int(st.st_ino)
+        row["st_nlink"] = int(st.st_nlink)
+        row["allocated_bytes_estimate"] = int(st.st_blocks) * 512
+        ident = (int(st.st_dev), int(st.st_ino))
+        if dest_id is None:
+            row["dest_relation"] = "absent"
+        elif ident == dest_id:
+            row["dest_relation"] = "same_attempt_inode"
+        else:
+            row["dest_relation"] = "different_inode"
+        live.append(row)
+    return {"recorded": recorded, "live": live}
+
+
 _NOCLOBBER_UNSUPPORTED = frozenset(
     err
     for err in (

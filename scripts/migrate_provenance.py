@@ -41,6 +41,14 @@ def _parser() -> argparse.ArgumentParser:
         help=f"must be exactly {_CONFIRMATION}",
     )
     publish.set_defaults(_run=_cmd_publish)
+
+    leftovers = sub.add_parser(
+        "leftovers",
+        help="list publication leftovers (read-only; never mutates dest)",
+    )
+    leftovers.add_argument("--work-dir", type=Path, required=True)
+    leftovers.add_argument("--dest-dir", type=Path, required=True)
+    leftovers.set_defaults(_run=_cmd_leftovers)
     return parser
 
 
@@ -57,6 +65,10 @@ def _cmd_publish(args: argparse.Namespace) -> dict:
         confirm_stopped=args.confirm_stopped,
         writers_stopped=True,
     )
+
+
+def _cmd_leftovers(args: argparse.Namespace) -> dict:
+    return db.list_publication_leftovers(args.work_dir, args.dest_dir)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1462,3 +1462,9 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - UPDATE 2026-08-26 — Codex Gate 1 ×3: pass 1 **AMEND** (applied); pass 2 **AMEND** (applied); pass 3 **AMEND** (applied: no resolve() under patched lstat; c01 uses dest-create guards; c08 forbids reading symlink target). Pass 3 did **not** land ACCEPT / ACCEPT-AS-AMENDED. Focused file **14 failed, 1 passed**.
 - UPDATE 2026-08-27 — Codex Gate 1 round 2 ×3: **AMEND / AMEND / AMEND** (applied). Pass 3 did **not** land ACCEPT. Codex is still expanding test guards (io.open, dirfd anchoring, per-name EACCES), not rejecting the list-only product. Focused file **16 failed, 1 passed**.
 
+### DEF-038 Gate-2 UPDATE: leftovers list CLI
+- date: 2026-08-27 / status: Gate 2 production implemented; pending reviewer acceptance / triggered_by: operator accept of Gate 1 as good enough / related: DEF-038, DEC-063, INC-036, scripts/migrate_provenance.py, modelark/core/db.py / docs_updated: docs/decision_log.md, scripts/migrate_provenance.py, modelark/core/db.py
+- production: `modelark-provenance-migrate leftovers --work-dir --dest-dir` calls `list_publication_leftovers`. Read-only. No dispose. Work-dir fd walk, `O_NOFOLLOW` state, live `lstat` of dest `catalog.sqlite` plus reserved staging bundle. Out-of-bundle recorded paths marked `unbound`. Live catalog not opened.
+- evidence: DEF-038 contracts **25 passed**; INC-034/035/036 focused **21 passed**. Codex ×3 on production: **ACCEPT / ACCEPT / ACCEPT**.
+- scope_boundary: List only. No dispose, DEF-037, portal, live catalog, Fill, Gate 3.
+
