@@ -132,7 +132,7 @@ def _list_guards(work: Path, dest: Path, extra_forbidden: list[Path] | None = No
         p = Path(path)
         if _forbid_path(p):
             raise AssertionError(f"must not observe {p}")
-        if dest.exists() and p.parent.resolve() == dest.resolve() and p.name not in _LIVE_NAMES and p != dest:
+        if p.parent == dest and p not in dest_ok and p != dest:
             raise AssertionError(f"live observation limited to reserved dest names, got {p}")
         return real_lstat(path, *a, **k)
 
@@ -145,22 +145,18 @@ def _list_guards(work: Path, dest: Path, extra_forbidden: list[Path] | None = No
         p = Path(path)
         if _forbid_path(p):
             raise AssertionError(f"must not open {p}")
-        if dest.exists() and flags & os.O_CREAT:
-            try:
-                if p.resolve() == dest.resolve() or dest.resolve() in p.resolve().parents or p.parent.resolve() == dest.resolve():
-                    raise AssertionError("leftovers must not create/write dest")
-            except OSError:
-                pass
+        if flags & os.O_CREAT and (p == dest or p.parent == dest):
+            raise AssertionError("leftovers must not create/write dest")
         return real_open(path, flags, *a, **k)
 
     def unlink_hook(path, *a, **k):
         p = Path(path)
-        if dest.exists() and (p.parent.resolve() == dest.resolve() or p.resolve() == dest.resolve()):
+        if p == dest or p.parent == dest:
             raise AssertionError("leftovers must not unlink dest")
         return real_unlink(path, *a, **k)
 
     def mkdir_hook(path, *a, **k):
-        if dest.exists() is False and Path(path).resolve() == dest.resolve():
+        if Path(path) == dest:
             raise AssertionError("leftovers must not mkdir dest")
         return real_mkdir(path, *a, **k)
 
@@ -219,7 +215,7 @@ def test_c01_leftovers_exists_without_catalog_bind_or_dest_create(tmp_path):
     dest = tmp_path / "dest"
     before_work = _tree_snap(work)
     main = _load_main()
-    with _no_catalog_bind():
+    with _list_guards(work, dest):
         rc, _payload, err = _leftovers(main, work, dest)
         with pytest.raises(SystemExit) as missing_dest:
             main(["leftovers", "--work-dir", str(work)])
@@ -406,9 +402,7 @@ def test_c08_slot_state_symlink_refused(tmp_path):
     dest = tmp_path / "dest"
     dest.mkdir()
     main = _load_main()
-    with _no_catalog_bind(), mock.patch.object(
-        db, "_resolve_rehearsal_layout", side_effect=AssertionError("no layout")
-    ):
+    with _list_guards(work, dest, extra_forbidden=[target]):
         rc, payload, err = _leftovers(main, work, dest)
     assert "invalid choice" not in err.lower(), err
     assert rc != 0

@@ -1459,5 +1459,5 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - contracts: `tests/test_def038_gate1_contracts.py`. Expected-red **c01–c05, c07–c10** (`leftovers` missing). Retained-green **c06** no `leftovers-dispose` parser. DEF-035 contracts remain green.
 - red_evidence: focused DEF-038 file **12 failed, 1 passed** after Codex pass-1 AMEND (sidecar param, dest snapshot, no dispose-parser invalid-choice, observation guards).
 - scope_boundary: Contracts only. No CLI production, dispose, live catalog, Fill, Gate 3.
-- UPDATE 2026-08-26 — Codex Gate 1 pass 1 **AMEND** (applied).
+- UPDATE 2026-08-26 — Codex Gate 1 ×3: pass 1 **AMEND** (applied); pass 2 **AMEND** (applied); pass 3 **AMEND** (applied: no resolve() under patched lstat; c01 uses dest-create guards; c08 forbids reading symlink target). Pass 3 did **not** land ACCEPT / ACCEPT-AS-AMENDED. Focused file **14 failed, 1 passed**.
 
