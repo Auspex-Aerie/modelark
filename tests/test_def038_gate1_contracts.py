@@ -114,43 +114,72 @@ def _leftovers(main, work: Path, dest: Path | None, extra_argv: list[str] | None
 def _list_guards(work: Path, dest: Path, extra_forbidden: list[Path] | None = None):
     forbidden = list(extra_forbidden or [])
     dest_ok = _allowed_dest_paths(dest)
-    work_ok_prefix = work.resolve()
-    dest_res = dest.resolve() if dest.exists() else dest
 
     def layout_boom(*_a, **_k):
         raise AssertionError("leftovers must not call _resolve_rehearsal_layout")
 
     real_lstat = os.lstat
+    real_stat = os.stat
+    real_open = os.open
+    real_unlink = os.unlink
+    real_mkdir = os.mkdir
+
+    def _forbid_path(path) -> bool:
+        p = Path(path)
+        return p in forbidden or p.name in {"outside.sqlite", "decoy.bin"}
 
     def lstat_hook(path, *a, **k):
         p = Path(path)
-        try:
-            resolved_parent = p.parent.resolve()
-        except OSError:
-            resolved_parent = p.parent
-        if p in forbidden or p.name == "outside.sqlite" or p.name == "decoy.bin":
+        if _forbid_path(p):
             raise AssertionError(f"must not observe {p}")
-        if dest.exists() and resolved_parent == dest.resolve() and p.name not in _LIVE_NAMES and p != dest:
+        if dest.exists() and p.parent.resolve() == dest.resolve() and p.name not in _LIVE_NAMES and p != dest:
             raise AssertionError(f"live observation limited to reserved dest names, got {p}")
         return real_lstat(path, *a, **k)
 
+    def stat_hook(path, *a, **k):
+        if _forbid_path(path):
+            raise AssertionError(f"must not stat {path}")
+        return real_stat(path, *a, **k)
+
+    def open_hook(path, flags, *a, **k):
+        p = Path(path)
+        if _forbid_path(p):
+            raise AssertionError(f"must not open {p}")
+        if dest.exists() and flags & os.O_CREAT:
+            try:
+                if p.resolve() == dest.resolve() or dest.resolve() in p.resolve().parents or p.parent.resolve() == dest.resolve():
+                    raise AssertionError("leftovers must not create/write dest")
+            except OSError:
+                pass
+        return real_open(path, flags, *a, **k)
+
+    def unlink_hook(path, *a, **k):
+        p = Path(path)
+        if dest.exists() and (p.parent.resolve() == dest.resolve() or p.resolve() == dest.resolve()):
+            raise AssertionError("leftovers must not unlink dest")
+        return real_unlink(path, *a, **k)
+
+    def mkdir_hook(path, *a, **k):
+        if dest.exists() is False and Path(path).resolve() == dest.resolve():
+            raise AssertionError("leftovers must not mkdir dest")
+        return real_mkdir(path, *a, **k)
+
     with _no_catalog_bind(), mock.patch.object(
         db, "_resolve_rehearsal_layout", side_effect=layout_boom
-    ), mock.patch.object(os, "lstat", side_effect=lstat_hook):
-        yield
+    ), mock.patch.object(os, "lstat", side_effect=lstat_hook), mock.patch.object(
+        os, "stat", side_effect=stat_hook
+    ), mock.patch.object(os, "open", side_effect=open_hook), mock.patch.object(
+        os, "unlink", side_effect=unlink_hook
+    ), mock.patch.object(os, "mkdir", side_effect=mkdir_hook):
+        yield dest_ok
 
 
 def _live_rows(payload: dict) -> list[dict]:
-    live = payload.get("live") or payload.get("observations") or []
-    if isinstance(live, dict):
-        rows = []
-        for key, val in live.items():
-            if isinstance(val, dict):
-                rows.append({"path": val.get("path", key), **val})
-            else:
-                rows.append({"path": key})
-        return rows
-    return list(live)
+    live = payload["live"]
+    assert isinstance(live, list) and len(live) == 5
+    names = {Path(item["path"]).name for item in live}
+    assert names == _LIVE_NAMES
+    return live
 
 
 def _row_named(rows: list[dict], name: str) -> dict:
@@ -166,8 +195,9 @@ def _assert_member_lstat(row: dict, path: Path, *, dest_relation: str) -> None:
     assert int(row["st_ino"]) == int(st.st_ino)
     assert int(row["st_nlink"]) == int(st.st_nlink)
     assert int(row["allocated_bytes_estimate"]) == int(st.st_blocks) * 512
-    rel = row.get("dest_relation") or row.get("live_dest_relation")
-    assert rel == dest_relation
+    assert row["dest_relation"] == dest_relation
+    assert row["present"] is True
+    assert row.get("missing") is not True
 
 
 def _valid_state(members: list[dict]) -> str:
@@ -187,6 +217,7 @@ def test_c01_leftovers_exists_without_catalog_bind_or_dest_create(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     dest = tmp_path / "dest"
+    before_work = _tree_snap(work)
     main = _load_main()
     with _no_catalog_bind():
         rc, _payload, err = _leftovers(main, work, dest)
@@ -195,6 +226,7 @@ def test_c01_leftovers_exists_without_catalog_bind_or_dest_create(tmp_path):
         with pytest.raises(SystemExit) as missing_work:
             main(["leftovers", "--dest-dir", str(dest)])
     assert dest.exists() is False
+    assert _tree_snap(work) == before_work
     assert "invalid choice" not in err.lower(), err
     assert rc in (0, 1)
     assert missing_dest.value.code not in (0, None)
@@ -270,7 +302,8 @@ def test_c04_dest_renamed_away_lists_missing_dest(tmp_path):
     assert _ident(_state_path(work)) == before_state
     dest_row = _row_named(_live_rows(payload), "catalog.sqlite")
     left = _row_named(_live_rows(payload), _RESERVED)
-    assert dest_row.get("present") is False or dest_row.get("missing") is True
+    assert dest_row["present"] is False
+    assert dest_row.get("missing") is True
     _assert_member_lstat(left, leftover, dest_relation="absent")
 
 
@@ -342,8 +375,8 @@ def test_c07_out_of_bundle_recorded_member_is_unbound(tmp_path):
     assert rc == 0, err
     assert _tree_snap(dest) == before_dest
     assert _ident(_state_path(work)) == before_state
-    recorded = payload.get("recorded") or payload.get("recorded_report") or {}
-    rec_members = recorded.get("members") if isinstance(recorded, dict) else payload.get("recorded_members")
+    recorded = payload["recorded"]
+    rec_members = recorded["members"]
     flagged = [m for m in rec_members if "outside.sqlite" in str(m.get("path"))]
     assert flagged and (flagged[0].get("unbound") or flagged[0].get("invalid"))
     for item in _live_rows(payload):
@@ -405,29 +438,38 @@ def test_c09_run_dir_symlink_race_refused(tmp_path):
     (real_run / _STATE_NAME).write_text(payload_txt)
     escaped = tmp_path / "escaped"
     escaped.mkdir()
-    (escaped / _STATE_NAME).write_text('{"evil": true}')
-    real_scandir = os.scandir
+    (escaped / _STATE_NAME).write_text(payload_txt)
+    escaped_state = escaped / _STATE_NAME
+    before_escaped = _ident(escaped_state)
+    before_dest = _tree_snap(dest)
+    real_open = os.open
     swapped = {"yes": False}
 
-    def scandir_hook(path):
-        it = real_scandir(path)
-        for entry in it:
-            yield entry
-        if Path(path).resolve() == work.resolve() and not swapped["yes"]:
+    def open_hook(path, flags, *a, dir_fd=None, **k):
+        target = Path(path)
+        if dir_fd is not None:
+            try:
+                base = Path(os.readlink(f"/proc/self/fd/{int(dir_fd)}"))
+                target = base / path
+            except OSError:
+                pass
+        if target.resolve() == escaped_state.resolve():
+            raise AssertionError("must not read escaped state file")
+        if target.name == "pub" and flags & os.O_DIRECTORY and not swapped["yes"]:
             swapped["yes"] = True
             os.rename(real_run, tmp_path / "pub-aside")
             os.symlink(escaped, real_run)
+        return real_open(path, flags, *a, dir_fd=dir_fd, **k)
 
     main = _load_main()
     with _no_catalog_bind(), mock.patch.object(
         db, "_resolve_rehearsal_layout", side_effect=AssertionError("no layout")
-    ), mock.patch.object(os, "scandir", side_effect=scandir_hook):
+    ), mock.patch.object(os, "open", side_effect=open_hook):
         rc, payload, err = _leftovers(main, work, dest)
     assert "invalid choice" not in err.lower(), err
-    assert swapped["yes"] is True
     assert rc != 0
-    blob = err + (json.dumps(payload) if payload else "")
-    assert "evil" not in blob
+    assert _ident(escaped_state) == before_escaped
+    assert _tree_snap(dest) == before_dest
 
 
 @pytest.mark.parametrize("errnum", (errno.EACCES, errno.EIO))
@@ -461,3 +503,53 @@ def test_c10_non_enoent_lstat_is_refuse_not_missing(tmp_path, errnum):
         assert dest_row is None or dest_row.get("missing") is not True
     assert _tree_snap(dest) == before_dest
     assert _ident(_state_path(work)) == before_state
+
+
+def test_c11_root_slot_state_is_accepted(tmp_path):
+    """A regular publication-slot-state.json directly under work-dir must list."""
+    work = tmp_path / "work"
+    work.mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    leftover = dest / _RESERVED
+    leftover.write_bytes(b"root-state")
+    st = leftover.lstat()
+    (work / _STATE_NAME).write_text(_valid_state([{
+        "path": str(leftover),
+        "st_dev": int(st.st_dev),
+        "st_ino": int(st.st_ino),
+        "st_nlink": int(st.st_nlink),
+        "allocated_bytes_estimate": int(st.st_blocks) * 512,
+    }]))
+    main = _load_main()
+    with _list_guards(work, dest):
+        rc, payload, err = _leftovers(main, work, dest)
+    assert rc == 0, err
+    _assert_member_lstat(
+        _row_named(_live_rows(payload), _RESERVED), leftover, dest_relation="absent"
+    )
+
+
+def test_c12_duplicate_recorded_members_refused(tmp_path):
+    """Duplicate member paths in slot-state must refuse."""
+    work = tmp_path / "work"
+    run = work / "pub"
+    run.mkdir(parents=True)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    leftover = dest / _RESERVED
+    leftover.write_bytes(b"dup")
+    st = leftover.lstat()
+    member = {
+        "path": str(leftover),
+        "st_dev": int(st.st_dev),
+        "st_ino": int(st.st_ino),
+        "st_nlink": int(st.st_nlink),
+        "allocated_bytes_estimate": int(st.st_blocks) * 512,
+    }
+    (run / _STATE_NAME).write_text(_valid_state([member, dict(member)]))
+    main = _load_main()
+    with _list_guards(work, dest):
+        rc, _payload, err = _leftovers(main, work, dest)
+    assert "invalid choice" not in err.lower(), err
+    assert rc != 0
