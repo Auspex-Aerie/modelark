@@ -1457,6 +1457,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEF-038 Gate-1 UPDATE: Leftover list CLI expected-red contracts
 - date: 2026-08-26 / status: Gate 1 contracts implemented; pending reviewer acceptance; Gate 2 not authorized / triggered_by: operator accept of Gate 0 / related: DEF-038, tests/test_def038_gate1_contracts.py, scripts/migrate_provenance.py / docs_updated: docs/decision_log.md, tests/test_def038_gate1_contracts.py
 - contracts: `tests/test_def038_gate1_contracts.py`. Expected-red **c01–c05, c07–c10** (`leftovers` missing). Retained-green **c06** no `leftovers-dispose` parser. DEF-035 contracts remain green.
-- red_evidence: focused DEF-038 file **9 failed, 1 passed**.
+- red_evidence: focused DEF-038 file **12 failed, 1 passed** after Codex pass-1 AMEND (sidecar param, dest snapshot, no dispose-parser invalid-choice, observation guards).
 - scope_boundary: Contracts only. No CLI production, dispose, live catalog, Fill, Gate 3.
+- UPDATE 2026-08-26 — Codex Gate 1 pass 1 **AMEND** (applied).
 
