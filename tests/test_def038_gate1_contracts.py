@@ -5,6 +5,7 @@ cases stay red until Gate 2. leftovers-dispose must remain absent.
 """
 from __future__ import annotations
 
+import builtins
 import errno
 import importlib.util
 import json
@@ -124,32 +125,44 @@ def _list_guards(work: Path, dest: Path, extra_forbidden: list[Path] | None = No
     real_unlink = os.unlink
     real_mkdir = os.mkdir
 
+    def _from_dirfd(path, dir_fd=None) -> Path:
+        p = Path(path)
+        if dir_fd is None:
+            return p
+        try:
+            return Path(os.readlink(f"/proc/self/fd/{int(dir_fd)}")) / path
+        except OSError:
+            return p
+
     def _forbid_path(path) -> bool:
         p = Path(path)
         return p in forbidden or p.name in {"outside.sqlite", "decoy.bin"}
 
-    def lstat_hook(path, *a, **k):
-        p = Path(path)
+    def lstat_hook(path, *a, dir_fd=None, **k):
+        p = _from_dirfd(path, dir_fd)
         if _forbid_path(p):
             raise AssertionError(f"must not observe {p}")
         if p.parent == dest and p not in dest_ok and p != dest:
             raise AssertionError(f"live observation limited to reserved dest names, got {p}")
-        return real_lstat(path, *a, **k)
+        return real_lstat(path, *a, dir_fd=dir_fd, **k)
 
-    def stat_hook(path, *a, **k):
-        if _forbid_path(path):
-            raise AssertionError(f"must not stat {path}")
-        return real_stat(path, *a, **k)
+    def stat_hook(path, *a, dir_fd=None, **k):
+        p = _from_dirfd(path, dir_fd)
+        if _forbid_path(p) or p in dest_ok:
+            raise AssertionError(f"live dest metadata must use lstat, not stat: {p}")
+        return real_stat(path, *a, dir_fd=dir_fd, **k)
 
-    def open_hook(path, flags, *a, **k):
-        p = Path(path)
+    def open_hook(path, flags, *a, dir_fd=None, **k):
+        p = _from_dirfd(path, dir_fd)
         if _forbid_path(p):
             raise AssertionError(f"must not open {p}")
+        if p in dest_ok:
+            raise AssertionError("must not open dest member contents")
         if flags & os.O_CREAT and (p == dest or p.parent == dest):
             raise AssertionError("leftovers must not create/write dest")
         if p.name == _STATE_NAME and not (flags & getattr(os, "O_NOFOLLOW", 0)):
             raise AssertionError("state open must use O_NOFOLLOW")
-        return real_open(path, flags, *a, **k)
+        return real_open(path, flags, *a, dir_fd=dir_fd, **k)
 
     def unlink_hook(path, *a, **k):
         p = Path(path)
@@ -161,6 +174,15 @@ def _list_guards(work: Path, dest: Path, extra_forbidden: list[Path] | None = No
         if Path(path) == dest:
             raise AssertionError("leftovers must not mkdir dest")
         return real_mkdir(path, *a, **k)
+
+    real_bopen = builtins.open
+
+    def bopen_hook(file, *a, **k):
+        if not isinstance(file, int):
+            p = Path(file)
+            if _forbid_path(p) or p in dest_ok or p.name == _STATE_NAME:
+                raise AssertionError("high-level open forbidden; use os.open O_NOFOLLOW")
+        return real_bopen(file, *a, **k)
 
     real_listdir = os.listdir
     real_scandir = os.scandir
@@ -183,7 +205,9 @@ def _list_guards(work: Path, dest: Path, extra_forbidden: list[Path] | None = No
         os, "unlink", side_effect=unlink_hook
     ), mock.patch.object(os, "mkdir", side_effect=mkdir_hook), mock.patch.object(
         os, "listdir", side_effect=listdir_hook
-    ), mock.patch.object(os, "scandir", side_effect=scandir_hook):
+    ), mock.patch.object(os, "scandir", side_effect=scandir_hook), mock.patch.object(
+        builtins, "open", side_effect=bopen_hook
+    ):
         yield dest_ok
 
 
@@ -472,10 +496,13 @@ def test_c09_run_dir_symlink_race_refused(tmp_path):
                 pass
         if target == escaped_state or Path(path) == escaped_state:
             raise AssertionError("must not read escaped state file")
-        if target.name == "pub" and flags & os.O_DIRECTORY and not swapped["yes"]:
-            swapped["yes"] = True
-            os.rename(real_run, tmp_path / "pub-aside")
-            os.symlink(escaped, real_run)
+        if target.name == "pub" and flags & os.O_DIRECTORY:
+            assert dir_fd is not None, "child run dir must open relative to work dirfd"
+            assert flags & getattr(os, "O_NOFOLLOW", 0)
+            if not swapped["yes"]:
+                swapped["yes"] = True
+                os.rename(real_run, tmp_path / "pub-aside")
+                os.symlink(escaped, real_run)
         return real_open(path, flags, *a, dir_fd=dir_fd, **k)
 
     main = _load_main()
@@ -500,11 +527,17 @@ def test_c10_non_enoent_lstat_is_refuse_not_missing(tmp_path, errnum):
     before_state = _ident(_state_path(work))
     real_lstat = os.lstat
 
+    fired = {"yes": False}
+
     def lstat_hook(path, *a, dir_fd=None, **k):
         p = Path(path)
         if dir_fd is not None:
-            p = Path(path)
+            try:
+                p = Path(os.readlink(f"/proc/self/fd/{int(dir_fd)}")) / path
+            except OSError:
+                p = Path(path)
         if p.parent == dest and p.name in {"catalog.sqlite", _RESERVED}:
+            fired["yes"] = True
             raise OSError(errnum, os.strerror(errnum))
         return real_lstat(path, *a, dir_fd=dir_fd, **k)
 
@@ -515,6 +548,7 @@ def test_c10_non_enoent_lstat_is_refuse_not_missing(tmp_path, errnum):
         rc, payload, err = _leftovers(main, work, dest)
     assert "invalid choice" not in err.lower(), err
     assert rc != 0
+    assert fired["yes"] is True
     if payload:
         rows = _live_rows(payload, dest)
         try:
