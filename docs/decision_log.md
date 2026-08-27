@@ -1460,4 +1460,5 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - red_evidence: focused DEF-038 file **12 failed, 1 passed** after Codex pass-1 AMEND (sidecar param, dest snapshot, no dispose-parser invalid-choice, observation guards).
 - scope_boundary: Contracts only. No CLI production, dispose, live catalog, Fill, Gate 3.
 - UPDATE 2026-08-26 — Codex Gate 1 ×3: pass 1 **AMEND** (applied); pass 2 **AMEND** (applied); pass 3 **AMEND** (applied: no resolve() under patched lstat; c01 uses dest-create guards; c08 forbids reading symlink target). Pass 3 did **not** land ACCEPT / ACCEPT-AS-AMENDED. Focused file **14 failed, 1 passed**.
+- UPDATE 2026-08-27 — Codex Gate 1 round 2 ×3: **AMEND / AMEND / AMEND** (applied). Pass 3 did **not** land ACCEPT. Codex is still expanding test guards (io.open, dirfd anchoring, per-name EACCES), not rejecting the list-only product. Focused file **16 failed, 1 passed**.
 

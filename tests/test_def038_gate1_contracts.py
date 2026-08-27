@@ -8,8 +8,10 @@ from __future__ import annotations
 import builtins
 import errno
 import importlib.util
+import io
 import json
 import os
+import sqlite3
 from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path
@@ -175,14 +177,26 @@ def _list_guards(work: Path, dest: Path, extra_forbidden: list[Path] | None = No
             raise AssertionError("leftovers must not mkdir dest")
         return real_mkdir(path, *a, **k)
 
-    real_bopen = builtins.open
+    real_ioopen = io.open
 
-    def bopen_hook(file, *a, **k):
+    def _high_level_open(file, *a, **k):
         if not isinstance(file, int):
             p = Path(file)
             if _forbid_path(p) or p in dest_ok or p.name == _STATE_NAME:
                 raise AssertionError("high-level open forbidden; use os.open O_NOFOLLOW")
-        return real_bopen(file, *a, **k)
+        return real_ioopen(file, *a, **k)
+
+    def bopen_hook(file, *a, **k):
+        return _high_level_open(file, *a, **k)
+
+    real_connect = sqlite3.connect
+
+    def connect_hook(database, *a, **k):
+        if not isinstance(database, int):
+            p = Path(str(database).split("?", 1)[0].removeprefix("file:"))
+            if p in dest_ok:
+                raise AssertionError("must not sqlite3.connect dest members")
+        return real_connect(database, *a, **k)
 
     real_listdir = os.listdir
     real_scandir = os.scandir
@@ -207,6 +221,8 @@ def _list_guards(work: Path, dest: Path, extra_forbidden: list[Path] | None = No
         os, "listdir", side_effect=listdir_hook
     ), mock.patch.object(os, "scandir", side_effect=scandir_hook), mock.patch.object(
         builtins, "open", side_effect=bopen_hook
+    ), mock.patch.object(io, "open", side_effect=_high_level_open), mock.patch.object(
+        sqlite3, "connect", side_effect=connect_hook
     ):
         yield dest_ok
 
@@ -485,6 +501,7 @@ def test_c09_run_dir_symlink_race_refused(tmp_path):
     before_dest = _tree_snap(dest)
     real_open = os.open
     swapped = {"yes": False}
+    work_id = os.stat(work)
 
     def open_hook(path, flags, *a, dir_fd=None, **k):
         target = Path(path)
@@ -498,6 +515,12 @@ def test_c09_run_dir_symlink_race_refused(tmp_path):
             raise AssertionError("must not read escaped state file")
         if target.name == "pub" and flags & os.O_DIRECTORY:
             assert dir_fd is not None, "child run dir must open relative to work dirfd"
+            assert not os.path.isabs(str(path)), "child path must be relative to work dirfd"
+            wst = os.fstat(dir_fd)
+            assert (int(wst.st_dev), int(wst.st_ino)) == (
+                int(work_id.st_dev),
+                int(work_id.st_ino),
+            )
             assert flags & getattr(os, "O_NOFOLLOW", 0)
             if not swapped["yes"]:
                 swapped["yes"] = True
@@ -517,8 +540,9 @@ def test_c09_run_dir_symlink_race_refused(tmp_path):
     assert _tree_snap(dest) == before_dest
 
 
+@pytest.mark.parametrize("target_name", sorted(_LIVE_NAMES))
 @pytest.mark.parametrize("errnum", (errno.EACCES, errno.EIO))
-def test_c10_non_enoent_lstat_is_refuse_not_missing(tmp_path, errnum):
+def test_c10_non_enoent_lstat_is_refuse_not_missing(tmp_path, errnum, target_name):
     """Non-ENOENT lstat on dest catalog must refuse, not look like missing."""
     _data, _report, work = _rehearse_ok(tmp_path)
     dest = tmp_path / "dest"
@@ -536,7 +560,7 @@ def test_c10_non_enoent_lstat_is_refuse_not_missing(tmp_path, errnum):
                 p = Path(os.readlink(f"/proc/self/fd/{int(dir_fd)}")) / path
             except OSError:
                 p = Path(path)
-        if p.parent == dest and p.name in {"catalog.sqlite", _RESERVED}:
+        if p.parent == dest and p.name == target_name:
             fired["yes"] = True
             raise OSError(errnum, os.strerror(errnum))
         return real_lstat(path, *a, dir_fd=dir_fd, **k)
