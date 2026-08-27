@@ -1452,4 +1452,11 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - proposed_gate1_contracts: `tests/test_def038_gate1_contracts.py` expected-red: c01 parser + no configure/connect + no dest mutation/create; c02 occupied leftover listed; c03 success extra hardlink listed; c04 dest renamed away; c05 sidecar neighbor; c06 no dispose parser; c07 unbound recorded member; c08 state symlink; c09 child-dir symlink race; c10 non-ENOENT lstat is refuse not missing.
 - scope_boundary: Gate 0 bookkeeping only. No CLI production, dispose, DEF-037, portal, live catalog, Fill, Gate 3. Greptile omitted (DEC-062).
 - UPDATE 2026-08-26 — Codex ×3: pass 1 **REJECT** (dispose ABA — applied: list-only); pass 2 **ACCEPT-AS-AMENDED**; pass 3 **ACCEPT-AS-AMENDED** (fd-walk resolver; ENOENT vs observation error).
+- UPDATE 2026-08-26 — **DEF-038 Gate 0 accepted at `fc5e728`.** Operator accept. Gate 1 authorized (list-only contracts). Dispose remains deferred. Live catalog still off-limits.
+
+### DEF-038 Gate-1 UPDATE: Leftover list CLI expected-red contracts
+- date: 2026-08-26 / status: Gate 1 contracts implemented; pending reviewer acceptance; Gate 2 not authorized / triggered_by: operator accept of Gate 0 / related: DEF-038, tests/test_def038_gate1_contracts.py, scripts/migrate_provenance.py / docs_updated: docs/decision_log.md, tests/test_def038_gate1_contracts.py
+- contracts: `tests/test_def038_gate1_contracts.py`. Expected-red **c01–c05, c07–c10** (`leftovers` missing). Retained-green **c06** no `leftovers-dispose` parser. DEF-035 contracts remain green.
+- red_evidence: focused DEF-038 file **9 failed, 1 passed**.
+- scope_boundary: Contracts only. No CLI production, dispose, live catalog, Fill, Gate 3.
 
