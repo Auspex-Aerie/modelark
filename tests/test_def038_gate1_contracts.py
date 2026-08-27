@@ -147,6 +147,8 @@ def _list_guards(work: Path, dest: Path, extra_forbidden: list[Path] | None = No
             raise AssertionError(f"must not open {p}")
         if flags & os.O_CREAT and (p == dest or p.parent == dest):
             raise AssertionError("leftovers must not create/write dest")
+        if p.name == _STATE_NAME and not (flags & getattr(os, "O_NOFOLLOW", 0)):
+            raise AssertionError("state open must use O_NOFOLLOW")
         return real_open(path, flags, *a, **k)
 
     def unlink_hook(path, *a, **k):
@@ -160,21 +162,38 @@ def _list_guards(work: Path, dest: Path, extra_forbidden: list[Path] | None = No
             raise AssertionError("leftovers must not mkdir dest")
         return real_mkdir(path, *a, **k)
 
+    real_listdir = os.listdir
+    real_scandir = os.scandir
+
+    def listdir_hook(path):
+        if Path(path) == dest:
+            raise AssertionError("must not enumerate dest")
+        return real_listdir(path)
+
+    def scandir_hook(path):
+        if Path(path) == dest:
+            raise AssertionError("must not enumerate dest")
+        return real_scandir(path)
+
     with _no_catalog_bind(), mock.patch.object(
         db, "_resolve_rehearsal_layout", side_effect=layout_boom
     ), mock.patch.object(os, "lstat", side_effect=lstat_hook), mock.patch.object(
         os, "stat", side_effect=stat_hook
     ), mock.patch.object(os, "open", side_effect=open_hook), mock.patch.object(
         os, "unlink", side_effect=unlink_hook
-    ), mock.patch.object(os, "mkdir", side_effect=mkdir_hook):
+    ), mock.patch.object(os, "mkdir", side_effect=mkdir_hook), mock.patch.object(
+        os, "listdir", side_effect=listdir_hook
+    ), mock.patch.object(os, "scandir", side_effect=scandir_hook):
         yield dest_ok
 
 
-def _live_rows(payload: dict) -> list[dict]:
+def _live_rows(payload: dict, dest: Path) -> list[dict]:
     live = payload["live"]
     assert isinstance(live, list) and len(live) == 5
     names = {Path(item["path"]).name for item in live}
     assert names == _LIVE_NAMES
+    for item in live:
+        assert Path(item["path"]) == dest / Path(item["path"]).name
     return live
 
 
@@ -250,7 +269,7 @@ def test_c02_occupied_leftover_listed_absent_from_dest(tmp_path):
     assert rc == 0, err
     assert _tree_snap(dest) == before_dest
     assert _ident(_state_path(work)) == before_state
-    row = _row_named(_live_rows(payload), _RESERVED)
+    row = _row_named(_live_rows(payload, dest), _RESERVED)
     _assert_member_lstat(row, leftover, dest_relation="absent")
 
 
@@ -269,8 +288,8 @@ def test_c03_success_extra_hardlink_listed(tmp_path):
     assert rc == 0, err
     assert _tree_snap(dest) == before_dest
     assert _ident(_state_path(work)) == before_state
-    left = _row_named(_live_rows(payload), _RESERVED)
-    dest_row = _row_named(_live_rows(payload), "catalog.sqlite")
+    left = _row_named(_live_rows(payload, dest), _RESERVED)
+    dest_row = _row_named(_live_rows(payload, dest), "catalog.sqlite")
     st_l = leftover.lstat()
     st_d = dest_cat.lstat()
     assert (st_l.st_dev, st_l.st_ino) == (st_d.st_dev, st_d.st_ino)
@@ -296,10 +315,14 @@ def test_c04_dest_renamed_away_lists_missing_dest(tmp_path):
     assert rc == 0, err
     assert _tree_snap(dest) == before_dest
     assert _ident(_state_path(work)) == before_state
-    dest_row = _row_named(_live_rows(payload), "catalog.sqlite")
-    left = _row_named(_live_rows(payload), _RESERVED)
+    dest_row = _row_named(_live_rows(payload, dest), "catalog.sqlite")
+    left = _row_named(_live_rows(payload, dest), _RESERVED)
     assert dest_row["present"] is False
-    assert dest_row.get("missing") is True
+    assert dest_row["missing"] is True
+    for name in (_RESERVED + s for s in _SIDECARS):
+        row = _row_named(_live_rows(payload, dest), name)
+        assert row["present"] is False
+        assert row["missing"] is True
     _assert_member_lstat(left, leftover, dest_relation="absent")
 
 
@@ -323,7 +346,7 @@ def test_c05_sidecar_neighbor_listed(tmp_path, suffix):
     assert rc == 0, err
     assert _tree_snap(dest) == before_dest
     assert _ident(_state_path(work)) == before_state
-    row = _row_named(_live_rows(payload), sidecar.name)
+    row = _row_named(_live_rows(payload, dest), sidecar.name)
     _assert_member_lstat(row, sidecar, dest_relation="absent")
 
 
@@ -374,8 +397,8 @@ def test_c07_out_of_bundle_recorded_member_is_unbound(tmp_path):
     recorded = payload["recorded"]
     rec_members = recorded["members"]
     flagged = [m for m in rec_members if "outside.sqlite" in str(m.get("path"))]
-    assert flagged and (flagged[0].get("unbound") or flagged[0].get("invalid"))
-    for item in _live_rows(payload):
+    assert flagged and flagged[0].get("unbound") is True
+    for item in _live_rows(payload, dest):
         assert Path(item["path"]).name in _LIVE_NAMES
 
 
@@ -447,7 +470,7 @@ def test_c09_run_dir_symlink_race_refused(tmp_path):
                 target = base / path
             except OSError:
                 pass
-        if target.resolve() == escaped_state.resolve():
+        if target == escaped_state or Path(path) == escaped_state:
             raise AssertionError("must not read escaped state file")
         if target.name == "pub" and flags & os.O_DIRECTORY and not swapped["yes"]:
             swapped["yes"] = True
@@ -461,6 +484,7 @@ def test_c09_run_dir_symlink_race_refused(tmp_path):
     ), mock.patch.object(os, "open", side_effect=open_hook):
         rc, payload, err = _leftovers(main, work, dest)
     assert "invalid choice" not in err.lower(), err
+    assert swapped["yes"] is True
     assert rc != 0
     assert _ident(escaped_state) == before_escaped
     assert _tree_snap(dest) == before_dest
@@ -476,10 +500,13 @@ def test_c10_non_enoent_lstat_is_refuse_not_missing(tmp_path, errnum):
     before_state = _ident(_state_path(work))
     real_lstat = os.lstat
 
-    def lstat_hook(path, *a, **k):
-        if Path(path).name == "catalog.sqlite" and Path(path).parent.resolve() == dest.resolve():
+    def lstat_hook(path, *a, dir_fd=None, **k):
+        p = Path(path)
+        if dir_fd is not None:
+            p = Path(path)
+        if p.parent == dest and p.name in {"catalog.sqlite", _RESERVED}:
             raise OSError(errnum, os.strerror(errnum))
-        return real_lstat(path, *a, **k)
+        return real_lstat(path, *a, dir_fd=dir_fd, **k)
 
     main = _load_main()
     with _no_catalog_bind(), mock.patch.object(
@@ -489,7 +516,7 @@ def test_c10_non_enoent_lstat_is_refuse_not_missing(tmp_path, errnum):
     assert "invalid choice" not in err.lower(), err
     assert rc != 0
     if payload:
-        rows = _live_rows(payload)
+        rows = _live_rows(payload, dest)
         try:
             dest_row = _row_named(rows, "catalog.sqlite")
         except AssertionError:
@@ -520,7 +547,7 @@ def test_c11_root_slot_state_is_accepted(tmp_path):
         rc, payload, err = _leftovers(main, work, dest)
     assert rc == 0, err
     _assert_member_lstat(
-        _row_named(_live_rows(payload), _RESERVED), leftover, dest_relation="absent"
+        _row_named(_live_rows(payload, dest), _RESERVED), leftover, dest_relation="absent"
     )
 
 
@@ -547,3 +574,56 @@ def test_c12_duplicate_recorded_members_refused(tmp_path):
         rc, _payload, err = _leftovers(main, work, dest)
     assert "invalid choice" not in err.lower(), err
     assert rc != 0
+
+
+def test_c13_live_different_inode_when_dest_and_leftover_are_distinct(tmp_path):
+    """Dest catalog present with a different inode from leftover is different_inode."""
+    work = tmp_path / "work"
+    run = work / "pub"
+    run.mkdir(parents=True)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    leftover = dest / _RESERVED
+    leftover.write_bytes(b"leftover-copy")
+    dest_cat = dest / "catalog.sqlite"
+    dest_cat.write_bytes(b"other-catalog-bytes")
+    st = leftover.lstat()
+    (run / _STATE_NAME).write_text(_valid_state([{
+        "path": str(leftover),
+        "st_dev": int(st.st_dev),
+        "st_ino": int(st.st_ino),
+        "st_nlink": int(st.st_nlink),
+        "allocated_bytes_estimate": int(st.st_blocks) * 512,
+    }]))
+    main = _load_main()
+    with _list_guards(work, dest):
+        rc, payload, err = _leftovers(main, work, dest)
+    assert rc == 0, err
+    _assert_member_lstat(
+        _row_named(_live_rows(payload, dest), _RESERVED), leftover, dest_relation="different_inode"
+    )
+
+
+def test_c14_dangling_symlink_leftover_uses_lstat(tmp_path):
+    """A dangling reserved symlink is listed by lstat identity, not followed."""
+    work = tmp_path / "work"
+    run = work / "pub"
+    run.mkdir(parents=True)
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    leftover = dest / _RESERVED
+    leftover.symlink_to(dest / "missing-target")
+    st = leftover.lstat()
+    (run / _STATE_NAME).write_text(_valid_state([{
+        "path": str(leftover),
+        "st_dev": int(st.st_dev),
+        "st_ino": int(st.st_ino),
+        "st_nlink": int(st.st_nlink),
+        "allocated_bytes_estimate": int(st.st_blocks) * 512,
+    }]))
+    main = _load_main()
+    with _list_guards(work, dest):
+        rc, payload, err = _leftovers(main, work, dest)
+    assert rc == 0, err
+    row = _row_named(_live_rows(payload, dest), _RESERVED)
+    _assert_member_lstat(row, leftover, dest_relation="absent")
