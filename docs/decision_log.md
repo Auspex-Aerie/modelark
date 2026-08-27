@@ -1467,4 +1467,5 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - production: `modelark-provenance-migrate leftovers --work-dir --dest-dir` calls `list_publication_leftovers`. Read-only. No dispose. Work-dir fd walk, `O_NOFOLLOW` state, live `lstat` of dest `catalog.sqlite` plus reserved staging bundle. Out-of-bundle recorded paths marked `unbound`. Live catalog not opened.
 - evidence: DEF-038 contracts **25 passed**; INC-034/035/036 focused **21 passed**. Codex ×3 on production: **ACCEPT / ACCEPT / ACCEPT**.
 - scope_boundary: List only. No dispose, DEF-037, portal, live catalog, Fill, Gate 3.
+- UPDATE 2026-08-27 — **Gate 2 accepted; production frozen at `b8895d2`.** Operator accept. Frozen production tip: `b8895d2` (`b8895d2120d37c0eeb79b7d417150a4e59d36f91`). Further DEF-038 production requires a new gate cycle. Dispose remains deferred. Does not authorize live catalog, Fill, drives, Gate 3, ready/merge. Greptile omitted (DEC-062).
 
