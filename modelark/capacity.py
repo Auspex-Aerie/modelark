@@ -1028,17 +1028,26 @@ def _unknown_evidence_failures(
     mode: CapacityMode,
     solver_inp: placement.SolverInput,
 ) -> tuple[CapacityFailure, ...]:
-    """Project fail-closed unknown evidence onto CapacityFailure rows (evidence_code preserved)."""
-    unknown = [d for d in capacity_drives if not d.evidence.executable]
+    """Project unknown evidence for canonical placement targets, not historical plan membership.
+
+    ``capacity_drives`` intentionally retains lost/excluded members so their ledgers stay visible.
+    Diagnostic ``eligible_drives`` has the narrower placement meaning, so derive that relation from
+    the already-canonical candidate set consumed by Gate B (INC-044).
+    """
+    requirement_by_target: dict[str, str] = {}
+    for requirement_id, candidate_rows in solver_inp.candidates.by_requirement:
+        for candidate in candidate_rows:
+            requirement_by_target.setdefault(candidate.target_drive, requirement_id)
+    target_labels = set(requirement_by_target)
+    unknown = [
+        drive for drive in capacity_drives
+        if drive.drive_label in target_labels and not drive.evidence.executable
+    ]
     if not unknown:
-        unknown = list(capacity_drives)
-    rid = None
-    for req_id, cs in solver_inp.candidates.by_requirement:
-        if cs:
-            rid = req_id
-            break
-    if rid is None and solver_inp.graph.desired:
-        rid = solver_inp.graph.desired[0].requirement_id
+        # A CAPACITY_EVIDENCE_UNKNOWN Gate-B result should always identify at least one unknown
+        # candidate target. Preserve a typed compatibility row if evidence classification changes,
+        # but never widen it to non-candidate historical drives.
+        unknown = [drive for drive in capacity_drives if drive.drive_label in target_labels]
     out: list[CapacityFailure] = []
     for drive in unknown:
         # Not CAPACITY_*_SHORT — Gate-1 forbids projecting CAPACITY_EVIDENCE_UNKNOWN as a
@@ -1048,7 +1057,7 @@ def _unknown_evidence_failures(
         out.append(CapacityFailure(
             code=FailureCode.CAPACITY_EVIDENCE_UNKNOWN,
             capacity_mode=mode,
-            requirement_id=rid,
+            requirement_id=requirement_by_target.get(drive.drive_label),
             task_ids=(),
             target_tier=_drive_tier(drive),
             eligible_drives=(drive.drive_label,),
