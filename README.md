@@ -225,6 +225,13 @@ prepare drives, migrate a catalog, or enable fill auto-resume. Add `--resume-fil
 plan, drives, migrated data, and rollback path have been checked; starting that unit can continue
 large downloads. See the full [deployment and rollback guide](docs/deployment.md).
 
+**Upgrading an existing installation:** fresh installs need no migration, but the current binary
+deliberately refuses to open an existing pre-v7 catalog. ModelArk 0.2.0 users therefore perform one
+stopped, backup-first, side-by-side provenance migration before restarting. It preserves the catalog
+and git-annex map locator without touching archive bytes or starting Fill. See
+[Upgrading ModelArk](docs/upgrading.md) and the detailed
+[provenance live-cutover runbook](docs/provenance-live-cutover.md).
+
 The current ZipNN dependency makes the first environment large—typically 4–5 GB on Linux because
 upstream pulls Torch and may pull CUDA/NVIDIA packages. ModelArk does not require a GPU. `DEF-014`
 tracks the smaller standalone StreamZNN package.

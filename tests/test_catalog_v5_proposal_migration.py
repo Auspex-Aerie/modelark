@@ -231,6 +231,31 @@ def test_migrate_v4_to_v5_adds_five_tables_and_seeds_planner_state(tmp_path):
     con.close()
 
 
+def test_v5_planner_state_bootstrap_timestamp_is_canonical(tmp_path):
+    """An old catalog migrated twice must not acquire wall-clock-dependent content identity."""
+    _seed_v4(tmp_path)
+    con = _reopen_raw()
+    con.execute("PRAGMA foreign_keys=OFF")
+    db._migrate_proposal_control_v5(con, backup_existing=False)
+    row = con.execute(
+        "SELECT singleton_id,planner_revision,active_approved_proposal_id,"
+        "next_fencing_token,updated_at FROM planner_state WHERE singleton_id=1"
+    ).fetchone()
+    con.close()
+    assert row == (1, 0, None, 0, "1970-01-01 00:00:00"), row
+
+
+def test_fresh_planner_state_bootstrap_timestamp_matches_migration(tmp_path):
+    db.configure(tmp_path, tmp_path / "state")
+    con = db.connect()
+    row = con.execute(
+        "SELECT singleton_id,planner_revision,active_approved_proposal_id,"
+        "next_fencing_token,updated_at FROM planner_state WHERE singleton_id=1"
+    ).fetchone()
+    con.close()
+    assert row == (1, 0, None, 0, "1970-01-01 00:00:00"), row
+
+
 def test_v5_backup_precedes_every_v5_object(tmp_path):
     _seed_v4(tmp_path)
     db.migrate_existing_catalog().close()

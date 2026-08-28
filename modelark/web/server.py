@@ -18,7 +18,7 @@ from urllib.parse import parse_qs, urlparse, urlsplit
 from modelark.core import platform as osplat
 from modelark.core import telemetry
 from modelark import plan, wishlist
-from modelark.web import (catalog_api, data, disk_api, fill_api, fill_worker,
+from modelark.web import (catalog_api, data, disk_api, drive_api, fill_api, fill_worker,
                                  library_api, plan_api, selection_api, verify_api)
 
 
@@ -125,6 +125,11 @@ class Handler(BaseHTTPRequestHandler):
         refused = isinstance(result, dict) and result.get("refused")
         self._json(result, 409 if refused else 200)
 
+    def _mutation_result(self, result):
+        """Return typed mutation refusals as conflicts without hiding their evidence."""
+        refused = isinstance(result, dict) and result.get("refused")
+        self._json(result, 409 if refused else 200)
+
     def _request_authority(self) -> tuple[str, int] | None:
         authority = _authority(self.headers.get("Host"))
         if authority is None or authority[1] != self.server.server_port:
@@ -187,6 +192,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(selection_api.summary())
             elif u.path == "/api/disk":
                 self._json(disk_api.disk())
+            elif u.path == "/api/drives":
+                self._json(drive_api.overview())
+            elif u.path == "/api/drive/loss-preview":
+                self._json(drive_api.loss_preview((p.get("drive_label") or [""])[0]))
             elif u.path == "/api/meta":
                 self._json({"os": osplat.OS_LABEL, "smart_supported": osplat.SMART_SUPPORTED})
             elif u.path == "/api/library":
@@ -292,6 +301,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(plan_api.set_capacity_mode(body))
             elif u.path == "/api/plan/provisioning":
                 self._json(plan_api.set_provisioning(body))
+            elif u.path == "/api/drive/declare-lost":
+                self._mutation_result(drive_api.declare_lost(body))
             elif u.path == "/api/verify/run":
                 self._json(verify_api.run(body))
             else:

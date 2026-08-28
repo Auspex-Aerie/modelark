@@ -264,7 +264,8 @@ def _archived_facts(
     drive_ph = ",".join("?" for _ in drive_labels)
     file_ph = ",".join("?" for _ in rfilenames)
     rows = con.execute(
-        "SELECT repo_id,drive_label,rfilename,orig_sha256,orig_bytes,stored_bytes,annex_key FROM archived "
+        "SELECT repo_id,drive_label,rfilename,orig_sha256,orig_bytes,stored_bytes,annex_key,compressed "
+        "FROM archived "
         f"WHERE repo_id IN ({repo_ph}) AND drive_label IN ({drive_ph}) AND rfilename IN ({file_ph}) "
         "ORDER BY repo_id,drive_label,rfilename",
         [*repo_ids, *drive_labels, *rfilenames],
@@ -274,6 +275,7 @@ def _archived_facts(
             repo_id=row[0], drive_label=row[1], rfilename=row[2], orig_sha256=row[3],
             orig_bytes=(int(row[4]) if row[4] is not None else None),
             stored_bytes=(int(row[5]) if row[5] is not None else None), annex_key=row[6],
+            compressed=bool(row[7]),
         )
         for row in rows
     )

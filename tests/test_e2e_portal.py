@@ -479,6 +479,107 @@ def _blocked_selection_flow(pg) -> None:
     print("  blocked-selection notice + Dismiss/Replan contracts exercised")
 
 
+def _drive_loss_flow(pg) -> None:
+    """Exercise DEC-069 entirely through mocked observations; never enumerate test-host disks."""
+    inventory = {
+        "ok": True,
+        "planner_revision": 11,
+        "inventory_available": True,
+        "observation_authority": "advisory_only",
+        "message": "Attached inventory is observation only.",
+        "registered": [{
+            "drive_label": "drive-02", "lifecycle": "active", "eligibility": "enabled",
+            "identity_epoch": 3, "identity_fingerprint": "b" * 64,
+            "serial": "FAILED-SERIAL", "hw_model": "old disk",
+            "capacity_bytes": 4_000_000_000_000, "last_seen": "2026-08-01",
+            "observation": "not_attached", "device": None,
+            "plans": [{"plan_id": "ark", "is_active": True}],
+        }],
+        "unregistered": [{
+            "dev": "/dev/mock-seagate", "size": "7.3T", "model": "Seagate 8TB",
+            "serial": "NEW-SEAGATE", "bus": "usb", "spinning": True,
+            "observation": "unregistered", "action_taken": False,
+        }],
+    }
+    preview = {
+        "ok": True,
+        "preview": {
+            "drive_label": "drive-02", "planner_revision": 11,
+            "identity_epoch": 3, "identity_fingerprint": "b" * 64,
+            "archived_rows": 120, "archived_repositories": 40,
+            "replica_rows": 120, "confirmation": "DECLARE LOST drive-02",
+            "warning": "Not currently observed means offline or missing only.",
+        },
+    }
+    response = {
+        "ok": True,
+        "transition": {
+            "drive_label": "drive-02", "lifecycle": "lost", "eligibility": "excluded",
+            "planner_revision": 12,
+        },
+        "after": {
+            "totals": {"capacity": 5_000_000_000_000},
+            "replan": {
+                "root_code": "CAPACITY_EVIDENCE_UNKNOWN", "feasible": False,
+                "executable_tasks": 0, "target_counts": {}, "planner_revision": 12,
+            },
+            "replan_error": None,
+        },
+    }
+    submitted = []
+    smart_requests = []
+
+    pg.route("**/api/drives", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(inventory)))
+    pg.route("**/api/drive/loss-preview**", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(preview)))
+
+    def declare(route):
+        submitted.append(route.request.post_data_json)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(response))
+
+    pg.route("**/api/drive/declare-lost", declare)
+    pg.route("**/api/disk", lambda route: (
+        smart_requests.append(True),
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({"drives": []})),
+    ))
+
+    pg.click("button[data-view='disk']")
+    pg.wait_for_selector(".driveproblem")
+    text = pg.inner_text("#driveBody")
+    assert "drive-02" in text and "not attached" in text.lower()
+    assert "Seagate 8TB" in text and "unregistered" in text.lower()
+    assert smart_requests == [], "opening Drives must not run SMART"
+
+    pg.click(".driveproblem")
+    pg.wait_for_selector("#driveLossModal", state="visible")
+    assert "offline or missing only" in pg.inner_text("#driveLossWarning")
+    pg.click("#driveLossCancel")
+    assert submitted == [], "cancel must be a no-op"
+
+    pg.click(".driveproblem")
+    pg.fill("#driveLossConfirm", "DECLARE LOST drive-02")
+    assert pg.locator("#driveLossApply").is_enabled()
+    pg.click("#driveLossApply")
+    pg.wait_for_selector("#driveEvent", state="visible")
+    assert submitted == [{
+        "drive_label": "drive-02", "expected_revision": 11,
+        "expected_identity_epoch": 3, "expected_identity_fingerprint": "b" * 64,
+        "confirmation": "DECLARE LOST drive-02",
+    }]
+    event = pg.inner_text("#driveEvent")
+    assert "replanned at revision 12" in event
+    assert "CAPACITY_EVIDENCE_UNKNOWN" in event and "lost-drive targets 0" in event
+    assert smart_requests == [], "loss/replan must not implicitly run SMART"
+
+    for pattern in (
+        "**/api/drives", "**/api/drive/loss-preview**", "**/api/drive/declare-lost",
+        "**/api/disk",
+    ):
+        pg.unroute(pattern)
+    print("  advisory drive discovery + cancel + exact loss/replan UI exercised without SMART")
+
+
 def _browser_flow() -> None:
     """Drive the portal in a headless browser: clear the #35 plan-gate by selecting `ark`, open the
     Catalog, tick the giant, and confirm the over-cap banner shows + dismisses. Patient waits per step
@@ -575,26 +676,30 @@ def _browser_flow() -> None:
             assert "demo/small-llm" in pg.inner_text("#libBody")
             print("  library repository search + clickable multi-drive filters rendered")
 
-            # 4. open Catalog, wait for rows, confirm the giant is there
+            # 4. Rehearse drive discovery and the operator-confirmed loss flow with browser-level
+            # mock hardware evidence. No request reaches the host inventory or SMART endpoint.
+            _drive_loss_flow(pg)
+
+            # 5. open Catalog, wait for rows, confirm the giant is there
             pg.click("button[data-view='catalog']")
             time.sleep(2)
             pg.wait_for_selector("#tbody tr")
             assert pg.query_selector("tr[data-id='demo/giant-llm']"), "giant row missing from catalog"
             print("  catalog rendered")
-            # 5. tick the giant -> the over-cap banner should appear
+            # 6. tick the giant -> the over-cap banner should appear
             pg.check("tr[data-id='demo/giant-llm'] input[type=checkbox]")
             time.sleep(3)                                # selection round-trip + renderBudget
             pg.wait_for_selector("#capWarn", state="visible")
             msg = pg.inner_text("#capWarnMsg")
             assert "24-hour" in msg and "considerate" in msg, f"unexpected banner text: {msg!r}"
             print("  over-cap banner shown")
-            # 6. dismiss hides it
+            # 7. dismiss hides it
             pg.click("#capWarnDismiss")
             time.sleep(1)
             pg.wait_for_selector("#capWarn", state="hidden")
             print("  banner dismissed")
 
-            # 7. A bounded transport retry must be visibly identified as network work, with its
+            # 8. A bounded transport retry must be visibly identified as network work, with its
             # attempt count, instead of looking like rapid model churn or an unexplained stall.
             retry_status = {
                 "status": "running", "running": True, "phase": "primary",
@@ -620,7 +725,7 @@ def _browser_flow() -> None:
             pg.unroute("**/api/fill/status")
             print("  transient retry reason + attempt count rendered")
 
-            # 8. the same public hook used by the live Fill poll must show typed terminals without a
+            # 9. the same public hook used by the live Fill poll must show typed terminals without a
             # reload; verify the operator-facing evidence/action surface, not merely DOM presence.
             pg.evaluate("""
                 window.MA.showFillTerminal({
@@ -639,7 +744,7 @@ def _browser_flow() -> None:
             assert "add_capacity" in pg.inner_text("#oopsieActions")
             print("  live typed fill terminal shown")
 
-            # 9. A gated repository is first-class interactive state: the retained notice toasts,
+            # 10. A gated repository is first-class interactive state: the retained notice toasts,
             # the second encounter displays the bounded prompt and a fixed-origin HF link, and the
             # operator decision is posted with the prompt id (stale tabs cannot answer a later one).
             pg.evaluate("document.getElementById('oopsieModal').hidden = true")
@@ -683,7 +788,7 @@ def _browser_flow() -> None:
             pg.unroute("**/api/fill/status")
             print("  gated toast + retry/skip prompt rendered and resolved")
 
-            # 10. PR-01 portal mutation guard (RFC-002/DEC-049 #39 slice 1), tests-first: a selection
+            # 11. PR-01 portal mutation guard (RFC-002/DEC-049 #39 slice 1), tests-first: a selection
             # removal the server refuses with a typed HTTP 409 must hold the prior checked/selected
             # appearance and surface the refusal — WITHOUT issuing any rollback GET (no /api/models
             # reload, no selection-summary refetch), since a refused mutation changed nothing canonical

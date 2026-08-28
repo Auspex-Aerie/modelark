@@ -995,7 +995,7 @@ def test_baseline_archived_evidence_drift_refuses_approve():
 
 
 def test_missing_catalog_identity_does_not_satisfy_baseline():
-    """Greptile P1: files without sha256 and size_bytes never count as complete archives."""
+    """Files without sha256 and size never satisfy or become executable placement work."""
     prop = _proposal()
     con = _mem()
     _seed_selection(con)
@@ -1014,7 +1014,12 @@ def test_missing_catalog_identity_does_not_satisfy_baseline():
         "SELECT row_kind FROM proposal_tasks WHERE proposal_id=?", [pid]).fetchall()]
     assert "baseline_satisfied" not in kinds, (
         f"filename-only archive must not satisfy baseline; kinds={kinds}")
-    assert "executable" in kinds, kinds
+    # DEC-067: the proposal consumes canonical provenance decisions.  An existing same-name row
+    # cannot be safely overwritten or budgeted when catalog identity is absent, so this is a typed
+    # fail-closed plan rather than executable work from the retired proposal-only planner.
+    assert "executable" not in kinds, kinds
+    loaded = prop.load_proposal(con, pid)
+    assert loaded["gate_b_code"] == "UNPROVEN_PROVENANCE"
 
 
 def test_default_evidence_is_not_catalog_free_as_live():

@@ -114,8 +114,14 @@ archive recovery proof.
 
 ## Updating or removing the service
 
-After pulling a reviewed release, rerun `python3 scripts/deploy.py` with the same explicit paths and
-resume choice, review the generated unit, then add `--start` to restart onto the new package.
+Before updating, check [`upgrading.md`](upgrading.md). A fresh install or already-current catalog can
+be redeployed normally. An existing pre-v7 catalog—including ModelArk 0.2.0's schema-v2 catalog—must
+complete the stopped, side-by-side provenance migration before the new service starts; the new binary
+will refuse rather than auto-migrate it.
+
+After pulling a reviewed release with no pending catalog migration, rerun `python3 scripts/deploy.py`
+with the same explicit paths and resume choice, review the generated unit, then add `--start` to
+restart onto the new package.
 
 To remove supervision without deleting data:
 

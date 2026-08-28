@@ -289,7 +289,7 @@ def plan_placements(con, repos: list[str] | None = None, plan_id: str | None = N
 
 
 def _reconciled_projection(con, repos, plan_id, capacity_mode):
-    """Build one read-only graph/ledger snapshot using live free space where it is observable."""
+    """Compatibility adapter over the one first-class planning authority (DEC-067)."""
     if plan_id is None:
         row = con.execute(
             "SELECT plan_id FROM plans WHERE is_active ORDER BY plan_id LIMIT 1"
@@ -297,17 +297,12 @@ def _reconciled_projection(con, repos, plan_id, capacity_mode):
         if row is None:
             raise ValueError("no active plan; select a plan before requesting library placement")
         plan_id = row[0]
-    labels = [row[0] for row in con.execute(
-        "SELECT drive_label FROM plan_drives WHERE plan_id=? ORDER BY drive_label", [plan_id]
-    ).fetchall()]
-    now = datetime.now(timezone.utc).isoformat(sep=" ")
-    evidence = admission.preview_by_drive(
-        con, labels, observe=lambda label: fetch.observe_for_admission(con, label), now=now)
-    graph = reconcile.reconcile_plan(con, plan_id, repos)
-    ledger = capacity_model.plan_capacity(
-        con, graph, capacity_mode=capacity_mode, evidence_by_drive=evidence,
+    from modelark import planning
+
+    result = planning.preview(
+        con, plan_id, repos, capacity_mode=capacity_mode,
     )
-    return graph, ledger
+    return result
 
 
 def _diagnostic_payload(graph) -> list[dict]:
@@ -390,7 +385,9 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
     assignment and byte from ``reconcile_plan`` + ``plan_capacity``.  Policy-invalid repositories
     remain in typed diagnostics instead of raising on the first one or disappearing from the cart.
     """
-    graph, ledger = _reconciled_projection(con, repos, plan_id, capacity_mode)
+    snapshot = _reconciled_projection(con, repos, plan_id, capacity_mode)
+    graph, ledger = snapshot.graph, snapshot.capacity
+    drive_state = {item.drive_label: item for item in snapshot.drive_states}
     diagnostics = _diagnostic_payload(graph)
     failures = ledger.to_dict()["failures"]
     cats = dict(con.execute("SELECT repo_id, coalesce(category, '?') FROM models").fetchall())
@@ -430,6 +427,8 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
         planned = sum(item["size"] for item in models)
         out.append({
             "label": label, "tier": tier, "role": role, "raid_backed": raid,
+            "lifecycle": drive_state[label].lifecycle,
+            "eligibility": drive_state[label].eligibility,
             "capacity": int(drive_capacity or 0), "headroom": safety_floor,
             "free": drive_ledger.observed_free, "usable": usable,
             "evidence_kind": drive_ledger.evidence_kind, "evidence_code": drive_ledger.evidence_code,
@@ -507,7 +506,8 @@ def queue_view(con, plan_id: str | None = None, capacity_mode: str = "guaranteed
     (queue_state) and positions each row under the drive of its NEXT unfinished copy — done rows
     settle under their copy#1 home (done-placement 'b'). Heavy (~one plan pass): the Fill tab fetches
     it once on open; the cheap queue_state refreshes state at model boundaries without re-planning."""
-    graph, ledger = _reconciled_projection(con, None, plan_id, capacity_mode)
+    snapshot = _reconciled_projection(con, None, plan_id, capacity_mode)
+    graph, ledger = snapshot.graph, snapshot.capacity
     diagnostics = _diagnostic_payload(graph)
     failures = ledger.to_dict()["failures"]
     copy1, copy2 = {}, {}

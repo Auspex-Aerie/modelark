@@ -399,7 +399,17 @@ def cmd_plan(args):
             print(f"Plan {p['plan_id']} ({p['name']}) — {'ACTIVE' if p['is_active'] else 'inactive'}, "
                   f"capacity mode={p['capacity_mode']}")
             print(f"  annex:  {p['annex_root']}")
-            print(f"  drives ({len(p['drives'])}): {', '.join(p['drives']) or '(none)'}")
+            drive_rows = con.execute(
+                "SELECT d.drive_label,d.lifecycle,d.eligibility "
+                "FROM plan_drives pd JOIN drives d USING(drive_label) "
+                "WHERE pd.plan_id=? ORDER BY d.drive_label",
+                [pid],
+            ).fetchall()
+            drive_summary = ", ".join(
+                f"{label}[{lifecycle}/{eligibility}]"
+                for label, lifecycle, eligibility in drive_rows
+            )
+            print(f"  drives ({len(drive_rows)}): {drive_summary or '(none)'}")
             print(f"  raw forecast           : {_tb(t['uncompressed'])}   "
                   f"({t['n_selection']} models, {t['n_must']} must-have · copy-aware)")
             print(f"  expected stored forecast: {_tb(t['compressed'])}   "

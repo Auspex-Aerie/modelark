@@ -4,6 +4,30 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## Unreleased
 
+### Added
+
+- An explicit `modelark-provenance-migrate` rehearsal/publication workflow for existing pre-v7 SQLite
+  catalogs, with copied-runtime acceptance and a stopped side-by-side cutover guide.
+- Operator-confirmed missing-drive loss/exclusion in the portal, followed by one canonical replan;
+  unregistered attached hardware remains advisory and never inherits the lost identity.
+
+### Changed
+
+- Planning now has one first-class authority shared by CLI, Library, portal preview, proposal
+  construction, and approval adapters. Capacity modes remain centrally managed policies rather than
+  alternate planners.
+- Existing pre-v7 catalogs are no longer auto-migrated on open. Users upgrading from 0.2.0 run the
+  documented backup-first provenance migration once; fresh installs require no action.
+- Provenance publication preserves and validates the optional `library.json` git-annex map locator in
+  the new data directory, preventing a custom archive map from silently falling back to the default.
+
+### Fixed
+
+- Lost/excluded historical plan members now remain visible with their lifecycle/eligibility reason
+  while contributing no targets or admitted capacity.
+- Proposal preview can no longer bypass identity-bound capacity admission through stale legacy
+  `free_bytes`; all planning surfaces report the same typed root blocker and executable task set.
+
 ## 0.2.0 - 2026-07-20
 
 ### Added

@@ -18,7 +18,7 @@ import json
 from dataclasses import dataclass
 from enum import Enum
 
-from modelark import archive_manifest, budgets
+from modelark import archive_hash, archive_manifest, budgets
 from modelark.budgets import CandidateBudget, FileBudget  # noqa: F401 — re-exported: one shared budget truth
 
 
@@ -36,6 +36,7 @@ class TaskKind(str, Enum):
 class ProofSource(str, Enum):
     MANIFEST_SHA256 = "manifest_sha256"          # upstream LFS hash present and matched
     ARCHIVED_ORIG_SHA256 = "archived_orig_sha256"  # hashless manifest bound by a non-null archived hash
+    RAW_ANNEX_SHA256E = "raw_annex_sha256e"      # hashless manifest bound by a raw SHA256 annex key
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class ArchivedFileFact:
     orig_bytes: int | None
     stored_bytes: int | None
     annex_key: str | None = None
+    compressed: bool = False
 
 
 @dataclass(frozen=True)
@@ -294,15 +296,37 @@ def _proof(mf: archive_manifest.ManifestFile, row: ArchivedFileFact | None) -> s
         return "missing"
     if row.orig_bytes != mf.size_bytes:                       # size gate — both branches
         return "unproven"
-    if mf.sha256 is not None:
-        return "proven" if row.orig_sha256 == mf.sha256 else "unproven"
-    return "proven" if row.orig_sha256 is not None else "unproven"  # hashless residual: any non-null hash
+    return "proven" if archive_hash.content_satisfies(
+        approved_sha256=mf.sha256,
+        orig_sha256=row.orig_sha256,
+        compressed=row.compressed,
+        annex_key=row.annex_key,
+    ) else "unproven"
 
 
 def _reusable(mf: archive_manifest.ManifestFile, row: ArchivedFileFact) -> ReusableFile:
     if mf.sha256 is not None:
         return ReusableFile(mf.rfilename, mf.size_bytes, mf.sha256, ProofSource.MANIFEST_SHA256)
-    return ReusableFile(mf.rfilename, mf.size_bytes, row.orig_sha256, ProofSource.ARCHIVED_ORIG_SHA256)
+    if row.orig_sha256 is not None:
+        return ReusableFile(
+            mf.rfilename,
+            mf.size_bytes,
+            row.orig_sha256,
+            ProofSource.ARCHIVED_ORIG_SHA256,
+        )
+    resolved = archive_hash.expected_sha256(
+        catalog_sha=None,
+        orig_sha256=None,
+        compressed=row.compressed,
+        annex_key=row.annex_key,
+    )
+    # ``_proof`` has already established that a digest exists and is conflict-free.
+    return ReusableFile(
+        mf.rfilename,
+        mf.size_bytes,
+        resolved,
+        ProofSource.RAW_ANNEX_SHA256E,
+    )
 
 
 def _source_key(source) -> tuple[str, str]:

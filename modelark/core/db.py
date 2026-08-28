@@ -258,6 +258,9 @@ _PROPOSAL_CONTROL_SCHEMA_VERSION = 5  # v5: planner_state + proposals + executio
 _EXECUTION_CONFIG_HASH_SCHEMA_VERSION = 6  # v6: placement_proposals.execution_config_hash (PR-09 / B7)
 _PROVENANCE_SCHEMA_VERSION = 7  # v7: DEC-053 provenance + DEF-034 derivation CHECK + DEC-054 repair state
 _SCHEMA_VERSION = 7
+# Canonical bootstrap marker: planner state exists, but no planner mutation has occurred yet.
+# Do not use wall-clock time here; migration identity must be reproducible from the same seed.
+_PLANNER_STATE_BOOTSTRAP_UPDATED_AT = "1970-01-01 00:00:00"
 
 # v5 proposal-control tables: never created during the pre-migration tables-only pass so
 # backup-first v4→v5 owns them transactionally (same class of bug as early v3 evidence tables).
@@ -607,7 +610,10 @@ def _migrate_proposal_control_v5(con, *, backup_existing: bool) -> None:
         if con.execute("SELECT count(*) FROM planner_state WHERE singleton_id=1").fetchone()[0] == 0:
             con.execute(
                 "INSERT INTO planner_state(singleton_id,planner_revision,"
-                "active_approved_proposal_id,next_fencing_token) VALUES(1,0,NULL,0)")
+                "active_approved_proposal_id,next_fencing_token,updated_at) "
+                "VALUES(1,0,NULL,0,?)",
+                [_PLANNER_STATE_BOOTSTRAP_UPDATED_AT],
+            )
         con.execute(f"PRAGMA user_version={_PROPOSAL_CONTROL_SCHEMA_VERSION}")
         return
     if con.execute("PRAGMA foreign_keys").fetchone()[0]:
@@ -622,7 +628,10 @@ def _migrate_proposal_control_v5(con, *, backup_existing: bool) -> None:
         if con.execute("SELECT count(*) FROM planner_state WHERE singleton_id=1").fetchone()[0] == 0:
             con.execute(
                 "INSERT INTO planner_state(singleton_id,planner_revision,"
-                "active_approved_proposal_id,next_fencing_token) VALUES(1,0,NULL,0)")
+                "active_approved_proposal_id,next_fencing_token,updated_at) "
+                "VALUES(1,0,NULL,0,?)",
+                [_PLANNER_STATE_BOOTSTRAP_UPDATED_AT],
+            )
         violations = con.execute("PRAGMA foreign_key_check").fetchall()
         if violations:
             raise RuntimeError(
@@ -1172,6 +1181,187 @@ def _manifest_entry(path: Path | None) -> dict:
             "present": True,
         }
     return {"path": str(path) if path else None, "size": None, "sha256": None, "present": False}
+
+
+_LIBRARY_LOCATOR_NAME = "library.json"
+_LIBRARY_LOCATOR_MAX_BYTES = 1_048_576
+
+
+def _read_library_locator(data_dir: Path) -> bytes | None:
+    """Read and validate the one whitelisted non-SQLite runtime companion.
+
+    The exact bytes are migration evidence; JSON parsing validates only the runtime
+    contract consumed by ``register.library_root``. Symlinks and non-regular files
+    are refused so a copied data directory cannot smuggle an unbound path into the
+    publication unit.
+    """
+    path = Path(data_dir) / _LIBRARY_LOCATOR_NAME
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RuntimeError(f"cannot inspect {_LIBRARY_LOCATOR_NAME}: {exc}") from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise RuntimeError(f"{_LIBRARY_LOCATOR_NAME} must be a regular file")
+    if int(st.st_size) > _LIBRARY_LOCATOR_MAX_BYTES:
+        raise RuntimeError(f"{_LIBRARY_LOCATOR_NAME} exceeds the size limit")
+    flags = os.O_RDONLY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(str(path), flags)
+    except OSError as exc:
+        raise RuntimeError(f"cannot open {_LIBRARY_LOCATOR_NAME}: {exc}") from exc
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or _file_id(opened) != _file_id(st):
+            raise RuntimeError(
+                f"{_LIBRARY_LOCATOR_NAME} changed during inspection or is not regular"
+            )
+        chunks: list[bytes] = []
+        remaining = int(opened.st_size)
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+    finally:
+        os.close(fd)
+    if len(payload) != int(st.st_size):
+        raise RuntimeError(f"{_LIBRARY_LOCATOR_NAME} changed during inspection")
+    try:
+        parsed = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{_LIBRARY_LOCATOR_NAME} is not valid UTF-8 JSON") from exc
+    root = parsed.get("library_root") if isinstance(parsed, dict) else None
+    if not isinstance(root, str) or not root.strip():
+        raise RuntimeError(
+            f"{_LIBRARY_LOCATOR_NAME} must contain a nonempty string library_root"
+        )
+    return payload
+
+
+def _runtime_companion_report(payload: bytes | None) -> dict:
+    return {
+        "present": payload is not None,
+        "size": len(payload) if payload is not None else None,
+        "sha256": hashlib.sha256(payload).hexdigest() if payload is not None else None,
+    }
+
+
+def _validated_reported_library_locator(report: dict) -> dict:
+    companions = report.get("runtime_companions")
+    entry = companions.get(_LIBRARY_LOCATOR_NAME) if isinstance(companions, dict) else None
+    if not isinstance(entry, dict):
+        raise RuntimeError(
+            f"publication refused: rehearsal report lacks {_LIBRARY_LOCATOR_NAME} evidence"
+        )
+    expected_keys = {"present", "size", "sha256"}
+    if set(entry) != expected_keys or not isinstance(entry.get("present"), bool):
+        raise RuntimeError(
+            f"publication refused: invalid {_LIBRARY_LOCATOR_NAME} evidence"
+        )
+    if entry["present"]:
+        if not isinstance(entry.get("size"), int) or entry["size"] < 0:
+            raise RuntimeError(
+                f"publication refused: invalid {_LIBRARY_LOCATOR_NAME} size evidence"
+            )
+        digest = entry.get("sha256")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise RuntimeError(
+                f"publication refused: invalid {_LIBRARY_LOCATOR_NAME} hash evidence"
+            )
+    elif entry.get("size") is not None or entry.get("sha256") is not None:
+        raise RuntimeError(
+            f"publication refused: invalid absent {_LIBRARY_LOCATOR_NAME} evidence"
+        )
+    return dict(entry)
+
+
+def _refuse_destination_library_locator(dest_dir: Path) -> None:
+    path = Path(dest_dir) / _LIBRARY_LOCATOR_NAME
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise RuntimeError(
+            f"publication refused: cannot observe destination {_LIBRARY_LOCATOR_NAME}: {exc}"
+        ) from exc
+    raise RuntimeError(
+        f"publication refused: destination {_LIBRARY_LOCATOR_NAME} already exists; "
+        "will not overwrite"
+    )
+
+
+def _create_pinned_library_locator(dest_dir: Path, payload: bytes) -> int:
+    """Create the exact companion with O_EXCL and return a retained read/write fd."""
+    path = Path(dest_dir) / _LIBRARY_LOCATOR_NAME
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.EEXIST:
+            raise RuntimeError(
+                f"publication refused: destination {_LIBRARY_LOCATOR_NAME} already exists; "
+                "will not overwrite"
+            ) from exc
+        raise RuntimeError(
+            f"publication refused: cannot create destination {_LIBRARY_LOCATOR_NAME}: {exc}"
+        ) from exc
+    try:
+        written = 0
+        while written < len(payload):
+            count = os.write(fd, payload[written:])
+            if count <= 0:
+                raise OSError(errno.EIO, f"short write of {_LIBRARY_LOCATOR_NAME}")
+            written += count
+        os.fsync(fd)
+        _assert_pinned_library_locator(fd, path, payload)
+        dir_fd = os.open(
+            str(dest_dir), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+        )
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _assert_pinned_library_locator(fd: int, path: Path, expected: bytes) -> None:
+    fst = os.fstat(fd)
+    try:
+        pst = os.lstat(path)
+    except OSError as exc:
+        raise RuntimeError(
+            f"publication refused: destination {_LIBRARY_LOCATOR_NAME} disappeared: {exc}"
+        ) from exc
+    if (not stat.S_ISREG(fst.st_mode) or not stat.S_ISREG(pst.st_mode)
+            or _file_id(fst) != _file_id(pst)):
+        raise RuntimeError(
+            f"publication refused: destination {_LIBRARY_LOCATOR_NAME} identity changed"
+        )
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = int(fst.st_size)
+    while remaining:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    if b"".join(chunks) != expected:
+        raise RuntimeError(
+            f"publication refused: destination {_LIBRARY_LOCATOR_NAME} bytes changed"
+        )
 
 
 _SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
@@ -1806,6 +1996,10 @@ def rehearse_provenance_migration(
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     src = _source_catalog_path(source_dir)
+    library_locator = _read_library_locator(source_dir)
+    runtime_companions = {
+        _LIBRARY_LOCATOR_NAME: _runtime_companion_report(library_locator),
+    }
     run_root = _contained_run_root(work_dir, run_id)
     # Prefer refusing an existing run directory (never rmtree escape candidates).
     if run_root.exists():
@@ -1830,6 +2024,7 @@ def rehearse_provenance_migration(
         "run_id": run_id,
         "source_dir": str(source_dir.resolve()),
         "source_catalog": str(src.resolve()),
+        "runtime_companions": runtime_companions,
     }
     for key, path in members.items():
         payload = pre_work_bytes[key]
@@ -1873,6 +2068,10 @@ def rehearse_provenance_migration(
     if _read_sqlite_bundle_bytes(src) != pre_work_bytes:
         raise RuntimeError(
             "rehearsal refused: canonical source bundle changed during capture"
+        )
+    if _read_library_locator(source_dir) != library_locator:
+        raise RuntimeError(
+            f"rehearsal refused: {_LIBRARY_LOCATOR_NAME} changed during capture"
         )
 
     manifest_path = run_root / "manifest.json"
@@ -1949,6 +2148,7 @@ def rehearse_provenance_migration(
         "manifest_status": "validated",
         "clone_catalog_path": str(clone_path.resolve()),
         "manifest": manifest,
+        "runtime_companions": runtime_companions,
         "work_dir": str(run_root.resolve()),
         "source_catalog": str(src.resolve()),
     }
@@ -2321,11 +2521,19 @@ def publish_provenance_migration(
                 f"directory ({dest_resolved})"
             )
 
+    reported_library_locator = _validated_reported_library_locator(report)
+    source_library_locator = _read_library_locator(source_parent)
+    if _runtime_companion_report(source_library_locator) != reported_library_locator:
+        raise RuntimeError(
+            f"publication refused: {_LIBRARY_LOCATOR_NAME} changed since rehearsal"
+        )
+
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest_cat = dest_dir / "catalog.sqlite"
     _refuse_dest_catalog_occupied(dest_cat)
     # Finding 2 / INC-029 A: refuse foreign destination sidecars before any staging.
     _refuse_destination_sidecars(dest_cat, when="before staging")
+    _refuse_destination_library_locator(dest_dir)
     staging = dest_dir / _PUBLICATION_STAGING_NAME
     occupants = [path for path in _reserved_bundle_paths(staging) if _path_lexists(path)]
     if occupants:
@@ -2364,6 +2572,7 @@ def publish_provenance_migration(
     clone_lock: sqlite3.Connection | None = None
     stage_con: sqlite3.Connection | None = None
     staging_fd: int | None = None
+    library_locator_fd: int | None = None
     slot_created = False
     try:
         try:
@@ -2551,6 +2760,20 @@ def publish_provenance_migration(
         # Finding 2 second guard: recheck immediately before publish (TOCTOU).
         _refuse_destination_sidecars(dest_cat, when="immediately before replace")
 
+        # INC-042: publish the exact optional runtime companion before making the
+        # catalog visible. A failed attempt retains this no-clobber artifact and
+        # the destination must not be reused.
+        if _runtime_companion_report(_read_library_locator(source_parent)) != reported_library_locator:
+            raise RuntimeError(
+                f"publication refused: {_LIBRARY_LOCATOR_NAME} changed since rehearsal"
+            )
+        if source_library_locator is not None:
+            library_locator_fd = _create_pinned_library_locator(
+                dest_dir, source_library_locator
+            )
+        else:
+            _refuse_destination_library_locator(dest_dir)
+
         # Final atomic no-clobber publish while source, clone, and staging
         # locks are held. linkat follows /proc/self/fd so dest names the
         # fd's inode (INC-035), not a later staging pathname. EEXIST
@@ -2586,6 +2809,14 @@ def publish_provenance_migration(
                 "publication refused: published catalog identity drifted "
                 "after replace under retained lock"
             )
+        if library_locator_fd is not None:
+            _assert_pinned_library_locator(
+                library_locator_fd,
+                dest_dir / _LIBRARY_LOCATOR_NAME,
+                source_library_locator,
+            )
+        else:
+            _refuse_destination_library_locator(dest_dir)
         # Re-check path/inode and sidecars once more immediately before success
         # so a late pathname attack during the identity re-read cannot pass.
         if not dest_cat.is_file() or _file_id(dest_cat.stat()) != staging_id:
@@ -2605,6 +2836,9 @@ def publish_provenance_migration(
             "manifest_status": "validated",
             "manifest_path": str(manifest_path),
             "snapshot_sha256": live_snap_sha,
+            "published_companions": {
+                _LIBRARY_LOCATOR_NAME: reported_library_locator,
+            },
             "staging_report": report_out,
         }
     except Exception as exc:
@@ -2626,6 +2860,11 @@ def publish_provenance_migration(
         if staging_fd is not None:
             try:
                 os.close(staging_fd)
+            except OSError:
+                pass
+        if library_locator_fd is not None:
+            try:
+                os.close(library_locator_fd)
             except OSError:
                 pass
         if clone_lock is not None:

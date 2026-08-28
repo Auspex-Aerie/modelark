@@ -101,8 +101,26 @@
 <!-- ===== Disk Health view ===== -->
 <section id="view-disk" class="view" hidden>
   <div class="page">
-    <h1 class="ph">Disk Health</h1>
-    <p class="psub" id="diskNote">SMART status for attached drives — vet your library volumes before they hold archive data.</p>
+    <h1 class="ph">Drives</h1>
+    <p class="psub">Registered library identities and passive attached-hardware observations. An
+      offline drive is never declared lost automatically, and an unregistered disk is never assigned
+      a role automatically.</p>
+    <div class="drivebar">
+      <b>Registered library drives</b>
+      <button id="refreshDriveInventory">Refresh attached inventory</button>
+    </div>
+    <p class="psub" id="driveNote"></p>
+    <div id="driveEvent" hidden></div>
+    <div id="driveBody" class="diskgrid"></div>
+    <div class="healthgate">
+      <div>
+        <b>Hardware health checks</b>
+        <div class="sub">SMART access reads attached hardware and is kept separate from passive
+          discovery and lifecycle planning.</div>
+      </div>
+      <button id="runHealthChecks">Run SMART checks</button>
+    </div>
+    <p class="psub" id="diskNote">No SMART command has been run from this screen.</p>
     <div id="diskBody" class="diskgrid"></div>
   </div>
 </section>
@@ -192,6 +210,27 @@
       <a id="gatedLink" class="modal-link" target="_blank" rel="noopener noreferrer">Open Hugging Face</a>
       <button id="gatedSkip">Skip for this run</button>
       <button id="gatedRetry" class="primary">Retry after getting access</button>
+    </div>
+  </div>
+</div>
+
+<!-- Operator-confirmed catalog transition. Hardware observation alone cannot open or submit it. -->
+<div class="oopsie-overlay" id="driveLossModal" role="dialog" aria-modal="true"
+     aria-labelledby="driveLossHead" hidden>
+  <div class="oopsie-card drive-loss-card">
+    <div class="oopsie-head" id="driveLossHead">Review a missing drive</div>
+    <div class="oopsie-msg" id="driveLossMsg"></div>
+    <div class="oopsie-failed" id="driveLossEvidence"></div>
+    <div class="disknote" id="driveLossWarning"></div>
+    <label class="lossconfirm" for="driveLossConfirm">
+      Type <code id="driveLossPhrase"></code> to mark this exact identity lost, exclude it from new
+      placement, invalidate approval, and replan.
+    </label>
+    <input id="driveLossConfirm" autocomplete="off" spellcheck="false">
+    <div class="oopsie-failed" id="driveLossRefusal"></div>
+    <div class="oopsie-acts">
+      <button id="driveLossCancel">Cancel</button>
+      <button id="driveLossApply" class="danger" disabled>Declare lost + replan</button>
     </div>
   </div>
 </div>

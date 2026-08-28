@@ -285,10 +285,10 @@ CREATE TABLE IF NOT EXISTS planner_state (
     updated_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 -- Fresh packaged schema must seed the CAS singleton (same as v4→v5 migration).
--- Schema-only test fixtures and first-boot catalogs need revision=0 / fencing token=0.
+-- The epoch timestamp means no planner mutation yet and keeps fresh/migrated identity deterministic.
 INSERT OR IGNORE INTO planner_state(
-    singleton_id, planner_revision, active_approved_proposal_id, next_fencing_token
-) VALUES (1, 0, NULL, 0);
+    singleton_id, planner_revision, active_approved_proposal_id, next_fencing_token, updated_at
+) VALUES (1, 0, NULL, 0, '1970-01-01 00:00:00');
 
 CREATE TABLE IF NOT EXISTS placement_proposals (
     proposal_id            VARCHAR PRIMARY KEY NOT NULL CHECK (length(trim(proposal_id)) > 0),

@@ -43,12 +43,14 @@ def _usb_id(name: str):
     return None
 
 
-def _lsblk() -> list[dict]:
+def _lsblk_result() -> tuple[bool, list[dict]]:
     try:
         r = subprocess.run(["lsblk", "-dn", "-P", "-o", "NAME,SIZE,MODEL,SERIAL,TYPE,TRAN,ROTA"],
                            capture_output=True, text=True, timeout=10)
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []
+        return False, []
+    if r.returncode != 0:
+        return False, []
     out = []
     for line in r.stdout.splitlines():
         d = dict(re.findall(r'(\w+)="([^"]*)"', line))
@@ -58,7 +60,31 @@ def _lsblk() -> list[dict]:
         if any(name.startswith(s) for s in _SKIP_PREFIX) or d.get("SIZE") in ("", "0B", "0"):
             continue
         out.append(d)
-    return out
+    return True, out
+
+
+def _lsblk() -> list[dict]:
+    """Compatibility helper for the existing SMART endpoint."""
+    return _lsblk_result()[1]
+
+
+def attached_inventory() -> dict:
+    """Return passive block-device inventory without running SMART or mutating hardware."""
+    available, disks = _lsblk_result()
+    return {
+        "available": available,
+        "devices": [
+            {
+                "dev": "/dev/" + item["NAME"],
+                "size": item.get("SIZE"),
+                "model": item.get("MODEL") or None,
+                "serial": item.get("SERIAL") or None,
+                "bus": item.get("TRAN") or None,
+                "spinning": item.get("ROTA") == "1",
+            }
+            for item in disks
+        ],
+    }
 
 
 # -d drivers to try, in order — covers most USB-SATA/USB-NVMe bridges.

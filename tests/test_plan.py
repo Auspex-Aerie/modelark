@@ -118,6 +118,21 @@ def test_plan_list_and_show_are_read_only_diagnostics():
         assert "ark" in output.getvalue()
 
 
+def test_plan_show_exposes_lifecycle_and_eligibility_for_each_member():
+    con = _mem()
+    _seed_drives(con)
+    plan.bootstrap(con)
+    con.execute(
+        "UPDATE drives SET lifecycle='lost', eligibility='excluded' WHERE drive_label='drive-01'"
+    )
+    output = io.StringIO()
+    with mock.patch.object(db, "connect", return_value=con), redirect_stdout(output):
+        cli.cmd_plan(Namespace(plan_cmd="show", plan=None))
+    rendered = output.getvalue()
+    assert "drive-00[active/enabled]" in rendered
+    assert "drive-01[lost/excluded]" in rendered
+
+
 def test_plan_show_without_active_plan_has_a_clear_read_only_error():
     con = _mem()
     with mock.patch.object(db, "connect", return_value=con) as connect, \

@@ -1,0 +1,63 @@
+# Upgrading ModelArk
+
+ModelArk upgrades application code normally, but it never silently rewrites an existing catalog whose
+schema is older than the installed release. Existing data is migrated through an explicit,
+backup-first, side-by-side procedure so the old runtime remains a usable rollback point.
+
+## Do I need to do anything?
+
+| Existing installation | Required action |
+|---|---|
+| Fresh install with no catalog | None. The current schema is created on first use. |
+| Existing catalog already at the current schema | Update/redeploy normally. |
+| SQLite catalog at schema v1–v6, including ModelArk 0.2.0's schema v2 | Run the one-time provenance migration before starting the new service. |
+| Legacy checkout with DuckDB or pre-canonical runtime layout | Follow `legacy-cutover.md` first; install the `migration` extra when DuckDB conversion is required. |
+
+If a new ModelArk binary is pointed at an existing pre-v7 catalog, it refuses before changing the
+file and names `modelark-provenance-migrate`. This is expected protection, not catalog corruption.
+
+## What the provenance migration does
+
+The migration:
+
+1. reads a stopped, disposable copy of the existing data directory;
+2. captures the complete SQLite main/WAL/SHM bundle before any recovery-capable open;
+3. creates and validates a migrated clone;
+4. classifies existing archive digest provenance without inventing missing evidence;
+5. preserves the validated `library.json` git-annex map locator when present;
+6. publishes a new schema-v7 catalog into a separate empty data directory without overwriting an
+   existing destination; and
+7. retains the old runtime plus migration snapshots/manifests for rollback.
+
+It does not modify archive bytes, mount or format drives, initialize git-annex repositories,
+register hardware, repair missing provenance, approve a placement proposal, or start Fill.
+
+## What an existing user must do
+
+An operator must schedule a stopped-writer window, retain a backup of the entire old data directory
+including SQLite sidecars, run rehearsal and publication from a disposable copy, then repoint the
+service to the new directory. The detailed commands and stop conditions are in
+[`provenance-live-cutover.md`](provenance-live-cutover.md).
+
+After migration, start the portal without `--resume`, review the catalog and plan, and reconcile
+attached archive drives before expecting capacity to become executable. Drives with missing or stale
+identity-bound evidence remain visible but contribute no admitted capacity. This is intentional.
+
+Most users should not need to re-download models or recreate their cart. They may need to:
+
+- reconnect or mount archive drives through their normal operating-system procedure;
+- explicitly reconcile each candidate drive so its current identity and free-space evidence are
+  anchored;
+- resolve any typed provenance, policy, identity, or capacity blocker shown by the planner; and
+- approve a newly generated proposal before Fill can run.
+
+## Rollback boundary
+
+Before any post-migration catalog action, rollback is simply: stop the new service, restore the old
+service definition, and point the old executable at the untouched old data/state/config paths. Never
+let an older binary open the new schema-v7 catalog.
+
+Once operators declare drives lost, register replacement media, repair evidence, approve proposals,
+or start Fill in the new runtime, rolling back to the old catalog also discards those newer graph
+decisions. Preserve the migration evidence and review that divergence instead of copying the new
+catalog over the old one.

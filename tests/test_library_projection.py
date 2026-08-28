@@ -95,6 +95,8 @@ def _assert_mixed_cart(plan: dict, queue: dict) -> None:
     assert plan["feasible"] is False
     assert plan["blocking_diagnostics"] == ["MANIFEST_POLICY"]
     assert plan["capacity_failures"] == []
+    assert plan["drives"][0]["lifecycle"] == "active"
+    assert plan["drives"][0]["eligibility"] == "enabled"
     assert plan["totals"]["n_selected"] == 2
     assert plan["totals"]["n_planned"] == 1
     assert plan["totals"]["n_blocked"] == 1

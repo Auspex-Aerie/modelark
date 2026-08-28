@@ -1,6 +1,6 @@
 """INC-028 Gate-1 contracts — content satisfaction and exact completion.
 
-Expected-red until Gate 2.  These contracts deliberately cross the real proposal,
+Expected-red until Gate 2.  These contracts deliberately cross the canonical planner,
 FETCH-resume, Fill-drain, and replica seams so a correct-but-unused predicate cannot
 green the gate.  Production code is unchanged in Gate 1.
 """
@@ -15,7 +15,7 @@ from unittest import mock
 import pytest
 
 import _pr09_gate1_fixtures as f
-from modelark import archive_hash, archive_manifest, execution_projection, fetch, proposal, wishlist
+from modelark import archive_hash, archive_manifest, candidates, execution_projection, fetch, wishlist
 from modelark import fill as fill_mod
 from modelark.core import db
 
@@ -80,6 +80,45 @@ def _manifest(*, sha=APPROVED):
             storage_action="compress",
         ),
     )
+
+
+def _canonical_satisfaction(*, planned, orig, compressed, annex_key, orig_bytes=100):
+    inp = candidates.PlannerInput(
+        plan_id="ark",
+        selection=(REPO,),
+        manifests=((REPO, tuple(planned)),),
+        numcopies=((REPO, 1),),
+        drives=(candidates.DriveFact(
+            drive_label="d0",
+            role="primary",
+            raid_backed=False,
+            capacity_bytes=10_000,
+            filesystem_capacity_bytes=10_000,
+            identity_epoch=1,
+        ),),
+        archived=(candidates.ArchivedFileFact(
+            repo_id=REPO,
+            drive_label="d0",
+            rfilename=FILE,
+            orig_sha256=orig,
+            orig_bytes=orig_bytes,
+            stored_bytes=100,
+            annex_key=annex_key,
+            compressed=compressed,
+        ),),
+        compression_cfg=(),
+        float_ratio=1.0,
+    )
+    graph = candidates.requirements(inp)
+    return candidates.candidates(inp, graph)
+
+
+def _satisfying_labels(candidate_set) -> list[str]:
+    return [
+        copy.drive_label
+        for satisfaction in candidate_set.satisfied
+        for copy in satisfaction.copies
+    ]
 
 
 def _fetch_outcome(*, stored=()):
@@ -207,23 +246,24 @@ def test_c02b_existing_content_rules_delegate_to_shared_predicate(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Proposal and Fill guard wiring — spy return must control the real consumer.
+# Canonical planner and Fill guard wiring — spy return must control the real consumer.
 # ---------------------------------------------------------------------------
 
 
-def test_c03_proposal_baseline_calls_shared_rule_with_archive_evidence():
-    con = f.mem_con()
-    _seed_repo(con, catalog_sha=None)
-    _seed_archived(con, orig=None, compressed=True, annex_key=None)
+def test_c03_canonical_planner_calls_shared_rule_with_archive_evidence():
     planned = _manifest(sha=None)
     trace = mock.Mock(return_value=False)
 
     with mock.patch.object(archive_hash, "content_satisfies", trace, create=True):
-        complete = proposal._complete_archived_plan_drives(
-            con, REPO, {"d0"}, planned=planned)
+        result = _canonical_satisfaction(
+            planned=planned,
+            orig=None,
+            compressed=True,
+            annex_key=None,
+        )
 
-    assert trace.call_count == 1, "proposal baseline must call the shared predicate"
-    assert complete == [], "size agreement cannot replace digest evidence"
+    assert trace.call_count == 1, "canonical satisfaction must call the shared predicate"
+    assert _satisfying_labels(result) == [], "size agreement cannot replace digest evidence"
     assert trace.call_args.kwargs == {
         "approved_sha256": None,
         "orig_sha256": None,
@@ -232,25 +272,32 @@ def test_c03_proposal_baseline_calls_shared_rule_with_archive_evidence():
     }
 
 
-def test_c04_proposal_hashless_raw_sha256e_can_satisfy_but_size_still_must_match():
-    con = f.mem_con()
-    _seed_repo(con, catalog_sha=None)
+def test_c04_canonical_hashless_raw_sha256e_can_satisfy_but_size_still_must_match():
     key = f"SHA256E-s100--{OTHER}.bin"
-    _seed_archived(con, orig=None, compressed=False, annex_key=key)
     planned = _manifest(sha=None)
     trace = mock.Mock(return_value=True)
 
     with mock.patch.object(archive_hash, "content_satisfies", trace, create=True):
-        assert proposal._complete_archived_plan_drives(
-            con, REPO, {"d0"}, planned=planned) == ["d0"]
-        con.execute(
-            "UPDATE archived SET orig_bytes=99 WHERE repo_id=? AND drive_label='d0'",
-            [REPO],
+        satisfied = _canonical_satisfaction(
+            planned=planned,
+            orig=None,
+            compressed=False,
+            annex_key=key,
         )
-        assert proposal._complete_archived_plan_drives(
-            con, REPO, {"d0"}, planned=planned) == []
+        mismatched_size = _canonical_satisfaction(
+            planned=planned,
+            orig=None,
+            compressed=False,
+            annex_key=key,
+            orig_bytes=99,
+        )
 
-    assert trace.call_count == 2
+    assert _satisfying_labels(satisfied) == ["d0"]
+    assert _satisfying_labels(mismatched_size) == []
+    reused = satisfied.satisfied[0].copies[0].reused_files[0]
+    assert reused.bound_hash == OTHER
+    assert reused.proof_source == candidates.ProofSource.RAW_ANNEX_SHA256E
+    assert trace.call_count == 1, "size mismatch must fail before digest satisfaction"
 
 
 def test_c05_fill_file_guard_uses_shared_rule_not_presence(monkeypatch):

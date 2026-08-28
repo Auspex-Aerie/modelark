@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
-from modelark import archive_hash, archive_manifest, capacity, drive_fence, plan as plan_mod
+from modelark import archive_manifest, capacity, drive_fence, plan as plan_mod, planning
 from modelark import proposal_canonical as canonical
 from modelark.core import db
 from modelark.web import fill_worker
@@ -41,6 +41,7 @@ GRAPH_AFFECTING_WRITERS = {
     "drive_mutation.begin_generation": "dirty generation advance",
     "drive_mutation.publish_clean_anchor": "clean anchor publish",
     "drive_bootstrap.reconcile_drive": "drive identity bootstrap",
+    "drive_lifecycle.declare_lost": "operator-confirmed drive loss",
     "register.register_drive": "drive registration",
     "hash_repair.repair_hashes": "legacy hash repair apply",
     "proposal.approve": "proposal approval CAS",
@@ -216,33 +217,6 @@ def _requirement_set_hash(tasks: Sequence[Mapping]) -> str:
         json.dumps(ids, separators=(",", ":")).encode()).hexdigest()
 
 
-def _plan_drives(con, plan_id: str) -> list[tuple]:
-    """Placeable plan members (active+enabled) for *new* executable assignment."""
-    return list(con.execute(
-        "SELECT d.drive_label, d.identity_epoch, d.identity_fingerprint, "
-        "coalesce(d.free_bytes, 0), "
-        "coalesce(d.filesystem_capacity_bytes, d.capacity_bytes, 0), "
-        "coalesce(d.raid_backed, 0) "
-        "FROM plan_drives pd JOIN drives d USING(drive_label) "
-        "WHERE pd.plan_id=? AND d.lifecycle='active' AND d.eligibility='enabled' "
-        "ORDER BY d.drive_label", [plan_id]).fetchall())
-
-
-def _plan_baseline_labels(con, plan_id: str) -> set[str]:
-    """Plan-member drives that may *satisfy* durability (complete archives).
-
-    Active members count even when eligibility is excluded — an existing complete
-    copy still satisfies numcopies; excluded only blocks *new* placement.
-    Lost/retired members do not satisfy.
-    """
-    return {
-        r[0] for r in con.execute(
-            "SELECT d.drive_label FROM plan_drives pd JOIN drives d USING(drive_label) "
-            "WHERE pd.plan_id=? AND d.lifecycle='active' ORDER BY d.drive_label",
-            [plan_id]).fetchall()
-    }
-
-
 def _selected_repos(con, mutation: tuple) -> list[str]:
     kind = mutation[0]
     args = mutation[1] if len(mutation) > 1 else ()
@@ -256,93 +230,6 @@ def _selected_repos(con, mutation: tuple) -> list[str]:
     return [r[0] for r in con.execute(
         "SELECT repo_id FROM selection WHERE finalized_at IS NOT NULL "
         "ORDER BY repo_id").fetchall()]
-
-
-def _archived_matches_manifest(
-    *,
-    file_sha256: str | None,
-    file_size: int | None,
-    arch_sha256: str | None,
-    arch_bytes: int | None,
-    compressed: bool = False,
-    annex_key: str | None = None,
-) -> bool:
-    """Content-aware match of one archived row against the current files manifest.
-
-    Filename presence alone is not enough: a same-name refresh of hash/size must not
-    count as a durable baseline copy of the *current* catalog content. Catalog rows
-    with no identity evidence (neither sha256 nor size_bytes) never satisfy baseline.
-    """
-    # Fail closed: unproven catalog identity cannot claim durable content match.
-    if not file_sha256 and file_size is None:
-        return False
-    if not archive_hash.content_satisfies(
-        approved_sha256=file_sha256,
-        orig_sha256=arch_sha256,
-        compressed=compressed,
-        annex_key=annex_key,
-    ):
-        return False
-    # Size must agree when both sides record it.
-    if file_size is not None and arch_bytes is not None:
-        if int(file_size) != int(arch_bytes):
-            return False
-    # Catalog size known but archive has no size *and* no hash proof → unproven.
-    if file_size is not None and arch_bytes is None and not (file_sha256 and arch_sha256):
-        return False
-    return True
-
-
-def _complete_archived_plan_drives(
-        con, repo_id: str, plan_labels: set[str], planned=None) -> list[str]:
-    """Plan-member drives holding a content-complete archive of the *planned* file set.
-
-    Completeness is measured against the acquisition-planned set (INC-024), not the
-    whole catalog: policy-excluded formats (e.g. onnx) need not be archived for
-    baseline_satisfied. Optional ``planned`` is the batch-inspect result for this
-    repository. Filename-only matches still do not satisfy numcopies.
-    """
-    if planned is None:
-        planned = archive_manifest.manifest_for_repo(con, repo_id)
-    needed = [(m.rfilename, m.size_bytes, m.sha256) for m in planned]
-    if not needed:
-        # Empty planned set → treat any archived presence on a plan drive as complete.
-        rows = con.execute(
-            "SELECT DISTINCT drive_label FROM archived WHERE repo_id=? ORDER BY drive_label",
-            [repo_id]).fetchall()
-        return [r[0] for r in rows if r[0] in plan_labels]
-    complete = []
-    for label in sorted(plan_labels):
-        rows = con.execute(
-            "SELECT rfilename, orig_bytes, orig_sha256, compressed, annex_key FROM archived "
-            "WHERE repo_id=? AND drive_label=?",
-            [repo_id, label]).fetchall()
-        by_name = {r[0]: (r[1], r[2], bool(r[3]), r[4]) for r in rows}
-        ok = True
-        for rfilename, size_bytes, sha256 in needed:
-            if rfilename not in by_name:
-                ok = False
-                break
-            arch_bytes, arch_sha, compressed, annex_key = by_name[rfilename]
-            if not _archived_matches_manifest(
-                    file_sha256=sha256,
-                    file_size=int(size_bytes) if size_bytes is not None else None,
-                    arch_sha256=arch_sha,
-                    arch_bytes=int(arch_bytes) if arch_bytes is not None else None,
-                    compressed=compressed,
-                    annex_key=annex_key):
-                ok = False
-                break
-        if ok:
-            complete.append(label)
-    return complete
-
-
-def _repo_size(con, repo_id: str, planned=None) -> int:
-    """Durable byte charge for one repository — acquisition-planned set only (INC-024)."""
-    if planned is None:
-        planned = archive_manifest.manifest_for_repo(con, repo_id)
-    return int(sum(int(m.size_bytes or 0) for m in planned))
 
 
 def _append_missing_files(
@@ -388,42 +275,6 @@ def _baseline_file_evidence(con, repo_id: str, drive_label: str) -> list[dict]:
     ]
 
 
-def _manifest_policy_gate_block(
-        errors: Mapping[str, archive_manifest.ArchivePolicyError]) -> dict:
-    """Single-container MANIFEST_POLICY Gate-B observability (INC-024 Q2).
-
-    One structured block supplies code, gate, evidence, and actions. Reasons are
-    sorted by repo_id. Exact action list is contract-pinned.
-    """
-    blocked = [
-        {"repo_id": repo_id, "reason": str(errors[repo_id])}
-        for repo_id in sorted(errors)
-    ]
-    return {
-        "code": "MANIFEST_POLICY",
-        "gate": "B",
-        "evidence": {"blocked_repositories": blocked},
-        "actions": list(_MANIFEST_POLICY_ACTIONS),
-    }
-
-
-def _requirement_id(copy_i: int, nc: int, repo: str) -> str:
-    if copy_i == 1:
-        return f"primary:{repo}"
-    if nc > 2:
-        return f"replica{copy_i}:{repo}"
-    return f"replica:{repo}"
-
-
-def _admissible_from_drive_row(drive_row: tuple) -> int:
-    """Safety-adjusted free for one plan-drive row (free − floor, never raw free)."""
-    free_b = int(drive_row[3] or 0)
-    fs_cap = int(drive_row[4] or 0)
-    raid = bool(drive_row[5])
-    floor = capacity.safety_floor(fs_cap, raid) if fs_cap else 0
-    return max(0, free_b - floor)
-
-
 def _repo_workspace_peak(con, repo_id: str) -> int:
     """Peak transient workspace for one repo placement, aligned with execution budgets.
 
@@ -448,10 +299,6 @@ def _repo_workspace_peak(con, repo_id: str) -> int:
         if cap > peak:
             peak = int(cap)
     return peak
-
-
-def _admissible_map_from_drives(drives: Sequence[tuple]) -> dict[str, int]:
-    return {d[0]: _admissible_from_drive_row(d) for d in drives}
 
 
 def _admissible_map_from_evidence(evidence_by_drive: Mapping[str, Any]) -> dict[str, int]:
@@ -520,205 +367,141 @@ def joint_capacity_shortfall(
 def _build_assignment(
         con, plan_id: str, mutation: tuple
 ) -> tuple[list[dict], list[dict], str, dict | None, str]:
-    """Build tasks/files and gate_b_code for the hypothetical post-mutation selection.
+    """Adapt the canonical planning result into immutable proposal rows (DEC-067).
 
-    Joint model (preview ≡ approval authority):
-    - one ``inspect_manifests_for_repos`` batch per draft (INC-024);
-    - file authority and durable charges from the acquisition-planned set;
-    - baseline only on complete *planned* archives on plan-member drives;
-    - distinct media per numcopies;
-    - safety-adjusted free depleted across the whole assignment (not per-task vs full free);
-    - acquisition-policy errors → INFEASIBLE + single-container MANIFEST_POLICY block.
-
-    Returns ``(tasks, files, gate_b_code, policy_gate_block_or_None, derivation_mode)``.
-    ``derivation_mode`` is placement audit evidence (optimized | state_truncated |
-    canonical_fallback) carried into preview_pure (DEF-034 / DEC-060).
+    This function performs no placement, capacity calculation, satisfaction decision, or source
+    selection.  It only serializes the exact canonical assignment and durable evidence into the
+    proposal's stable wire/storage shape.
     """
-    drives = _plan_drives(con, plan_id)
     repos = _selected_repos(con, mutation)
+    plan_row = plan_mod.get(con, plan_id)
+    capacity_mode = plan_row["capacity_mode"] if plan_row else "guaranteed"
+    result = planning.preview(
+        con, plan_id, repos, capacity_mode=capacity_mode,
+    )
+    graph = result.graph
+    ledger = result.capacity
+
+    def proposal_requirement_id(requirement_id: str) -> str:
+        # Preserve the v5 proposal/executor wire vocabulary while adapting canonical requirement
+        # identities.  This is a name mapping only; it does not alter the requirement or assignment.
+        if requirement_id.startswith("protected_home:"):
+            return "primary:" + requirement_id.split(":", 1)[1]
+        if requirement_id.startswith("protected_replica:"):
+            return "replica:" + requirement_id.split(":", 1)[1]
+        return requirement_id
+
+    labels = sorted({
+        label for _rid, label in graph.matches
+    } | {
+        task.target_drive for task in ledger.tasks
+    } | {
+        task.source_drive for task in ledger.tasks if task.source_drive
+    })
+    drive_identity = {}
+    if labels:
+        placeholders = ",".join("?" for _ in labels)
+        drive_identity = {
+            row[0]: (int(row[1]), row[2] or "")
+            for row in con.execute(
+                "SELECT drive_label,identity_epoch,identity_fingerprint FROM drives "
+                f"WHERE drive_label IN ({placeholders})",
+                labels,
+            ).fetchall()
+        }
+
     tasks: list[dict] = []
     files: list[dict] = []
     order = 0
-    gate = "FEASIBLE"
-    policy_gate: dict | None = None
+    task_target = {task.requirement_id: task.target_drive for task in ledger.tasks}
 
-    if not repos:
-        # Empty selection is still a valid adopt_current draft (diagnostic-feasible no-op set).
-        return tasks, files, gate, None, _derivation_mode_for_gate(gate)
+    # Proven complete copies are reviewable certificate rows, not executable work.
+    for canonical_rid, label in sorted(graph.matches):
+        order += 1
+        repo = canonical_rid.split(":", 1)[1]
+        rid = proposal_requirement_id(canonical_rid)
+        planned = graph.manifests[repo]
+        manifest_hash = _manifest_hash(con, repo, planned=planned)
+        epoch, fingerprint = drive_identity.get(label, (0, ""))
+        cert = canonical.baseline_satisfaction_certificate(
+            requirement_id=rid,
+            full_manifest_hash=manifest_hash,
+            drive_label=label,
+            identity_epoch=epoch,
+            identity_fingerprint=fingerprint,
+            files=_baseline_file_evidence(con, repo, label),
+        )
+        durable = sum(int(item.size_bytes or 0) for item in planned)
+        tasks.append({
+            "requirement_id": rid,
+            "row_kind": "baseline_satisfied",
+            "repo_id": repo,
+            "target_drive": label,
+            "source_drive": None,
+            "satisfying_drive": label,
+            "full_manifest_hash": manifest_hash,
+            "order_key": order,
+            "guaranteed_durable": durable,
+            "expected_durable": durable,
+            "identity_epoch": epoch,
+            "baseline_certificate": cert,
+        })
 
-    # One batch inspect for the whole draft — policy errors retained per repository.
-    batch = archive_manifest.inspect_manifests_for_repos(con, repos)
-    if batch.errors:
-        gate = "INFEASIBLE"
-        policy_gate = _manifest_policy_gate_block(batch.errors)
-    # Only repositories that produced a planned manifest are placeable work.
-    placeable_repos = [r for r in repos if r in batch.manifests]
+    # Canonical execution rank is stable and keeps fetch/home work before dependent replicas.
+    assigned = sorted(ledger.tasks, key=lambda item: capacity.execution_rank(item, graph))
+    for task in assigned:
+        order += 1
+        rid = proposal_requirement_id(task.requirement_id)
+        planned = graph.manifests[task.repo_id]
+        epoch, _fingerprint = drive_identity.get(task.target_drive, (0, ""))
+        source = task.source_drive
+        if source is None and task.depends_on_requirement:
+            source = task_target.get(task.depends_on_requirement)
+        tasks.append({
+            "requirement_id": rid,
+            "row_kind": "executable",
+            "repo_id": task.repo_id,
+            "target_drive": task.target_drive,
+            "source_drive": source,
+            "satisfying_drive": None,
+            "full_manifest_hash": _manifest_hash(con, task.repo_id, planned=planned),
+            "order_key": order,
+            "guaranteed_durable": task.budget.guaranteed_durable,
+            "expected_durable": task.budget.expected_durable,
+            "identity_epoch": epoch,
+            "baseline_certificate": None,
+        })
+        missing = set(task.budget.missing_files)
+        _append_missing_files(
+            con,
+            files,
+            rid,
+            task.repo_id,
+            planned=tuple(item for item in planned if item.rfilename in missing),
+        )
 
-    if not drives:
-        gate = "INFEASIBLE"
-        for repo in placeable_repos:
-            planned = batch.manifests[repo]
-            order += 1
-            rid = f"primary:{repo}"
-            mh = _manifest_hash(con, repo, planned=planned)
-            size = _repo_size(con, repo, planned=planned)
-            tasks.append({
-                "requirement_id": rid,
-                "row_kind": "executable",
-                "repo_id": repo,
-                "target_drive": None,
-                "source_drive": None,
-                "full_manifest_hash": mh,
-                "order_key": order,
-                "guaranteed_durable": size,
-                "expected_durable": size,
-                "identity_epoch": None,
-            })
-            _append_missing_files(con, files, rid, repo, planned=planned)
-        return tasks, files, gate, policy_gate, _derivation_mode_for_gate(gate)
+    policy_errors = {
+        str(dict(item.detail).get("repo_id")): str(dict(item.detail).get("message"))
+        for item in graph.diagnostics
+        if item.code == "MANIFEST_POLICY" and dict(item.detail).get("repo_id")
+    }
+    policy_gate = None
+    if policy_errors:
+        policy_gate = {
+            "code": "MANIFEST_POLICY",
+            "gate": "B",
+            "evidence": {
+                "blocked_repositories": [
+                    {"repo_id": repo, "reason": policy_errors[repo]}
+                    for repo in sorted(policy_errors)
+                ]
+            },
+            "actions": list(_MANIFEST_POLICY_ACTIONS),
+        }
 
-    placeable_labels = {d[0] for d in drives}
-    baseline_labels = _plan_baseline_labels(con, plan_id)
-    drive_by_label = {d[0]: d for d in drives}
-    # Epoch lookup for baseline-only (excluded) members not in placeable rows.
-    for label in baseline_labels - placeable_labels:
-        row = con.execute(
-            "SELECT drive_label, identity_epoch, identity_fingerprint, "
-            "coalesce(free_bytes,0), coalesce(filesystem_capacity_bytes,capacity_bytes,0), "
-            "coalesce(raid_backed,0) FROM drives WHERE drive_label=?",
-            [label]).fetchone()
-        if row:
-            drive_by_label[label] = row
-    # Running remaining capacity — depleted only by executable placement charges.
-    remaining = _admissible_map_from_drives(drives)
-
-    for repo in placeable_repos:
-        planned = batch.manifests[repo]
-        nrow = con.execute(
-            "SELECT coalesce(numcopies,1) FROM models WHERE repo_id=?",
-            [repo]).fetchone()
-        nc = int((nrow[0] if nrow else 1) or 1)
-        size = _repo_size(con, repo, planned=planned)
-        workspace = _repo_workspace_peak(con, repo)
-        mh = _manifest_hash(con, repo, planned=planned)
-        # Complete *planned* archives on active plan members satisfy durability.
-        satisfied = _complete_archived_plan_drives(
-            con, repo, baseline_labels, planned=planned)[:nc]
-        used: set[str] = set()
-        copy_i = 0
-        # Primary durable source for replica dependencies (first complete archive if any).
-        primary_source = satisfied[0] if satisfied else None
-        for label in satisfied:
-            copy_i += 1
-            order += 1
-            row = drive_by_label[label]
-            epoch = int(row[1])
-            fp = row[2]
-            rid = _requirement_id(copy_i, nc, repo)
-            # Certificate evidence stays archived-unfiltered (c14 / Q6).
-            cert_files = _baseline_file_evidence(con, repo, label)
-            cert = canonical.baseline_satisfaction_certificate(
-                requirement_id=rid,
-                full_manifest_hash=mh,
-                drive_label=label,
-                identity_epoch=epoch,
-                identity_fingerprint=fp or "",
-                files=cert_files,
-            )
-            tasks.append({
-                "requirement_id": rid,
-                "row_kind": "baseline_satisfied",
-                "repo_id": repo,
-                "target_drive": label,
-                "source_drive": None,
-                "satisfying_drive": label,
-                "full_manifest_hash": mh,
-                "order_key": order,
-                "guaranteed_durable": size,
-                "expected_durable": size,
-                "workspace_peak": 0,
-                "identity_epoch": epoch,
-                "baseline_certificate": cert,
-            })
-            used.add(label)
-            # Baseline does not charge remaining free.
-
-        need = nc - len(satisfied)
-        # New placement only on placeable (active+enabled) drives not already used for this repo.
-        free_drives = [d for d in drives if d[0] not in used]
-        if need > len(free_drives):
-            gate = "INFEASIBLE"
-        if size >= 10**14:
-            gate = "INFEASIBLE"
-        peak_need = size + workspace
-        for j in range(need):
-            copy_i += 1
-            order += 1
-            rid = _requirement_id(copy_i, nc, repo)
-            label, epoch = None, None
-            if free_drives:
-                # Prefer a still-unused drive whose remaining free covers durable+workspace peak.
-                pick = None
-                for d in free_drives:
-                    if remaining.get(d[0], 0) >= peak_need:
-                        pick = d
-                        break
-                if pick is None:
-                    # No drive has residual capacity; still assign first free for diagnostic
-                    # rows, but mark the draft non-approvable.
-                    pick = free_drives[0]
-                    gate = "INFEASIBLE"
-                free_drives.remove(pick)
-                label, epoch = pick[0], int(pick[1])
-                have = remaining.get(label, 0)
-                if peak_need > have:
-                    gate = "INFEASIBLE"
-                else:
-                    remaining[label] = have - size  # workspace is transient
-            else:
-                gate = "INFEASIBLE"
-            # Replica / later copies depend on an existing durable source when available (finding 40).
-            source = None
-            if copy_i > 1:
-                source = primary_source
-                if source is None and label is not None:
-                    # No baseline yet: first executable of this repo becomes the source for later ones.
-                    prior = next(
-                        (t for t in tasks
-                         if t.get("repo_id") == repo and t.get("target_drive")),
-                        None)
-                    source = prior["target_drive"] if prior else None
-                if source is None and label is not None and copy_i == 2 and not primary_source:
-                    # When both are new placements, first assigned target of this repo is source.
-                    first_exec = next(
-                        (t for t in tasks
-                         if t.get("repo_id") == repo and t.get("row_kind") == "executable"
-                         and t.get("target_drive")),
-                        None)
-                    source = first_exec["target_drive"] if first_exec else None
-            if copy_i == 1 and primary_source is None and label is not None:
-                primary_source = label
-            tasks.append({
-                "requirement_id": rid,
-                "row_kind": "executable",
-                "repo_id": repo,
-                "target_drive": label,
-                "source_drive": source,
-                "full_manifest_hash": mh,
-                "order_key": order,
-                "guaranteed_durable": size,
-                "expected_durable": size,
-                "workspace_peak": workspace,
-                "identity_epoch": epoch,
-                "baseline_certificate": None,
-            })
-            _append_missing_files(con, files, rid, repo, planned=planned)
-
-    # Final joint pass (stable order) — catches any construction path that skipped remaining.
-    short = joint_capacity_shortfall(tasks, _admissible_map_from_drives(drives))
-    if short is not None:
-        gate = "INFEASIBLE"
-    return tasks, files, gate, policy_gate, _derivation_mode_for_gate(gate)
+    gate = result.proposal_gate_code
+    derivation_mode = ledger.derivation_mode or _derivation_mode_for_gate(gate)
+    return tasks, files, gate, policy_gate, derivation_mode
 
 
 _DERIVATION_MODES = frozenset({"optimized", "state_truncated", "canonical_fallback"})

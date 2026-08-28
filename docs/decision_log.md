@@ -1469,3 +1469,220 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - scope_boundary: List only. No dispose, DEF-037, portal, live catalog, Fill, Gate 3.
 - UPDATE 2026-08-27 — **Gate 2 accepted; production frozen at `b8895d2`.** Operator accept. Frozen production tip: `b8895d2` (`b8895d2120d37c0eeb79b7d417150a4e59d36f91`). Further DEF-038 production requires a new gate cycle. Dispose remains deferred. Does not authorize live catalog, Fill, drives, Gate 3, ready/merge. Greptile omitted (DEC-062).
 
+### DEC-064: Rehearse provenance migration through repeatable copied-runtime acceptance
+- `id`: DEC-064
+- `date`: 2026-08-27
+- `status`: accepted
+- `triggered_by`: operator acceptance of the copy-only provenance-testing controls after review of `docs/provenance-migrate-copy-runbook.md`
+- `decision`: Capture the existing LocalModelArk runtime as a transactionally valid, immutable data/config/state seed before testing. A seed comes from a verified consistent backup or a writer-stopped copy of the complete stable data directory including SQLite sidecars; an ad hoc copy of a live WAL database is inadmissible. Every attempt uses a fresh work/destination/state capsule and explicit literal paths, mutates only disposable copies, and records the executing branch/package identity. Acceptance includes schema/provenance validation plus read-only CLI planning/projection and a non-resuming loopback portal against the published copy. Real storage remains observational: no Fill, repair, restore, drive mutation, annex mutation, `adopt_current`, or physical-byte write. Require three identical baseline runs from one frozen seed and one passing run from a freshly captured seed before a separate live-cutover plan may be reviewed.
+- `rationale`: DEC-059 requires repeatable clone-first evidence, but the first runbook accepted an unspecified `cp -a` input and stopped at “SQLite opens,” leaving the deployment-capture seam, branch/runtime identity, application planning acceptance, and repetition threshold undefined. A frozen production-shaped seed plus per-run capsules lets migration, disk residency, capacity, placement, and typed blockers be exercised repeatedly without spending the live rollback opportunity or broadening into archive execution.
+- `impact`: `docs/provenance-migrate-copy-runbook.md` now defines the capture routes, immutable capsule layout, fresh-pipeline gate, copied migration/publication commands, planning and portal acceptance, controlled copied-state scenarios, finding loop, and readiness threshold. This decision prepares later copied-runtime execution but authorizes none.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-057, DEC-059, DEC-060, DEC-063, DEF-036, DEF-037, DEF-038, INC-029, INC-033, INC-034, INC-035, INC-036, docs/rfcs/001-migrated-runtime-acceptance.md
+- `scope_boundary`: Documentation and test policy only. No capture tree, service stop/start, live-path open/copy, test run against copied state, rehearsal, publication, portal, migration, repair, Fill, drive operation, PR-state change, merge, or rollback-artifact deletion is authorized or performed by this entry.
+
+### INC-037: Immutable capture seed was bound as the publisher's writable quiescence target
+- `id`: INC-037
+- `date`: 2026-08-27
+- `status`: remediated by DEC-065
+- `triggered_by`: first copied-runtime rehearsal `run-001` under DEC-064
+- `symptom`: Rehearsal succeeded against the chmod-frozen capture seed and recorded that seed as `source_catalog`, but `publish_provenance_migration` later opens the reported source normally and retains `BEGIN IMMEDIATE` through publication. An independent read-only query already demonstrated that the source's persisted WAL mode requests writable sidecar state. Publishing this rehearsal would therefore either fail on the frozen permissions or require weakening the seed's immutability control. Publication was not attempted; destination remained empty and the seed hash remained exact.
+- `root_cause`: The first expanded runbook modeled capture source, rehearsal source, and publication-lock source as one directory. DEC-059/INC-029 require publication to lock and possibly normalize the stopped source after preserving an exact rollback bundle, while DEC-064 requires the capture seed to remain byte-immutable. Those are different authorities and need different directories.
+- `blast_radius`: Every copy-only baseline following the first layout would stop between successful rehearsal and publication or tempt an operator to chmod the sole captured seed writable, undermining cross-run repeatability.
+- `why_not_caught_earlier`: Rehearsal is genuinely source-immutable and all automated publication fixtures use writable temporary source directories, so neither path alone exposed the composition error. It appeared only when the operator run froze the production-shaped seed before binding the rehearsal report.
+- `planned_remediation`: DEC-065 interposes a disposable writable per-run source mirror and keeps the capture seed outside every migration/publication path.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-059, DEC-064, INC-029, modelark/core/db.py
+
+### DEC-065: Interpose a disposable source mirror between capture and publication
+- `id`: DEC-065
+- `date`: 2026-08-27
+- `status`: accepted
+- `triggered_by`: INC-037 during copied-runtime `run-001`
+- `decision`: Preserve `capture/source-data` as the byte-immutable cross-run seed. Every attempt first copies it to `runs/<RUN>/source-data`, verifies equality, and makes only that per-run mirror writable. Rehearsal records the mirror as `source_catalog`; publication may retain its source lock and normalize physical WAL state there. Work, destination, state, config, and evidence remain per-run. A completed attempt must re-verify the immutable capture hash independently.
+- `rationale`: Source-capture immutability and publication quiescence are complementary but incompatible on one pathname. A distinct per-run source keeps DEC-059/INC-029's real lock boundary while preserving DEC-064's deterministic seed and requires no production-code weakening or special-case bypass.
+- `impact`: `run-001` is retained as a successful rehearsal stopped before publication. Baseline execution resumes as `run-002` from a fresh per-run source mirror. The runbook layout and commands now encode the missing layer.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-059, DEC-064, INC-029, INC-037
+- `scope_boundary`: Copy-only test architecture. No live catalog, physical drive, production migration code, Fill, repair, restore, proposal approval, or replacement-drive action is authorized.
+
+### INC-038: Old-schema rehearsal seeds wall-clock-dependent planner state
+- `id`: INC-038
+- `date`: 2026-08-27
+- `status`: remediated by DEC-066
+- `triggered_by`: DEC-064 repeatability comparison of copied-runtime `run-001` and `run-002`
+- `symptom`: Two rehearsals from byte-identical source catalogs produced the same snapshot SHA-256, provenance classification, schema, indexes, triggers, views, and all other rows, but different `clone_content_identity` values. The only row difference was `planner_state.updated_at`: `2026-08-28 03:33:19` versus `2026-08-28 03:36:47`.
+- `root_cause`: `_migrate_proposal_control_v5` omits `updated_at` when seeding the new singleton, so SQLite supplies `CURRENT_TIMESTAMP`. DEC-059 repeatability coverage starts from frozen v6, where `planner_state` already exists, and therefore never exercises the v2/v4 bootstrap used by the deployed catalog.
+- `blast_radius`: Rehearsing or publishing the same pre-v5 catalog at different times produces logically different migrated catalogs and prevents exact repeatability evidence. The operational values are otherwise equivalent, but the content identity used to validate publication legitimately includes the volatile row.
+- `why_not_caught_earlier`: Unit migration tests assert revision, approval pointer, and fencing token but not `updated_at`; the clone-first repeatability contract begins after the volatile migration step.
+- `planned_remediation`: Seed a canonical “never planner-mutated” timestamp explicitly in both the v4→v5 migration and fresh packaged-schema singleton, pin it expected-red in `tests/test_catalog_v5_proposal_migration.py`, then repeat copied-runtime rehearsal before publication.
+- `docs_updated`: docs/decision_log.md, tests/test_catalog_v5_proposal_migration.py, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-049, DEC-057, DEC-059, DEC-064, modelark/core/db.py, modelark/core/schema.sql
+- `scope_boundary`: Planner-state bootstrap determinism only. No proposal behavior, live catalog, migration execution against live state, Fill, repair, drive, or replacement-drive operation is authorized.
+
+### DEC-066: Canonicalize the never-mutated planner-state timestamp
+- `id`: DEC-066
+- `date`: 2026-08-27
+- `status`: accepted
+- `triggered_by`: INC-038 during copied-runtime repeatability comparison
+- `decision`: Seed `planner_state.updated_at` explicitly as `1970-01-01 00:00:00` whenever the singleton is created by the v4→v5 migration or the fresh packaged schema. Interpret that value only as the canonical marker that no planner mutation has occurred; ordinary planner mutations retain their real event timestamps. Pin both construction paths with regression contracts before resuming copied-runtime publication.
+- `rationale`: Bootstrap is catalog construction, not an operator event. Deriving it from wall-clock time made two migrations from the same frozen bytes produce different full content identities and obscured whether any semantic state differed. A single explicit sentinel preserves chronology after the first mutation while making fresh and migrated catalogs deterministic.
+- `impact`: The two INC-038 expected-red contracts now pass, the complete proposal/control migration suite passes 10/10, the full non-E2E suite passes 892 tests, and isolated portal E2E passes. Copied-runtime rehearsal must still independently reproduce the same full identity before publication.
+- `docs_updated`: docs/decision_log.md, modelark/core/db.py, modelark/core/schema.sql, tests/test_catalog_v5_proposal_migration.py
+- `related`: DEC-049, DEC-057, DEC-059, DEC-064, INC-038
+- `scope_boundary`: Deterministic bootstrap metadata only. No change to planner mutation timestamps, proposal behavior, live catalog, Fill, repair, restore, physical drive state, or replacement-drive handling.
+
+### INC-039: Lost plan membership is invisible in copied planning surfaces
+- `id`: INC-039
+- `date`: 2026-08-27
+- `status`: remediated by DEC-068; copied-runtime validated 2026-08-28
+- `triggered_by`: DEC-064 controlled `scenario-lost-drive-02` after successful copied v7 publication
+- `symptom`: After the operator-declared-lost `drive-02` identity was set to `lifecycle='lost'` and `eligibility='excluded'` through an isolated copied-catalog test seam, planning correctly removed its capacity and assigned it no work. However, `plan show` still printed the unqualified label among seven drives, and `library plan --json` emitted a normal-looking drive object with nominal capacity and `usable=0` but omitted both lifecycle and eligibility. The only visible clue was fleet capacity falling from 21.08 TB to 17.19 TB. The failed identity remains historical plan membership by design, but the surfaces do not explain why it is non-candidate.
+- `root_cause`: `plan show` renders only `plan_drives` labels. `librarian.plan_view` queries role, RAID, capacity, and legacy free bytes but does not carry `drives.lifecycle` or `drives.eligibility` into the established drive JSON shape. Candidate filtering is correctly implemented below those presentation adapters, so safety and explanation diverge.
+- `blast_radius`: An operator reviewing replacement placement can mistake a retained lost member for ordinary offline capacity, cannot distinguish loss/exclusion from unknown capacity evidence, and must reconstruct catalog rows by hand. This violates DEC-050's typed lost-target observability contract even though the planner fails closed.
+- `why_not_caught_earlier`: Lifecycle tests pin candidate and satisfaction semantics, while presentation tests pin capacity-evidence fields; none requires lifecycle/eligibility to survive into CLI/library output for retained historical membership.
+- `planned_remediation`: Add expected-red contracts that require library drive rows to expose lifecycle, eligibility, and typed candidacy reason, and require `plan show` to annotate non-active/non-enabled retained members without deleting historical membership. Keep the operator mutation separately gated: no automatic loss inference and no label reuse.
+- `docs_updated`: docs/decision_log.md
+- `related`: INC-022, DEC-050, DEF-029, DEC-064, modelark/librarian.py, modelark/cli.py
+- `scope_boundary`: Planning observability over copied state only. No live catalog edit, automatic loss detection, physical drive probe/write, replacement registration, proposal approval, Fill, or retirement/reuse operation.
+
+### DEF-029 UPDATE: Replacement-drive gate is now active
+- `date`: 2026-08-27 / `status`: active — revisit condition met; lifecycle/reuse implementation still required
+- `triggered_by`: operator report of a new replacement drive during DEC-064 copied-runtime acceptance
+- `evidence`: Host-level read-only inventory enumerated only the two internal NVMe devices; no ModelArk archive device or `/mnt/drive-00` through `/mnt/drive-06` mount was present, so the replacement cannot yet be bound to observed hardware evidence. Current registration safely refuses an existing label before physical or catalog mutation, but offers no identity-aware refresh/retire workflow and no operator CLI/API for the DEC-050 lost+excluded transition. The copied catalog proves `drive-02` owns zero `archived` rows and zero `replicas`, while its stale row remains active+enabled until an explicit operation is applied.
+- `disposition`: Do not reuse `drive-02` for new media and do not manually edit the live catalog. When the replacement is enumerable, first capture its device/serial/filesystem/annex identity in a read-only or dry-run qualification, assign a new label by default, and require a separately reviewed lifecycle operation to bind the old identity+epoch, declare it lost+excluded, increment planner revision, preserve its provenance, and force fresh preview/approval. Registration of a new label may then add that distinct identity to the active plan; it must not inherit Drive-02 facts or repair state.
+- `related`: DEF-029, INC-022, DEC-050, DEC-060, INC-039, RFC-002
+- `scope_boundary`: Reopens design/acceptance work only. No device formatting, mount, SMART stress, annex initialization, registration, label reuse, live lifecycle mutation, Fill, or proposal approval is authorized by this update.
+
+### INC-040: Proposal preview bypasses canonical admission and reports stale capacity feasible
+- `id`: INC-040
+- `date`: 2026-08-27
+- `status`: remediated by DEC-068; copied-runtime validated 2026-08-28
+- `triggered_by`: DEC-064 run-004 cross-surface copied portal acceptance
+- `symptom`: Against the same published copied catalog, `library plan --json` and `--explain` returned `feasible=false`, `gate_b_code='UNPROVEN_PROVENANCE'`, 111 diagnostics, and zero executable tasks because capacity evidence was unknown and migrated digest provenance remained unresolved. The read-only `/api/plan/preview` instead returned `ok=true` and `gate_b_code='FEASIBLE'`. Direct inspection of its authoritative `proposal.preview_pure` payload produced 500 proposal rows—317 executable and 183 baseline-satisfied—targeting only drive-00/01, with no refusal.
+- `root_cause`: The proposal path is a second planner. `_plan_drives` reads `drives.free_bytes` and `_admissible_from_drive_row` subtracts only a safety floor, while the canonical reconcile/admission path requires identity-bound live or clean-anchor evidence and carries digest-provenance blockers. `preview_pure` never consumes that canonical `CapacityPlan`; the reduced portal response then presents its packing code as the planning result. Approval later revalidates exact evidence under fences, but late refusal does not make a false-green preview safe or reviewable.
+- `blast_radius`: A future operator-facing approval flow could present a stale legacy-capacity assignment as feasible, then fail only at approval—or, as the two planners evolve, canonicalize and review a materially different graph from the library surface. On this real copied catalog the discrepancy hides both unknown capacity evidence and 99 blocking provenance requirements, defeating the migration acceptance purpose and DEC-049/RFC-002's preview-equals-approval authority.
+- `why_not_caught_earlier`: Proposal tests pin its internal manifest, CAS, and approval-revalidation contracts; admission/library tests pin the reconciled planner. Blocked-selection tests intentionally require `/api/plan/preview` to call `preview_pure`, not `plan_view`. No copied-catalog contract compares the two authorities end to end.
+- `planned_remediation`: Establish one immutable planning input and one canonical reconcile/admission/capacity result for library, proposal construction, and portal preview. Preserve proposal-specific exact files, baseline certificates, canonical hashing, and approval-time fenced revalidation as adapters around that result; remove raw legacy `free_bytes` as preview authority. The reduced endpoint must expose overall executability and root typed blockers instead of defaulting missing detail to `FEASIBLE`. Add an expected-red copied-catalog cross-surface contract before production changes.
+- `expected_red`: `tests/test_inc040_gate1_contracts.py` constructs one identity-unproven drive with tempting legacy free bytes. Canonical `librarian.plan_view` returns `CAPACITY_EVIDENCE_UNKNOWN`, zero planned work, and non-feasible; `proposal.preview_pure` fails the contract by returning `FEASIBLE` with executable work. Focused result: 1 failed as expected.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, tests/test_inc040_gate1_contracts.py
+- `related`: DEC-045, DEC-049, DEC-050, DEC-057, DEC-064, DEF-036, RFC-002, modelark/proposal.py, modelark/librarian.py, modelark/web/plan_api.py
+- `scope_boundary`: Planning-authority unification and read-only observability only. No live catalog, proposal publication/approval, selection mutation, Fill, repair, restore, device operation, or replacement registration is authorized.
+
+### DEC-067: Make planning one first-class authority with centrally managed modes
+- `id`: DEC-067
+- `date`: 2026-08-28
+- `status`: accepted
+- `triggered_by`: operator agreement after INC-040 copied-runtime diagnosis
+- `decision`: Planning is a first-class subsystem with one immutable input and one canonical typed result consumed by CLI, Library, portal preview, proposal construction, and later approval. `guaranteed`, `compression_aware`, and any future planning modes are centrally registered policy values inside that authority; they may alter budget/evidence rules but may not select an alternate planner. Proposal construction adapts the canonical result into exact files, certificates, and canonical hashes without re-solving placement. Approval retains a fresher fenced revalidation of the reviewed result and must not silently substitute a different assignment.
+- `rationale`: INC-040 demonstrates that duplicated planning logic—not insufficient object-oriented structure—is the failure. A separate class hierarchy per mode would preserve the same split behind cleaner names. The useful first-class boundary is a stable planning request/result contract, a single orchestration entry point around the existing functional core, centrally managed mode policy, and thin consumer adapters.
+- `impact`: Remediation should converge the existing PlannerInput/reconcile/admission/capacity pieces behind one public planning service or facade, remove proposal preview's raw `free_bytes` authority, expose overall executability plus typed blockers consistently, and make the INC-040 cross-surface contract green before copied-runtime repetition resumes. INC-039 lifecycle visibility should be carried in the same result rather than patched independently into every surface.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-045, DEC-049, DEC-050, DEC-057, DEC-064, INC-039, INC-040, RFC-002
+- `scope_boundary`: First-class planning contract and adapters only. It does not authorize a framework rewrite, per-mode planner implementations, execution transport changes, live migration, proposal approval, Fill, repair, or physical drive work.
+
+### INC-041: Canonical planning bypassed the shared raw-annex content-satisfaction rule
+- `id`: INC-041
+- `date`: 2026-08-28
+- `status`: remediated by DEC-068; copied-runtime validated 2026-08-28
+- `triggered_by`: removal of INC-040's dead proposal-planner helpers after DEC-067 convergence
+- `symptom`: The only contracts proving hashless raw `SHA256E` annex-key satisfaction called `_complete_archived_plan_drives`, an unused helper in the retired proposal planner. The canonical `candidates` core compared only `orig_sha256` and did not carry `archived.compressed`, so valid raw annex-key evidence was reported as unproven. On the copied deployment this reduced proposal baseline certificates from 183 to 77 and made `UNPROVEN_PROVENANCE` appear to be the root blocker ahead of the real unknown-capacity gate.
+- `root_cause`: Canonical `ArchivedFileFact` omitted the raw-versus-compressed discriminator and `_proof` reimplemented digest logic instead of delegating to `archive_hash.content_satisfies`. The integration tests pinned the old proposal helper rather than the first-class planning core, allowing production authority and test authority to diverge.
+- `blast_radius`: Planning failed closed and executed no work, but undercounted proven disk residency, overstated provenance repair, and obscured the next actionable gate. Approval/execution consumers already used the shared digest rule, so this was a conservative preview/satisfaction mismatch rather than a false durability claim.
+- `why_not_caught_earlier`: INC-028 correctly established a shared scalar predicate but wired its proposal assertion to a helper that became dead when DEC-067 moved proposal construction onto canonical candidates. No contract required the immutable candidate input to include `compressed` or the canonical proof source to record raw annex-key evidence.
+- `remediation`: Add `compressed` to `ArchivedFileFact`, route canonical satisfaction through `archive_hash.content_satisfies`, record `RAW_ANNEX_SHA256E` as the proof source, move the INC-028 consumer contracts onto `candidates`, and delete the obsolete proposal planner/admission helpers. Focused result: 135 passed; full result: 894 passed plus standalone portal E2E.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, modelark/candidates.py, modelark/reconcile.py, modelark/proposal.py, tests/test_inc028_gate1_contracts.py
+- `related`: DEC-051, DEC-055, INC-028, INC-033, INC-040, DEC-067
+- `scope_boundary`: Disk-residency proof and canonical planning only. No repair, live catalog, physical drive, proposal approval, or Fill action is authorized.
+
+### DIS-004: Post-publication SQLite byte drift is runtime representation, not graph mutation
+- `date`: 2026-08-28 / `status`: observed / `triggered_by`: final DEC-064 current-code replay / `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `finding`: The four disposable published catalogs began with the same publication container SHA-256. Normal read-write proposal/portal opens converted SQLite journal metadata to WAL and produced different later container hashes according to open history. All four still had schema v7, integrity `ok`, no foreign-key violations, planner revision `0`, and exact logical content identity `084c144230d74077a36bc1af8a26a34d164bed8d99bba5e6878bfb64ea6926d1`.
+- `implication`: Preserve the physical SHA as publication/container evidence, but compare the canonical logical identity plus revision/integrity after runtime replay. Do not infer a planning graph mutation from SQLite representation bytes alone; any table-row or revision change remains a stop condition.
+- `related`: DEC-052, DEC-059, DEC-064
+
+### DEC-068: Accept the unified planning authority and copied-runtime threshold
+- `id`: DEC-068
+- `date`: 2026-08-28
+- `status`: accepted
+- `triggered_by`: DEC-064 threshold, DEC-067 implementation, INC-039, INC-040, INC-041
+- `decision`: Accept `modelark.planning` as the one first-class read-only planning authority. It captures lifecycle, eligibility, identity-bound admission evidence, canonical requirements/satisfaction, capacity mode policy, and assignment in one consistent catalog transaction. Library/CLI and proposal/portal consume that result through presentation or persistence adapters; capacity modes remain centrally managed policy values and may not select alternate planners. Accept copied-runtime behavioral readiness for the recorded working-tree candidate after three identical frozen-seed baselines and one identical fresh-capture baseline, while keeping immutable artifact freeze and live cutover separately gated.
+- `rationale`: The recorded working-tree candidate passes 894 non-E2E tests and standalone portal E2E. All four migrated copies share schema v7, integrity/FK success, classification `3286/1208/1122/0`, snapshot SHA-256 `eec3a1f17326a8950ba7552a4b31b34385998cab9379eec11ab761171190a83a`, and logical identity `084c144230d74077a36bc1af8a26a34d164bed8d99bba5e6878bfb64ea6926d1`. Current-code replay agrees across Library, proposal, and portal on `CAPACITY_EVIDENCE_UNKNOWN` with zero executable tasks; the lost-drive scenario visibly excludes `drive-02` and targets it zero times.
+- `impact`: INC-039, INC-040, and INC-041 are remediated. The duplicate proposal placement/admission helpers are removed; canonical raw-annex proof is retained; lifecycle state reaches operator surfaces. Remaining work is freezing the currently reviewed working tree into an immutable candidate commit/package, DEF-029 identity-aware replacement/lifecycle handling, restoration of drive admission evidence, an explicit capacity decision because the visible 1 TB candidate does not replace the lost ~3.89 TB, and a separately reviewed live-cutover/rollback plan. The live catalog remains schema v2 and byte-identical at `07f8aa3907edb80c11d145341c2fb522afce181b7cd533a3df008ed21bf51c1e`.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, modelark/planning.py, modelark/librarian.py, modelark/proposal.py, modelark/candidates.py, modelark/reconcile.py, modelark/cli.py, modelark/core/db.py, modelark/core/schema.sql, tests/test_inc040_gate1_contracts.py, tests/test_inc028_gate1_contracts.py, tests/test_catalog_v5_proposal_migration.py, tests/test_inc024_gate1_contracts.py, tests/test_library_projection.py, tests/test_plan.py, tests/test_proposal_cas_approval.py
+- `related`: DEC-049, DEC-050, DEC-052, DEC-055, DEC-057, DEC-059, DEC-064, DEC-067, DEF-029, DEF-036, DEF-038, INC-039, INC-040, INC-041, DIS-004, RFC-002
+- `scope_boundary`: Acceptance of copy-only migration and planning architecture. No live migration/publication, service start, provenance repair, drive mount/format/register, replacement label reuse, proposal approval, Fill, PR merge, or evidence disposal is authorized.
+
+### BOT-002: Unregistered host disk was mistaken for the intended Drive #2 replacement
+- `date`: 2026-08-28
+- `status`: logged
+- `triggered_by`: operator hardware correction after DEC-068
+- `claim`: The AI treated a visible unmounted 1 TB WD_BLACK device as the likely replacement for the failed approximately 3.89 TB Drive #2, then derived a fleet-capacity recommendation from that inferred role.
+- `correction`: The operator identified the replacement as a Seagate 8 TB disk. It is now physically connected but remains unregistered; it must be left alone during preparation.
+- `verified`: The replacement identity and current connection are operator assertions. No block-device inventory, SMART command, mount, format, registration, or identity binding was run after the correction. The 1 TB device is unrelated unless independently established later.
+- `lesson`: Attached or visible hardware is observation, not identity or intent. Never infer a replacement role from device size, name, or host presence; require an explicit operator decision and identity-aware registration workflow.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-050, DEC-068, DEF-029, INC-039
+
+### DEC-069: Make drive loss an operator-confirmed catalog transition followed by canonical replan
+- `id`: DEC-069
+- `date`: 2026-08-28
+- `status`: accepted
+- `triggered_by`: operator-requested UI walkthrough, BOT-002, DEC-050, DEC-067, DEF-029, INC-039
+- `decision`: Passive attached-device discovery is advisory only. A missing registered drive stays active until an operator opens a loss preview and confirms the exact drive label, planner revision, identity epoch, identity fingerprint, and phrase `DECLARE LOST <label>`. The one atomic graph write sets that old identity to `lost + excluded`, invalidates any active approval, increments planner revision once, and preserves the drive row, plan membership, identity/provenance, archived facts, and replica facts. The UI then renders one result from the central `modelark.planning` authority. Unregistered attached hardware is displayed only as unregistered: it receives no label, role, plan membership, capacity authority, or inherited history. SMART remains a separate explicit action rather than an automatic consequence of opening the Drives screen.
+- `rationale`: Offline/missing evidence is not proof of permanent loss, while automatic replacement binding could attach old disk-residency claims to unrelated media. Exact CAS bindings make the consequential operator decision reviewable and stale-safe. Preserving historical membership and facts keeps the failure visible; central replanning prevents a lifecycle-specific alternate planner.
+- `impact`: Add a first-class `drive_lifecycle` domain operation, passive registered/unregistered observation mapping, loopback portal preview/confirm endpoints, and a Drives-screen `Uh oh` walkthrough. Contracts cover read-only observation, no auto-binding, confirmation/revision/epoch/fingerprint CAS, live-Fill exclusion, approval invalidation, single revision bump, historical-row preservation, idempotence, CSRF, typed conflict, and zero targets for the lost drive. Replacement qualification/registration and any old-label reuse remain DEF-029 work.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, modelark/drive_lifecycle.py, modelark/proposal.py, modelark/web/drive_api.py, modelark/web/disk_api.py, modelark/web/server.py, modelark/web/static/index.html, modelark/web/static/app.css, modelark/web/static/disk.js, tests/test_drive_lifecycle.py, tests/test_web_http_security.py
+- `related`: BOT-002, DEC-045, DEC-049, DEC-050, DEC-060, DEC-067, DEC-068, DEF-029, DEF-036, INC-022, INC-039, RFC-002
+- `scope_boundary`: Authorizes implementation and copied-state testing of discovery, explicit old-drive loss/exclusion, and read-only replanning only. It does not authorize probing the operator-reported Seagate, SMART, mount, format, filesystem/annex initialization, registration, replacement binding, live-catalog mutation, proposal publication/approval, Fill, repair, restore, or service start.
+- UPDATE 2026-08-28 — **Prepared workflow validated without physical enumeration.** Full non-E2E result: 907 passed, 5 warnings. Standalone isolated portal E2E passed, including browser-routed mock observations for a missing registered Drive #2 plus an unregistered Seagate 8 TB; cancel emitted no mutation, submit carried the exact revision/epoch/fingerprint/phrase, the UI rendered `CAPACITY_EVIDENCE_UNKNOWN` with zero lost-drive targets, and an intercepted `/api/disk` counter remained zero. The operator-reported physical Seagate was not enumerated or probed.
+
+### DEC-070: Accept the operator-qualified replacement candidate without reusing Drive #2 identity
+- `id`: DEC-070
+- `date`: 2026-08-28
+- `status`: accepted
+- `triggered_by`: DEC-069 copied-state operator walkthrough, DEF-029, and the separately authorized physical-media qualification recorded in the private scenario evidence
+- `decision`: Accept the operator-reviewed new Seagate 8 TB disk as the replacement candidate for the next onboarding stage. Its exact device identity was re-established before diagnostics; passive SMART, SMART short, SMART conveyance, and an operator-run offline no-write ext4 consistency check all passed. The candidate remains a new identity: it must receive a new label by default, must not reuse `drive-02`, and must not inherit Drive #2 residency, replica, capacity, approval, or repair facts. The extended SMART test is not an admission prerequisite under the present operator decision.
+- `rationale`: The disk is brand new, matches the operator's expected vendor and capacity, reports no SMART/media/interface errors, and has a clean existing ext4 filesystem. This evidence is sufficient to proceed to explicit onboarding without claiming full-surface or write-path proof. Preserving the old lost identity separately is the architectural safety boundary; a longer optional diagnostic does not justify delaying the controlled local migration.
+- `impact`: The copied drive-loss scenario and initial read-only qualification are complete. Work may proceed to immutable candidate freeze, side-by-side live provenance migration, and a separately gated replacement preview/registration/reconciliation workflow. Public documentation must distinguish automatic fresh-install behavior from the explicit backup-first migration required for an existing pre-v7 catalog.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/provenance-live-cutover.md, docs/upgrading.md, docs/deployment.md, README.md, CHANGELOG.md
+- `related`: DEC-050, DEC-059, DEC-064, DEC-067, DEC-068, DEC-069, DEF-029, DEF-039, RFC-002
+- `scope_boundary`: This accepts the media as a replacement candidate only. It does not itself mount, format, initialize git-annex, register, bind, admit capacity, approve a proposal, start Fill, repair provenance, or authorize old-label reuse.
+
+### DEF-039: Defer the optional extended SMART test for the accepted replacement candidate
+- `id`: DEF-039
+- `date`: 2026-08-28
+- `status`: active
+- `triggered_by`: DEC-070 operator acceptance after clean short/conveyance SMART and offline filesystem checks
+- `decision`: Do not run the advertised 988-minute extended SMART test now. Proceed using the bounded qualification evidence already captured, while continuing to describe it accurately as initial read-only qualification rather than full-surface proof.
+- `rationale`: The new drive matches the expected vendor/capacity and has clean health, error-log, short-test, conveyance-test, and ext4 consistency evidence. The long test would delay the migration/onboarding work without changing the identity-separation or fail-closed planning controls.
+- `impact`: Extended SMART is neither a current migration gate nor an automatic background action. Any later run remains explicit and operator-visible.
+- `revisit_when`: SMART counters change, unexplained I/O or transport errors occur, the operator adopts a fleet-wide burn-in policy, or additional assurance is desired before reducing redundancy or relying on this disk for a sole irreplaceable copy.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-070, DEF-029
+
+### INC-042: Provenance publication omits the runtime's git-annex map locator
+- `id`: INC-042
+- `date`: 2026-08-28
+- `status`: remediated by DEC-071; focused migration/publication suite passed 2026-08-28
+- `triggered_by`: preparation of the post-DEC-070 live cutover and public user-upgrade procedure
+- `symptom`: `modelark-provenance-migrate publish` creates only `DEST/catalog.sqlite`. The source data directory's optional `library.json` is neither captured in rehearsal evidence nor published to the new data directory. A side-by-side migrated runtime can therefore fall back to `~/modelark-library` instead of retaining a user's configured git-annex map path. This host happens to use that default path, which masks the defect locally.
+- `root_cause`: The provenance tool treats the SQLite bundle as the complete runtime publication unit even though `register.library_root()` reads a second durable data-directory authority, `library.json`. Copied-runtime acceptance validated catalog/planning behavior but did not require a non-default map locator in the destination.
+- `blast_radius`: Users with a custom map path could successfully migrate the catalog and then initialize/register/sync drives against the wrong map. Existing planning rows remain fail-closed, but later physical storage operations could diverge from the intended archive topology.
+- `why_not_caught_earlier`: The copied deployment's locator pointed at the packaged default location, and no publication contract asserted preservation of optional runtime companion files.
+- `planned_remediation`: Make `library.json` an optional, validated, byte-pinned migration companion: capture presence/hash/content during rehearsal, refuse source drift and destination occupancy during publish, and publish the exact regular-file bytes before making `catalog.sqlite` visible. Add expected-red contracts for present, absent, malformed, drifted, and occupied cases. Keep config/state outside this publisher and preserve the one-run/one-destination refusal model after any partial attempt.
+- `docs_updated`: docs/decision_log.md
+- `related`: DEC-006, DEC-059, DEC-064, DEC-070, modelark/core/db.py, modelark/register.py, docs/provenance-live-cutover.md
+- `scope_boundary`: Runtime data-directory identity only. No drive operation, annex command, live catalog mutation, Fill, service start, broad arbitrary-file copy, or publication-leftover disposal is authorized.
+
+### DEC-071: Publish the validated git-annex map locator with the migrated catalog
+- `id`: DEC-071
+- `date`: 2026-08-28
+- `status`: accepted
+- `triggered_by`: INC-042
+- `decision`: Treat the optional data-directory `library.json` as the sole whitelisted non-SQLite companion in provenance migration. Rehearsal reads it without following symlinks, requires a bounded regular UTF-8 JSON file with a nonempty string `library_root`, and records exact presence/size/SHA-256 evidence. Publication treats the report as untrusted, refuses source drift and destination occupancy, writes the exact bytes through an exclusive no-follow descriptor, fsyncs and pins pathname/inode/content identity, and makes the catalog visible only after the companion is correct. An absent source locator remains absent. Config and state stay outside the publisher.
+- `rationale`: The catalog and map locator jointly select the archive topology for later registration and git-annex operations. Publishing the catalog alone is not a complete side-by-side runtime-data transition. A narrow companion allowlist preserves that authority without turning migration into an arbitrary data-directory copier or weakening the catalog's atomic no-clobber boundary.
+- `impact`: Custom map paths survive migration; malformed, symlinked, changing, and occupied locator cases fail closed. A failed attempt that created any destination member remains a refused one-run destination and is not automatically cleaned or reused. Focused INC-042 contracts pass 9/9; the surrounding migration/publication fault suite passes 131 tests with two existing deprecation warnings.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/provenance-live-cutover.md, docs/upgrading.md, README.md, CHANGELOG.md, modelark/core/db.py, tests/test_inc042_gate1_contracts.py
+- `related`: DEC-006, DEC-059, DEC-063, DEC-064, INC-042, DEF-038
+- `scope_boundary`: This publishes only `catalog.sqlite` and the validated optional `library.json`. It does not copy configuration/state/backups, run git-annex, mutate drives, start services, repair evidence, approve work, or dispose of leftovers.

@@ -7,7 +7,7 @@ import threading
 from contextlib import contextmanager
 from unittest import mock
 
-from modelark.web import plan_api, selection_api, server
+from modelark.web import drive_api, plan_api, selection_api, server
 
 
 @contextmanager
@@ -136,6 +136,22 @@ def test_capacity_mode_route_and_deprecated_alias_dispatch():
     assert status == 200 and old_status == 200
     canonical.assert_called_once_with({"plan_id": "ark", "capacity_mode": "guaranteed"})
     legacy.assert_called_once_with({"plan_id": "ark", "mode": "uncompressed"})
+
+
+def test_drive_loss_route_uses_mutation_security_and_conflict_status():
+    refused = {"ok": False, "refused": {"code": "DRIVE_LOSS_PREVIEW_STALE"}}
+    with _portal() as httpd, mock.patch.object(
+            drive_api, "declare_lost", return_value=refused) as declare:
+        payload = {"drive_label": "drive-02"}
+        status, _, body = _request(
+            httpd,
+            "POST",
+            "/api/drive/declare-lost",
+            json.dumps(payload),
+            _mutation_headers(httpd),
+        )
+    assert status == 409 and json.loads(body) == refused
+    declare.assert_called_once_with(payload)
 
 
 def test_non_loopback_bind_is_refused_before_startup():

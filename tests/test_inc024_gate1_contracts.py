@@ -332,7 +332,7 @@ def test_c06_excluded_catalog_file_does_not_invalidate_approval():
 # ---------------------------------------------------------------------------
 
 
-def test_c07_durable_charges_equal_planned_size():
+def test_c07_durable_charges_use_canonical_planned_file_budgets():
     con = f.mem_con()
     _seed_drives_and_plan(con)
     _gte_shape(con)
@@ -343,7 +343,10 @@ def test_c07_durable_charges_equal_planned_size():
         "SELECT coalesce(sum(size_bytes),0) FROM files WHERE repo_id=?",
         ["org/gte"]).fetchone()[0])
     assert task["guaranteed_durable"] == planned
-    assert task["expected_durable"] == planned
+    # DEC-067: proposal is an adapter over the canonical planner budget.  Guaranteed is the
+    # acquisition-planned raw envelope; expected applies the shared compression estimate/margin.
+    assert task["expected_durable"] == 733
+    assert task["expected_durable"] < task["guaranteed_durable"]
     assert planned < catalog
     assert task["guaranteed_durable"] != catalog
 
