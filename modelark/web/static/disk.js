@@ -4,6 +4,7 @@
   const {api, post, esc, gb, toast} = window.MA;
   const $ = id => document.getElementById(id);
   let lossPreview = null;
+  let onboardingPreview = null;
 
   const OBS = {
     attached_exact_serial: ["attached", "ok", "Exact registered serial observed."],
@@ -35,7 +36,7 @@
     </div>`;
   }
 
-  function unregisteredCard(item) {
+  function unregisteredCard(item, index) {
     return `<div class="drive unknown">
       <span class="pill unknown">unregistered</span>
       <h3>${esc(item.dev || "attached device")}</h3>
@@ -43,6 +44,7 @@
         serial ${esc(item.serial || "unreported")}</div>
       <div class="disknote">No action taken. This hardware has no ModelArk label, role, plan
         membership, capacity authority, or inherited residency history.</div>
+      <div class="driveacts"><button class="driveonboard" data-drive-index="${index}">Review onboarding</button></div>
     </div>`;
   }
 
@@ -67,6 +69,64 @@
     body.querySelectorAll(".driveproblem").forEach(button => {
       button.onclick = () => openLoss(registered[Number(button.dataset.driveIndex)]);
     });
+    body.querySelectorAll(".driveonboard").forEach(button => {
+      button.onclick = () => openOnboarding(unregistered[Number(button.dataset.driveIndex)]);
+    });
+  }
+
+  async function openOnboarding(item) {
+    let result;
+    try {
+      result = await api("/api/drive/onboarding-preview?dev=" + encodeURIComponent(item.dev) +
+        "&serial=" + encodeURIComponent(item.serial || ""));
+    } catch (e) {
+      toast("could not prepare onboarding preview");
+      return;
+    }
+    if (!result || !result.ok) {
+      toast(result?.refused?.code || "onboarding preview refused");
+      return;
+    }
+    onboardingPreview = result.preview;
+    const volume = onboardingPreview.volume;
+    const lost = onboardingPreview.separate_lost_identities || [];
+    $("driveOnboardingHead").textContent = "Review onboarding — " + onboardingPreview.suggested_label;
+    $("driveOnboardingMsg").textContent =
+      "Read-only preview. No SMART, formatting, initialization, registration, plan change, or reconciliation has run.";
+    $("driveOnboardingIdentity").textContent =
+      "observed " + (item.dev || "device") + " · " + (item.model || "unknown model") +
+      " · serial " + (item.serial || "unreported") + " · proposed new label " +
+      onboardingPreview.suggested_label;
+    $("driveOnboardingVolume").textContent = volume
+      ? "filesystem " + volume.dev + " · " + volume.fstype + " · UUID " +
+        (volume.fs_uuid || "unproven") + " · " + (volume.mounted ? "mounted" : "not mounted")
+      : "No single registration filesystem was identified.";
+    $("driveOnboardingHistory").textContent = lost.length
+      ? "Separate lost history (never inherited): " + lost.map(old =>
+          old.drive_label + " epoch " + old.identity_epoch + " · " + old.archived_rows +
+          " archived rows · " + old.replica_rows + " replica rows").join("; ")
+      : "No lost identity is being replaced or inherited by this preview.";
+    const actions = {
+      mount_volume: "Next operator gate: mount " + (volume?.dev || "the filesystem") +
+        ", then refresh this preview.",
+      review_registration: "Filesystem is mounted. Stop and review before enabling a separate registration action.",
+      refuse_system_device: "Refused: this device backs the running system.",
+      choose_volume: "More than one filesystem exists. Choose the intended volume outside ModelArk first.",
+      review_filesystem: "No supported existing filesystem is ready. Formatting remains a separate destructive workflow.",
+      establish_filesystem_identity: "The filesystem UUID is unproven; do not register it.",
+      review_archive_namespace: "The modelark path is already occupied and was not recognized as a safe fresh target.",
+      review_existing_annex: "An existing git-annex identity is present. Use the recovery/re-registration workflow; do not treat it as fresh media.",
+      refresh_topology: "Topology could not be proven; refresh attached inventory.",
+    };
+    $("driveOnboardingNext").textContent = actions[onboardingPreview.next_action] ||
+      "Preview is blocked; refresh and review the evidence.";
+    $("driveOnboardingModal").hidden = false;
+    $("driveOnboardingClose").focus();
+  }
+
+  function closeOnboarding() {
+    $("driveOnboardingModal").hidden = true;
+    onboardingPreview = null;
   }
 
   async function openLoss(item) {
@@ -201,6 +261,7 @@
       $("driveLossApply").disabled = !lossPreview || $("driveLossConfirm").value !== lossPreview.confirmation;
     };
     $("driveLossApply").onclick = applyLoss;
+    $("driveOnboardingClose").onclick = closeOnboarding;
   }
   if (document.readyState !== "loading") wire(); else document.addEventListener("DOMContentLoaded", wire);
 })();

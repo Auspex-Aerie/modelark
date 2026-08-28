@@ -12,6 +12,7 @@ import os
 import re
 import shutil
 import subprocess
+from pathlib import Path, PurePosixPath
 
 from modelark.core import platform as osplat
 
@@ -84,6 +85,136 @@ def attached_inventory() -> dict:
             }
             for item in disks
         ],
+    }
+
+
+def _registration_device_path(dev: str) -> bool:
+    """Accept a concrete /dev path as one argv token; never interpret it through a shell."""
+    if not isinstance(dev, str) or not dev.startswith("/dev/") or len(dev) > 256:
+        return False
+    if any(char in dev for char in ("\x00", "\n", "\r")):
+        return False
+    return ".." not in PurePosixPath(dev).parts
+
+
+def _flatten_lsblk(nodes: list[dict]) -> list[dict]:
+    flattened: list[dict] = []
+    for node in nodes:
+        flattened.append(node)
+        flattened.extend(_flatten_lsblk(node.get("children") or []))
+    return flattened
+
+
+def registration_topology(dev: str) -> dict:
+    """Read a prospective registration target's filesystem topology without SMART or writes."""
+    if not _registration_device_path(dev):
+        return {
+            "available": False,
+            "requested_dev": dev,
+            "system_backing": False,
+            "nodes": [],
+            "error": "invalid_device_path",
+        }
+    try:
+        result = subprocess.run(
+            [
+                "lsblk", "--json", "-b", "-p", "-o",
+                "PATH,TYPE,SIZE,FSTYPE,UUID,MOUNTPOINTS,MODEL,SERIAL,TRAN,ROTA",
+                dev,
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return {
+            "available": False,
+            "requested_dev": dev,
+            "system_backing": False,
+            "nodes": [],
+            "error": "lsblk_unavailable",
+        }
+    if result.returncode != 0:
+        return {
+            "available": False,
+            "requested_dev": dev,
+            "system_backing": False,
+            "nodes": [],
+            "error": "topology_probe_failed",
+        }
+    try:
+        roots = json.loads(result.stdout).get("blockdevices") or []
+    except (json.JSONDecodeError, AttributeError):
+        roots = []
+    raw_nodes = _flatten_lsblk(roots)
+    nodes = []
+    for node in raw_nodes:
+        mountpoints = node.get("mountpoints") or []
+        if isinstance(mountpoints, str):
+            mountpoints = [mountpoints]
+        mountpoints = [str(item) for item in mountpoints if item]
+        archive_path = None
+        archive_state = "unmounted"
+        annex_uuid = None
+        if len(mountpoints) == 1:
+            archive = Path(mountpoints[0]) / "modelark"
+            archive_path = str(archive)
+            if archive.is_symlink():
+                archive_state = "unsafe_path"
+            elif not archive.exists():
+                archive_state = "absent"
+            elif archive.is_dir() and (archive / ".git").exists():
+                try:
+                    annex = subprocess.run(
+                        ["git", "-C", str(archive), "config", "--local", "--get", "annex.uuid"],
+                        capture_output=True,
+                        text=True,
+                    )
+                except FileNotFoundError:
+                    annex = None
+                if annex is not None and annex.returncode == 0 and annex.stdout.strip():
+                    archive_state = "annex"
+                    annex_uuid = annex.stdout.strip().splitlines()[0]
+                else:
+                    archive_state = "unrecognized"
+            else:
+                archive_state = "unrecognized"
+        nodes.append({
+            "dev": node.get("path"),
+            "type": node.get("type"),
+            "size_bytes": int(node.get("size") or 0),
+            "fstype": node.get("fstype") or None,
+            "fs_uuid": node.get("uuid") or None,
+            "mountpoints": mountpoints,
+            "archive_path": archive_path,
+            "archive_state": archive_state,
+            "annex_uuid": annex_uuid,
+        })
+
+    root_source = None
+    try:
+        root = subprocess.run(
+            ["findmnt", "-nro", "SOURCE", "/"],
+            capture_output=True,
+            text=True,
+        )
+        if root.returncode == 0 and root.stdout.strip():
+            root_source = root.stdout.strip().splitlines()[0].split("[", 1)[0]
+    except FileNotFoundError:
+        pass
+    node_paths = {
+        os.path.realpath(str(node["dev"]))
+        for node in nodes
+        if node.get("dev")
+    }
+    system_backing = any("/" in node["mountpoints"] for node in nodes)
+    if root_source:
+        system_backing = system_backing or os.path.realpath(root_source) in node_paths
+    return {
+        "available": bool(nodes),
+        "requested_dev": dev,
+        "system_backing": system_backing,
+        "nodes": nodes,
+        "error": None if nodes else "device_not_found",
     }
 
 

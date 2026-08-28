@@ -64,6 +64,46 @@ def loss_preview(drive_label: str) -> dict:
         return _refused(exc)
 
 
+def onboarding_preview(
+    dev: str,
+    serial: str,
+    *,
+    inventory: dict | None = None,
+    topology: dict | None = None,
+) -> dict:
+    """Rebind one passive observation and return a read-only new-label preview."""
+    if not dev or not serial:
+        return _refused(proposal.Refusal(
+            "DRIVE_ONBOARDING_REQUEST_INCOMPLETE",
+            {"required": ["dev", "serial"]},
+            ("refresh_drive_inventory",),
+        ))
+    inventory = inventory if inventory is not None else disk_api.attached_inventory()
+    if not inventory.get("available"):
+        return _refused(proposal.Refusal(
+            "DRIVE_INVENTORY_UNAVAILABLE",
+            {},
+            ("refresh_drive_inventory",),
+        ))
+    matches = [
+        item for item in inventory.get("devices") or []
+        if str(item.get("dev") or "") == dev and str(item.get("serial") or "") == serial
+    ]
+    if len(matches) != 1:
+        return _refused(proposal.Refusal(
+            "DRIVE_ONBOARDING_OBSERVATION_STALE",
+            {"dev": dev, "serial": serial, "matches": len(matches)},
+            ("refresh_drive_inventory",),
+        ))
+    topology = topology if topology is not None else disk_api.registration_topology(dev)
+    try:
+        with data._lock:
+            preview = drive_lifecycle.onboarding_preview(data.conn(), matches[0], topology)
+        return {"ok": True, "preview": preview}
+    except proposal.Refusal as exc:
+        return _refused(exc)
+
+
 def declare_lost(body: dict, *, observe: Callable[[str], object | None] | None = None) -> dict:
     """Apply the exact loss transition, then show one canonical post-change replan."""
     required = {

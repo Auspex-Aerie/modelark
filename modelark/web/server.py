@@ -196,6 +196,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(drive_api.overview())
             elif u.path == "/api/drive/loss-preview":
                 self._json(drive_api.loss_preview((p.get("drive_label") or [""])[0]))
+            elif u.path == "/api/drive/onboarding-preview":
+                self._json(drive_api.onboarding_preview(
+                    (p.get("dev") or [""])[0],
+                    (p.get("serial") or [""])[0],
+                ))
             elif u.path == "/api/meta":
                 self._json({"os": osplat.OS_LABEL, "smart_supported": osplat.SMART_SUPPORTED})
             elif u.path == "/api/library":

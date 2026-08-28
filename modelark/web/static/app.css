@@ -200,6 +200,7 @@ td.cb{width:34px;text-align:center}input[type=checkbox]{width:15px;height:15px;a
 .oopsie-acts button:hover,.oopsie-acts .modal-link:hover{filter:brightness(1.08)}
 .gated-card{border-top-color:var(--brass);max-width:680px}
 .drive-loss-card{max-width:700px}.lossconfirm{display:block;color:var(--mut);font-size:.82rem;line-height:1.45;margin:12px 0 7px}
+.drive-onboarding-card{max-width:740px;border-top-color:var(--steel)}
 .lossconfirm code{color:var(--ink);background:#0b0f14;padding:2px 5px;border-radius:4px}
 #driveLossConfirm{width:100%;background:#0b0f14;border:1px solid var(--line2);border-radius:7px;color:var(--ink);padding:9px 11px;font-family:ui-monospace,Menlo,monospace;margin-bottom:12px}
 #driveLossConfirm:focus{outline:none;border-color:var(--warn)}

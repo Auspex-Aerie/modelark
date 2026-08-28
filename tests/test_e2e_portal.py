@@ -526,13 +526,51 @@ def _drive_loss_flow(pg) -> None:
             "replan_error": None,
         },
     }
+    onboarding = {
+        "ok": True,
+        "preview": {
+            "planner_revision": 11,
+            "observation_authority": "read_only",
+            "device": inventory["unregistered"][0],
+            "volume": {
+                "dev": "/dev/mock-seagate1", "type": "part",
+                "size_bytes": 8_000_000_000_000, "fstype": "ext4",
+                "fs_uuid": "NEW-FS-UUID", "mountpoints": [], "mounted": False,
+            },
+            "suggested_label": "drive-07",
+            "label_policy": "new_label_required",
+            "blockers": ["MOUNT_REQUIRED"],
+            "ready_for_registration": False,
+            "next_action": "mount_volume",
+            "registration_preview": {
+                "dev": "/dev/mock-seagate1", "label": "drive-07", "mount": None,
+                "format": None, "role": "primary", "adds_to_active_plan": "ark",
+                "requires_reconcile_after_registration": True,
+                "inherited_from_lost_identity": [],
+            },
+            "separate_lost_identities": [{
+                "drive_label": "drive-02", "identity_epoch": 3,
+                "identity_fingerprint": "b" * 64, "archived_rows": 120,
+                "replica_rows": 120,
+                "plans": [{"plan_id": "ark", "is_active": True}],
+                "relationship": "not_inherited",
+            }],
+        },
+    }
     submitted = []
     smart_requests = []
+    onboarding_requests = []
 
     pg.route("**/api/drives", lambda route: route.fulfill(
         status=200, content_type="application/json", body=json.dumps(inventory)))
     pg.route("**/api/drive/loss-preview**", lambda route: route.fulfill(
         status=200, content_type="application/json", body=json.dumps(preview)))
+
+    def onboarding_preview(route):
+        onboarding_requests.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(onboarding))
+
+    pg.route("**/api/drive/onboarding-preview**", onboarding_preview)
 
     def declare(route):
         submitted.append(route.request.post_data_json)
@@ -550,6 +588,19 @@ def _drive_loss_flow(pg) -> None:
     assert "drive-02" in text and "not attached" in text.lower()
     assert "Seagate 8TB" in text and "unregistered" in text.lower()
     assert smart_requests == [], "opening Drives must not run SMART"
+
+    pg.click(".driveonboard")
+    pg.wait_for_selector("#driveOnboardingModal", state="visible")
+    onboarding_text = pg.inner_text("#driveOnboardingModal")
+    assert "drive-07" in onboarding_text
+    assert "/dev/mock-seagate1" in onboarding_text
+    assert "not mounted" in onboarding_text.lower()
+    assert "drive-02" in onboarding_text and "never inherited" in onboarding_text.lower()
+    assert len(onboarding_requests) == 1
+    assert "dev=%2Fdev%2Fmock-seagate" in onboarding_requests[0]
+    assert "serial=NEW-SEAGATE" in onboarding_requests[0]
+    assert smart_requests == [], "onboarding preview must not run SMART"
+    pg.click("#driveOnboardingClose")
 
     pg.click(".driveproblem")
     pg.wait_for_selector("#driveLossModal", state="visible")
@@ -574,7 +625,7 @@ def _drive_loss_flow(pg) -> None:
 
     for pattern in (
         "**/api/drives", "**/api/drive/loss-preview**", "**/api/drive/declare-lost",
-        "**/api/disk",
+        "**/api/drive/onboarding-preview**", "**/api/disk",
     ):
         pg.unroute(pattern)
     print("  advisory drive discovery + cancel + exact loss/replan UI exercised without SMART")

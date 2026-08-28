@@ -7,6 +7,7 @@ row so historical claims remain reviewable, while excluding the identity from ne
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Iterable, Mapping
 
 from modelark import plan, proposal
@@ -151,6 +152,195 @@ def observe_registered(
         if id(item) not in matched_device_ids
     ]
     return {"registered": registered, "unregistered": unregistered}
+
+
+def _next_drive_label(con) -> str:
+    numbers = []
+    for row in con.execute("SELECT drive_label FROM drives").fetchall():
+        match = re.fullmatch(r"drive-(\d+)", str(row[0]))
+        if match:
+            numbers.append(int(match.group(1)))
+    number = max(numbers, default=0) + 1
+    return f"drive-{number:02d}"
+
+
+def _lost_identity_summaries(con) -> list[dict[str, Any]]:
+    summaries = []
+    rows = con.execute(
+        "SELECT drive_label,identity_epoch,identity_fingerprint FROM drives "
+        "WHERE lifecycle='lost' AND eligibility='excluded' ORDER BY drive_label"
+    ).fetchall()
+    for drive_label, identity_epoch, identity_fingerprint in rows:
+        archived_rows = int(con.execute(
+            "SELECT count(*) FROM archived WHERE drive_label=?", [drive_label]
+        ).fetchone()[0])
+        replica_rows = int(con.execute(
+            "SELECT count(*) FROM replicas WHERE drive_label=?", [drive_label]
+        ).fetchone()[0])
+        plans = [
+            {"plan_id": str(plan_id), "is_active": bool(is_active)}
+            for plan_id, is_active in con.execute(
+                "SELECT p.plan_id,p.is_active FROM plan_drives pd "
+                "JOIN plans p USING(plan_id) WHERE pd.drive_label=? ORDER BY p.plan_id",
+                [drive_label],
+            ).fetchall()
+        ]
+        summaries.append({
+            "drive_label": str(drive_label),
+            "identity_epoch": int(identity_epoch),
+            "identity_fingerprint": identity_fingerprint,
+            "archived_rows": archived_rows,
+            "replica_rows": replica_rows,
+            "plans": plans,
+            "relationship": "not_inherited",
+        })
+    return summaries
+
+
+def onboarding_preview(
+    con,
+    observed_device: Mapping[str, Any],
+    topology: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Explain a new-label registration candidate without probing SMART or changing state."""
+    device = dict(observed_device)
+    dev = str(device.get("dev") or "")
+    serial = str(device.get("serial") or "").strip()
+    if not dev or not serial or serial == "—":
+        raise proposal.Refusal(
+            "DRIVE_ONBOARDING_IDENTITY_UNPROVEN",
+            {"dev": dev, "serial": serial or None},
+            ("refresh_drive_inventory",),
+        )
+    collisions = [
+        str(row[0])
+        for row in con.execute(
+            "SELECT drive_label FROM drives WHERE serial=? ORDER BY drive_label", [serial]
+        ).fetchall()
+    ]
+    if collisions:
+        raise proposal.Refusal(
+            "DRIVE_ONBOARDING_IDENTITY_COLLISION",
+            {"serial": serial, "registered_labels": collisions},
+            ("review_registered_identity",),
+        )
+    if str(topology.get("requested_dev") or "") != dev:
+        raise proposal.Refusal(
+            "DRIVE_ONBOARDING_OBSERVATION_STALE",
+            {"observed_dev": dev, "topology_dev": topology.get("requested_dev")},
+            ("refresh_drive_inventory",),
+        )
+
+    nodes = [dict(node) for node in topology.get("nodes") or []]
+    volumes = [node for node in nodes if node.get("fstype")]
+    volume = None
+    blockers = []
+    if topology.get("system_backing"):
+        blockers.append("SYSTEM_DEVICE")
+    if not topology.get("available"):
+        blockers.append("TOPOLOGY_UNAVAILABLE")
+    elif not volumes:
+        blockers.append("FILESYSTEM_NOT_FOUND")
+    elif len(volumes) != 1:
+        blockers.append("MULTIPLE_FILESYSTEMS")
+    else:
+        raw_volume = volumes[0]
+        mountpoints = [str(item) for item in raw_volume.get("mountpoints") or [] if item]
+        volume = {
+            "dev": str(raw_volume.get("dev") or ""),
+            "type": raw_volume.get("type"),
+            "size_bytes": int(raw_volume.get("size_bytes") or 0),
+            "fstype": str(raw_volume.get("fstype") or ""),
+            "fs_uuid": raw_volume.get("fs_uuid"),
+            "mountpoints": mountpoints,
+            "mounted": bool(mountpoints),
+            "archive_path": raw_volume.get("archive_path"),
+            "archive_state": raw_volume.get("archive_state") or (
+                "unmounted" if not mountpoints else "unrecognized"
+            ),
+            "annex_uuid": raw_volume.get("annex_uuid"),
+        }
+        if not volume["fs_uuid"]:
+            blockers.append("FILESYSTEM_IDENTITY_UNPROVEN")
+        fs_collisions = [
+            str(row[0])
+            for row in con.execute(
+                "SELECT drive_label FROM drives WHERE fs_uuid=? ORDER BY drive_label",
+                [volume["fs_uuid"]],
+            ).fetchall()
+        ] if volume["fs_uuid"] else []
+        if fs_collisions:
+            raise proposal.Refusal(
+                "DRIVE_ONBOARDING_IDENTITY_COLLISION",
+                {"fs_uuid": volume["fs_uuid"], "registered_labels": fs_collisions},
+                ("review_registered_identity",),
+            )
+        annex_collisions = [
+            str(row[0])
+            for row in con.execute(
+                "SELECT drive_label FROM drives WHERE annex_uuid=? ORDER BY drive_label",
+                [volume["annex_uuid"]],
+            ).fetchall()
+        ] if volume["annex_uuid"] else []
+        if annex_collisions:
+            raise proposal.Refusal(
+                "DRIVE_ONBOARDING_IDENTITY_COLLISION",
+                {"annex_uuid": volume["annex_uuid"], "registered_labels": annex_collisions},
+                ("review_registered_identity",),
+            )
+        if volume["fstype"] not in {"ext4", "xfs"}:
+            blockers.append("UNSUPPORTED_FILESYSTEM")
+        if not volume["mounted"]:
+            blockers.append("MOUNT_REQUIRED")
+        elif volume["archive_state"] == "annex":
+            blockers.append("ANNEX_IDENTITY_PRESENT")
+        elif volume["archive_state"] != "absent":
+            blockers.append("ARCHIVE_NAMESPACE_OCCUPIED")
+
+    active = plan.active(con)
+    label = _next_drive_label(con)
+    if "SYSTEM_DEVICE" in blockers:
+        next_action = "refuse_system_device"
+    elif "TOPOLOGY_UNAVAILABLE" in blockers:
+        next_action = "refresh_topology"
+    elif "MULTIPLE_FILESYSTEMS" in blockers:
+        next_action = "choose_volume"
+    elif "FILESYSTEM_NOT_FOUND" in blockers or "UNSUPPORTED_FILESYSTEM" in blockers:
+        next_action = "review_filesystem"
+    elif "FILESYSTEM_IDENTITY_UNPROVEN" in blockers:
+        next_action = "establish_filesystem_identity"
+    elif "ARCHIVE_NAMESPACE_OCCUPIED" in blockers:
+        next_action = "review_archive_namespace"
+    elif "ANNEX_IDENTITY_PRESENT" in blockers:
+        next_action = "review_existing_annex"
+    elif "MOUNT_REQUIRED" in blockers:
+        next_action = "mount_volume"
+    else:
+        next_action = "review_registration"
+
+    mountpoint = volume["mountpoints"][0] if volume and volume["mountpoints"] else None
+    return {
+        "planner_revision": planner_revision(con),
+        "observation_authority": "read_only",
+        "device": device,
+        "volume": volume,
+        "suggested_label": label,
+        "label_policy": "new_label_required",
+        "blockers": blockers,
+        "ready_for_registration": not blockers,
+        "next_action": next_action,
+        "registration_preview": {
+            "dev": volume["dev"] if volume else None,
+            "label": label,
+            "mount": mountpoint,
+            "format": None,
+            "role": "primary",
+            "adds_to_active_plan": active["plan_id"] if active else None,
+            "requires_reconcile_after_registration": True,
+            "inherited_from_lost_identity": [],
+        },
+        "separate_lost_identities": _lost_identity_summaries(con),
+    }
 
 
 def declare_lost(

@@ -96,6 +96,9 @@ def _topology(**overrides) -> dict:
                 "fstype": "ext4",
                 "fs_uuid": "NEW-FS-UUID",
                 "mountpoints": [],
+                "archive_path": None,
+                "archive_state": "unmounted",
+                "annex_uuid": None,
             },
         ],
     }
@@ -124,6 +127,9 @@ def test_preview_is_read_only_suggests_new_label_and_preserves_lost_dependencies
         "fs_uuid": "NEW-FS-UUID",
         "mountpoints": [],
         "mounted": False,
+        "archive_path": None,
+        "archive_state": "unmounted",
+        "annex_uuid": None,
     }
     assert preview["ready_for_registration"] is False
     assert preview["next_action"] == "mount_volume"
@@ -171,6 +177,40 @@ def test_preview_refuses_registered_identity_collision_and_system_device():
     assert system["ready_for_registration"] is False
     assert system["next_action"] == "refuse_system_device"
     assert "SYSTEM_DEVICE" in system["blockers"]
+    con.close()
+
+
+def test_preview_refuses_annex_collision_or_unrecognized_archive_namespace():
+    con = _catalog()
+    con.execute("UPDATE drives SET annex_uuid='KNOWN-ANNEX' WHERE drive_label='drive-05'")
+    mounted_node = {
+        **_topology()["nodes"][1],
+        "mountpoints": ["/media/test/seagate"],
+        "archive_path": "/media/test/seagate/modelark",
+        "archive_state": "annex",
+        "annex_uuid": "KNOWN-ANNEX",
+    }
+    with pytest.raises(proposal.Refusal) as collision:
+        drive_lifecycle.onboarding_preview(
+            con,
+            _device(),
+            _topology(nodes=[_topology()["nodes"][0], mounted_node]),
+        )
+    assert collision.value.code == "DRIVE_ONBOARDING_IDENTITY_COLLISION"
+
+    occupied_node = {
+        **mounted_node,
+        "annex_uuid": None,
+        "archive_state": "unrecognized",
+    }
+    occupied = drive_lifecycle.onboarding_preview(
+        con,
+        _device(),
+        _topology(nodes=[_topology()["nodes"][0], occupied_node]),
+    )
+    assert occupied["ready_for_registration"] is False
+    assert occupied["next_action"] == "review_archive_namespace"
+    assert "ARCHIVE_NAMESPACE_OCCUPIED" in occupied["blockers"]
     con.close()
 
 
