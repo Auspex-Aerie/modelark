@@ -49,6 +49,44 @@ def _catalog_with_lost_and_placeable_unknown_drives() -> sqlite3.Connection:
     return con
 
 
+def _catalog_with_primary_replica_and_lost_unknown_drives() -> sqlite3.Connection:
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    for statement in db._statements(db.SCHEMA_PATH.read_text()):
+        con.execute(statement)
+    con.execute(
+        "INSERT INTO plans(plan_id,name,capacity_mode,is_active) "
+        "VALUES('ark','Ark','guaranteed',1)"
+    )
+    con.executemany(
+        "INSERT INTO drives("
+        "drive_label,role,raid_backed,capacity_bytes,free_bytes,lifecycle,eligibility"
+        ") VALUES(?,?,?,?,?,?,?)",
+        [
+            ("drive-home", "primary", 1, 1_000_000, 1_000_000, "active", "enabled"),
+            ("drive-replica", "replica", 0, 1_000_000, 1_000_000, "active", "enabled"),
+            ("drive-lost", "primary", 0, 2_000_000, 2_000_000, "lost", "excluded"),
+        ],
+    )
+    con.executemany(
+        "INSERT INTO plan_drives(plan_id,drive_label) VALUES('ark',?)",
+        [("drive-home",), ("drive-replica",), ("drive-lost",)],
+    )
+    con.executemany(
+        "INSERT INTO models(repo_id,category,numcopies) VALUES(?,'generative-llm',?)",
+        [("a/must", 2), ("z/bulk", 1)],
+    )
+    con.executemany(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
+        "VALUES(?,'model.safetensors',100,'safetensors','bf16',?)",
+        [("a/must", "a" * 64), ("z/bulk", "b" * 64)],
+    )
+    con.executemany(
+        "INSERT INTO selection(repo_id,finalized_at) VALUES(?,'2026-01-01 00:00:00')",
+        [("a/must",), ("z/bulk",)],
+    )
+    return con
+
+
 def test_inc044_unknown_failure_rows_exclude_lost_historical_membership():
     con = _catalog_with_lost_and_placeable_unknown_drives()
     plan = librarian.plan_view(con, plan_id="ark", capacity_mode="guaranteed")
@@ -77,4 +115,29 @@ def test_inc044_unknown_failure_rows_exclude_lost_historical_membership():
         if item["code"] == "CAPACITY_EVIDENCE_UNKNOWN"
     )
     assert capacity_advisory["count"] == 1
+    con.close()
+
+
+def test_inc044_filter_does_not_change_compatibility_summary_association():
+    """Filtering labels must not make one fleet-wide gate look like extra blocked repositories."""
+    con = _catalog_with_primary_replica_and_lost_unknown_drives()
+    plan = librarian.plan_view(con, plan_id="ark", capacity_mode="guaranteed")
+
+    failure_labels = {
+        label
+        for failure in plan["capacity_failures"]
+        for label in failure["eligible_drives"]
+    }
+    assert failure_labels == {"drive-home", "drive-replica"}
+    assert {
+        failure["requirement_id"] for failure in plan["capacity_failures"]
+    } == {"primary:z/bulk"}, plan["capacity_failures"]
+    assert plan["totals"] == {
+        "n_planned": 1,
+        "n_done": 0,
+        "n_must": 1,
+        "n_bulk": 0,
+        "n_blocked": 1,
+        "n_selected": 2,
+    }
     con.close()

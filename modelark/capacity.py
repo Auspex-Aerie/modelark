@@ -1034,11 +1034,15 @@ def _unknown_evidence_failures(
     Diagnostic ``eligible_drives`` has the narrower placement meaning, so derive that relation from
     the already-canonical candidate set consumed by Gate B (INC-044).
     """
-    requirement_by_target: dict[str, str] = {}
+    target_labels: set[str] = set()
+    representative_requirement = None
     for requirement_id, candidate_rows in solver_inp.candidates.by_requirement:
+        if candidate_rows and representative_requirement is None:
+            representative_requirement = requirement_id
         for candidate in candidate_rows:
-            requirement_by_target.setdefault(candidate.target_drive, requirement_id)
-    target_labels = set(requirement_by_target)
+            target_labels.add(candidate.target_drive)
+    if representative_requirement is None and solver_inp.graph.desired:
+        representative_requirement = solver_inp.graph.desired[0].requirement_id
     unknown = [
         drive for drive in capacity_drives
         if drive.drive_label in target_labels and not drive.evidence.executable
@@ -1057,7 +1061,7 @@ def _unknown_evidence_failures(
         out.append(CapacityFailure(
             code=FailureCode.CAPACITY_EVIDENCE_UNKNOWN,
             capacity_mode=mode,
-            requirement_id=requirement_by_target.get(drive.drive_label),
+            requirement_id=representative_requirement,
             task_ids=(),
             target_tier=_drive_tier(drive),
             eligible_drives=(drive.drive_label,),
