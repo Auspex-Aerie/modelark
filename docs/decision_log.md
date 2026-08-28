@@ -1686,3 +1686,41 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/provenance-live-cutover.md, docs/upgrading.md, README.md, CHANGELOG.md, modelark/core/db.py, tests/test_inc042_gate1_contracts.py
 - `related`: DEC-006, DEC-059, DEC-063, DEC-064, INC-042, DEF-038
 - `scope_boundary`: This publishes only `catalog.sqlite` and the validated optional `library.json`. It does not copy configuration/state/backups, run git-annex, mutate drives, start services, repair evidence, approve work, or dispose of leftovers.
+
+### INC-043: Direct read-only SQLite preflight materialized live WAL coordination sidecars
+- `id`: INC-043
+- `date`: 2026-08-28
+- `status`: remediated procedurally before capture; no catalog-content change or service impact
+- `triggered_by`: stopped LocalModelArk live-cutover preflight after candidate freeze
+- `symptom`: A direct Python `sqlite3` URI open with `mode=ro`, used to read `user_version`, integrity, and foreign keys, created `catalog.sqlite-shm` (32,768 bytes) and a zero-byte `catalog.sqlite-wal` beside the stopped live catalog. The main catalog SHA-256 remained exactly `07f8aa3907edb80c11d145341c2fb522afce181b7cd533a3df008ed21bf51c1e`, with unchanged size and mtime.
+- `root_cause`: SQLite read-only database semantics do not imply filesystem-namespace immutability for a WAL-mode database; opening can materialize coordination sidecars. The preflight incorrectly treated logical read-only access as a byte/namespace-read-only observation despite the copy-runbook rule to capture before any SQLite open.
+- `blast_radius`: No user rows, main catalog bytes, archive files, service state, or Fill state changed. The live data-directory namespace gained two sidecars, so the original no-sidecar observation is no longer the current physical bundle. Deleting them would erase evidence and is not authorized.
+- `why_not_caught_earlier`: The command used SQLite's `mode=ro` and was assumed to be physically non-mutating. Prior copied-runtime work had already distinguished logical identity from SQLite representation churn, but that lesson was not applied to the live pre-capture check.
+- `planned_remediation`: Preserve and hash the complete current main/WAL/SHM bundle; copy the stopped data directory byte-for-byte; run integrity, foreign-key, schema, and logical-identity checks only against the disposable captured copy. Public/internal cutover instructions now explicitly forbid direct SQLite inspection of the live path, including `mode=ro`.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/provenance-live-cutover.md
+- `related`: DEC-059, DEC-064, DIS-004
+- `scope_boundary`: Procedure/evidence correction only. Do not delete or normalize the live sidecars, restart the old service, or treat their presence as a catalog-graph mutation.
+
+### DEC-072: Accept the stopped side-by-side LocalModelArk schema-v7 cutover
+- `id`: DEC-072
+- `date`: 2026-08-28
+- `status`: accepted
+- `triggered_by`: DEC-070 operator authorization after immutable candidate freeze, INC-042 remediation, and INC-043 procedural correction
+- `decision`: Accept the side-by-side transition of the stopped LocalModelArk runtime from schema v2 to schema v7 using candidate commit `11d9d6d` and wheel SHA-256 `1589a6168054ffd69b09aa82b8cbb34de76636b0d1ac6f2895718a3e03ecfb2a`. The systemd user service now targets the pinned detached checkout/environment and newly published data/config/state paths, starts without `--resume`, and remains disabled for automatic login startup. Preserve the complete old v2 runtime, old unit, immutable seed, migration work, rollback bundle, and publication leftovers. Treat the operator's live Drive #2 loss declaration as the next separate mutation gate.
+- `rationale`: Fresh candidate validation passed 916 non-E2E tests, installed-wheel smoke, standalone portal E2E, focused migration/publication fault tests, and package build. Live rehearsal reproduced schema v7 integrity `ok`, no foreign-key violations, classification `3286/1208/1122/0`, snapshot SHA-256 `eec3a1f17326a8950ba7552a4b31b34385998cab9379eec11ab761171190a83a`, logical identity `084c144230d74077a36bc1af8a26a34d164bed8d99bba5e6878bfb64ea6926d1`, and exact `library.json` SHA-256 `5cea66664a875e53bfd2f40a49101d1fc1809f5d440e813df7c4fc9ffb69ad84`. After publication and portal startup, planner revision remains `0`, no proposal is approved, Fill is idle, Library and proposal preview both report `CAPACITY_EVIDENCE_UNKNOWN`, and passive inventory leaves the Seagate unregistered. The preserved old main/WAL/SHM bundle still matches the immutable seed exactly.
+- `impact`: The live portal is now on the accepted first-class planning/provenance architecture while retaining an exact rollback boundary. The migrated catalog intentionally still records Drive #2 as active/enabled until the operator repeats the copied and reviewed loss workflow; the replacement remains a distinct unregistered observation with zero admitted capacity. No rollback was required.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/provenance-live-cutover.md, docs/upgrading.md
+- `related`: DEC-059, DEC-064, DEC-068, DEC-069, DEC-070, DEC-071, DEF-029, DEF-039, INC-042, INC-043, DIS-004
+- `scope_boundary`: Live schema/service cutover and retained rollback evidence only. No Drive #2 declaration, replacement initialization/registration/reconciliation, old-label reuse, provenance repair, proposal approval, Fill, archive-byte mutation, PR merge, or evidence disposal is authorized by this decision.
+
+### DEF-040: Give the public schema-v7 release a distinct package version
+- `id`: DEF-040
+- `date`: 2026-08-28
+- `status`: active
+- `triggered_by`: DEC-072 deployment identity review
+- `decision`: The locally validated candidate remains version `0.2.0` so the exact tested cutover artifact is not rebuilt during the operational transition. Before public distribution, assign the schema-v7 release a version newer than the released 0.2.0 and update release notes, upgrade examples, and artifact identity evidence together. Until then, source/pre-release operators must use catalog schema and the binary's monotonic-version refusal—not the package string alone—as the migration gate.
+- `rationale`: Reusing `0.2.0` for both the released schema-v2 source and the unreleased schema-v7 candidate makes support reports and upgrade decisions ambiguous. Changing it after local validation would create a different artifact and require a fresh release-candidate build/test cycle, while the catalog's schema guard already makes the local transition safe.
+- `revisit_when`: Before tagging, publishing, or recommending the schema-v7 build to any user.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/upgrading.md
+- `related`: DEC-072
+- `scope_boundary`: Release identity and user migration communication only. No schema change, live runtime rebuild, drive action, proposal approval, Fill, or rollback-evidence disposal.

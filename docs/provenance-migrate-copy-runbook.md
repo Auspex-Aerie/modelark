@@ -1,9 +1,12 @@
 # Provenance migration — repeatable copied-runtime runbook
 
-Status: **copied-runtime behavioral acceptance, Drive #2 loss rehearsal, and replacement-media
-read-only qualification passed on 2026-08-28; live cutover not executed**. The tested source working
-tree must still be frozen into an immutable candidate commit/package. The live deployment remains
-stopped/disabled on schema v2 and has not been opened by the candidate runtime.
+Status: **copied-runtime acceptance, Drive #2 loss rehearsal, replacement-media read-only
+qualification, immutable candidate freeze, and the stopped side-by-side live cutover passed on
+2026-08-28**. LocalModelArk now runs schema v7 from candidate commit `11d9d6d`; the service remains
+disabled for login startup and was started without Fill resume. The preserved schema-v2 runtime and
+complete cutover capsule remain the rollback point. The next live mutation is the operator's repeat
+of the Drive #2 loss declaration; replacement registration, proposal approval, and Fill remain
+separate gates.
 
 Use this runbook to exercise the provenance migration from the current development branch against a
 production-shaped, disposable copy of the existing LocalModelArk deployment. The process is designed
@@ -17,9 +20,9 @@ this runbook was expanded was `fix/placement-capacity-pr10-content-satisfaction`
 
 ## Executed acceptance record — 2026-08-28
 
-The DEC-064 behavioral threshold has been met on disposable state. The test session recorded the
-branch, base commit, package version/module path, and dirty file set; freezing that exact state into
-an immutable candidate artifact remains a pre-cutover gate:
+The DEC-064 behavioral threshold was first met on disposable state and the exact accepted state was
+then frozen as commit `11d9d6d` and a wheel with SHA-256
+`1589a6168054ffd69b09aa82b8cbb34de76636b0d1ac6f2895718a3e03ecfb2a`:
 
 - the final candidate pipeline passed **894 non-E2E tests** (5 deprecation warnings) and the
   standalone portal E2E passed every scenario;
@@ -43,8 +46,22 @@ an immutable candidate artifact remains a pre-cutover gate:
   identity, clean SMART baseline/error log, passing short and conveyance tests, and a clean offline
   no-write ext4 check. It remains unregistered and contributes no capacity. DEC-070 accepts it as a
   replacement candidate; DEF-039 defers the optional extended SMART test;
-- the live schema-v2 catalog remains byte-identical at SHA-256
-  `07f8aa3907edb80c11d145341c2fb522afce181b7cd533a3df008ed21bf51c1e`; no live rollback was needed.
+- the frozen candidate passed **916 non-E2E tests**, isolated installed-wheel smoke, standalone portal
+  E2E, focused migration/publication fault tests, and package build;
+- live rehearsal from the stopped, disposable v2 capture reproduced the accepted classification,
+  snapshot hash, and v7 logical identity, including the exact validated `library.json` locator;
+- live publication succeeded into a new runtime directory and retained the immutable source seed,
+  old service unit, rollback catalog/source bundle, migration report, and publication staging
+  evidence;
+- the deployed portal uses the pinned candidate checkout/environment, has schema v7 logical identity
+  `084c144230d74077a36bc1af8a26a34d164bed8d99bba5e6878bfb64ea6926d1`, planner revision `0`, no
+  approved proposal, and no running Fill. Library and proposal preview both fail closed on
+  `CAPACITY_EVIDENCE_UNKNOWN` with zero executable tasks;
+- passive inventory shows the Seagate as unregistered and takes no action. The migrated live catalog
+  still shows Drive #2 as active/enabled until the operator repeats the reviewed loss declaration;
+- the preserved old schema-v2 main/WAL/SHM bundle still matches its immutable seed. INC-043 records
+  the pre-capture read-only SQLite sidecars; no catalog-content change occurred and no sidecar was
+  deleted or normalized.
 
 The published SQLite container hash is evidence only at publication time. Opening a disposable
 published catalog through the normal read-write portal/proposal runtime can convert its journal
@@ -53,10 +70,9 @@ four physical hashes differ, while integrity, foreign keys, schema, planner revi
 logical content identity above remain equal. Preserve both the original publication hash and the
 post-open logical identity; do not misreport normal SQLite representation churn as a graph mutation.
 
-This acceptance authorizes preparation of a separate live-cutover plan only after the exact candidate
-state is frozen and its focused identity checks are repeated. It does not authorize drive
-qualification/registration, lifecycle mutation in the live catalog, provenance repair, live
-publication, proposal approval, or Fill.
+DEC-072 accepts this live cutover. It does not authorize replacement registration, provenance repair,
+proposal approval, Fill, old-label reuse, or deletion of any rollback/publication evidence. The
+Drive #2 declaration remains an attended, exact-identity operator action in the migrated portal.
 
 ## Purpose and acceptance boundary
 
@@ -213,6 +229,9 @@ This route requires a short writer-stopped capture window.
 3. Prove there is no process holding or writing the deployed catalog and no worker remains.
 4. Before any SQLite tool opens the live path, record byte hashes, sizes, modes, ownership, mtimes,
    inode/link information, and presence/absence for `catalog.sqlite`, `-wal`, `-shm`, and `-journal`.
+   Do not run even a URI `mode=ro` integrity/version query against the live path: WAL-mode SQLite may
+   create `-shm` or `-wal` coordination files. Copy the stable physical bundle first and run every
+   SQLite query against a disposable copy.
 5. Copy the **entire stable data directory** to `capture/source-data`, the exact config to
    `capture/source-config`, and the state directory to `capture/source-state` for fidelity evidence.
 6. Re-record the live bundle metadata and hashes. They must be byte-identical to the pre-copy record.
@@ -539,37 +558,30 @@ walkthrough is the first point where passive enumeration is allowed; SMART remai
 
 ## Current stop point
 
-Copied-runtime execution is complete and remains copy-only. DEC-067 supplies one planning authority,
-INC-039/INC-040/INC-041 are remediated, the full pipeline is green, three frozen-seed baselines plus
-one fresh capture agree, and the lost-drive scenario fails closed visibly. DEC-069's real copied-state
-operator walkthrough also passed: cancel made no change, the exact declaration produced revision 1,
-and the central replan excluded Drive #2. The physical Seagate was qualified only afterward under a
-separate authorization; DEC-070 accepts it as a distinct replacement candidate and DEF-039 defers the
-optional extended SMART test.
+The immutable candidate and stopped side-by-side live cutover are complete under DEC-072. The portal
+is active on the migrated v7 runtime, but the service remains disabled and Fill resume is absent.
+The old v2 runtime, service unit, immutable seed, migration work, rollback bundle, and publication
+leftovers remain retained and matched. No rollback was required.
 
-Stop here before live cutover. The remaining gates are operational and evidence-bound:
+Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. Freeze the reviewed working tree into an immutable candidate commit/package and repeat the focused
-   migration/planning identity checks against that exact artifact. The accepted behavior is green,
-   but the current checkout is intentionally uncommitted and is not yet a cutover artifact.
-2. Follow the separate side-by-side live procedure in `docs/provenance-live-cutover.md`: preserve the
-   stopped schema-v2 deployment as rollback evidence, publish v7 into a new destination, repoint the
-   service only after validation, and start without Fill resume.
-3. Repeat the Drive #2 loss declaration in the migrated live portal. The copied scenario is evidence,
-   not a mutation to the live catalog.
-4. Implement and rehearse the remaining DEF-029 replacement operation separately: show the accepted
-   candidate's exact identity and media state, require a new label by default, split preview from
-   initialization/registration/reconciliation, and never inherit Drive #2 facts.
-5. Restore identity-bound capacity evidence for candidate drives. Until that evidence exists,
+1. In the migrated live portal, repeat the reviewed Drive #2 loss declaration. Cancel must remain a
+   no-op; exact confirmation must increment the planner revision once, retain historical provenance,
+   clear any approval, exclude Drive #2, and centrally replan with zero lost-drive targets.
+2. Implement and rehearse the remaining DEF-029 replacement workflow separately: show the accepted
+   Seagate's exact identity/media state, require a new label by default, and split preview from any
+   initialization, registration, plan-membership, or reconciliation mutation. Never inherit Drive #2
+   facts or reuse its identity epoch.
+3. Restore identity-bound capacity evidence for eligible candidate drives. Until then,
    `CAPACITY_EVIDENCE_UNKNOWN` correctly permits no executable proposal.
-6. Resolve capacity only from admitted registered evidence. The accepted Seagate contributes zero
-   planning capacity until registered under its own label, placed in the plan, and given current
-   identity-bound capacity evidence. Recompute the fleet centrally after that work and never add an
-   alternate planner.
-7. No Fill or proposal approval may follow until
-   the freshly migrated live preview is feasible, cross-surface identical, and explicitly approved.
+4. Recompute capacity only through the central planner after the new drive has its own registration,
+   plan membership, and current admission evidence. The currently attached Seagate contributes zero
+   capacity while it remains merely observed and unregistered.
+5. Do not approve a proposal or start Fill until the migrated live preview is feasible,
+   cross-surface identical, explicitly reviewed, and approved through the normal fenced workflow.
+6. Before public distribution, assign the schema-v7 release a package version distinct from the
+   released 0.2.0 source version (DEF-040); development package strings are not a safe migration gate.
 
 Publication staging hardlinks and every failed/refused capsule remain retained evidence under
-DEC-063/DEF-038. No live migration/publication, repair, `adopt_current`, Fill, drive
-format/mount/register, replacement label reuse, service replacement, PR merge, or rollback-artifact
-deletion has yet occurred.
+DEC-063/DEF-038. No provenance repair, `adopt_current`, Fill, drive format/mount/register, replacement
+label reuse, proposal approval, PR merge, or rollback-artifact deletion has occurred.

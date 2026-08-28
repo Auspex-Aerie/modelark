@@ -10,11 +10,14 @@ backup-first, side-by-side procedure so the old runtime remains a usable rollbac
 |---|---|
 | Fresh install with no catalog | None. The current schema is created on first use. |
 | Existing catalog already at the current schema | Update/redeploy normally. |
-| SQLite catalog at schema v1–v6, including ModelArk 0.2.0's schema v2 | Run the one-time provenance migration before starting the new service. |
+| SQLite catalog at schema v1–v6, including catalogs created by the released ModelArk 0.2.0 | Run the one-time provenance migration before starting the new service. |
 | Legacy checkout with DuckDB or pre-canonical runtime layout | Follow `legacy-cutover.md` first; install the `migration` extra when DuckDB conversion is required. |
 
 If a new ModelArk binary is pointed at an existing pre-v7 catalog, it refuses before changing the
 file and names `modelark-provenance-migrate`. This is expected protection, not catalog corruption.
+For source checkouts and pre-release builds, do not use the Python package version string alone to
+decide whether migration is needed: the catalog schema and the binary's refusal are authoritative.
+The public release carrying schema v7 must have a version newer than 0.2.0.
 
 ## What the provenance migration does
 
@@ -38,6 +41,18 @@ An operator must schedule a stopped-writer window, retain a backup of the entire
 including SQLite sidecars, run rehearsal and publication from a disposable copy, then repoint the
 service to the new directory. The detailed commands and stop conditions are in
 [`provenance-live-cutover.md`](provenance-live-cutover.md).
+
+In practical terms, an existing user should expect one attended maintenance window:
+
+1. stop ModelArk and copy the complete data/config/state runtime as rollback evidence;
+2. rehearse the migration and review its integrity, classification, and locator evidence;
+3. publish into a new empty data directory rather than overwriting the old catalog;
+4. start the new service without automatic Fill resume; and
+5. review drives, typed blockers, and the new plan before approving any work.
+
+Keep the old runtime and migration capsule until post-upgrade drive reconciliation and at least one
+operator-chosen recovery checkpoint have passed. Do not delete publication leftovers just because
+the portal starts successfully.
 
 After migration, start the portal without `--resume`, review the catalog and plan, and reconcile
 attached archive drives before expecting capacity to become executable. Drives with missing or stale

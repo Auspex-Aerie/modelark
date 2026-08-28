@@ -8,6 +8,10 @@ Use a reviewed release/candidate that has already passed the copied-runtime runb
 example path below with an explicit reviewed literal path. Keep the complete cutover capsule on the
 same filesystem as the final destination because publication uses an atomic no-clobber hard link.
 
+Reference execution status: this procedure passed for the LocalModelArk deployment on 2026-08-28
+using pinned candidate commit `11d9d6d` (DEC-072). That execution does not waive any per-install
+capture, validation, or rollback gate below.
+
 ## Stop boundary
 
 This procedure authorizes catalog migration and a non-resuming portal start only. It does not
@@ -23,6 +27,11 @@ Record:
 - service enabled/active state;
 - exact catalog, WAL, SHM, journal, `library.json`, and configuration metadata/hashes; and
 - free space and filesystem identity for the cutover destination.
+
+Do not run `sqlite3`, Python `sqlite3`, or an application diagnostic directly against the old live
+catalog—even with `mode=ro`. A WAL-mode read-only open may create `-shm`/`-wal` coordination files.
+Record physical metadata and hashes with ordinary file tools, capture the stopped bundle, and perform
+all schema/integrity/foreign-key/logical checks on the disposable copy.
 
 Stop the user service and prove no portal, Fill, migration, or maintenance writer remains:
 
