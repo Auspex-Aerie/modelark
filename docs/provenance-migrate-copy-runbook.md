@@ -1,12 +1,12 @@
 # Provenance migration — repeatable copied-runtime runbook
 
-Status: **copied-runtime acceptance, Drive #2 loss rehearsal, replacement-media read-only
-qualification, immutable candidate freeze, and the stopped side-by-side live cutover passed on
-2026-08-28**. LocalModelArk now runs schema v7 from candidate commit `11d9d6d`; the service remains
-disabled for login startup and was started without Fill resume. The preserved schema-v2 runtime and
-complete cutover capsule remain the rollback point. The next live mutation is the operator's repeat
-of the Drive #2 loss declaration; replacement registration, proposal approval, and Fill remain
-separate gates.
+Status: **copied-runtime acceptance, Drive #2 loss rehearsal and live declaration,
+replacement-media read-only qualification, immutable candidate freeze, stopped side-by-side live
+cutover, and the attended diagnostic-only application swap passed on 2026-08-28**. LocalModelArk now
+runs schema v7 from candidate commit `ce81288`; the service remains disabled for login startup and
+was started without Fill resume. The preserved schema-v2 runtime, cutover capsule, and earlier
+application candidates remain rollback/evidence points. Replacement onboarding, capacity-evidence
+restoration, proposal approval, and Fill remain separate gates.
 
 Use this runbook to exercise the provenance migration from the current development branch against a
 production-shaped, disposable copy of the existing LocalModelArk deployment. The process is designed
@@ -61,7 +61,11 @@ then frozen as commit `11d9d6d` and a wheel with SHA-256
   still shows Drive #2 as active/enabled until the operator repeats the reviewed loss declaration;
 - the preserved old schema-v2 main/WAL/SHM bundle still matches its immutable seed. INC-043 records
   the pre-capture read-only SQLite sidecars; no catalog-content change occurred and no sidecar was
-  deleted or normalized.
+  deleted or normalized;
+- after the attended Drive #2 declaration, the application-only `ce81288` swap preserved planner
+  revision `1`, Fill idle, disabled startup, and the existing v7 data/config/state paths. It removed
+  `drive-02` from unknown-capacity diagnostic targets without changing the compatibility summary:
+  `316` planned, `79` done, `104` must, `212` bulk, `1` blocked, and `396` selected.
 
 The published SQLite container hash is evidence only at publication time. Opening a disposable
 published catalog through the normal read-write portal/proposal runtime can convert its journal
@@ -565,47 +569,63 @@ is `CAPACITY_EVIDENCE_UNKNOWN`, zero executable tasks, zero lost-drive targets, 
 active capacity. Fill remained idle, the service remained healthy, and the attached Seagate remained
 an unregistered observation with no action taken.
 
-Read-only cross-surface verification found one non-authoritative diagnostic defect, INC-044. The
-running `11d9d6d` candidate correctly excludes Drive #2 from the canonical candidate graph, active
-capacity, and assignment, but its compatibility projection still emits one
-`capacity_failures[].eligible_drives` row for `drive-02`. DEC-073 remediates that projection at commit
-`d01cc6e`: unknown-evidence failure rows now derive labels and requirement association from the same
-canonical candidate set consumed by Gate B, while historical ledgers retain the lost drive.
+Read-only cross-surface verification found the non-authoritative diagnostic defect INC-044. Candidate
+`11d9d6d` correctly excluded Drive #2 from the canonical candidate graph, active capacity, and
+assignment, but its compatibility projection still emitted one
+`capacity_failures[].eligible_drives` row for `drive-02`. DEC-073 corrected the diagnostic target set
+at commit `d01cc6e`; the attended application-only swap proved six active-drive failure labels and no
+lost-drive label. That first correction also exposed INC-045: associating each failure row with a
+different candidate requirement changed the compatibility summary from `316` planned / `1` blocked
+to `315` planned / `2` blocked. The service remained fail-closed and Fill stayed idle, but the
+presentation regression was not accepted as the final state.
 
-The replacement candidate passed the expected-red regression, 111 focused lifecycle/capacity/planning
-tests, the full 917-test non-E2E pipeline, standalone portal E2E, package build, and isolated installed-
-wheel smoke. Its wheel SHA-256 is
-`88862f8f3203938e85db6b11bd34cf948b659e3de197901ad0b4a513a2f45fd0`. It is preserved separately
-and has not replaced or restarted the live service.
+DEC-074 narrows the implementation at commit `ce81288`: failure labels still come only from canonical
+placement candidates, while the fleet-wide unknown-evidence gate retains one deterministic
+representative requirement for compatibility aggregation. The corrected candidate passed both
+expected-red regressions, 112 focused lifecycle/capacity/planning tests, the full 918-test non-E2E
+pipeline, standalone portal E2E, package build, and two isolated installed-wheel smokes. Its wheel
+SHA-256 is `07ee8c097183c6637f96b2d98d0ab9f4dddc86bc8a44a9e640f45a2ddddd55d4`.
+
+The final attended swap now runs `ce81288` against the unchanged migrated v7 data/config/state paths.
+The service is active but disabled, starts with `resume=False`, and reports Fill idle. Planner revision
+remains `1`; `drive-02` remains `lost + excluded` with zero usable, archived, and planned bytes; the
+Seagate remains an unregistered passive observation with `action_taken=false`; preview remains
+`CAPACITY_EVIDENCE_UNKNOWN`; and total planned bytes remain zero. Library now emits exactly six
+failure labels (`drive-00`, `drive-01`, `drive-03`, `drive-04`, `drive-05`, `drive-06`), zero lost-drive
+mentions, and the pre-correction totals `316/79/104/212/1/396`.
 
 ## Current stop point
 
-The immutable candidate, stopped side-by-side live cutover, and attended live Drive #2 loss
-declaration are complete under DEC-072. The portal is active on the migrated v7 runtime at revision
-`1`, but the service remains disabled and Fill resume is absent. The old v2 runtime, service unit,
+The immutable migration candidate, stopped side-by-side live cutover, attended Drive #2 loss
+declaration, and diagnostic-only application correction are complete under DEC-072 through DEC-074.
+The portal is active on `ce81288` against the same migrated v7 runtime at revision `1`; the service
+remains disabled and Fill resume is absent. The old v2 runtime, prior service units/candidates,
 immutable seed, migration work, rollback bundle, and publication leftovers remain retained and
-matched. No rollback was required.
+matched. No data rollback was required.
 
 Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. Review and separately authorize replacement of the running `11d9d6d` service artifact with the
-   tested `d01cc6e` candidate. This is an application-only correction: retain the existing v7 runtime,
-   keep the service disabled, omit Fill resume, and recheck revision `1` plus the corrected six-drive
-   unknown-evidence projection before proceeding.
-2. Implement and rehearse the remaining DEF-029 replacement workflow separately: show the accepted
+1. Implement and rehearse the remaining DEF-029 replacement workflow separately: show the accepted
    Seagate's exact identity/media state, require a new label by default, and split preview from any
    initialization, registration, plan-membership, or reconciliation mutation. Never inherit Drive #2
    facts or reuse its identity epoch.
-3. Restore identity-bound capacity evidence for eligible candidate drives. Until then,
+2. Restore identity-bound capacity evidence for eligible candidate drives. Until then,
    `CAPACITY_EVIDENCE_UNKNOWN` correctly permits no executable proposal.
-4. Recompute capacity only through the central planner after the new drive has its own registration,
+3. Recompute capacity only through the central planner after the new drive has its own registration,
    plan membership, and current admission evidence. The currently attached Seagate contributes zero
    capacity while it remains merely observed and unregistered.
-5. Do not approve a proposal or start Fill until the migrated live preview is feasible,
+4. Do not approve a proposal or start Fill until the migrated live preview is feasible,
    cross-surface identical, explicitly reviewed, and approved through the normal fenced workflow.
-6. Before public distribution, assign the schema-v7 release a package version distinct from the
+5. Before public distribution, assign the schema-v7 release a package version distinct from the
    released 0.2.0 source version (DEF-040); development package strings are not a safe migration gate.
 
 Publication staging hardlinks and every failed/refused capsule remain retained evidence under
 DEC-063/DEF-038. No provenance repair, `adopt_current`, Fill, drive format/mount/register, replacement
 label reuse, proposal approval, PR merge, or rollback-artifact deletion has occurred.
+
+When adding later application-swap evidence to a retained cutover capsule, always use an explicit
+generation-prefixed destination filename and refuse an existing destination; never group-copy a
+generic basename such as `modelark.service` into the shared evidence directory. INC-046 records one
+immediately detected collision: the original `11d9d6d` unit was restored from its byte-preserved
+pre-swap copy and hash-verified, while the final unit was stored separately as
+`ce81288-modelark.service`. No live service or catalog state was affected.

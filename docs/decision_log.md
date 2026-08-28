@@ -1728,7 +1728,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### INC-044: Unknown-capacity diagnostics label a lost drive as eligible
 - `id`: INC-044
 - `date`: 2026-08-28
-- `status`: remediated by DEC-073; replacement candidate built/tested but not deployed
+- `status`: remediated by DEC-073 and DEC-074; corrected candidate deployed
 - `triggered_by`: DEC-072 post-cutover read-only verification after the live Drive #2 loss declaration
 - `symptom`: The live v7 portal correctly advanced to planner revision `1`, retained `drive-02` as `lost + excluded`, removed its nominal capacity from the active total, assigned it zero planned bytes/targets, and returned `CAPACITY_EVIDENCE_UNKNOWN` with zero executable tasks. However, `library plan` also emitted one `capacity_failures` row whose `eligible_drives` contained `drive-02` and whose recovery action said to mount/reconcile it.
 - `root_cause`: `_unknown_evidence_failures` in `modelark/capacity.py` projects one failure for every non-executable member of `capacity_drives`. That collection intentionally includes all durable plan members for historical ledger visibility, including lost/excluded identities. The function does not restrict its diagnostic rows to the canonical candidate graph/placeable target set already used by Gate B, then serializes each retained label under the stronger name `eligible_drives`.
@@ -1750,3 +1750,43 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, modelark/capacity.py, tests/test_inc044_gate1_contracts.py
 - `related`: DEC-050, DEC-067, DEC-068, DEC-072, INC-039, INC-040, INC-044
 - `scope_boundary`: Diagnostic eligibility projection and candidate artifact preparation only. No service replacement/restart, live catalog mutation, replacement-drive onboarding, capacity reconciliation, proposal approval, Fill, archive-byte action, or evidence disposal.
+
+### INC-045: Per-drive diagnostic association changes compatibility summary counts
+- `id`: INC-045
+- `date`: 2026-08-28
+- `status`: remediated by DEC-074
+- `triggered_by`: attended deployment and read-only verification of the DEC-073 candidate `d01cc6e`
+- `symptom`: The corrected live projection removed `drive-02` and emitted the intended six active-drive failure labels, but Library totals changed from `316` planned / `104` must / `1` blocked to `315` planned / `103` must / `2` blocked. Done, bulk, selected, total planned bytes, planner revision, preview gate, and executable work were unchanged.
+- `root_cause`: The first INC-044 remediation coupled label filtering to a new per-drive representative-requirement lookup. A single fleet-wide `CAPACITY_EVIDENCE_UNKNOWN` condition was therefore attached to two different repositories, and the compatibility summary counted those associations as two blocked repositories. The pre-existing projection used one deterministic representative requirement for every row.
+- `blast_radius`: Presentation/compatibility aggregation only in the briefly deployed local test candidate. Candidate generation, lifecycle exclusion, admission, capacity, assignments, proposal preview, and execution remained fail-closed; planner revision stayed `1`, total planned bytes stayed zero, and Fill stayed idle. No catalog, drive, archive, or approval mutation occurred.
+- `why_not_caught_earlier`: The first expected-red contract used one selected repository and one active target, so it proved lost-label exclusion but could not detect multiplication of representative requirements across roles/tiers. The live production-shaped catalog supplied the missing mixed-tier shape.
+- `planned_remediation`: DEC-074 restores the single fleet-wide representative association while retaining canonical-candidate label filtering, adds a mixed primary/replica and must/bulk compatibility contract, rebuilds the artifact, and requires exact before/after live totals during the replacement check.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, modelark/capacity.py, tests/test_inc044_gate1_contracts.py
+- `related`: DEC-067, DEC-068, DEC-073, INC-044
+- `scope_boundary`: Central diagnostic projection and read-only compatibility output only. No data migration, lifecycle edit, drive onboarding, capacity admission, proposal approval, Fill, archive-byte operation, or evidence disposal.
+
+### DEC-074: Preserve one fleet-wide capacity-gate association while filtering targets
+- `id`: DEC-074
+- `date`: 2026-08-28
+- `status`: accepted
+- `triggered_by`: INC-045
+- `decision`: Continue deriving `CAPACITY_EVIDENCE_UNKNOWN` failure labels solely from the canonical candidate target set, but preserve the compatibility projection's single deterministic representative requirement across every failure row. Select that representative from the canonical candidate requirements when available, with the established desired-requirement fallback only when the canonical set is empty. Do not create per-drive repository associations for one fleet-wide evidence gate.
+- `rationale`: Target eligibility and summary attribution are separate concerns. Canonical candidates own which drives may be named; the fleet-wide gate should still be counted once. Keeping both rules inside the central capacity projection prevents alternate planner semantics while retaining historical drive-ledger visibility.
+- `impact`: Commit `ce81288` adds the mixed-tier compatibility regression and narrows the INC-044 fix. Focused lifecycle/capacity/planning result: 112 passed; full non-E2E result: 918 passed with five known deprecation warnings; Ruff was clean; standalone portal E2E passed; both isolated installed-wheel smokes passed. The wheel SHA-256 is `07ee8c097183c6637f96b2d98d0ab9f4dddc86bc8a44a9e640f45a2ddddd55d4`. The attended application-only swap retained the existing schema-v7 data/config/state paths, planner revision `1`, disabled startup, `resume=False`, and idle Fill. Final live output has six active-drive failure labels, no `drive-02`, zero planned bytes, and exact restored totals `316/79/104/212/1/396`.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, modelark/capacity.py, tests/test_inc044_gate1_contracts.py
+- `related`: DEC-067, DEC-068, DEC-072, DEC-073, INC-044, INC-045, DEF-040
+- `scope_boundary`: Diagnostic-only application replacement. No live catalog mutation, drive registration/initialization/reconciliation, capacity-evidence fabrication, proposal approval, Fill, archive-byte operation, release publication, or rollback-evidence disposal.
+
+### INC-046: Generic unit filename collided with retained cutover evidence
+- `id`: INC-046
+- `date`: 2026-08-28
+- `status`: remediated procedurally; original bytes restored and verified
+- `triggered_by`: final DEC-074 evidence preservation after the attended application swap
+- `symptom`: A grouped evidence copy placed the current unit into the retained cutover directory using its generic basename `modelark.service`, briefly replacing the historical `11d9d6d` cutover-unit record.
+- `root_cause`: The evidence-copy step relied on source basenames in a directory that already contained a generation-specific artifact under a generic name. It had no explicit destination filename or no-clobber guard.
+- `blast_radius`: Evidence namespace only; the installed live unit and service were unaffected. The original cutover unit remained byte-preserved as the `d01cc6e` candidate's pre-swap unit. It was restored with matching SHA-256 `2fb4c68b3b0abf7ddded6627225c5e13b2ec70ad9a133298a422a48fc5200aca`, and the final unit was retained separately as `ce81288-modelark.service` with SHA-256 `afa227811979ff7b94e53baa8b2e2b134d409eee63d50382eae33cb046d1c7b9`.
+- `why_not_caught_earlier`: Earlier snapshots used candidate-specific directories, while the final copy mixed multiple files into the shared cutover evidence directory and did not first compare destination basenames.
+- `planned_remediation`: For shared evidence capsules, use explicit generation-prefixed destination names, refuse existing destinations by default, and verify historical and new hashes after every copy. Never use a grouped basename-preserving copy for versioned service units.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-063, DEC-072, DEC-074
+- `scope_boundary`: Evidence naming/preservation only. No service rollback, catalog change, drive action, proposal action, Fill, or evidence deletion.
