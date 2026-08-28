@@ -1724,3 +1724,17 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/upgrading.md
 - `related`: DEC-072
 - `scope_boundary`: Release identity and user migration communication only. No schema change, live runtime rebuild, drive action, proposal approval, Fill, or rollback-evidence disposal.
+
+### INC-044: Unknown-capacity diagnostics label a lost drive as eligible
+- `id`: INC-044
+- `date`: 2026-08-28
+- `status`: open; authoritative planning remains fail-closed
+- `triggered_by`: DEC-072 post-cutover read-only verification after the live Drive #2 loss declaration
+- `symptom`: The live v7 portal correctly advanced to planner revision `1`, retained `drive-02` as `lost + excluded`, removed its nominal capacity from the active total, assigned it zero planned bytes/targets, and returned `CAPACITY_EVIDENCE_UNKNOWN` with zero executable tasks. However, `library plan` also emitted one `capacity_failures` row whose `eligible_drives` contained `drive-02` and whose recovery action said to mount/reconcile it.
+- `root_cause`: `_unknown_evidence_failures` in `modelark/capacity.py` projects one failure for every non-executable member of `capacity_drives`. That collection intentionally includes all durable plan members for historical ledger visibility, including lost/excluded identities. The function does not restrict its diagnostic rows to the canonical candidate graph/placeable target set already used by Gate B, then serializes each retained label under the stronger name `eligible_drives`.
+- `blast_radius`: This is an explanation/action defect, not an assignment or admission bypass: lifecycle, candidate generation, active capacity, proposal preview, and target assignment all exclude Drive #2, and Fill remains stopped. Operators can nevertheless see a contradictory seventh capacity-evidence failure and be told to reconcile media that policy has declared lost.
+- `why_not_caught_earlier`: Lifecycle contracts prove that lost/excluded drives cannot become candidates or targets, while capacity-evidence contracts prove typed unknown failures for ordinary plan drives. No cross-contract asserts that diagnostic failure rows use the canonical placeable candidate set while historical ledgers retain excluded membership.
+- `planned_remediation`: Add an expected-red lifecycle/capacity projection contract, then derive unknown-evidence failure labels from canonical candidate targets (or an explicitly named placeable-target set) rather than every retained ledger drive. Keep the lost drive visible in `drives`/ledgers with lifecycle and eligibility, but never call it eligible or offer mount/reconcile as its recovery action. Re-run the focused lifecycle/capacity suites, full non-E2E pipeline, portal E2E, and copied/live read-only projection before replacing the deployed candidate.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-050, DEC-067, DEC-068, DEC-069, DEC-072, INC-039, INC-040
+- `scope_boundary`: Central planning diagnostic projection only. No live catalog edit, lifecycle reversal, replacement registration, capacity admission, proposal approval, Fill, archive-byte action, or rollback-evidence disposal.

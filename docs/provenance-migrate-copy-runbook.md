@@ -556,18 +556,35 @@ Test the inventory view with injected/mock observations before the physical walk
 unregistered 8 TB Seagate must remain unregistered and must not alter planner revision. The physical
 walkthrough is the first point where passive enumeration is allowed; SMART remains separately gated.
 
+## Executed live Drive #2 loss declaration — 2026-08-28
+
+The operator repeated the exact-confirmation workflow against the migrated live v7 portal. It
+completed once at planner revision `1`: `drive-02` is now `lost + excluded`, remains visible as
+historical membership at identity epoch `1`, and has zero planned bytes/targets. The canonical result
+is `CAPACITY_EVIDENCE_UNKNOWN`, zero executable tasks, zero lost-drive targets, and 17.19 TB displayed
+active capacity. Fill remained idle, the service remained healthy, and the attached Seagate remained
+an unregistered observation with no action taken.
+
+Read-only cross-surface verification found one non-authoritative diagnostic defect, INC-044. The
+canonical candidate graph, active-capacity total, lifecycle view, and assignment result all exclude
+Drive #2 correctly, but `capacity_failures[].eligible_drives` still emits one unknown-evidence row for
+`drive-02`. That compatibility projection iterates all retained plan-drive ledgers instead of the
+canonical placeable candidate targets. It is not an execution leak, but it can tell an operator to
+mount/reconcile a drive the planner has already excluded and must be corrected before public release.
+
 ## Current stop point
 
-The immutable candidate and stopped side-by-side live cutover are complete under DEC-072. The portal
-is active on the migrated v7 runtime, but the service remains disabled and Fill resume is absent.
-The old v2 runtime, service unit, immutable seed, migration work, rollback bundle, and publication
-leftovers remain retained and matched. No rollback was required.
+The immutable candidate, stopped side-by-side live cutover, and attended live Drive #2 loss
+declaration are complete under DEC-072. The portal is active on the migrated v7 runtime at revision
+`1`, but the service remains disabled and Fill resume is absent. The old v2 runtime, service unit,
+immutable seed, migration work, rollback bundle, and publication leftovers remain retained and
+matched. No rollback was required.
 
 Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. In the migrated live portal, repeat the reviewed Drive #2 loss declaration. Cancel must remain a
-   no-op; exact confirmation must increment the planner revision once, retain historical provenance,
-   clear any approval, exclude Drive #2, and centrally replan with zero lost-drive targets.
+1. Remediate INC-044 at the central capacity-failure projection: derive unknown-evidence diagnostic
+   drive labels from canonical placeable candidate targets, while retaining excluded/lost drives in
+   historical ledgers. Pin a lifecycle-aware expected-red contract before changing production code.
 2. Implement and rehearse the remaining DEF-029 replacement workflow separately: show the accepted
    Seagate's exact identity/media state, require a new label by default, and split preview from any
    initialization, registration, plan-membership, or reconciliation mutation. Never inherit Drive #2
