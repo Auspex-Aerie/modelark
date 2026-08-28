@@ -1728,7 +1728,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### INC-044: Unknown-capacity diagnostics label a lost drive as eligible
 - `id`: INC-044
 - `date`: 2026-08-28
-- `status`: open; authoritative planning remains fail-closed
+- `status`: remediated by DEC-073; replacement candidate built/tested but not deployed
 - `triggered_by`: DEC-072 post-cutover read-only verification after the live Drive #2 loss declaration
 - `symptom`: The live v7 portal correctly advanced to planner revision `1`, retained `drive-02` as `lost + excluded`, removed its nominal capacity from the active total, assigned it zero planned bytes/targets, and returned `CAPACITY_EVIDENCE_UNKNOWN` with zero executable tasks. However, `library plan` also emitted one `capacity_failures` row whose `eligible_drives` contained `drive-02` and whose recovery action said to mount/reconcile it.
 - `root_cause`: `_unknown_evidence_failures` in `modelark/capacity.py` projects one failure for every non-executable member of `capacity_drives`. That collection intentionally includes all durable plan members for historical ledger visibility, including lost/excluded identities. The function does not restrict its diagnostic rows to the canonical candidate graph/placeable target set already used by Gate B, then serializes each retained label under the stronger name `eligible_drives`.
@@ -1738,3 +1738,15 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
 - `related`: DEC-050, DEC-067, DEC-068, DEC-069, DEC-072, INC-039, INC-040
 - `scope_boundary`: Central planning diagnostic projection only. No live catalog edit, lifecycle reversal, replacement registration, capacity admission, proposal approval, Fill, archive-byte action, or rollback-evidence disposal.
+
+### DEC-073: Derive capacity diagnostic eligibility from canonical candidates
+- `id`: DEC-073
+- `date`: 2026-08-28
+- `status`: accepted
+- `triggered_by`: INC-044
+- `decision`: Keep `capacity_drives` and drive ledgers broad enough to retain every durable plan member, including lost/excluded historical identities, but derive `CAPACITY_EVIDENCE_UNKNOWN` failure labels and their representative requirement association exclusively from the canonical candidate set already consumed by Gate B. Never widen a compatibility failure row back to all plan members when candidate-target evidence is empty.
+- `rationale`: Lifecycle membership and placement eligibility are intentionally different authorities. Removing lost drives from ledgers would erase useful history, while projecting ledger membership into a field named `eligible_drives` contradicts the canonical planner and gives the wrong recovery action. Reusing the candidate target relation avoids another planner or lifecycle interpretation and keeps all CLI/Library/portal consumers aligned.
+- `impact`: Commit `d01cc6e` adds a lifecycle-aware expected-red contract and changes only the central unknown-evidence projection. The contract moved from the observed `drive-active + drive-lost` diagnostic set to `drive-active` only while the lost row remained visible with zero usable/planned bytes. Focused result: 111 passed; full non-E2E result: 917 passed with five known deprecation warnings; standalone portal E2E passed. The rebuilt wheel SHA-256 is `88862f8f3203938e85db6b11bd34cf948b659e3de197901ad0b4a513a2f45fd0`, and isolated installed-wheel smoke passed from its preserved candidate environment. The running service remains on `11d9d6d` until a separate replacement decision.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, modelark/capacity.py, tests/test_inc044_gate1_contracts.py
+- `related`: DEC-050, DEC-067, DEC-068, DEC-072, INC-039, INC-040, INC-044
+- `scope_boundary`: Diagnostic eligibility projection and candidate artifact preparation only. No service replacement/restart, live catalog mutation, replacement-drive onboarding, capacity reconciliation, proposal approval, Fill, archive-byte action, or evidence disposal.

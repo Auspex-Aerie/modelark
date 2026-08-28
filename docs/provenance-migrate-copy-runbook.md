@@ -566,11 +566,17 @@ active capacity. Fill remained idle, the service remained healthy, and the attac
 an unregistered observation with no action taken.
 
 Read-only cross-surface verification found one non-authoritative diagnostic defect, INC-044. The
-canonical candidate graph, active-capacity total, lifecycle view, and assignment result all exclude
-Drive #2 correctly, but `capacity_failures[].eligible_drives` still emits one unknown-evidence row for
-`drive-02`. That compatibility projection iterates all retained plan-drive ledgers instead of the
-canonical placeable candidate targets. It is not an execution leak, but it can tell an operator to
-mount/reconcile a drive the planner has already excluded and must be corrected before public release.
+running `11d9d6d` candidate correctly excludes Drive #2 from the canonical candidate graph, active
+capacity, and assignment, but its compatibility projection still emits one
+`capacity_failures[].eligible_drives` row for `drive-02`. DEC-073 remediates that projection at commit
+`d01cc6e`: unknown-evidence failure rows now derive labels and requirement association from the same
+canonical candidate set consumed by Gate B, while historical ledgers retain the lost drive.
+
+The replacement candidate passed the expected-red regression, 111 focused lifecycle/capacity/planning
+tests, the full 917-test non-E2E pipeline, standalone portal E2E, package build, and isolated installed-
+wheel smoke. Its wheel SHA-256 is
+`88862f8f3203938e85db6b11bd34cf948b659e3de197901ad0b4a513a2f45fd0`. It is preserved separately
+and has not replaced or restarted the live service.
 
 ## Current stop point
 
@@ -582,9 +588,10 @@ matched. No rollback was required.
 
 Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. Remediate INC-044 at the central capacity-failure projection: derive unknown-evidence diagnostic
-   drive labels from canonical placeable candidate targets, while retaining excluded/lost drives in
-   historical ledgers. Pin a lifecycle-aware expected-red contract before changing production code.
+1. Review and separately authorize replacement of the running `11d9d6d` service artifact with the
+   tested `d01cc6e` candidate. This is an application-only correction: retain the existing v7 runtime,
+   keep the service disabled, omit Fill resume, and recheck revision `1` plus the corrected six-drive
+   unknown-evidence projection before proceeding.
 2. Implement and rehearse the remaining DEF-029 replacement workflow separately: show the accepted
    Seagate's exact identity/media state, require a new label by default, and split preview from any
    initialization, registration, plan-membership, or reconciliation mutation. Never inherit Drive #2
