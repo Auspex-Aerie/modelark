@@ -2,8 +2,9 @@
 
 Status: **copied-runtime acceptance, Drive #2 loss rehearsal and live declaration,
 replacement-media read-only qualification, immutable candidate freeze, stopped side-by-side live
-cutover, and the attended diagnostic-only application swap passed on 2026-08-28**. LocalModelArk now
-runs schema v7 from candidate commit `ce81288`; the service remains disabled for login startup and
+cutover, attended diagnostic-only application swap, and read-only replacement-onboarding preview
+passed on 2026-08-28**. LocalModelArk now runs schema v7 from candidate commit `e71e234`; the service
+remains disabled for login startup and
 was started without Fill resume. The preserved schema-v2 runtime, cutover capsule, and earlier
 application candidates remain rollback/evidence points. Replacement onboarding, capacity-evidence
 restoration, proposal approval, and Fill remain separate gates.
@@ -594,29 +595,67 @@ Seagate remains an unregistered passive observation with `action_taken=false`; p
 failure labels (`drive-00`, `drive-01`, `drive-03`, `drive-04`, `drive-05`, `drive-06`), zero lost-drive
 mentions, and the pre-correction totals `316/79/104/212/1/396`.
 
+## Executed read-only replacement onboarding preview — 2026-08-28
+
+DEC-075 adds the first DEF-029 replacement gate without adding a registration mutation. Candidate
+`e71e234` provides a **Review onboarding** action for every passive unregistered observation. The
+server rebinds the exact device path plus serial against a fresh attached-device inventory, inspects
+block/filesystem topology without SMART, and then reports:
+
+- a monotonically new `drive-NN` suggestion rather than filling a historical gap or reusing a lost
+  label;
+- the one existing filesystem target, UUID, mount state, and whether the running system depends on
+  it;
+- serial, filesystem UUID, existing annex UUID, and occupied archive-namespace collisions;
+- every lost/excluded identity and its retained plan/archive/replica dependencies as separate history
+  with an explicit `not_inherited` relationship;
+- the active plan that a later registration would join and the separate reconciliation requirement;
+- one typed next action. No mutation endpoint exists in this candidate.
+
+Contracts first failed against the missing workflow, then passed after implementation. Focused
+result: 40 tests passed. The complete suite passed 923 tests with five known deprecation warnings;
+Ruff was clean; standalone portal E2E exercised the onboarding modal without SMART or mutation; the
+isolated installed-wheel smoke passed; and the package built successfully. The wheel SHA-256 is
+`177b37b5c41ade58de91c341c53c518c03dbe0ad48d7b5144c3cca3fc956178a`.
+
+The application-only live swap retained the same schema-v7 data/config/state paths, planner revision
+`1`, disabled startup, `resume=False`, idle Fill, and exact planning result (ignoring fresh
+`observed_at` timestamps). The live read-only preview binds Seagate serial `ZR16L100` at `/dev/sda` to
+one non-system ext4 volume `/dev/sda1`, filesystem UUID
+`7db95a52-88f9-48c5-a39e-7a24f2d36588`, and proposed label `drive-07`. It is unmounted, so the sole
+blocker/next action is `MOUNT_REQUIRED` / `mount_volume`. Drive #2 remains lost/excluded at identity
+epoch 1 with zero archived and replica rows, and the preview inherits none of its facts.
+
 ## Current stop point
 
 The immutable migration candidate, stopped side-by-side live cutover, attended Drive #2 loss
-declaration, and diagnostic-only application correction are complete under DEC-072 through DEC-074.
-The portal is active on `ce81288` against the same migrated v7 runtime at revision `1`; the service
+declaration, diagnostic-only application correction, and read-only replacement preview are complete
+under DEC-072 through DEC-075. The portal is active on `e71e234` against the same migrated v7 runtime
+at revision `1`; the service
 remains disabled and Fill resume is absent. The old v2 runtime, prior service units/candidates,
 immutable seed, migration work, rollback bundle, and publication leftovers remain retained and
 matched. No data rollback was required.
 
 Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. Implement and rehearse the remaining DEF-029 replacement workflow separately: show the accepted
-   Seagate's exact identity/media state, require a new label by default, and split preview from any
-   initialization, registration, plan-membership, or reconciliation mutation. Never inherit Drive #2
-   facts or reuse its identity epoch.
-2. Restore identity-bound capacity evidence for eligible candidate drives. Until then,
+1. Operator visual gate: open **Drives**, select **Review onboarding** on `/dev/sda`, and confirm that
+   the modal shows serial `ZR16L100`, filesystem `/dev/sda1`, the UUID above, proposed label
+   `drive-07`, Drive #2 as separate/non-inherited history, and “not mounted.” Close the preview; it has
+   no apply action. Then mount `/dev/sda1` through the operator's normal OS procedure and refresh the
+   same preview. Do not format it or run SMART merely to clear this gate.
+2. After the mounted preview is reviewed, implement/rehearse and separately authorize the actual
+   new-label registration mutation. It must rebind the preview identity, refuse label/UUID/annex
+   collisions and occupied namespaces, initialize only the empty `modelark` namespace, add
+   `drive-07` to the active plan once, invalidate stale approval through the graph-write boundary,
+   and stop before reconciliation. DEF-029 remains active for same-identity refresh and retirement.
+3. Restore identity-bound capacity evidence for eligible candidate drives. Until then,
    `CAPACITY_EVIDENCE_UNKNOWN` correctly permits no executable proposal.
-3. Recompute capacity only through the central planner after the new drive has its own registration,
+4. Recompute capacity only through the central planner after the new drive has its own registration,
    plan membership, and current admission evidence. The currently attached Seagate contributes zero
    capacity while it remains merely observed and unregistered.
-4. Do not approve a proposal or start Fill until the migrated live preview is feasible,
+5. Do not approve a proposal or start Fill until the migrated live preview is feasible,
    cross-surface identical, explicitly reviewed, and approved through the normal fenced workflow.
-5. Before public distribution, assign the schema-v7 release a package version distinct from the
+6. Before public distribution, assign the schema-v7 release a package version distinct from the
    released 0.2.0 source version (DEF-040); development package strings are not a safe migration gate.
 
 Publication staging hardlinks and every failed/refused capsule remain retained evidence under
