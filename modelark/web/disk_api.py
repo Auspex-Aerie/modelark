@@ -220,29 +220,39 @@ def registration_topology(dev: str) -> dict:
                 archive_parent_uid = mount_stat.st_uid
                 archive_parent_gid = mount_stat.st_gid
                 archive_parent_mode = f"{stat.S_IMODE(mount_stat.st_mode):04o}"
-            if archive.is_symlink():
-                archive_state = "unsafe_path"
-            elif not archive.exists():
-                archive_state = "absent"
-            elif archive.is_dir() and (archive / ".git").exists():
-                try:
-                    annex = subprocess.run(
-                        ["git", "-C", str(archive), "config", "--local", "--get", "annex.uuid"],
-                        capture_output=True,
-                        text=True,
-                    )
-                except FileNotFoundError:
-                    annex = None
-                if annex is not None and annex.returncode == 0 and annex.stdout.strip():
-                    annex_uuid = annex.stdout.strip().splitlines()[0]
-                    registration_receipt = drive_register.registration_receipt(archive)
-                    archive_state = (
-                        "prepared_registration" if registration_receipt else "annex"
-                    )
+            try:
+                if archive.is_symlink():
+                    archive_state = "unsafe_path"
+                elif not archive.exists():
+                    archive_state = "absent"
+                elif archive.is_dir() and (archive / ".git").exists():
+                    try:
+                        annex = subprocess.run(
+                            [
+                                "git", "-C", str(archive), "config", "--local", "--get",
+                                "annex.uuid",
+                            ],
+                            capture_output=True,
+                            text=True,
+                        )
+                    except FileNotFoundError:
+                        annex = None
+                    if annex is not None and annex.returncode == 0 and annex.stdout.strip():
+                        annex_uuid = annex.stdout.strip().splitlines()[0]
+                        registration_receipt = drive_register.registration_receipt(archive)
+                        archive_state = (
+                            "prepared_registration" if registration_receipt else "annex"
+                        )
+                    else:
+                        archive_state = "unrecognized"
                 else:
                     archive_state = "unrecognized"
-            else:
-                archive_state = "unrecognized"
+            except OSError:
+                # Passive inventory must remain available when an unrelated mount (commonly a
+                # protected system/EFI volume) cannot be traversed by the service account.
+                archive_state = "inaccessible"
+                annex_uuid = None
+                registration_receipt = None
         nodes.append({
             "dev": node.get("path"),
             "type": node.get("type"),
