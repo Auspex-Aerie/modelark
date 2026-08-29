@@ -5,6 +5,7 @@ git-annex output.  They never inspect or mutate operator drives.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -164,6 +165,43 @@ def test_attached_inventory_enriches_disk_with_read_only_storage_identity():
         "archive_state": "annex",
     }]
     probe.assert_called_once_with("/dev/sdb")
+
+
+def test_topology_reports_inaccessible_archive_namespace_instead_of_failing(tmp_path):
+    lsblk = {
+        "blockdevices": [{
+            "path": "/dev/system",
+            "type": "disk",
+            "size": 1000,
+            "fstype": None,
+            "uuid": None,
+            "mountpoints": [],
+            "children": [{
+                "path": "/dev/system1",
+                "type": "part",
+                "size": 900,
+                "fstype": "vfat",
+                "uuid": "EFI-FS",
+                "mountpoints": [str(tmp_path)],
+            }],
+        }],
+    }
+
+    def probe(args, **_kwargs):
+        if args[0] == "lsblk":
+            return subprocess.CompletedProcess(args, 0, json.dumps(lsblk), "")
+        if args[:3] == ["findmnt", "-nro", "SOURCE"]:
+            return subprocess.CompletedProcess(args, 0, "/dev/system1\n", "")
+        return subprocess.CompletedProcess(args, 1, "", "")
+
+    with mock.patch.object(disk_api.subprocess, "run", side_effect=probe), \
+            mock.patch.object(Path, "is_symlink", side_effect=PermissionError("denied")):
+        topology = disk_api.registration_topology("/dev/system")
+
+    volume = next(node for node in topology["nodes"] if node["fstype"] == "vfat")
+    assert topology["available"] is True
+    assert volume["archive_state"] == "inaccessible"
+    assert volume["annex_uuid"] is None
 
 
 def _catalogued(con: sqlite3.Connection, rfilename: str, key: str) -> None:
