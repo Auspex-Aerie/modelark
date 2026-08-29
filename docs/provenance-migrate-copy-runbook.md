@@ -4,11 +4,12 @@ Status: **copied-runtime acceptance, Drive #2 loss rehearsal and live declaratio
 replacement-media read-only qualification, immutable candidate freeze, stopped side-by-side live
 cutover, attended diagnostic-only application swaps, and preview-bound replacement onboarding
 passed, including recovery from a cleanly refused archive-parent permission check and one successful
-new-identity registration; stopped before capacity reconciliation on 2026-08-28**. LocalModelArk now
-runs schema v7 from permission-guidance candidate commit `e92c354`; the service remains disabled for
-login startup and was started without Fill resume. The preserved schema-v2 runtime, cutover capsule,
-and earlier application candidates remain rollback/evidence points. Capacity-evidence restoration,
-proposal approval, and Fill remain separate gates.
+new-identity registration plus its dedicated-local capacity bootstrap; stopped before reconciling
+the remaining active drives on 2026-08-28**. LocalModelArk now runs schema v7 from permission-guidance
+candidate commit `e92c354`; the service remains disabled for login startup and was started without
+Fill resume. The preserved schema-v2 runtime, cutover capsule, and earlier application candidates
+remain rollback/evidence points. Remaining-drive capacity-evidence restoration, proposal approval,
+and Fill remain separate gates.
 
 Use this runbook to exercise the provenance migration from the current development branch against a
 production-shaped, disposable copy of the existing LocalModelArk deployment. The process is designed
@@ -746,35 +747,67 @@ Canonical planning remains fail-closed on `CAPACITY_EVIDENCE_UNKNOWN`: `drive-07
 planned bytes until reconciliation, appears once among the seven active unknown-evidence targets,
 and lost `drive-02` appears zero times. Compatibility totals remain `316/79/104/212/1/396`.
 
+## Executed Drive #7 dedicated-local reconciliation — 2026-08-28
+
+The operator explicitly confirmed that the replacement filesystem is dedicated to ModelArk. The
+candidate CLI then ran one `drive reconcile drive-07 --dedicated` against the exact migrated
+data/config/state paths, without `--accept-drift`. It returned `bootstrapped`, identity epoch `1`,
+generation `1`, and observed free space `7,537,248,694,272` bytes.
+
+Read-only acceptance proved:
+
+- planner revision advanced exactly once from `2` to `3`; active approval remains null;
+- identity fingerprint is
+  `bd311b67d33a56341d0d7883b47229aad19721a5e8c29a73c636c479285d3329`;
+- filesystem capacity is `7,937,390,178,304` bytes, write authority is `dedicated_local`, and the
+  catalog drive generation is `1`;
+- one append-only `bootstrap` dirty-generation row and one matching clean anchor exist at epoch
+  `1` / generation `1`, with exact filesystem and annex identity proofs;
+- the clean anchor records `7,537,248,694,272` free bytes and the central planner admits
+  `7,378,031,317,044` usable bytes after its headroom policy;
+- `drive-07` now reports `evidence_kind=live`, no evidence error, zero archived/planned bytes, and
+  zero archived/replica rows;
+- catalog integrity is `ok`, foreign-key violations are zero, Fill is idle, archive ownership and
+  namespace are unchanged, and no model bytes were copied; and
+- the fleet root remains `CAPACITY_EVIDENCE_UNKNOWN`, now with exactly six active failure labels:
+  `drive-00`, `drive-01`, `drive-03`, `drive-04`, `drive-05`, and `drive-06`. Lost `drive-02` and
+  reconciled `drive-07` are absent from that failure set. Compatibility totals remain
+  `316/79/104/212/1/396`.
+
 ## Current stop point
 
 The immutable migration candidate, stopped side-by-side live cutover, attended Drive #2 loss
 declaration, diagnostic-only application correction, read-only replacement preview, and disposable
-new-identity registration rehearsal plus live registration are complete under DEC-072 through
-DEC-078. The portal is active on `e92c354` against the same migrated v7 runtime at revision `2`; the
-service remains disabled and Fill resume is absent. The old v2 runtime, prior service units/candidates,
-immutable seed, migration work, rollback bundle, and publication leftovers remain retained and
-matched. No data rollback was required.
+new-identity registration rehearsal, live registration, and Drive #7 capacity bootstrap are complete
+under DEC-072 through DEC-078. The portal is active on `e92c354` against the same migrated v7 runtime
+at revision `3`; the service remains disabled and Fill resume is absent. The old v2 runtime, prior
+service units/candidates, immutable seed, migration work, rollback bundle, and publication leftovers
+remain retained and matched. No data rollback was required.
 
 Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. Restore identity-bound capacity evidence for `drive-07` through the existing central
-   reconciliation operation, with the operator explicitly asserting dedicated-local authority for
-   this dedicated replacement filesystem. Until then,
-   `CAPACITY_EVIDENCE_UNKNOWN` correctly permits no executable proposal.
-2. Preserve the reconciliation response and stop again. Expect a new identity fingerprint,
-   filesystem-capacity evidence, `dedicated_local` write authority, generation `1`, a clean anchor,
-   and one further planner-revision increment. Do not use `--accept-drift` for this first bootstrap.
-3. Recompute capacity only through the central planner after the new drive has current admission
-   evidence. Registration-time `capacity_bytes` and `free_bytes` remain diagnostic until that gate.
-4. Do not approve a proposal or start Fill until the migrated live preview is feasible,
+1. Attach and mount one remaining active drive at a time—never lost `drive-02`—using its normal
+   operating-system procedure. First perform read-only filesystem/annex identity qualification;
+   attached device names and serial observations alone are not registration or reconciliation
+   authority.
+2. Reconcile only the proven matching registered identity. Assert `--dedicated` only for storage
+   whose exclusivity policy is actually dedicated-local; shared/NAS/unfenceable storage must not be
+   promoted by convenience. Preserve each response and require exactly one revision increment per
+   successful bootstrap.
+3. Continue until the remaining failure labels `drive-00`, `drive-01`, `drive-03`, `drive-04`,
+   `drive-05`, and `drive-06` have either valid identity-bound evidence or an explicit lifecycle/
+   eligibility decision. Do not manufacture evidence for unavailable media.
+4. Recompute capacity only through the central planner after each accepted reconciliation. Legacy
+   `capacity_bytes` and `free_bytes` remain diagnostic until their identity-bound gate passes.
+5. Do not approve a proposal or start Fill until the migrated live preview is feasible,
    cross-surface identical, explicitly reviewed, and approved through the normal fenced workflow.
-5. Before public distribution, assign the schema-v7 release a package version distinct from the
+6. Before public distribution, assign the schema-v7 release a package version distinct from the
    released 0.2.0 source version (DEF-040); development package strings are not a safe migration gate.
 
 Publication staging hardlinks and every failed/refused capsule remain retained evidence under
-DEC-063/DEF-038. No provenance repair, `adopt_current`, Fill, drive format, capacity reconciliation,
-replacement label reuse, proposal approval, PR merge, or rollback-artifact deletion has occurred.
+DEC-063/DEF-038. No provenance repair, `adopt_current`, Fill, drive format, remaining-drive
+reconciliation, replacement label reuse, proposal approval, PR merge, or rollback-artifact deletion
+has occurred.
 
 When adding later application-swap evidence to a retained cutover capsule, always use an explicit
 generation-prefixed destination filename and refuse an existing destination; never group-copy a
