@@ -5,22 +5,23 @@ replacement-media read-only qualification, immutable candidate freeze, stopped s
 cutover, attended diagnostic-only application swaps, and preview-bound replacement onboarding
 passed, including recovery from a cleanly refused archive-parent permission check and one successful
 new-identity registration plus its dedicated-local capacity bootstrap; stopped before reconciling
-the remaining active drives after separately bootstrapping the NAS and Drive #1 on 2026-08-28**.
-LocalModelArk now runs schema v7 from permission-guidance candidate commit `e92c354`; the service
-remains disabled for login startup and was started without Fill resume. The preserved schema-v2
-runtime, cutover capsule, and earlier application candidates remain rollback/evidence points.
-Remaining-drive capacity-evidence restoration, attached-identity presentation remediation, proposal
-approval, and Fill remain separate gates.
+the remaining active drives after separately bootstrapping the NAS and Drive #1 and replacing the
+application with the stable-identity/reconciliation candidate on 2026-08-28**. LocalModelArk now
+runs schema v7 from corrected candidate commit `890b1dc`; the service remains disabled for login
+startup and was started without Fill resume. The preserved schema-v2 runtime, cutover capsule, and
+earlier application candidates remain rollback/evidence points. Remaining-drive capacity-evidence
+restoration, proposal approval, and Fill remain separate gates.
 
 Use this runbook to exercise the provenance migration from the current development branch against a
 production-shaped, disposable copy of the existing LocalModelArk deployment. The process is designed
 to be repeated from the same immutable seed after every correction, and then repeated once more from
 a freshly captured seed before live cutover is considered.
 
-This is not Fill, not a live cutover, and not `modelark-migrate` (the legacy ModelDump cutover; see
-[`legacy-cutover.md`](legacy-cutover.md)). The migration CLI is `modelark-provenance-migrate`
-(`scripts/migrate_provenance.py`). Its leftovers-list behavior is frozen at `b8895d2`; the branch when
-this runbook was expanded was `fix/placement-capacity-pr10-content-satisfaction`.
+The copied-runtime rehearsal itself is not Fill or a live cutover, and this workflow is not
+`modelark-migrate` (the legacy ModelDump cutover; see [`legacy-cutover.md`](legacy-cutover.md)). The
+migration CLI is `modelark-provenance-migrate` (`scripts/migrate_provenance.py`). Its leftovers-list
+behavior is frozen at `b8895d2`; the branch when this runbook was expanded was
+`fix/placement-capacity-pr10-content-satisfaction`.
 
 ## Executed acceptance record — 2026-08-28
 
@@ -77,6 +78,19 @@ then frozen as commit `11d9d6d` and a wheel with SHA-256
   `2652c671ec2e2bc9fcd800424011819e6b2ced44668a9d01724f67355b4cf746`, and the attended swap
   retained revision `1`, identical canonical planning, idle Fill, and an untouched replacement
   filesystem.
+- after registering and reconciling Drive #7, then reconciling the separately identity-qualified NAS
+  Drive #0 and USB-attached Drive #1, planner revision reached `5`; Drive #0/#1/#7 now have
+  identity-bound dedicated-local capacity evidence and the unknown-evidence target set is exactly
+  Drive #3 through Drive #6;
+- corrected application candidate `890b1dc` resolves attached registered drives by the exact
+  filesystem/annex UUID pair, treats serial as supporting/fallback evidence, batches annex membership
+  proof, prunes `.git` before filesystem descent, emits bounded progress, and leaves all mutation
+  fences intact. Its final wheel SHA-256 is
+  `3c2bb7996fba7448ad3e83dceb758af4ebe4b36fa34fb2ccf242efe67959f762`;
+- the first `e45c725` swap exposed one additional presentation defect: enriching every attached disk
+  allowed an unreadable system mount such as `/boot/efi` to abort `/api/drives`. Candidate `890b1dc`
+  records such unrelated topology as `inaccessible` and continues passive inventory. No drive,
+  catalog, planner, approval, or Fill state changed during either application-only swap.
 
 The published SQLite container hash is evidence only at publication time. Opening a disposable
 published catalog through the normal read-write portal/proposal runtime can convert its journal
@@ -805,8 +819,8 @@ is `ok`, foreign-key violations are zero, approval remains null, Fill is idle, c
 remain `316/79/104/212/1/396`, and the unknown-evidence target set is now exactly `drive-03` through
 `drive-06`.
 
-The walkthrough exposed two bounded issues without invalidating either reconciliation. They are now
-remediated in the post-`e6af755` source candidate, pending the application-only live replacement:
+The walkthrough exposed two bounded issues without invalidating either reconciliation. Both are
+remediated and live in application candidate `890b1dc`:
 
 1. Passive inventory now enriches each disk with read-only mounted topology and routes correlation
    through one central resolver. An exact unique filesystem/annex UUID pair is authoritative; serial
@@ -822,49 +836,67 @@ remediated in the post-`e6af755` source candidate, pending the application-only 
    final observation are unchanged. The real Drive #0 map returned 2,131 target keys from the new
    read-only query in about half a second.
 
-Expected-red commit `92ced97` failed all seven initial contract points. The implementation plus CLI
-and browser additions pass 80 focused contracts, 950 non-E2E tests with five known deprecation
-warnings, Ruff, JavaScript syntax, and the standalone portal E2E. Packaging and the application-only
-swap remain the next gate; no drive or catalog mutation occurred during this remediation.
+Expected-red commit `92ced97` failed all seven initial contract points. The first implementation
+candidate `e45c725` then exposed a third bounded issue during its live application-only swap:
+read-only topology enrichment attempted to inspect the archive namespace on every mounted disk, and
+a protected unrelated system mount (`/boot/efi`) raised `PermissionError`, degrading only the Drives
+API/UI. Planner and Fill endpoints remained healthy and no mutation ran. Expected-red commit
+`e661ae3` reproduces that production shape; corrected candidate `890b1dc` converts the inaccessible
+topology to passive evidence and keeps the rest of inventory available.
+
+Final qualification passes 44 correction-focused contracts, 951 non-E2E tests with five known
+deprecation warnings, Ruff, JavaScript syntax, installed-wheel topology/resource smoke, and the
+standalone portal E2E. The retained final wheel and source archive have SHA-256
+`3c2bb7996fba7448ad3e83dceb758af4ebe4b36fa34fb2ccf242efe67959f762` and
+`4db6e59538af28ed0df7b00087e164476288aa1d21a2e71927145184f9e9ecfd`. The in-app browser backend
+was unavailable for a final attended visual replay, so that check is explicitly not claimed; the
+standalone portal E2E and live installed-wheel APIs passed.
+
+The final application-only swap uses the exact existing schema-v7 data/config/state paths. The
+service is active but disabled for login startup; approval remains null and Fill is idle and not
+resumed. Planner revision remains `5`, plan preview remains bound to selection hash
+`b8eb1154a66ec52d8aef85846a8dfdb677cbc471491354b319be579228990dd5`, and both pre/post plan and
+preview payloads are byte-identical. Normalized Library planning (excluding only observation time)
+and stable Fill state are equal. Live passive inventory maps Drive #0, Drive #1, and Drive #7 by
+their exact filesystem/annex pairs, presents Drive #1's bridge serial discrepancy without rewriting
+the stored `VR1KV4LK`, and no longer duplicates Drive #0/#1 under unregistered devices. No archive
+bytes, drive rows, planner rows, approval, or Fill state were changed by this remediation or swap.
 
 ## Current stop point
 
 The immutable migration candidate, stopped side-by-side live cutover, attended Drive #2 loss
 declaration, diagnostic-only application correction, read-only replacement preview, and disposable
 new-identity registration rehearsal, live registration, and Drive #7/#0/#1 capacity bootstraps are
-complete under DEC-072 through DEC-078. The portal is active on `e92c354` against the same migrated
+complete under DEC-072 through DEC-079. The portal is active on `890b1dc` against the same migrated
 v7 runtime at revision `5`; the service remains disabled and Fill resume is absent. The old v2
-runtime, prior service units/candidates, immutable seed, migration work, rollback bundle, and
-publication leftovers remain retained and matched. No data rollback was required.
+runtime, prior service units/candidates (including the bounded `e45c725` Drives-API failure),
+immutable seed, migration work, rollback bundle, and publication leftovers remain retained and
+matched. No data rollback was required.
 
 Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. Build and smoke the immutable candidate, then perform an application-only replacement against the
-   exact existing schema-v7 data/config/state paths. Prove planner revision `5`, null approval,
-   disabled startup, idle Fill, and canonical planning output are unchanged; prove the Drives view
-   now maps mounted Drive #0/#1 by stable identity and reports Drive #1's bridge serial explicitly.
-2. Attach and mount one remaining active drive at a time—never lost `drive-02`—using its normal
+1. Attach and mount one remaining active drive at a time—never lost `drive-02`—using its normal
    operating-system procedure. First perform read-only filesystem/annex identity qualification;
    attached device names and serial observations alone are not registration or reconciliation
    authority.
-3. Reconcile only the proven matching registered identity. Assert `--dedicated` only for storage
+2. Reconcile only the proven matching registered identity. Assert `--dedicated` only for storage
    whose exclusivity policy is actually dedicated-local; shared/NAS/unfenceable storage must not be
    promoted by convenience. Preserve each response and require exactly one revision increment per
    successful bootstrap.
-4. Continue until the remaining failure labels `drive-03`, `drive-04`, `drive-05`, and `drive-06`
+3. Continue until the remaining failure labels `drive-03`, `drive-04`, `drive-05`, and `drive-06`
    have either valid identity-bound evidence or an explicit lifecycle/eligibility decision. Do not
    manufacture evidence for unavailable media.
-5. Recompute capacity only through the central planner after each accepted reconciliation. Legacy
+4. Recompute capacity only through the central planner after each accepted reconciliation. Legacy
    `capacity_bytes` and `free_bytes` remain diagnostic until their identity-bound gate passes.
-6. Do not approve a proposal or start Fill until the migrated live preview is feasible,
+5. Do not approve a proposal or start Fill until the migrated live preview is feasible,
    cross-surface identical, explicitly reviewed, and approved through the normal fenced workflow.
-7. Before public distribution, assign the schema-v7 release a package version distinct from the
+6. Before public distribution, assign the schema-v7 release a package version distinct from the
    released 0.2.0 source version (DEF-040); development package strings are not a safe migration gate.
 
 Publication staging hardlinks and every failed/refused capsule remain retained evidence under
-DEC-063/DEF-038. No provenance repair, `adopt_current`, Fill, drive format, remaining-drive
-reconciliation, replacement label reuse, proposal approval, PR merge, or rollback-artifact deletion
-has occurred.
+DEC-063/DEF-038. No provenance repair, `adopt_current`, Fill, drive format, additional Drive
+#3-through-#6 reconciliation, replacement label reuse, proposal approval, PR merge, or
+rollback-artifact deletion has occurred.
 
 When adding later application-swap evidence to a retained cutover capsule, always use an explicit
 generation-prefixed destination filename and refuse an existing destination; never group-copy a

@@ -39,6 +39,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 - Full drive reconciliation no longer launches one `git annex whereis` process per archived row or
   descends into `.git/annex/objects`; one target-UUID membership query and a pruned worktree walk
   preserve the same missing-copy refusal and fresh-anchor boundary.
+- Passive drive inventory now records protected or otherwise unreadable unrelated mount topology as
+  inaccessible evidence instead of allowing one system mount to abort the entire Drives API.
 
 ## 0.2.0 - 2026-07-20
 

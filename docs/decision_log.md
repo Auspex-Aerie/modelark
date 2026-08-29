@@ -1852,3 +1852,57 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/deployment.md, docs/upgrading.md, README.md, CHANGELOG.md, modelark/drive_lifecycle.py, modelark/web/disk_api.py, modelark/web/static/app.css, modelark/web/static/disk.js, modelark/web/static/index.html, tests/test_def029_gate2_contracts.py, tests/test_e2e_portal.py
 - `related`: DEC-060, DEC-067, DEC-070, DEC-075, DEC-076, DEC-077, DEF-029, INC-047
 - `scope_boundary`: Preview-bound permission evidence, operator guidance, physical recheck, and application replacement only. No automatic host provisioning, ACL framework, recursive permission mutation, shared-filesystem policy, SMART, mount/format, registration, reconciliation, capacity admission, proposal approval, Fill, old-label reuse, or evidence disposal.
+
+### INC-048: Serial-only passive correlation hid attached registered identities
+- `id`: INC-048
+- `date`: 2026-08-28
+- `status`: remediated by DEC-079
+- `triggered_by`: Live Drive #0 and Drive #1 reconciliation walkthrough after DEC-078
+- `symptom`: The mounted, successfully identity-qualified Drive #0 and Drive #1 were not presented as attached registered drives. Drive #0 had no stored hardware serial, while Drive #1's USB bridge exposed `5652314B56344C4B` instead of the registered `VR1KV4LK`; both could also appear as unregistered observations even though their filesystem UUID and annex UUID exactly matched their catalog identities.
+- `root_cause`: `drive_lifecycle.observe_registered` correlated passive inventory only through a unique hardware-serial match. The lifecycle presentation path did not consume the filesystem/annex identity pair already used by registration and reconciliation, and `disk_api.attached_inventory` did not enrich attached observations with that read-only topology.
+- `blast_radius`: Drives-screen presentation and onboarding entry only. Registration still refused an occupied filesystem/annex identity, and reconciliation separately required the exact stable pair, so the defect did not bind a wrong identity, rewrite a serial, admit capacity, change planning, or move archive bytes.
+- `why_not_caught_earlier`: Synthetic observations were serial-shaped and did not reproduce an iSCSI identity with no stored serial or a dedicated drive seen through a USB bridge that rewrites the reported serial.
+- `remediation`: DEC-079 makes the exact unique filesystem/annex UUID pair authoritative for passive correlation, uses serial only as supporting or fallback evidence when a complete pair is absent, fails closed on complete-pair conflicts or ambiguity, exposes bridge discrepancies, and performs no identity rewrite.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/deployment.md, docs/upgrading.md, README.md, CHANGELOG.md
+- `related`: DEC-016, DEC-050, DEC-067, DEC-069, DEC-075, DEC-076, DEC-078, INC-022
+- `scope_boundary`: Passive attached-drive identity presentation only. No identity rewrite, registration, reconciliation, capacity admission, proposal approval, Fill, archive-byte placement, or hardware action.
+
+### INC-049: Reconciliation launched one annex query per catalog row and scanned Git objects
+- `id`: INC-049
+- `date`: 2026-08-28
+- `status`: remediated by DEC-079
+- `triggered_by`: Production-shaped Drive #0 and Drive #1 dedicated-local reconciliation
+- `symptom`: A full reconciliation could appear stalled for minutes with no bounded progress. It launched `git annex whereis --key` once for each archived catalog row and descended into `.git/annex/objects` before filtering those paths from its result.
+- `root_cause`: The inventory implementation asked git-annex the same target-membership question independently for every claim, and its recursive path helper excluded `.git` only after descent. The CLI exposed no progress boundary between claim loading, annex proof, and worktree scanning.
+- `blast_radius`: Operator time and observability on production-sized archives. The existing controller/drive fences, exact identity proof, missing-copy refusal, and fresh final observation remained correct; both attended reconciliations completed successfully and were not invalidated.
+- `why_not_caught_earlier`: Unit fixtures and temporary annex repositories were too small to make process-launch multiplicity or Git-object traversal operationally visible, and no contract bounded annex-query count or asserted pre-descent pruning.
+- `remediation`: DEC-079 runs one target-UUID membership query, intersects its returned keys with catalog claims, fails all annex membership claims closed if that query fails, prunes `.git` before traversal, and emits bounded claim/query/scan milestones without weakening final observation or mutation fences.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, README.md, CHANGELOG.md
+- `related`: DEC-018, DEC-050, DEC-060, DEC-067, DEC-079, INC-048
+- `scope_boundary`: Reconciliation inventory performance and progress only. No change to identity proof, admission policy, mutation fences, proposal planning, Fill, or archive content.
+
+### INC-050: Protected system mount aborted passive drive inventory
+- `id`: INC-050
+- `date`: 2026-08-28
+- `status`: remediated by DEC-079
+- `triggered_by`: First live application-only swap to candidate `e45c725`
+- `symptom`: `/api/drives` returned a permission error for `/boot/efi/modelark` after passive topology enrichment was enabled. The protected system mount was unrelated to ModelArk storage, but its unreadable archive-namespace path prevented all registered and unregistered drive observations from reaching the Drives UI.
+- `root_cause`: Passive inventory enriched every mounted block device through `registration_topology`, while archive-namespace probing assumed every mount root was traversable by the unprivileged service and did not convert `OSError` into an observational topology state.
+- `blast_radius`: Drives API/UI availability during the bounded `e45c725` application candidate. Planner preview and Fill status remained healthy; planner revision stayed `5`; no drive, capacity, approval, catalog, archive-byte, or Fill mutation ran. The failed candidate and pre/post units remain retained evidence.
+- `why_not_caught_earlier`: Disposable topology fixtures were owned by the test user and did not include an unrelated mounted filesystem that permits block-device enumeration but denies namespace traversal to the service.
+- `remediation`: Expected-red commit `e661ae3` reproduces the protected-mount shape. Corrected candidate `890b1dc` reports the archive state as `inaccessible`, withholds annex identity, and continues passive inventory so an unrelated protected mount cannot erase usable drive observations.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, CHANGELOG.md
+- `related`: DEC-060, DEC-075, DEC-078, DEC-079, INC-047, INC-048
+- `scope_boundary`: Fail-soft read-only enumeration of unrelated protected mounts only. No permission change, sudo, mount action, registration, reconciliation, capacity admission, proposal approval, Fill, or archive-byte placement.
+
+### DEC-079: Resolve attached identity from stable storage evidence and batch reconciliation proof
+- `id`: DEC-079
+- `date`: 2026-08-28
+- `status`: accepted; corrected live application-only swap completed 2026-08-28
+- `triggered_by`: INC-048, INC-049, INC-050, the operator's central-identity architecture direction, and authorization to implement and swap both corrections
+- `decision`: Use one central passive resolver whose strongest authority is an exact, unique filesystem UUID plus annex UUID pair. Hardware serial is supporting evidence and may be a fallback only when a complete stable pair is absent; it may never override a conflicting complete pair or rewrite registered identity. Enrich attached observations through read-only topology, representing inaccessible unrelated mounts as evidence rather than an API failure. During full reconciliation, prove target membership with one `git annex whereis --all --in <target-uuid>` query, intersect the result with catalog claims, prune `.git` before filesystem descent, and expose bounded progress. Preserve the exact registered identity check, controller and drive generation fences, all-or-nothing missing-copy refusal, debris/extra reporting, and a fresh final observation immediately before commit.
+- `rationale`: Filesystem and annex UUIDs are the durable physical/logical storage identity already bound at registration and reconciliation; device names and enclosure-reported serials are observations that can change with transport. Centralizing that precedence prevents an alternate identity mode. A batch annex proof asks the same authoritative question once instead of once per row, while fail-closed command handling and unchanged transaction fences preserve disk-residency truth. Passive enumeration must degrade per inaccessible unrelated mount, not erase the whole fleet view.
+- `impact`: Expected-red commit `92ced97` failed all seven initial contracts; implementation commit `e45c725` passed them and the first live swap exposed INC-050; expected-red commit `e661ae3` reproduced the protected-mount failure; corrected commit `890b1dc` passes 44 focused contracts, 951 non-E2E tests with five known deprecation warnings, Ruff, JavaScript syntax, installed-wheel topology/resource smoke, and standalone portal E2E. A real read-only Drive #0 query returned 2,131 target keys in about 0.49 seconds. The retained wheel SHA-256 is `3c2bb7996fba7448ad3e83dceb758af4ebe4b36fa34fb2ccf242efe67959f762`; source archive SHA-256 is `4db6e59538af28ed0df7b00087e164476288aa1d21a2e71927145184f9e9ecfd`. The final service runs `890b1dc` against the unchanged schema-v7 data/config/state paths, is disabled for login startup, and has idle Fill. Planner revision remains `5`; plan and preview payloads are byte-identical pre/post swap; normalized Library planning and stable Fill state are equal. Live inventory maps Drive #0/#1/#7 by exact storage identity, shows Drive #1's bridge serial mismatch as supporting-only, and keeps protected system mounts from aborting inventory. The in-app browser backend was unavailable for the final attended visual replay, so only the passed standalone portal E2E and live installed-wheel API evidence are claimed.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/deployment.md, docs/upgrading.md, README.md, CHANGELOG.md, modelark/drive_bootstrap.py, modelark/drive_lifecycle.py, modelark/web/disk_api.py, modelark/cli.py, tests/test_inc048_inc049_contracts.py, tests/test_drive_bootstrap.py, tests/test_planner_revision_writers.py, tests/test_e2e_portal.py
+- `related`: DEC-016, DEC-018, DEC-050, DEC-060, DEC-067, DEC-069, DEC-075, DEC-076, DEC-078, DEF-040, INC-048, INC-049, INC-050
+- `scope_boundary`: Stable passive identity resolution, fail-soft disk observation, reconciliation inventory performance/progress, and application-only replacement. No registered-identity rewrite, host permission or mount mutation, additional drive reconciliation, proposal publication/approval, Fill, archive-byte placement, old-label reuse, package release, or evidence disposal.
