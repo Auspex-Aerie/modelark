@@ -111,6 +111,19 @@
       "new identity role " + (registration.role || "unproven") + " · active plan " +
       (registration.adds_to_active_plan || "none") + " · reconciliation " +
       (registration.requires_reconcile_after_registration ? "required after registration" : "not required");
+    const remediation = onboardingPreview.permission_remediation;
+    const remediationBox = $("driveOnboardingRemediation");
+    remediationBox.hidden = !remediation;
+    $("driveOnboardingRemediationSummary").textContent = remediation
+      ? "This dedicated filesystem root is not writable by the ModelArk service account. Run these exact commands outside ModelArk, then refresh this preview."
+      : "";
+    $("driveOnboardingCommands").textContent = remediation
+      ? (remediation.commands || []).map(command => command.display).join("\n") : "";
+    $("driveOnboardingGuardrails").textContent = remediation
+      ? (remediation.guardrails || []).join(" ") : "";
+    const layout = registration.directory_layout;
+    $("driveOnboardingDirectory").hidden = !layout;
+    $("driveOnboardingLayout").textContent = layout?.display || "";
     $("driveOnboardingHistory").textContent = lost.length
       ? "Separate lost history (never inherited): " + lost.map(old =>
           old.drive_label + " epoch " + old.identity_epoch + " · " + old.archived_rows +

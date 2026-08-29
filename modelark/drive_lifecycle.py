@@ -8,6 +8,7 @@ row so historical claims remain reviewable, while excluding the identity from ne
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any, Callable, Iterable, Mapping
 
 from modelark import plan, proposal
@@ -197,6 +198,81 @@ def _lost_identity_summaries(con) -> list[dict[str, Any]]:
     return summaries
 
 
+def _directory_layout(mountpoint: str | None, label: str) -> dict[str, Any] | None:
+    if not mountpoint:
+        return None
+    mount = mountpoint.rstrip("/") or "/"
+    temporary = f"{mount}/.modelark.registering-{label}"
+    final = f"{mount}/modelark"
+    return {
+        "mount": mount,
+        "temporary_path": temporary,
+        "final_path": final,
+        "transition": "prepare_hidden_then_atomic_promote",
+        "operator_creates_directories": False,
+        "display": (
+            f"{mount}/\n"
+            f"├── .modelark.registering-{label}/  temporary; ModelArk creates this\n"
+            "└── modelark/  final; atomically promoted from the temporary directory"
+        ),
+    }
+
+
+def _permission_remediation(volume: Mapping[str, Any], mountpoint: str | None) -> dict[str, Any] | None:
+    if not mountpoint or volume.get("archive_parent_writable") is not False:
+        return None
+    uid = volume.get("service_uid")
+    gid = volume.get("service_gid")
+    user_value = volume.get("service_user") or uid
+    group_value = volume.get("service_group") or gid
+    user = str(user_value) if user_value is not None else ""
+    group = str(group_value) if group_value is not None else ""
+    if uid is None or gid is None or not user or not group:
+        return None
+    owner = f"{user}:{group}"
+    commands = [
+        (
+            ["sudo", "chown", "--", owner, mountpoint],
+            "assign only the dedicated filesystem root to ModelArk",
+        ),
+        (
+            ["sudo", "chmod", "--", "0750", mountpoint],
+            "limit the dedicated filesystem root to owner and group access",
+        ),
+        (
+            ["stat", "-c", "%U:%G %a %n", "--", mountpoint],
+            "verify ownership and mode before refreshing the preview",
+        ),
+    ]
+    return {
+        "policy": "dedicated_mount_owner",
+        "mount": mountpoint,
+        "current": {
+            "uid": volume.get("archive_parent_uid"),
+            "gid": volume.get("archive_parent_gid"),
+            "mode": volume.get("archive_parent_mode"),
+            "writable": False,
+        },
+        "required": {
+            "service_uid": uid,
+            "service_gid": gid,
+            "service_user": user,
+            "service_group": group,
+            "mode": "0750",
+        },
+        "commands": [
+            {"argv": argv, "display": shlex.join(argv), "purpose": purpose}
+            for argv, purpose in commands
+        ],
+        "guardrails": [
+            "Run only when this filesystem is dedicated to ModelArk.",
+            "Do not use recursive chown or chmod.",
+            "Do not create the staging or final archive directory manually.",
+            "Refresh the read-only preview after the commands; do not retry a stale modal.",
+        ],
+    }
+
+
 def onboarding_preview(
     con,
     observed_device: Mapping[str, Any],
@@ -271,6 +347,10 @@ def onboarding_preview(
             "archive_parent_uid",
             "archive_parent_gid",
             "archive_parent_mode",
+            "service_uid",
+            "service_gid",
+            "service_user",
+            "service_group",
         ):
             if key in raw_volume:
                 volume[key] = raw_volume.get(key)
@@ -353,6 +433,7 @@ def onboarding_preview(
         next_action = "review_registration"
 
     mountpoint = volume["mountpoints"][0] if volume and volume["mountpoints"] else None
+    permission_remediation = _permission_remediation(volume or {}, mountpoint)
     registration_binding = {
         "planner_revision": planner_revision(con),
         "dev": dev,
@@ -366,6 +447,19 @@ def onboarding_preview(
         "plan_id": active["plan_id"] if active else None,
         "role": "primary",
     }
+    registration_preview = {
+        "dev": volume["dev"] if volume else None,
+        "label": label,
+        "mount": mountpoint,
+        "format": None,
+        "role": "primary",
+        "adds_to_active_plan": active["plan_id"] if active else None,
+        "requires_reconcile_after_registration": True,
+        "inherited_from_lost_identity": [],
+    }
+    directory_layout = _directory_layout(mountpoint, label)
+    if directory_layout is not None:
+        registration_preview["directory_layout"] = directory_layout
     return {
         "planner_revision": planner_revision(con),
         "observation_authority": "read_only",
@@ -377,17 +471,9 @@ def onboarding_preview(
         "ready_for_registration": not blockers,
         "next_action": next_action,
         "confirmation": f"REGISTER NEW {label}",
+        "permission_remediation": permission_remediation,
         "registration_binding": registration_binding,
-        "registration_preview": {
-            "dev": volume["dev"] if volume else None,
-            "label": label,
-            "mount": mountpoint,
-            "format": None,
-            "role": "primary",
-            "adds_to_active_plan": active["plan_id"] if active else None,
-            "requires_reconcile_after_registration": True,
-            "inherited_from_lost_identity": [],
-        },
+        "registration_preview": registration_preview,
         "separate_lost_identities": _lost_identity_summaries(con),
     }
 

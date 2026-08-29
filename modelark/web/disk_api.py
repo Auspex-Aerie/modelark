@@ -107,6 +107,29 @@ def _flatten_lsblk(nodes: list[dict]) -> list[dict]:
     return flattened
 
 
+def _service_identity() -> tuple[int | None, int | None, str | None, str | None]:
+    """Return the effective account that performs portal drive preparation."""
+    uid = os.geteuid() if hasattr(os, "geteuid") else None
+    gid = os.getegid() if hasattr(os, "getegid") else None
+    user = str(uid) if uid is not None else None
+    group = str(gid) if gid is not None else None
+    try:
+        import pwd
+
+        if uid is not None:
+            user = pwd.getpwuid(uid).pw_name
+    except (ImportError, KeyError):
+        pass
+    try:
+        import grp
+
+        if gid is not None:
+            group = grp.getgrgid(gid).gr_name
+    except (ImportError, KeyError):
+        pass
+    return uid, gid, user, group
+
+
 def registration_topology(dev: str) -> dict:
     """Read a prospective registration target's filesystem topology without SMART or writes."""
     if not _registration_device_path(dev):
@@ -148,6 +171,7 @@ def registration_topology(dev: str) -> dict:
     except (json.JSONDecodeError, AttributeError):
         roots = []
     raw_nodes = _flatten_lsblk(roots)
+    service_uid, service_gid, service_user, service_group = _service_identity()
     nodes = []
     for node in raw_nodes:
         mountpoints = node.get("mountpoints") or []
@@ -215,6 +239,10 @@ def registration_topology(dev: str) -> dict:
             "archive_parent_uid": archive_parent_uid,
             "archive_parent_gid": archive_parent_gid,
             "archive_parent_mode": archive_parent_mode,
+            "service_uid": service_uid,
+            "service_gid": service_gid,
+            "service_user": service_user,
+            "service_group": service_group,
         })
 
     root_source = None
