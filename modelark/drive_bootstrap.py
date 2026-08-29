@@ -337,7 +337,7 @@ def _decide_and_commit(
     progress,
 ):
     if p_fp is None:                                     # (A) bootstrap: establish identity + first anchor
-        _require_complete_inventory(con, label, dest, progress=progress)
+        inventory = _require_complete_inventory(con, label, dest, progress=progress)
         final = _final_observation(con, label, ev)
         obs = final.observation()
 
@@ -350,10 +350,16 @@ def _decide_and_commit(
             from modelark.proposal import bump_revision
             bump_revision(con)
             return gen
-        return Reconciliation("bootstrapped", p_epoch, dm._immediate(con, _body), final.free)
+        return Reconciliation(
+            "bootstrapped",
+            p_epoch,
+            dm._immediate(con, _body),
+            final.free,
+            inventory=inventory,
+        )
 
     if transition:                                       # (D) capacity-epoch transition: reset the namespace
-        _require_complete_inventory(con, label, dest, progress=progress)
+        inventory = _require_complete_inventory(con, label, dest, progress=progress)
         final = _final_observation(con, label, ev)
         obs = final.observation()
         new_epoch = p_epoch + 1
@@ -367,11 +373,17 @@ def _decide_and_commit(
             from modelark.proposal import bump_revision
             bump_revision(con)
             return gen
-        return Reconciliation("epoch_advanced", new_epoch, dm._immediate(con, _body), final.free)
+        return Reconciliation(
+            "epoch_advanced",
+            new_epoch,
+            dm._immediate(con, _body),
+            final.free,
+            inventory=inventory,
+        )
 
     if p_gen == 0:
         # Identity known but never dirty-advanced (generation 0 has no anchor namespace): open gen 1.
-        _require_complete_inventory(con, label, dest, progress=progress)
+        inventory = _require_complete_inventory(con, label, dest, progress=progress)
         final = _final_observation(con, label, ev)
         obs = final.observation()
 
@@ -381,7 +393,13 @@ def _decide_and_commit(
             from modelark.proposal import bump_revision
             bump_revision(con)
             return gen
-        return Reconciliation("refreshed", p_epoch, dm._immediate(con, _body0), final.free)
+        return Reconciliation(
+            "refreshed",
+            p_epoch,
+            dm._immediate(con, _body0),
+            final.free,
+            inventory=inventory,
+        )
 
     if not dm._generation_is_clean(con, label, p_epoch, p_gen, p_fp, p_cap, "dedicated_local"):
         # (B) sessionless dirty recovery — republish THIS generation's anchor (session-attributed = #39)
@@ -390,10 +408,16 @@ def _decide_and_commit(
                             [label, p_epoch, p_gen]).fetchone()
         if owner is not None and owner[0] is not None:
             raise dm.DriveMutationRefused("DRIVE_RECOVERY_SESSION_ACTIVE", drive=label)
-        _require_complete_inventory(con, label, dest, progress=progress)
+        inventory = _require_complete_inventory(con, label, dest, progress=progress)
         final = _final_observation(con, label, ev)
         dm.publish_clean_anchor(con, label, p_epoch, p_gen, final.observation(), now)
-        return Reconciliation("recovered", p_epoch, p_gen, final.free)
+        return Reconciliation(
+            "recovered",
+            p_epoch,
+            p_gen,
+            final.free,
+            inventory=inventory,
+        )
 
     # (C) refresh of a currently-clean anchored drive — drift-gated on the first observation (refuse
     # before the full inventory), then anchored from the fresh final observation
@@ -402,7 +426,7 @@ def _decide_and_commit(
     drifted = abs(ev.free - last_free) > free_drift_tolerance_v1(ev.alloc_unit)
     if drifted and not accept_drift:
         raise dm.DriveMutationRefused("DRIVE_FREE_DRIFT", drive=label, anchored=last_free, observed=ev.free)
-    _require_complete_inventory(con, label, dest, progress=progress)
+    inventory = _require_complete_inventory(con, label, dest, progress=progress)
     final = _final_observation(con, label, ev)
     obs = final.observation()
     op = "accept-drift" if drifted else "reconcile"
@@ -413,5 +437,10 @@ def _decide_and_commit(
         from modelark.proposal import bump_revision
         bump_revision(con)
         return gen
-    return Reconciliation("drift_accepted" if drifted else "refreshed", p_epoch,
-                          dm._immediate(con, _body), final.free)
+    return Reconciliation(
+        "drift_accepted" if drifted else "refreshed",
+        p_epoch,
+        dm._immediate(con, _body),
+        final.free,
+        inventory=inventory,
+    )

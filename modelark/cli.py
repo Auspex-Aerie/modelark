@@ -601,6 +601,23 @@ def cmd_drive_reconcile(args):
         raise SystemExit(f"drive reconcile failed: {exc.code}") from exc
     finally:
         con.close()
+    if r.inventory is not None:
+        inventory = r.inventory
+        print(
+            f"{args.label}: inventory "
+            f"present={len(inventory.present)} missing={len(inventory.missing)} "
+            f"debris={len(inventory.debris)} extra={len(inventory.extra)}"
+        )
+        if inventory.debris:
+            print(
+                f"{args.label}: debris is retained, not catalogued, "
+                "and never deleted automatically"
+            )
+        if inventory.extra:
+            print(
+                f"{args.label}: extras are retained, not catalogued, "
+                "and never deleted automatically"
+            )
     free = f"  free={r.anchor_free_bytes}" if r.anchor_free_bytes is not None else ""
     print(f"{args.label}: {r.outcome}  epoch={r.identity_epoch} generation={r.generation}{free}")
 
