@@ -289,7 +289,18 @@ def test_drive_reconcile_cli_prints_progress_before_final_result(capsys):
         progress(drive_bootstrap.ReconciliationProgress(
             "filesystem_scan_completed", completed=17
         ))
-        return drive_bootstrap.Reconciliation("bootstrapped", 1, 1, 900)
+        return drive_bootstrap.Reconciliation(
+            "bootstrapped",
+            1,
+            1,
+            900,
+            inventory=drive_bootstrap.Inventory(
+                present=[("org/model", "weights.gguf")],
+                missing=[],
+                debris=["org/model/partial.bin.incomplete"],
+                extra=[f"org/legacy-{index:04d}.bin" for index in range(2_109)],
+            ),
+        )
 
     args = SimpleNamespace(label="drive-00", dedicated=True, accept_drift=False)
     with mock.patch.object(cli.db, "connect", return_value=connection), \
@@ -301,6 +312,12 @@ def test_drive_reconcile_cli_prints_progress_before_final_result(capsys):
     assert "checking 2 annex keys in one target-UUID query" in output.err
     assert "annex membership complete (2/2 keys proven)" in output.err
     assert "archive worktree scan complete (17 files)" in output.err
+    assert (
+        "drive-00: inventory present=1 missing=0 debris=1 extra=2109" in output.out
+    )
+    assert "extras are retained, not catalogued, and never deleted automatically" in output.out
+    assert "legacy-0000.bin" not in output.out and "legacy-2108.bin" not in output.out, \
+        "bounded reporting must not dump unbounded path lists"
     assert "drive-00: bootstrapped  epoch=1 generation=1  free=900" in output.out
     connection.close.assert_called_once_with()
 

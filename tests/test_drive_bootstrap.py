@@ -160,8 +160,13 @@ def test_bootstrap_local_dedicated_establishes_identity_authority_and_anchor(tmp
     with _catalog(tmp_path) as con:
         _drive_row(con, "drive-00", capacity=1000)
         bs = _bootstrap()
+        inventory = _clean_inv(
+            present=[("org/model", "weights.gguf")],
+            debris=["org/model/weights.gguf.incomplete"],
+            extra=["README.md"],
+        )
         with mock.patch.object(bs, "_live_evidence", return_value=_ev(fp=_FP, capacity=1000, free=940)), \
-             mock.patch.object(bs, "_inventory", return_value=_clean_inv()), \
+             mock.patch.object(bs, "_inventory", return_value=inventory), \
              mock.patch.object(register, "archive_path", return_value=tmp_path / "mount"):
             report = bs.reconcile_drive(con, "drive-00", now="2026-07-23 12:00:00", dedicated=True)
         row = con.execute("SELECT identity_epoch,write_generation,filesystem_capacity_bytes,"
@@ -174,6 +179,8 @@ def test_bootstrap_local_dedicated_establishes_identity_authority_and_anchor(tmp
         assert anchor == (1, 1, 940, 1000, "dedicated_local"), anchor
         assert anchor[2] < anchor[3], "the anchor free must be the observed available, never capacity"
         assert report.outcome == "bootstrapped" and report.anchor_free_bytes == 940, report
+        assert report.inventory is inventory, \
+            "the operator-visible reconciliation result must retain its classified inventory"
 
 
 def test_bootstrap_without_dedicated_assertion_stays_unknown(tmp_path):
