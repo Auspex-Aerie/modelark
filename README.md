@@ -376,7 +376,10 @@ Use `drive reconcile --dedicated` only when the archive storage is in fact exclu
 supported writer. Reconciliation holds the controller/drive fences, proves every catalogued annex
 claim against the exact target annex UUID in one query, prunes Git metadata from its report-only
 worktree scan, refuses missing claims, and prints bounded progress before publishing a fresh anchor.
-Shared or unfenceable storage must not be promoted to dedicated authority for convenience.
+Every successful result also prints bounded `present / missing / debris / extra` counts. Debris and
+extras remain on disk, are not promoted into catalogued residency, and are never deleted
+automatically; the command does not dump an unbounded path list. Shared or unfenceable storage must
+not be promoted to dedicated authority for convenience.
 
 Formatting during registration is deliberately two-step and Linux-only. First review a real safety
 preflight, then repeat the exact device path as destructive confirmation:

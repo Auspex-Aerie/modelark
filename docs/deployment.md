@@ -185,9 +185,12 @@ modelark drive reconcile drive-NN --dedicated
 
 The command now prints bounded inventory milestones. It queries the git-annex location log once for
 all keys recorded on the exact target annex UUID, treats a command failure or absent key as missing,
-and scans only the archive worktree—not `.git/annex/objects`—for extras/debris. Reconciliation remains
-under the controller and drive fences and publishes only from a fresh final identity/capacity
-observation. Do not use `--dedicated` for shared or otherwise unfenceable storage.
+and scans only the archive worktree—not `.git/annex/objects`—for extras/debris. A successful command
+returns that exact classified inventory and prints bounded `present / missing / debris / extra`
+counts. It never turns debris or extras into catalogued residency and never deletes them
+automatically. Reconciliation remains under the controller and drive fences and publishes only from
+a fresh final identity/capacity observation. Do not use `--dedicated` for shared or otherwise
+unfenceable storage.
 
 ## SMART access
 
