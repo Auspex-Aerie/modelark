@@ -235,7 +235,7 @@
   </div>
 </div>
 
-<!-- Read-only DEF-029 preview. Registration remains a later, separately confirmed operation. -->
+<!-- DEF-029 preview plus a separately typed, preview-bound new-identity registration action. -->
 <div class="oopsie-overlay" id="driveOnboardingModal" role="dialog" aria-modal="true"
      aria-labelledby="driveOnboardingHead" hidden>
   <div class="oopsie-card drive-onboarding-card">
@@ -245,8 +245,18 @@
     <div class="oopsie-failed" id="driveOnboardingVolume"></div>
     <div class="disknote" id="driveOnboardingHistory"></div>
     <div class="oopsie-when" id="driveOnboardingNext"></div>
+    <div id="driveOnboardingRegistration" hidden>
+      <label class="lossconfirm" for="driveOnboardingConfirm">
+        Type <code id="driveOnboardingPhrase"></code> to initialize only the empty archive
+        namespace, register this new identity, add it to the active plan, and invalidate stale
+        approval. Capacity reconciliation will not run.
+      </label>
+      <input id="driveOnboardingConfirm" autocomplete="off" spellcheck="false">
+      <div class="oopsie-failed" id="driveOnboardingRefusal"></div>
+    </div>
     <div class="oopsie-acts">
-      <button id="driveOnboardingClose" class="primary">Close preview</button>
+      <button id="driveOnboardingClose">Close preview</button>
+      <button id="driveOnboardingApply" class="primary" hidden disabled>Initialize + register</button>
     </div>
   </div>
 </div>

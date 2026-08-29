@@ -8,6 +8,7 @@ and reconciliation remain later operations.
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 from unittest import mock
 
 import pytest
@@ -223,7 +224,7 @@ def test_exact_registration_adds_new_identity_once_without_admitting_capacity():
         ({"planner_revision": 10}, None, "DRIVE_REGISTRATION_PREVIEW_STALE"),
         ({"fs_uuid": "OTHER-FS"}, None, "DRIVE_REGISTRATION_PREVIEW_STALE"),
         ({"mount": "/media/other"}, None, "DRIVE_REGISTRATION_PREVIEW_STALE"),
-        ({"label": "drive-02"}, None, "DRIVE_REGISTRATION_PREVIEW_STALE"),
+        ({"label": "drive-02"}, "REGISTER NEW drive-02", "DRIVE_REGISTRATION_IDENTITY_COLLISION"),
         ({}, "register it", "DRIVE_REGISTRATION_CONFIRMATION_MISMATCH"),
     ],
 )
@@ -330,6 +331,141 @@ def test_portal_apply_reprobes_exact_observation_without_smart_format_or_mount()
     mount.assert_not_called()
     data._con = None
     con.close()
+
+
+def test_physical_preparation_is_receipted_and_exactly_retryable(tmp_path):
+    library = tmp_path / "library"
+    mount = tmp_path / "mount"
+    library.mkdir()
+    mount.mkdir()
+    register._run("git", "-C", str(library), "init", "-q")
+    register._run("git", "-C", str(library), "config", "user.name", "ModelArk Test")
+    register._run("git", "-C", str(library), "config", "user.email", "modelark@example.invalid")
+    register._run("git", "-C", str(library), "annex", "init", "map")
+    (library / "README.md").write_text("# map\n")
+    register._run("git", "-C", str(library), "add", "README.md")
+    register._run("git", "-C", str(library), "commit", "-qm", "init map")
+    original_run = register._run
+
+    def exact_mount_probe(*args, **kwargs):
+        if args == ("findmnt", "-nro", "SOURCE", "/"):
+            return subprocess.CompletedProcess(args, 0, "/dev/root-system\n", "")
+        if args[:3] == ("findmnt", "-nro", "SOURCE"):
+            return subprocess.CompletedProcess(args, 0, "/dev/mock-seagate1\n", "")
+        if args[:3] == ("findmnt", "-nro", "FSTYPE"):
+            return subprocess.CompletedProcess(args, 0, "ext4\n", "")
+        if args[:3] == ("findmnt", "-nro", "UUID"):
+            return subprocess.CompletedProcess(args, 0, "NEW-FS-UUID\n", "")
+        if args[:3] == ("lsblk", "-nro", "PKNAME"):
+            return subprocess.CompletedProcess(args, 0, "mock-seagate\n", "")
+        if args[:3] == ("lsblk", "-dno", "SERIAL"):
+            return subprocess.CompletedProcess(args, 0, "NEW-SEAGATE\n", "")
+        return original_run(*args, **kwargs)
+
+    arguments = {
+        "volume_dev": "/dev/mock-seagate1",
+        "mount": str(mount),
+        "archive_path": str(mount / "modelark"),
+        "label": "drive-07",
+        "fs_uuid": "NEW-FS-UUID",
+        "fstype": "ext4",
+        "serial": "NEW-SEAGATE",
+        "model": "Seagate 8TB",
+        "role": "primary",
+        "library": str(library),
+    }
+    with mock.patch.object(register, "_run", side_effect=exact_mount_probe), \
+            mock.patch.object(register, "smart_baseline") as smart, \
+            mock.patch.object(register, "_mkfs") as mkfs, \
+            mock.patch.object(register, "_mount") as mount_drive:
+        first = register.prepare_new_identity_archive(**arguments)
+        second = register.prepare_new_identity_archive(**arguments)
+
+    assert first["annex_uuid"]
+    assert first["recovered_preparation"] is False
+    assert second["annex_uuid"] == first["annex_uuid"]
+    assert second["recovered_preparation"] is True
+    assert register.registration_receipt(mount / "modelark") == {
+        "state": "prepared",
+        "label": "drive-07",
+        "fs_uuid": "NEW-FS-UUID",
+        "serial": "NEW-SEAGATE",
+        "volume_dev": "/dev/mock-seagate1",
+    }
+    assert not (mount / ".modelark.registering-drive-07").exists()
+    assert register._git(library, "remote", "get-url", "drive-07") == str(mount / "modelark")
+    smart.assert_not_called()
+    mkfs.assert_not_called()
+    mount_drive.assert_not_called()
+
+
+def test_physical_preparation_refuses_unknown_namespace_without_deleting_it(tmp_path):
+    mount = tmp_path / "mount"
+    archive = mount / "modelark"
+    archive.mkdir(parents=True)
+    marker = archive / "operator-data"
+    marker.write_text("keep")
+
+    def probe(*args, **_kwargs):
+        values = {"SOURCE": "/dev/mock-seagate1\n", "FSTYPE": "ext4\n", "UUID": "NEW-FS-UUID\n"}
+        if args == ("findmnt", "-nro", "SOURCE", "/"):
+            return subprocess.CompletedProcess(args, 0, "/dev/root-system\n", "")
+        if args[:2] == ("findmnt", "-nro"):
+            return subprocess.CompletedProcess(args, 0, values[args[2]], "")
+        if args[:3] == ("lsblk", "-nro", "PKNAME"):
+            return subprocess.CompletedProcess(args, 0, "mock-seagate\n", "")
+        if args[:3] == ("lsblk", "-dno", "SERIAL"):
+            return subprocess.CompletedProcess(args, 0, "NEW-SEAGATE\n", "")
+        return subprocess.CompletedProcess(args, 1, "", "not configured")
+
+    with mock.patch.object(register, "_run", side_effect=probe), \
+            mock.patch.object(register, "_is_annex", return_value=True):
+        with pytest.raises(RuntimeError, match="receipt|namespace"):
+            register.prepare_new_identity_archive(
+                volume_dev="/dev/mock-seagate1",
+                mount=str(mount),
+                archive_path=str(archive),
+                label="drive-07",
+                fs_uuid="NEW-FS-UUID",
+                fstype="ext4",
+                serial="NEW-SEAGATE",
+                model="Seagate 8TB",
+                role="primary",
+                library=str(tmp_path / "library"),
+            )
+    assert marker.read_text() == "keep"
+
+
+def test_physical_preparation_rechecks_hardware_serial_before_any_namespace_write(tmp_path):
+    mount = tmp_path / "mount"
+    mount.mkdir()
+
+    def swapped_serial(*args, **_kwargs):
+        values = {"SOURCE": "/dev/mock-seagate1\n", "FSTYPE": "ext4\n", "UUID": "NEW-FS-UUID\n"}
+        if args[:2] == ("findmnt", "-nro"):
+            return subprocess.CompletedProcess(args, 0, values[args[2]], "")
+        if args[:3] == ("lsblk", "-nro", "PKNAME"):
+            return subprocess.CompletedProcess(args, 0, "mock-seagate\n", "")
+        if args[:3] == ("lsblk", "-dno", "SERIAL"):
+            return subprocess.CompletedProcess(args, 0, "SWAPPED-SERIAL\n", "")
+        return subprocess.CompletedProcess(args, 1, "", "not configured")
+
+    with mock.patch.object(register, "_run", side_effect=swapped_serial):
+        with pytest.raises(RuntimeError, match="serial changed"):
+            register.prepare_new_identity_archive(
+                volume_dev="/dev/mock-seagate1",
+                mount=str(mount),
+                archive_path=str(mount / "modelark"),
+                label="drive-07",
+                fs_uuid="NEW-FS-UUID",
+                fstype="ext4",
+                serial="NEW-SEAGATE",
+                model="Seagate 8TB",
+                role="primary",
+                library=str(tmp_path / "library"),
+            )
+    assert not (mount / "modelark").exists()
+    assert not (mount / ".modelark.registering-drive-07").exists()
 
 
 def test_registration_ui_requires_exact_phrase_and_calls_only_dedicated_endpoint():

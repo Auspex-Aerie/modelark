@@ -542,6 +542,14 @@ def _drive_loss_flow(pg) -> None:
             "blockers": ["MOUNT_REQUIRED"],
             "ready_for_registration": False,
             "next_action": "mount_volume",
+            "confirmation": "REGISTER NEW drive-07",
+            "registration_binding": {
+                "planner_revision": 11, "dev": "/dev/mock-seagate",
+                "serial": "NEW-SEAGATE", "volume_dev": "/dev/mock-seagate1",
+                "fs_uuid": "NEW-FS-UUID", "mount": None,
+                "archive_path": None, "archive_state": "unmounted",
+                "label": "drive-07", "plan_id": "ark", "role": "primary",
+            },
             "registration_preview": {
                 "dev": "/dev/mock-seagate1", "label": "drive-07", "mount": None,
                 "format": None, "role": "primary", "adds_to_active_plan": "ark",
@@ -560,6 +568,7 @@ def _drive_loss_flow(pg) -> None:
     submitted = []
     smart_requests = []
     onboarding_requests = []
+    registration_requests = []
 
     pg.route("**/api/drives", lambda route: route.fulfill(
         status=200, content_type="application/json", body=json.dumps(inventory)))
@@ -571,6 +580,23 @@ def _drive_loss_flow(pg) -> None:
         route.fulfill(status=200, content_type="application/json", body=json.dumps(onboarding))
 
     pg.route("**/api/drive/onboarding-preview**", onboarding_preview)
+
+    def register_new(route):
+        registration_requests.append(route.request.post_data_json)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "ok": True,
+            "registration": {
+                "changed": True, "already_registered": False,
+                "drive_label": "drive-07", "planner_revision": 12,
+                "plan_id": "ark", "archive_path": "/media/test/seagate/modelark",
+                "annex_uuid": "NEW-ANNEX", "approval_invalidated": True,
+                "capacity_evidence": "unknown_until_reconcile",
+                "reconciliation_required": True,
+                "inherited_from_lost_identity": [],
+            },
+        }))
+
+    pg.route("**/api/drive/register-new", register_new)
 
     def declare(route):
         submitted.append(route.request.post_data_json)
@@ -602,6 +628,40 @@ def _drive_loss_flow(pg) -> None:
     assert smart_requests == [], "onboarding preview must not run SMART"
     pg.click("#driveOnboardingClose")
 
+    onboarding["preview"]["volume"].update({
+        "mountpoints": ["/media/test/seagate"], "mounted": True,
+        "archive_path": "/media/test/seagate/modelark", "archive_state": "absent",
+    })
+    onboarding["preview"].update({
+        "blockers": [], "ready_for_registration": True,
+        "next_action": "review_registration",
+    })
+    onboarding["preview"]["registration_binding"].update({
+        "mount": "/media/test/seagate",
+        "archive_path": "/media/test/seagate/modelark",
+        "archive_state": "absent",
+    })
+    onboarding["preview"]["registration_preview"].update({
+        "mount": "/media/test/seagate",
+    })
+    pg.click(".driveonboard")
+    pg.wait_for_selector("#driveOnboardingModal", state="visible")
+    assert "mounted" in pg.inner_text("#driveOnboardingVolume").lower()
+    assert pg.locator("#driveOnboardingApply").is_disabled()
+    pg.fill("#driveOnboardingConfirm", "REGISTER NEW drive-07")
+    assert pg.locator("#driveOnboardingApply").is_enabled()
+    pg.click("#driveOnboardingApply")
+    pg.wait_for_selector("#driveEvent", state="visible")
+    assert registration_requests == [{
+        **onboarding["preview"]["registration_binding"],
+        "confirmation": "REGISTER NEW drive-07",
+    }]
+    registration_event = pg.inner_text("#driveEvent")
+    assert "registered as a new identity at revision 12" in registration_event
+    assert "capacity evidence remains unknown" in registration_event.lower()
+    assert "reconciliation not run" in registration_event.lower()
+    assert smart_requests == [], "registration must not implicitly run SMART"
+
     pg.click(".driveproblem")
     pg.wait_for_selector("#driveLossModal", state="visible")
     assert "offline or missing only" in pg.inner_text("#driveLossWarning")
@@ -612,7 +672,9 @@ def _drive_loss_flow(pg) -> None:
     pg.fill("#driveLossConfirm", "DECLARE LOST drive-02")
     assert pg.locator("#driveLossApply").is_enabled()
     pg.click("#driveLossApply")
-    pg.wait_for_selector("#driveEvent", state="visible")
+    pg.wait_for_function(
+        "document.getElementById('driveEvent').innerText.includes('replanned at revision 12')"
+    )
     assert submitted == [{
         "drive_label": "drive-02", "expected_revision": 11,
         "expected_identity_epoch": 3, "expected_identity_fingerprint": "b" * 64,
@@ -625,10 +687,10 @@ def _drive_loss_flow(pg) -> None:
 
     for pattern in (
         "**/api/drives", "**/api/drive/loss-preview**", "**/api/drive/declare-lost",
-        "**/api/drive/onboarding-preview**", "**/api/disk",
+        "**/api/drive/onboarding-preview**", "**/api/drive/register-new", "**/api/disk",
     ):
         pg.unroute(pattern)
-    print("  advisory drive discovery + cancel + exact loss/replan UI exercised without SMART")
+    print("  advisory discovery + exact new registration + loss/replan UI exercised without SMART")
 
 
 def _browser_flow() -> None:

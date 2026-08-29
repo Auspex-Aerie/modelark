@@ -84,7 +84,8 @@ def test_inventory_lists_accepted_supported_writers():
         "plan.create", "plan.add_drive", "plan.remove_drive", "plan.set_active",
         "plan.bootstrap", "plan.set_capacity_mode",
         "drive_mutation.begin_generation", "drive_mutation.publish_clean_anchor",
-        "drive_bootstrap.reconcile_drive", "register.register_drive",
+        "drive_bootstrap.reconcile_drive", "drive_lifecycle.register_new_identity",
+        "register.register_drive",
         "hash_repair.repair_hashes",
         "proposal.approve",
         # Archived progress/removal are inline through fetch write context (not new helpers).

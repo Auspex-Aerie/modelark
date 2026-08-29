@@ -29,6 +29,13 @@ from modelark.core import platform as osplat
 
 DEFAULT_LIBRARY = Path.home() / "modelark-library"
 ARCHIVE_SUBDIR = "modelark"          # content lives under <mount>/modelark
+_REGISTRATION_RECEIPT_KEYS = {
+    "state": "modelark.registration-state",
+    "label": "modelark.registration-label",
+    "fs_uuid": "modelark.registration-fs-uuid",
+    "serial": "modelark.registration-serial",
+    "volume_dev": "modelark.registration-volume-dev",
+}
 
 
 # ---- subprocess helpers -----------------------------------------------------
@@ -347,6 +354,206 @@ def _guard_existing_label(con, label: str) -> None:
             f"drive label '{label}' is already registered — re-registration is not supported here. "
             f"Use the drive lifecycle workflow (identity-aware re-registration / retirement, DEF-029) "
             f"to change or replace an existing drive.")
+
+
+def registration_receipt(archive: Path) -> dict[str, str] | None:
+    """Read the local, non-catalog receipt for a portal-prepared archive.
+
+    The receipt makes an interrupted cross-system registration recoverable without treating an
+    arbitrary unregistered annex as safe to adopt.  It is local git configuration, so it travels
+    with the initialized archive while remaining outside the shared map history.
+    """
+    archive = Path(archive)
+    if not archive.is_dir() or not (archive / ".git").exists():
+        return None
+    values = {
+        name: _git(archive, "config", "--local", "--get", key, check=False)
+        for name, key in _REGISTRATION_RECEIPT_KEYS.items()
+    }
+    if values["state"] != "prepared" or any(not values[name] for name in values):
+        return None
+    return values
+
+
+def _require_exact_registration_receipt(
+    archive: Path,
+    *,
+    label: str,
+    fs_uuid: str,
+    serial: str,
+    volume_dev: str,
+) -> str:
+    receipt = registration_receipt(archive)
+    expected = {
+        "state": "prepared",
+        "label": label,
+        "fs_uuid": fs_uuid,
+        "serial": serial,
+        "volume_dev": volume_dev,
+    }
+    if receipt != expected:
+        raise RuntimeError(
+            f"registration namespace {archive} already exists without the exact prepared "
+            f"receipt; expected={expected!r} observed={receipt!r}")
+    annex_uuid = _git(archive, "config", "--local", "--get", "annex.uuid", check=False)
+    if not annex_uuid:
+        raise RuntimeError(
+            f"registration namespace {archive} has a receipt but no git-annex UUID")
+    return annex_uuid
+
+
+def prepare_new_identity_archive(
+    *,
+    volume_dev: str,
+    mount: str,
+    archive_path: str,
+    label: str,
+    fs_uuid: str,
+    fstype: str,
+    serial: str,
+    model: str | None,
+    role: str,
+    library: str | None = None,
+) -> dict:
+    """Initialize or recover one exact new-label archive without SMART/format/mount work.
+
+    A hidden sibling is prepared first and carries an exact local receipt before its atomic rename
+    to ``<mount>/modelark``.  If a later map/catalog step fails, a retry may resume only that exact
+    receipt.  Unknown directories and annexes are never adopted or deleted.
+    """
+    if not re.fullmatch(r"drive-\d+", str(label)):
+        raise RuntimeError(f"invalid new drive label {label!r}")
+    if not all(isinstance(value, str) and value.strip()
+               for value in (volume_dev, mount, archive_path, fs_uuid, fstype, serial)):
+        raise RuntimeError("registration preparation requires exact device/filesystem identity")
+    if fstype not in {"ext4", "xfs"}:
+        raise RuntimeError(f"unsupported registration filesystem {fstype!r}")
+
+    mount_path = Path(mount).resolve()
+    archive = Path(archive_path).resolve()
+    expected_archive = mount_path / ARCHIVE_SUBDIR
+    if archive != expected_archive:
+        raise RuntimeError(
+            f"archive path {archive} is not the exact mounted namespace {expected_archive}")
+    if not mount_path.is_dir():
+        raise RuntimeError(f"registration mount is unavailable: {mount_path}")
+
+    source = _run("findmnt", "-nro", "SOURCE", "--target", str(mount_path),
+                  check=False).stdout.strip().splitlines()
+    live_fs = _run("findmnt", "-nro", "FSTYPE", "--target", str(mount_path),
+                   check=False).stdout.strip().splitlines()
+    live_uuid = _run("findmnt", "-nro", "UUID", "--target", str(mount_path),
+                     check=False).stdout.strip().splitlines()
+    if not source or os.path.realpath(source[0].split("[", 1)[0]) != os.path.realpath(volume_dev):
+        raise RuntimeError(
+            f"mounted source changed before registration: expected {volume_dev!r}, "
+            f"observed {(source[0] if source else None)!r}")
+    if not live_fs or live_fs[0] != fstype:
+        raise RuntimeError(
+            f"filesystem type changed before registration: expected {fstype!r}, "
+            f"observed {(live_fs[0] if live_fs else None)!r}")
+    if not live_uuid or live_uuid[0] != fs_uuid:
+        raise RuntimeError(
+            f"filesystem UUID changed before registration: expected {fs_uuid!r}, "
+            f"observed {(live_uuid[0] if live_uuid else None)!r}")
+    parent = _run("lsblk", "-nro", "PKNAME", volume_dev, check=False).stdout.strip()
+    serial_device = f"/dev/{parent.splitlines()[0]}" if parent else volume_dev
+    live_serial = _run(
+        "lsblk", "-dno", "SERIAL", serial_device, check=False
+    ).stdout.strip().splitlines()
+    if not live_serial or live_serial[0] != serial:
+        raise RuntimeError(
+            f"hardware serial changed before registration: expected {serial!r}, "
+            f"observed {(live_serial[0] if live_serial else None)!r}")
+    root_source = _run("findmnt", "-nro", "SOURCE", "/", check=False).stdout.strip()
+    if root_source and _parent_disk(volume_dev) == _parent_disk(root_source.split("[", 1)[0]):
+        raise RuntimeError(
+            f"refusing registration because {volume_dev} now backs the running system")
+
+    lib = Path(library).expanduser().resolve() if library else library_root().resolve()
+    if not _is_annex(lib):
+        raise RuntimeError(
+            f"existing git-annex map is unavailable at {lib}; registration will not create "
+            "or replace map authority implicitly")
+
+    expected_receipt = {
+        "state": "prepared",
+        "label": label,
+        "fs_uuid": fs_uuid,
+        "serial": serial,
+        "volume_dev": volume_dev,
+    }
+    recovered = False
+    if archive.exists() or archive.is_symlink():
+        if archive.is_symlink() or not archive.is_dir():
+            raise RuntimeError(f"refusing occupied or unsafe archive namespace {archive}")
+        annex_uuid = _require_exact_registration_receipt(
+            archive,
+            label=label,
+            fs_uuid=fs_uuid,
+            serial=serial,
+            volume_dev=volume_dev,
+        )
+        recovered = True
+    else:
+        stage = mount_path / f".{ARCHIVE_SUBDIR}.registering-{label}"
+        if stage.exists() or stage.is_symlink():
+            if stage.is_symlink() or not stage.is_dir():
+                raise RuntimeError(f"refusing occupied or unsafe registration staging path {stage}")
+            annex_uuid = _require_exact_registration_receipt(
+                stage,
+                label=label,
+                fs_uuid=fs_uuid,
+                serial=serial,
+                volume_dev=volume_dev,
+            )
+            recovered = True
+        else:
+            _run("git", "clone", str(lib), str(stage))
+            _git(stage, "annex", "init", label)
+            for name in ("label", "fs_uuid", "serial", "volume_dev"):
+                _git(
+                    stage,
+                    "config",
+                    "--local",
+                    _REGISTRATION_RECEIPT_KEYS[name],
+                    expected_receipt[name],
+                )
+            _git(
+                stage,
+                "config",
+                "--local",
+                _REGISTRATION_RECEIPT_KEYS["state"],
+                expected_receipt["state"],
+            )
+            annex_uuid = _require_exact_registration_receipt(
+                stage,
+                label=label,
+                fs_uuid=fs_uuid,
+                serial=serial,
+                volume_dev=volume_dev,
+            )
+        os.replace(stage, archive)
+
+    description = f"{label} · {model or 'drive'} · {role}"
+    _git(archive, "annex", "describe", "here", description)
+    remotes = _git(lib, "remote", check=False).splitlines()
+    if label in remotes:
+        current_url = _git(lib, "remote", "get-url", label, check=False)
+        if Path(current_url).expanduser().resolve() != archive:
+            raise RuntimeError(
+                f"map remote {label!r} already points to {current_url!r}, not {str(archive)!r}")
+    else:
+        _git(lib, "remote", "add", label, str(archive))
+    _git(lib, "annex", "sync", label)
+
+    usage = shutil.disk_usage(mount_path)
+    return {
+        "archive_path": str(archive),
+        "annex_uuid": annex_uuid,
+        "free_bytes": int(usage.free),
+        "recovered_preparation": recovered,
+    }
 
 
 def register_drive(dev, label=None, mount: str | None = None,

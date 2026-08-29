@@ -154,6 +154,22 @@ def test_drive_loss_route_uses_mutation_security_and_conflict_status():
     declare.assert_called_once_with(payload)
 
 
+def test_new_drive_registration_route_uses_mutation_security_and_conflict_status():
+    refused = {"ok": False, "refused": {"code": "DRIVE_REGISTRATION_PREVIEW_STALE"}}
+    with _portal() as httpd, mock.patch.object(
+            drive_api, "register_new", return_value=refused) as register_new:
+        payload = {"label": "drive-07"}
+        status, _, body = _request(
+            httpd,
+            "POST",
+            "/api/drive/register-new",
+            json.dumps(payload),
+            _mutation_headers(httpd),
+        )
+    assert status == 409 and json.loads(body) == refused
+    register_new.assert_called_once_with(payload)
+
+
 def test_non_loopback_bind_is_refused_before_startup():
     try:
         server.serve(host="0.0.0.0", open_browser=False)

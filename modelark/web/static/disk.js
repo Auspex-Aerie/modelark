@@ -109,24 +109,68 @@
     const actions = {
       mount_volume: "Next operator gate: mount " + (volume?.dev || "the filesystem") +
         ", then refresh this preview.",
-      review_registration: "Filesystem is mounted. Stop and review before enabling a separate registration action.",
+      review_registration: "Filesystem is mounted and the archive namespace is empty. The separately confirmed registration action is available below.",
       refuse_system_device: "Refused: this device backs the running system.",
+      select_active_plan: "Select one active plan before registering a new drive.",
       choose_volume: "More than one filesystem exists. Choose the intended volume outside ModelArk first.",
       review_filesystem: "No supported existing filesystem is ready. Formatting remains a separate destructive workflow.",
       establish_filesystem_identity: "The filesystem UUID is unproven; do not register it.",
       review_archive_namespace: "The modelark path is already occupied and was not recognized as a safe fresh target.",
       review_existing_annex: "An existing git-annex identity is present. Use the recovery/re-registration workflow; do not treat it as fresh media.",
+      review_prepared_registration: "A prepared registration receipt does not match this review. Stop and inspect it; do not adopt it automatically.",
       refresh_topology: "Topology could not be proven; refresh attached inventory.",
     };
     $("driveOnboardingNext").textContent = actions[onboardingPreview.next_action] ||
       "Preview is blocked; refresh and review the evidence.";
+    const mayRegister = Boolean(onboardingPreview.ready_for_registration);
+    $("driveOnboardingRegistration").hidden = !mayRegister;
+    $("driveOnboardingApply").hidden = !mayRegister;
+    $("driveOnboardingPhrase").textContent = onboardingPreview.confirmation || "";
+    $("driveOnboardingConfirm").value = "";
+    $("driveOnboardingRefusal").textContent = "";
+    $("driveOnboardingApply").disabled = true;
     $("driveOnboardingModal").hidden = false;
-    $("driveOnboardingClose").focus();
+    (mayRegister ? $("driveOnboardingConfirm") : $("driveOnboardingClose")).focus();
   }
 
   function closeOnboarding() {
     $("driveOnboardingModal").hidden = true;
     onboardingPreview = null;
+  }
+
+  async function applyOnboarding() {
+    if (!onboardingPreview || !onboardingPreview.ready_for_registration) return;
+    const button = $("driveOnboardingApply");
+    button.disabled = true;
+    let result;
+    try {
+      result = await post("/api/drive/register-new", {
+        ...onboardingPreview.registration_binding,
+        confirmation: $("driveOnboardingConfirm").value,
+      });
+    } catch (e) {
+      $("driveOnboardingRefusal").textContent =
+        "Network outcome unknown. Refresh attached inventory before retrying; an exact completed registration will be shown as registered, while an interrupted preparation remains separately reviewable.";
+      return;
+    }
+    if (!result || !result.ok) {
+      const refusal = result?.refused || {};
+      $("driveOnboardingRefusal").textContent = (refusal.code || "registration refused") +
+        (refusal.evidence ? " · " + JSON.stringify(refusal.evidence) : "");
+      button.disabled = refusal.code === "DRIVE_REGISTRATION_CONFIRMATION_MISMATCH"
+        ? $("driveOnboardingConfirm").value !== onboardingPreview.confirmation : true;
+      return;
+    }
+    const registration = result.registration;
+    const event = $("driveEvent");
+    event.hidden = false;
+    event.className = "driveevent blocked";
+    event.innerHTML = `<b>${esc(registration.drive_label)} is registered as a new identity at revision ${esc(registration.planner_revision)}.</b>` +
+      `<div class="sub">joined plan ${esc(registration.plan_id)} · capacity evidence remains unknown · reconciliation not run · inherited lost-drive facts 0</div>`;
+    closeOnboarding();
+    toast("new drive identity registered; reconciliation still required");
+    await loadInventory();
+    if (window.loadPlans) window.loadPlans();
   }
 
   async function openLoss(item) {
@@ -262,6 +306,11 @@
     };
     $("driveLossApply").onclick = applyLoss;
     $("driveOnboardingClose").onclick = closeOnboarding;
+    $("driveOnboardingConfirm").oninput = () => {
+      $("driveOnboardingApply").disabled = !onboardingPreview ||
+        $("driveOnboardingConfirm").value !== onboardingPreview.confirmation;
+    };
+    $("driveOnboardingApply").onclick = applyOnboarding;
   }
   if (document.readyState !== "loading") wire(); else document.addEventListener("DOMContentLoaded", wire);
 })();

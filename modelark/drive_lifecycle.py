@@ -8,7 +8,7 @@ row so historical claims remain reviewable, while excluding the identity from ne
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from modelark import plan, proposal
 
@@ -231,10 +231,14 @@ def onboarding_preview(
             ("refresh_drive_inventory",),
         )
 
+    active = plan.active(con)
+    label = _next_drive_label(con)
     nodes = [dict(node) for node in topology.get("nodes") or []]
     volumes = [node for node in nodes if node.get("fstype")]
     volume = None
     blockers = []
+    if active is None:
+        blockers.append("ACTIVE_PLAN_REQUIRED")
     if topology.get("system_backing"):
         blockers.append("SYSTEM_DEVICE")
     if not topology.get("available"):
@@ -260,6 +264,8 @@ def onboarding_preview(
             ),
             "annex_uuid": raw_volume.get("annex_uuid"),
         }
+        if raw_volume.get("registration_receipt") is not None:
+            volume["registration_receipt"] = raw_volume.get("registration_receipt")
         if not volume["fs_uuid"]:
             blockers.append("FILESYSTEM_IDENTITY_UNPROVEN")
         fs_collisions = [
@@ -292,15 +298,25 @@ def onboarding_preview(
             blockers.append("UNSUPPORTED_FILESYSTEM")
         if not volume["mounted"]:
             blockers.append("MOUNT_REQUIRED")
+        elif volume["archive_state"] == "prepared_registration":
+            expected_receipt = {
+                "state": "prepared",
+                "label": label,
+                "fs_uuid": volume["fs_uuid"],
+                "serial": serial,
+                "volume_dev": volume["dev"],
+            }
+            if volume.get("registration_receipt") != expected_receipt:
+                blockers.append("PREPARED_REGISTRATION_MISMATCH")
         elif volume["archive_state"] == "annex":
             blockers.append("ANNEX_IDENTITY_PRESENT")
         elif volume["archive_state"] != "absent":
             blockers.append("ARCHIVE_NAMESPACE_OCCUPIED")
 
-    active = plan.active(con)
-    label = _next_drive_label(con)
     if "SYSTEM_DEVICE" in blockers:
         next_action = "refuse_system_device"
+    elif "ACTIVE_PLAN_REQUIRED" in blockers:
+        next_action = "select_active_plan"
     elif "TOPOLOGY_UNAVAILABLE" in blockers:
         next_action = "refresh_topology"
     elif "MULTIPLE_FILESYSTEMS" in blockers:
@@ -313,12 +329,27 @@ def onboarding_preview(
         next_action = "review_archive_namespace"
     elif "ANNEX_IDENTITY_PRESENT" in blockers:
         next_action = "review_existing_annex"
+    elif "PREPARED_REGISTRATION_MISMATCH" in blockers:
+        next_action = "review_prepared_registration"
     elif "MOUNT_REQUIRED" in blockers:
         next_action = "mount_volume"
     else:
         next_action = "review_registration"
 
     mountpoint = volume["mountpoints"][0] if volume and volume["mountpoints"] else None
+    registration_binding = {
+        "planner_revision": planner_revision(con),
+        "dev": dev,
+        "serial": serial,
+        "volume_dev": volume["dev"] if volume else None,
+        "fs_uuid": volume["fs_uuid"] if volume else None,
+        "mount": mountpoint,
+        "archive_path": volume["archive_path"] if volume else None,
+        "archive_state": volume["archive_state"] if volume else None,
+        "label": label,
+        "plan_id": active["plan_id"] if active else None,
+        "role": "primary",
+    }
     return {
         "planner_revision": planner_revision(con),
         "observation_authority": "read_only",
@@ -329,6 +360,8 @@ def onboarding_preview(
         "blockers": blockers,
         "ready_for_registration": not blockers,
         "next_action": next_action,
+        "confirmation": f"REGISTER NEW {label}",
+        "registration_binding": registration_binding,
         "registration_preview": {
             "dev": volume["dev"] if volume else None,
             "label": label,
@@ -340,6 +373,314 @@ def onboarding_preview(
             "inherited_from_lost_identity": [],
         },
         "separate_lost_identities": _lost_identity_summaries(con),
+    }
+
+
+_REGISTRATION_BINDING_KEYS = (
+    "planner_revision",
+    "dev",
+    "serial",
+    "volume_dev",
+    "fs_uuid",
+    "mount",
+    "archive_path",
+    "archive_state",
+    "label",
+    "plan_id",
+    "role",
+)
+
+
+def _exact_existing_registration(
+    con,
+    *,
+    expected: Mapping[str, Any],
+    observed_device: Mapping[str, Any],
+    topology: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Recognize only a fully committed replay of the same registration request."""
+    row = con.execute(
+        "SELECT fs_uuid,annex_uuid,serial,role,lifecycle,eligibility FROM drives "
+        "WHERE drive_label=?",
+        [expected["label"]],
+    ).fetchone()
+    if row is None:
+        return None
+    volumes = [dict(node) for node in topology.get("nodes") or [] if node.get("fstype")]
+    volume = volumes[0] if len(volumes) == 1 else {}
+    memberships = [
+        str(item[0])
+        for item in con.execute(
+            "SELECT plan_id FROM plan_drives WHERE drive_label=? ORDER BY plan_id",
+            [expected["label"]],
+        ).fetchall()
+    ]
+    current = {
+        "fs_uuid": row[0],
+        "annex_uuid": row[1],
+        "serial": row[2],
+        "role": row[3],
+        "lifecycle": row[4],
+        "eligibility": row[5],
+        "observed_dev": observed_device.get("dev"),
+        "volume_dev": volume.get("dev"),
+        "volume_fs_uuid": volume.get("fs_uuid"),
+        "volume_annex_uuid": volume.get("annex_uuid"),
+        "mounted": bool(volume.get("mountpoints")),
+        "mountpoints": volume.get("mountpoints") or [],
+        "archive_path": volume.get("archive_path"),
+        "archive_state": volume.get("archive_state"),
+        "registration_receipt": volume.get("registration_receipt"),
+        "plans": memberships,
+    }
+    expected_receipt = {
+        "state": "prepared",
+        "label": expected["label"],
+        "fs_uuid": expected["fs_uuid"],
+        "serial": expected["serial"],
+        "volume_dev": expected["volume_dev"],
+    }
+    exact = (
+        row[0] == expected["fs_uuid"]
+        and bool(row[1])
+        and row[1] == volume.get("annex_uuid")
+        and row[2] == expected["serial"] == observed_device.get("serial")
+        and row[3] == expected["role"]
+        and row[4] == "active"
+        and row[5] == "enabled"
+        and observed_device.get("dev") == expected["dev"]
+        and volume.get("dev") == expected["volume_dev"]
+        and volume.get("fs_uuid") == expected["fs_uuid"]
+        and volume.get("mountpoints") == [expected["mount"]]
+        and volume.get("archive_path") == expected["archive_path"]
+        and volume.get("archive_state") == "prepared_registration"
+        and volume.get("registration_receipt") == expected_receipt
+        and expected["plan_id"] in memberships
+    )
+    if not exact:
+        raise proposal.Refusal(
+            "DRIVE_REGISTRATION_IDENTITY_COLLISION",
+            {"expected": dict(expected), "current": current},
+            ("review_registered_identity",),
+        )
+    return {
+        "changed": False,
+        "already_registered": True,
+        "drive_label": expected["label"],
+        "planner_revision": planner_revision(con),
+        "plan_id": expected["plan_id"],
+        "archive_path": expected["archive_path"],
+        "annex_uuid": row[1],
+        "approval_invalidated": False,
+        "capacity_evidence": "unknown_until_reconcile",
+        "reconciliation_required": True,
+        "inherited_from_lost_identity": [],
+    }
+
+
+def register_new_identity(
+    con,
+    observed_device: Mapping[str, Any],
+    topology: Mapping[str, Any],
+    *,
+    expected_binding: Mapping[str, Any],
+    confirmation: str,
+    prepare_archive: Callable[..., Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Prepare and register one exact new identity under the central graph-write boundary."""
+    if not isinstance(expected_binding, Mapping):
+        raise proposal.Refusal(
+            "DRIVE_REGISTRATION_BINDING_INVALID",
+            {"reason": "binding_not_an_object"},
+            ("refresh_onboarding_preview",),
+        )
+    missing = [key for key in _REGISTRATION_BINDING_KEYS if key not in expected_binding]
+    if missing:
+        raise proposal.Refusal(
+            "DRIVE_REGISTRATION_BINDING_INVALID",
+            {"missing": missing},
+            ("refresh_onboarding_preview",),
+        )
+    expected = {key: expected_binding[key] for key in _REGISTRATION_BINDING_KEYS}
+    if (not isinstance(expected["planner_revision"], int)
+            or isinstance(expected["planner_revision"], bool)
+            or not re.fullmatch(r"drive-\d+", str(expected["label"] or ""))):
+        raise proposal.Refusal(
+            "DRIVE_REGISTRATION_BINDING_INVALID",
+            {"binding": expected},
+            ("refresh_onboarding_preview",),
+        )
+    required_confirmation = f"REGISTER NEW {expected['label']}"
+    if confirmation != required_confirmation:
+        raise proposal.Refusal(
+            "DRIVE_REGISTRATION_CONFIRMATION_MISMATCH",
+            {"required": required_confirmation},
+            ("type_exact_confirmation",),
+        )
+
+    already = _exact_existing_registration(
+        con,
+        expected=expected,
+        observed_device=observed_device,
+        topology=topology,
+    )
+    if already is not None:
+        return already
+
+    current_preview = onboarding_preview(con, observed_device, topology)
+    current_binding = current_preview["registration_binding"]
+    if current_binding != expected:
+        raise proposal.Refusal(
+            "DRIVE_REGISTRATION_PREVIEW_STALE",
+            {"expected": expected, "current": current_binding},
+            ("refresh_onboarding_preview",),
+        )
+    if not current_preview["ready_for_registration"]:
+        raise proposal.Refusal(
+            "DRIVE_REGISTRATION_BLOCKED",
+            {
+                "blockers": current_preview["blockers"],
+                "next_action": current_preview["next_action"],
+            },
+            (current_preview["next_action"],),
+        )
+    volume = current_preview["volume"]
+    approval_invalidated = False
+
+    def op(c):
+        nonlocal approval_invalidated
+        current_revision = planner_revision(c)
+        active = plan.active(c)
+        current_catalog_binding = {
+            "planner_revision": current_revision,
+            "label": _next_drive_label(c),
+            "plan_id": active["plan_id"] if active else None,
+        }
+        expected_catalog_binding = {
+            "planner_revision": expected["planner_revision"],
+            "label": expected["label"],
+            "plan_id": expected["plan_id"],
+        }
+        if current_catalog_binding != expected_catalog_binding:
+            raise proposal.Refusal(
+                "DRIVE_REGISTRATION_PREVIEW_STALE",
+                {"expected": expected_catalog_binding, "current": current_catalog_binding},
+                ("refresh_onboarding_preview",),
+            )
+        for column, value in (
+            ("drive_label", expected["label"]),
+            ("serial", expected["serial"]),
+            ("fs_uuid", expected["fs_uuid"]),
+        ):
+            collision = c.execute(
+                f"SELECT drive_label FROM drives WHERE {column}=? ORDER BY drive_label", [value]
+            ).fetchall()
+            if collision:
+                raise proposal.Refusal(
+                    "DRIVE_REGISTRATION_IDENTITY_COLLISION",
+                    {column: value, "registered_labels": [str(row[0]) for row in collision]},
+                    ("review_registered_identity",),
+                )
+        try:
+            prepared = dict(prepare_archive(
+                volume_dev=expected["volume_dev"],
+                mount=expected["mount"],
+                archive_path=expected["archive_path"],
+                label=expected["label"],
+                fs_uuid=expected["fs_uuid"],
+                fstype=volume["fstype"],
+                serial=expected["serial"],
+                model=observed_device.get("model"),
+                role=expected["role"],
+            ))
+        except proposal.Refusal:
+            raise
+        except Exception as exc:
+            raise proposal.Refusal(
+                "DRIVE_REGISTRATION_PREPARATION_INCOMPLETE",
+                {"archive_path": expected["archive_path"], "error": str(exc)},
+                ("refresh_onboarding_preview", "review_prepared_namespace"),
+            ) from exc
+        annex_uuid = str(prepared.get("annex_uuid") or "")
+        if not annex_uuid or prepared.get("archive_path") != expected["archive_path"]:
+            raise proposal.Refusal(
+                "DRIVE_REGISTRATION_PREPARATION_INCOMPLETE",
+                {"prepared": prepared},
+                ("refresh_onboarding_preview", "review_prepared_namespace"),
+            )
+        annex_collision = c.execute(
+            "SELECT drive_label FROM drives WHERE annex_uuid=? ORDER BY drive_label",
+            [annex_uuid],
+        ).fetchall()
+        if annex_collision:
+            raise proposal.Refusal(
+                "DRIVE_REGISTRATION_IDENTITY_COLLISION",
+                {
+                    "annex_uuid": annex_uuid,
+                    "registered_labels": [str(row[0]) for row in annex_collision],
+                },
+                ("review_registered_identity",),
+            )
+
+        c.execute(
+            "INSERT INTO drives("
+            "drive_label,fs_uuid,annex_uuid,capacity_bytes,free_bytes,hw_model,serial,role,"
+            "raid_backed,health,last_seen,notes,identity_epoch,write_generation,"
+            "filesystem_capacity_bytes,identity_fingerprint,write_authority,lifecycle,eligibility"
+            ") VALUES(?,?,?,?,?,?,?,?,0,'unchecked',CURRENT_TIMESTAMP,?,1,0,NULL,NULL,'unknown',"
+            "'active','enabled')",
+            [
+                expected["label"],
+                expected["fs_uuid"],
+                annex_uuid,
+                int(volume["size_bytes"]),
+                int(prepared.get("free_bytes") or 0),
+                observed_device.get("model"),
+                expected["serial"],
+                expected["role"],
+                "Portal new-identity registration; SMART/format/mount were not run. "
+                "Capacity evidence remains unknown until explicit reconciliation.",
+            ],
+        )
+        c.execute(
+            "INSERT INTO plan_drives(plan_id,drive_label) VALUES(?,?)",
+            [expected["plan_id"], expected["label"]],
+        )
+        active_approval = c.execute(
+            "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
+        ).fetchone()[0]
+        approved_rows = int(c.execute(
+            "SELECT count(*) FROM placement_proposals WHERE lifecycle='approved'"
+        ).fetchone()[0])
+        c.execute(
+            "UPDATE placement_proposals SET lifecycle='superseded', "
+            "superseded_at=CURRENT_TIMESTAMP WHERE lifecycle='approved'"
+        )
+        c.execute(
+            "UPDATE planner_state SET active_approved_proposal_id=NULL WHERE singleton_id=1"
+        )
+        approval_invalidated = active_approval is not None or approved_rows > 0
+        return proposal.GraphResult(
+            proven_noop=False,
+            value={
+                "archive_path": prepared["archive_path"],
+                "annex_uuid": annex_uuid,
+            },
+        )
+
+    written = proposal.graph_write(con, op)
+    return {
+        "changed": True,
+        "already_registered": False,
+        "drive_label": expected["label"],
+        "planner_revision": planner_revision(con),
+        "plan_id": expected["plan_id"],
+        "archive_path": written.value["archive_path"],
+        "annex_uuid": written.value["annex_uuid"],
+        "approval_invalidated": approval_invalidated,
+        "capacity_evidence": "unknown_until_reconcile",
+        "reconciliation_required": True,
+        "inherited_from_lost_identity": [],
     }
 
 

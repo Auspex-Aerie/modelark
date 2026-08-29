@@ -240,7 +240,7 @@ def test_portal_preview_rebinds_exact_observation_without_smart_or_mutation():
     con.close()
 
 
-def test_drives_ui_exposes_preview_only_not_registration_mutation():
+def test_drives_ui_keeps_review_and_registration_as_separate_actions():
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1] / "modelark" / "web" / "static"
@@ -249,5 +249,5 @@ def test_drives_ui_exposes_preview_only_not_registration_mutation():
     assert 'id="driveOnboardingModal"' in html
     assert "Review onboarding" in script
     assert 'api("/api/drive/onboarding-preview?' in script
-    assert "/api/drive/register" not in script
+    assert 'post("/api/drive/register-new"' in script
     assert "/api/drive/onboarding-apply" not in script

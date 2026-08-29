@@ -308,6 +308,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(plan_api.set_provisioning(body))
             elif u.path == "/api/drive/declare-lost":
                 self._mutation_result(drive_api.declare_lost(body))
+            elif u.path == "/api/drive/register-new":
+                self._mutation_result(drive_api.register_new(body))
             elif u.path == "/api/verify/run":
                 self._json(verify_api.run(body))
             else:

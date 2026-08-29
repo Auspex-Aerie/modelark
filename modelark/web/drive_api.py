@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from modelark import drive_lifecycle, plan, planning, proposal
+from modelark import drive_lifecycle, plan, planning, proposal, register
 from modelark.web import data, disk_api
 
 
@@ -100,6 +100,64 @@ def onboarding_preview(
         with data._lock:
             preview = drive_lifecycle.onboarding_preview(data.conn(), matches[0], topology)
         return {"ok": True, "preview": preview}
+    except proposal.Refusal as exc:
+        return _refused(exc)
+
+
+def register_new(body: dict) -> dict:
+    """Re-probe and apply one exact preview-bound new-identity registration."""
+    binding_keys = (
+        "planner_revision",
+        "dev",
+        "serial",
+        "volume_dev",
+        "fs_uuid",
+        "mount",
+        "archive_path",
+        "archive_state",
+        "label",
+        "plan_id",
+        "role",
+    )
+    required = {*binding_keys, "confirmation"}
+    missing = sorted(required - body.keys())
+    if missing:
+        return _refused(proposal.Refusal(
+            "DRIVE_REGISTRATION_REQUEST_INCOMPLETE",
+            {"missing": missing},
+            ("refresh_onboarding_preview",),
+        ))
+    dev = body.get("dev")
+    serial = body.get("serial")
+    inventory = disk_api.attached_inventory()
+    if not inventory.get("available"):
+        return _refused(proposal.Refusal(
+            "DRIVE_INVENTORY_UNAVAILABLE",
+            {},
+            ("refresh_drive_inventory",),
+        ))
+    matches = [
+        item for item in inventory.get("devices") or []
+        if str(item.get("dev") or "") == dev and str(item.get("serial") or "") == serial
+    ]
+    if len(matches) != 1:
+        return _refused(proposal.Refusal(
+            "DRIVE_ONBOARDING_OBSERVATION_STALE",
+            {"dev": dev, "serial": serial, "matches": len(matches)},
+            ("refresh_drive_inventory",),
+        ))
+    topology = disk_api.registration_topology(str(dev or ""))
+    try:
+        with data._lock:
+            registration = drive_lifecycle.register_new_identity(
+                data.conn(),
+                matches[0],
+                topology,
+                expected_binding={key: body[key] for key in binding_keys},
+                confirmation=body["confirmation"],
+                prepare_archive=register.prepare_new_identity_archive,
+            )
+        return {"ok": True, "registration": registration}
     except proposal.Refusal as exc:
         return _refused(exc)
 

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
 
+from modelark import register as drive_register
 from modelark.core import platform as osplat
 
 
@@ -155,6 +156,7 @@ def registration_topology(dev: str) -> dict:
         archive_path = None
         archive_state = "unmounted"
         annex_uuid = None
+        registration_receipt = None
         if len(mountpoints) == 1:
             archive = Path(mountpoints[0]) / "modelark"
             archive_path = str(archive)
@@ -172,8 +174,11 @@ def registration_topology(dev: str) -> dict:
                 except FileNotFoundError:
                     annex = None
                 if annex is not None and annex.returncode == 0 and annex.stdout.strip():
-                    archive_state = "annex"
                     annex_uuid = annex.stdout.strip().splitlines()[0]
+                    registration_receipt = drive_register.registration_receipt(archive)
+                    archive_state = (
+                        "prepared_registration" if registration_receipt else "annex"
+                    )
                 else:
                     archive_state = "unrecognized"
             else:
@@ -188,6 +193,7 @@ def registration_topology(dev: str) -> dict:
             "archive_path": archive_path,
             "archive_state": archive_state,
             "annex_uuid": annex_uuid,
+            "registration_receipt": registration_receipt,
         })
 
     root_source = None

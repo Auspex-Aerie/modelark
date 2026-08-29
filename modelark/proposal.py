@@ -42,6 +42,7 @@ GRAPH_AFFECTING_WRITERS = {
     "drive_mutation.publish_clean_anchor": "clean anchor publish",
     "drive_bootstrap.reconcile_drive": "drive identity bootstrap",
     "drive_lifecycle.declare_lost": "operator-confirmed drive loss",
+    "drive_lifecycle.register_new_identity": "operator-confirmed new drive identity registration",
     "register.register_drive": "drive registration",
     "hash_repair.repair_hashes": "legacy hash repair apply",
     "proposal.approve": "proposal approval CAS",
