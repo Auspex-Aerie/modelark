@@ -478,7 +478,10 @@ def test_registration_ui_requires_exact_phrase_and_calls_only_dedicated_endpoint
 
     assert 'id="driveOnboardingConfirm"' in html
     assert 'id="driveOnboardingApply"' in html
+    assert 'id="driveOnboardingPlan"' in html
     assert 'post("/api/drive/register-new"' in script
+    assert "archive namespace" in script
+    assert "adds_to_active_plan" in script
     assert "onboardingPreview.confirmation" in script
     assert 'u.path == "/api/drive/register-new"' in server
     assert "Network outcome unknown" in script

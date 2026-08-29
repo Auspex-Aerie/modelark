@@ -647,6 +647,9 @@ def _drive_loss_flow(pg) -> None:
     pg.click(".driveonboard")
     pg.wait_for_selector("#driveOnboardingModal", state="visible")
     assert "mounted" in pg.inner_text("#driveOnboardingVolume").lower()
+    assert "archive namespace absent" in pg.inner_text("#driveOnboardingVolume").lower()
+    assert "active plan ark" in pg.inner_text("#driveOnboardingPlan").lower()
+    assert "reconciliation required" in pg.inner_text("#driveOnboardingPlan").lower()
     assert pg.locator("#driveOnboardingApply").is_disabled()
     pg.fill("#driveOnboardingConfirm", "REGISTER NEW drive-07")
     assert pg.locator("#driveOnboardingApply").is_enabled()
@@ -672,9 +675,7 @@ def _drive_loss_flow(pg) -> None:
     pg.fill("#driveLossConfirm", "DECLARE LOST drive-02")
     assert pg.locator("#driveLossApply").is_enabled()
     pg.click("#driveLossApply")
-    pg.wait_for_function(
-        "document.getElementById('driveEvent').innerText.includes('replanned at revision 12')"
-    )
+    pg.locator("#driveEvent").filter(has_text="replanned at revision 12").wait_for()
     assert submitted == [{
         "drive_label": "drive-02", "expected_revision": 11,
         "expected_identity_epoch": 3, "expected_identity_fingerprint": "b" * 64,

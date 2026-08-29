@@ -99,8 +99,15 @@
       onboardingPreview.suggested_label;
     $("driveOnboardingVolume").textContent = volume
       ? "filesystem " + volume.dev + " · " + volume.fstype + " · UUID " +
-        (volume.fs_uuid || "unproven") + " · " + (volume.mounted ? "mounted" : "not mounted")
+        (volume.fs_uuid || "unproven") + " · " + (volume.mounted ? "mounted" : "not mounted") +
+        " · archive namespace " + (volume.archive_state || "unproven") +
+        (volume.archive_path ? " at " + volume.archive_path : "")
       : "No single registration filesystem was identified.";
+    const registration = onboardingPreview.registration_preview || {};
+    $("driveOnboardingPlan").textContent =
+      "new identity role " + (registration.role || "unproven") + " · active plan " +
+      (registration.adds_to_active_plan || "none") + " · reconciliation " +
+      (registration.requires_reconcile_after_registration ? "required after registration" : "not required");
     $("driveOnboardingHistory").textContent = lost.length
       ? "Separate lost history (never inherited): " + lost.map(old =>
           old.drive_label + " epoch " + old.identity_epoch + " · " + old.archived_rows +
