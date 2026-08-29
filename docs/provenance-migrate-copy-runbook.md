@@ -5,11 +5,12 @@ replacement-media read-only qualification, immutable candidate freeze, stopped s
 cutover, attended diagnostic-only application swaps, and preview-bound replacement onboarding
 passed, including recovery from a cleanly refused archive-parent permission check and one successful
 new-identity registration plus its dedicated-local capacity bootstrap; stopped before reconciling
-the remaining active drives on 2026-08-28**. LocalModelArk now runs schema v7 from permission-guidance
-candidate commit `e92c354`; the service remains disabled for login startup and was started without
-Fill resume. The preserved schema-v2 runtime, cutover capsule, and earlier application candidates
-remain rollback/evidence points. Remaining-drive capacity-evidence restoration, proposal approval,
-and Fill remain separate gates.
+the remaining active drives after separately bootstrapping the NAS and Drive #1 on 2026-08-28**.
+LocalModelArk now runs schema v7 from permission-guidance candidate commit `e92c354`; the service
+remains disabled for login startup and was started without Fill resume. The preserved schema-v2
+runtime, cutover capsule, and earlier application candidates remain rollback/evidence points.
+Remaining-drive capacity-evidence restoration, attached-identity presentation remediation, proposal
+approval, and Fill remain separate gates.
 
 Use this runbook to exercise the provenance migration from the current development branch against a
 production-shaped, disposable copy of the existing LocalModelArk deployment. The process is designed
@@ -774,34 +775,84 @@ Read-only acceptance proved:
   reconciled `drive-07` are absent from that failure set. Compatibility totals remain
   `316/79/104/212/1/396`.
 
+## Executed Drive #0 and Drive #1 capacity bootstraps — 2026-08-28
+
+The operator brought the single-host Synology iSCSI LUN online at `/dev/sdc` and mounted it at
+`/mnt/drive-00`; Drive #1 was also attached through a USB enclosure as `/dev/sdb` and mounted at
+`/media/phaze/drive-01`. Read-only qualification proved each registered identity by the stable pair
+of filesystem UUID plus annex UUID before mutation:
+
+- Drive #0: filesystem `c43bdf6b-d0e2-4e5a-8785-3f0bee5e8c46`, annex
+  `f0a8abe8-06e1-4f67-b084-3759a07fdd36`;
+- Drive #1: filesystem `a4f43d95-055a-479c-90e6-a96c8c95a078`, annex
+  `adfa44c7-70f4-4cd5-b14a-f8c6fd5f2675`.
+
+The operator explicitly confirmed that the iSCSI LUN remains exclusive to this workstation under
+DEC-016's single-host topology and that Drive #1 is dedicated ModelArk storage. Each drive then ran
+one separately fenced `--dedicated` reconciliation without `--accept-drift`:
+
+- Drive #0 returned `bootstrapped`, epoch/generation `1/1`, free `187,395,854,336` bytes, advanced
+  revision `3 → 4`, recorded fingerprint
+  `5b99b36edd36498e97da7f99523d5dd27e3a2ddff96d7deee4b393a3a57f7a3e`, and admits
+  `43,618,522,727` usable bytes after RAID headroom;
+- Drive #1 returned `bootstrapped`, epoch/generation `1/1`, free `548,071,542,784` bytes, advanced
+  revision `4 → 5`, recorded fingerprint
+  `e9101ca18c421d65b7d77ec0fdabbf52fe7f9f60a5be3abd299740ba54a6604c`, and admits
+  `388,855,249,972` usable bytes after primary-drive headroom.
+
+Both have one matching append-only clean anchor and `dedicated_local` authority. Catalog integrity
+is `ok`, foreign-key violations are zero, approval remains null, Fill is idle, compatibility totals
+remain `316/79/104/212/1/396`, and the unknown-evidence target set is now exactly `drive-03` through
+`drive-06`.
+
+The walkthrough exposed two bounded issues without invalidating either reconciliation:
+
+1. Passive portal inventory correlates only stored and observed hardware serial. Drive #0 has no
+   migrated stored serial, while Drive #1's USB enclosure reports bridge serial `5652314B56344C4B`
+   instead of stored disk serial `VR1KV4LK`. The UI therefore presents both proven mounted archives
+   as registered-but-unobserved plus unregistered observations. Onboarding still refuses because the
+   filesystem/annex UUIDs collide, so this is misleading presentation rather than an identity bypass.
+   The architectural fix is one shared observation resolver that prioritizes exact filesystem plus
+   annex identity, treats serial as supporting evidence, and exposes bridge mismatch explicitly.
+2. Full bootstrap inventory performs a separate `git annex whereis --key` subprocess per catalogued
+   row and then walks the complete archive tree without progress reporting. It remained fenced and
+   fail-closed, but took minutes for each populated drive. Batch annex membership and bounded
+   progress reporting should replace the N+1 opaque operator wait before public migration readiness.
+
 ## Current stop point
 
 The immutable migration candidate, stopped side-by-side live cutover, attended Drive #2 loss
 declaration, diagnostic-only application correction, read-only replacement preview, and disposable
-new-identity registration rehearsal, live registration, and Drive #7 capacity bootstrap are complete
-under DEC-072 through DEC-078. The portal is active on `e92c354` against the same migrated v7 runtime
-at revision `3`; the service remains disabled and Fill resume is absent. The old v2 runtime, prior
-service units/candidates, immutable seed, migration work, rollback bundle, and publication leftovers
-remain retained and matched. No data rollback was required.
+new-identity registration rehearsal, live registration, and Drive #7/#0/#1 capacity bootstraps are
+complete under DEC-072 through DEC-078. The portal is active on `e92c354` against the same migrated
+v7 runtime at revision `5`; the service remains disabled and Fill resume is absent. The old v2
+runtime, prior service units/candidates, immutable seed, migration work, rollback bundle, and
+publication leftovers remain retained and matched. No data rollback was required.
 
 Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. Attach and mount one remaining active drive at a time—never lost `drive-02`—using its normal
+1. Record and remediate the central attached-identity presentation defect before declaring the
+   migration experience user-ready. Reuse one stable resolver across inventory and onboarding;
+   never update a stored serial or bind identity merely because a bridge reports a different value.
+2. Record and disposition the N+1/opaque full-inventory cost. Optimization must preserve the exact
+   per-key target-UUID proof, missing-copy refusal, extra/debris report, held fences, and fresh final
+   observation; do not trade correctness for speed.
+3. Attach and mount one remaining active drive at a time—never lost `drive-02`—using its normal
    operating-system procedure. First perform read-only filesystem/annex identity qualification;
    attached device names and serial observations alone are not registration or reconciliation
    authority.
-2. Reconcile only the proven matching registered identity. Assert `--dedicated` only for storage
+4. Reconcile only the proven matching registered identity. Assert `--dedicated` only for storage
    whose exclusivity policy is actually dedicated-local; shared/NAS/unfenceable storage must not be
    promoted by convenience. Preserve each response and require exactly one revision increment per
    successful bootstrap.
-3. Continue until the remaining failure labels `drive-00`, `drive-01`, `drive-03`, `drive-04`,
-   `drive-05`, and `drive-06` have either valid identity-bound evidence or an explicit lifecycle/
-   eligibility decision. Do not manufacture evidence for unavailable media.
-4. Recompute capacity only through the central planner after each accepted reconciliation. Legacy
+5. Continue until the remaining failure labels `drive-03`, `drive-04`, `drive-05`, and `drive-06`
+   have either valid identity-bound evidence or an explicit lifecycle/eligibility decision. Do not
+   manufacture evidence for unavailable media.
+6. Recompute capacity only through the central planner after each accepted reconciliation. Legacy
    `capacity_bytes` and `free_bytes` remain diagnostic until their identity-bound gate passes.
-5. Do not approve a proposal or start Fill until the migrated live preview is feasible,
+7. Do not approve a proposal or start Fill until the migrated live preview is feasible,
    cross-surface identical, explicitly reviewed, and approved through the normal fenced workflow.
-6. Before public distribution, assign the schema-v7 release a package version distinct from the
+8. Before public distribution, assign the schema-v7 release a package version distinct from the
    released 0.2.0 source version (DEF-040); development package strings are not a safe migration gate.
 
 Publication staging hardlinks and every failed/refused capsule remain retained evidence under
