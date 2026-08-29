@@ -63,8 +63,17 @@ Most users should not need to re-download models or recreate their cart. They ma
 - reconnect or mount archive drives through their normal operating-system procedure;
 - explicitly reconcile each candidate drive so its current identity and free-space evidence are
   anchored;
+- prepare the root permissions of a **new or replacement dedicated filesystem** when the onboarding
+  preview says the unprivileged ModelArk service cannot write it; copy the exact commands shown by
+  the preview, then refresh it, and do not recursively change an existing archive or shared mount;
 - resolve any typed provenance, policy, identity, or capacity blocker shown by the planner; and
 - approve a newly generated proposal before Fill can run.
+
+Existing archive drives do not need a blanket ownership rewrite merely because the catalog was
+migrated. The permission gate applies when registering a filesystem whose archive namespace is
+absent. ModelArk shows the service identity, current owner/mode, and its planned hidden staging plus
+final `modelark/` paths; it never runs the privileged commands or creates those directories until a
+separate exact registration confirmation succeeds.
 
 ## Rollback boundary
 

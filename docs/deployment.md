@@ -134,6 +134,40 @@ systemctl --user daemon-reload
 The virtual environment, data, state, configuration, archive drives, and git-annex map are
 intentionally left untouched. Delete or migrate them only as separate, explicit operations.
 
+## Dedicated drive permissions
+
+The supervised service runs as the ordinary user who deployed it. Before portal registration can
+initialize an existing mounted filesystem, the read-only onboarding preview proves that this service
+identity can traverse and write the filesystem root. A freshly created ext4 filesystem is commonly
+mounted with a root-owned top-level directory; being mounted and empty does not by itself make it
+registration-ready.
+
+When access is blocked, the portal shows **You do this now** with commands resolved to the observed
+absolute mount and effective service user/group. The rendered sequence has this shape:
+
+```bash
+sudo chown -- <service-user>:<service-group> /absolute/dedicated/mount
+sudo chmod -- 0750 /absolute/dedicated/mount
+stat -c '%U:%G %a %n' -- /absolute/dedicated/mount
+```
+
+Copy the portal's concrete commands rather than substituting a guessed account or path. This policy
+is only for a filesystem dedicated to ModelArk. Never apply either command recursively, and do not
+change the root owner of a shared filesystem without a separate host-level design. ModelArk does not
+invoke `sudo`, change permissions, or use successful mounting as authority to write.
+
+After running the commands, refresh the onboarding preview. Do not retry a stale confirmation modal
+and do not create these directories manually:
+
+```text
+/absolute/dedicated/mount/
+├── .modelark.registering-drive-NN/  temporary; ModelArk creates this
+└── modelark/                        final; atomically promoted from the temporary directory
+```
+
+The hidden directory is the recoverable preparation area. The final archive namespace appears only
+through ModelArk's atomic promotion during the separately confirmed registration action.
+
 ## SMART access
 
 The deployer never edits sudoers. If the Disk Health view should read SMART data, grant only the

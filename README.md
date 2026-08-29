@@ -332,6 +332,11 @@ From a fresh install to your first archive. Steps 1–2 are one-time host setup;
    ```bash
    modelark drive register --dev /dev/sdX --label drive-01
    ```
+   For portal onboarding, a mounted empty filesystem must also be writable by the unprivileged
+   ModelArk service account. If it is not, the read-only preview blocks registration and shows the
+   exact owner, mode, and commands for that service identity. Run those commands only for a
+   filesystem dedicated to ModelArk, never recursively, then refresh the preview. Do not create the
+   staging or final archive directories yourself.
 5. **Create and select a plan** (its drive fleet + capacity mode):
    ```bash
    modelark plan create --id ark && modelark plan select --id ark
@@ -376,6 +381,27 @@ modelark drive register --dev /dev/sdX --label drive-07 --format ext4 \
 The command refuses regular files, the system/root device, mounted descendants, active swap,
 encrypted/LVM/RAID stacks, and failed topology probes. It never auto-unmounts a volume; unmount or
 detach it explicitly and rerun the preflight.
+
+The portal's existing-filesystem onboarding also proves that the service account can traverse and
+write the mounted filesystem root. A newly created ext4 filesystem is commonly mounted with a
+root-owned top-level directory, so “mounted and empty” alone is not sufficient. When this check
+fails, copy the exact `chown`, `chmod`, and verification commands rendered under **You do this now**;
+they are generated from the observed mount and the effective service identity. Use that ownership
+policy only for a dedicated ModelArk filesystem. ModelArk does not invoke `sudo` or change
+permissions itself.
+
+After permission preparation, refresh the read-only preview instead of retrying a stale modal. The
+preview shows the directory transition that ModelArk will own:
+
+```text
+/absolute/dedicated/mount/
+├── .modelark.registering-drive-NN/  temporary; ModelArk creates this
+└── modelark/                        final; atomically promoted from the temporary directory
+```
+
+Do not manually create either directory. If the mount is shared with other applications or users,
+do not change its root ownership; dedicate a separate filesystem or establish an independently
+reviewed host permission policy first.
 
 ## Verification tiers
 

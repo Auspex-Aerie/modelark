@@ -10,6 +10,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
   catalogs, with copied-runtime acceptance and a stopped side-by-side cutover guide.
 - Operator-confirmed missing-drive loss/exclusion in the portal, followed by one canonical replan;
   unregistered attached hardware remains advisory and never inherits the lost identity.
+- Preview-bound replacement-drive registration now shows the service identity, required write
+  authority, exact attended permission commands when blocked, and ModelArk's temporary-to-final
+  archive directory transition before any storage or catalog mutation.
 
 ### Changed
 
@@ -27,6 +30,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
   while contributing no targets or admitted capacity.
 - Proposal preview can no longer bypass identity-bound capacity admission through stale legacy
   `free_bytes`; all planning surfaces report the same typed root blocker and executable task set.
+- A mounted, empty filesystem is no longer considered registration-ready unless the running
+  service account can traverse and write its root; the physical preparation helper repeats that
+  check before creating the hidden git-annex staging directory.
 
 ## 0.2.0 - 2026-07-20
 
