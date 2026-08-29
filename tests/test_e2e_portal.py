@@ -479,6 +479,76 @@ def _blocked_selection_flow(pg) -> None:
     print("  blocked-selection notice + Dismiss/Replan contracts exercised")
 
 
+def _proposal_approval_flow(pg) -> None:
+    """Resolve DEF-036 on the disposable catalog without starting Fill.
+
+    Remove the three intentionally blocked fixtures through the real selection API, then exercise
+    the real draft/review/typed-confirmation/approval path. The approved proposal remains confined to
+    the temporary E2E catalog and no request may reach Fill start.
+    """
+    blocked_ids = sorted(_POLICY_BLOCKED_IDS | {"demo/replica-blocked"})
+    removed = pg.evaluate(
+        """async ids => await window.MA.post('/api/selection/bulk', {ids, on: false})""",
+        blocked_ids,
+    )
+    assert removed and removed.get("n") == 1, (
+        f"only demo/tiny-llm should remain selected, got {removed!r}")
+
+    starts = []
+
+    def forbid_start(route):
+        starts.append(route.request.post_data_json)
+        route.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({"error": "E2E must not start Fill"}),
+        )
+
+    pg.route("**/api/fill/start", forbid_start)
+    pg.evaluate("window.loadFill()")
+    pg.wait_for_selector("#proposalDocket")
+    for _ in range(80):
+        if pg.is_enabled("#proposalReview") and "Approval required" in pg.inner_text(
+                "#proposalState"):
+            break
+        time.sleep(0.1)
+    assert pg.is_enabled("#proposalReview")
+    assert pg.is_disabled("#fillStart")
+    assert "Approval required" in pg.inner_text("#proposalState")
+
+    pg.click("#proposalReview")
+    pg.wait_for_selector("#proposalModal", state="visible")
+    canonical = pg.inner_text("#proposalCanonical").strip()
+    assert len(canonical) == 64 and set(canonical) <= set("0123456789abcdef")
+    assert "ark" in pg.inner_text("#proposalPlan")
+    assert "FEASIBLE" in pg.inner_text("#proposalGate")
+    rows = pg.locator("#proposalAssignments [data-requirement-id]")
+    assert rows.count() == 1, f"expected one exact assignment, got {rows.count()}"
+    assert "demo/tiny-llm" in rows.first.inner_text()
+    assert "drive-00" in rows.first.inner_text()
+    assert pg.locator("#proposalAssignments script").count() == 0
+    assert pg.is_disabled("#proposalApprove")
+
+    phrase = pg.inner_text("#proposalPhrase").strip()
+    assert phrase.startswith("APPROVE ") and len(phrase) > len("APPROVE ")
+    pg.fill("#proposalConfirm", phrase)
+    assert pg.is_enabled("#proposalApprove")
+    pg.click("#proposalApprove")
+    pg.wait_for_selector("#proposalModal", state="hidden")
+    for _ in range(80):
+        if "Approved" in pg.inner_text("#proposalState") and pg.is_enabled("#fillStart"):
+            break
+        time.sleep(0.1)
+    assert "Approved" in pg.inner_text("#proposalState")
+    assert pg.is_enabled("#fillStart"), "feasible + current approval must enable Start"
+    live = pg.evaluate("async () => await window.MA.api('/api/proposal/status')")
+    assert live["state"] == "approved_current"
+    assert live["active_proposal"]["canonical_hash"] == canonical
+    assert starts == [], f"approval must not start Fill: {starts!r}"
+    pg.unroute("**/api/fill/start")
+    print("  proposal draft reviewed + explicitly approved; Fill remained stopped")
+
+
 def _drive_loss_flow(pg) -> None:
     """Exercise DEC-069 entirely through mocked observations; never enumerate test-host disks."""
     inventory = {
@@ -847,6 +917,10 @@ def _browser_flow() -> None:
                 assert "segarch" in (segments.last.get_attribute("class") or "")
                 assert segments.first.bounding_box()["x"] < segments.last.bounding_box()["x"]
             print("  drive progress bar renders archived segment under blocked cart")
+
+            # 2b. Once blockers are explicitly removed, the same disposable catalog must support
+            # the complete DEF-036 proposal review/approval flow without starting Fill.
+            _proposal_approval_flow(pg)
 
             # 3. Library search and multi-drive filters operate over every archived model. Clicking
             # a fleet card toggles the same filter chip, while multiple drives use OR semantics.
