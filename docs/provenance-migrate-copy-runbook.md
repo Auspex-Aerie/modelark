@@ -4,11 +4,11 @@ Status: **copied-runtime acceptance, Drive #2 loss rehearsal and live declaratio
 replacement-media read-only qualification, immutable candidate freeze, stopped side-by-side live
 cutover, attended diagnostic-only application swap, and read-only replacement-onboarding preview
 passed, followed by a confirmation-bound new-identity registration candidate deployed and stopped
-before operator apply on 2026-08-28**. LocalModelArk now runs schema v7 from candidate commit
-`c190ce3`; the service remains disabled for login startup and was started without Fill resume. The
-preserved schema-v2 runtime, cutover capsule, and earlier application candidates remain
-rollback/evidence points. Live registration, capacity-evidence restoration, proposal approval, and
-Fill remain separate gates.
+before operator apply on 2026-08-28**. LocalModelArk now runs schema v7 from presentation-complete
+candidate commit `8457c16`; the service remains disabled for login startup and was started without
+Fill resume. The preserved schema-v2 runtime, cutover capsule, and earlier application candidates
+remain rollback/evidence points. Live registration, capacity-evidence restoration, proposal
+approval, and Fill remain separate gates.
 
 Use this runbook to exercise the provenance migration from the current development branch against a
 production-shaped, disposable copy of the existing LocalModelArk deployment. The process is designed
@@ -630,11 +630,14 @@ epoch 1 with zero archived and replica rows, and the preview inherits none of it
 ## Prepared confirmation-bound new-identity registration — 2026-08-28
 
 DEC-076 implements the separately gated mutation anticipated by DEC-075. Candidate `c190ce3`
-requires the exact phrase `REGISTER NEW drive-07` and rebinds planner revision, device path, serial,
-volume path, filesystem UUID, mount, absent/prepared archive namespace, proposed label, active plan,
-and role before any write. Immediately before initialization it again proves the mounted source,
-filesystem type and UUID, hardware serial, and non-system-disk relationship. It runs no SMART,
-format, or mount operation.
+introduced the registration boundary; presentation-complete candidate `8457c16` additionally shows
+the operator every bound planning/storage fact: archive namespace state and path, new-identity role,
+active plan, and the required post-registration reconciliation. It requires the exact phrase
+`REGISTER NEW drive-07` and rebinds planner revision, device path, serial, volume path, filesystem
+UUID, mount, absent/prepared archive namespace, proposed label, active plan, and role before any
+write. Immediately before initialization it again proves the mounted source, filesystem type and
+UUID, hardware serial, and non-system-disk relationship. It runs no SMART, format, or mount
+operation.
 
 The physical phase clones the existing git-annex map into a hidden sibling, initializes a new annex
 identity, writes an exact local preparation receipt, and atomically promotes it to
@@ -646,28 +649,31 @@ approval, and advances planner revision once. It does not inherit Drive #2 facts
 identity, publish capacity authority, approve a proposal, or start Fill.
 
 The expected-red Gate-2 contract first failed in 11 places. Final focused lifecycle/writer/security
-result: 57 passed; the full suite passed 938 tests with five known deprecation warnings; Ruff was
-clean; standalone portal E2E passed the exact mounted-preview/confirmation/result flow; and the
-installed wheel passed resource smoke plus a production-shaped disposable rehearsal. The rehearsal
+result: 57 passed; the final full suite passed 938 tests with five known deprecation warnings in
+287.55 seconds; Ruff was clean; standalone portal E2E passed the exact mounted-preview,
+operator-visible binding, confirmation, result, and subsequent loss/replan flow; and the installed
+wheel passed packaged-resource smoke. The production-shaped disposable rehearsal remains the
+`c190ce3` backend proof because `8457c16` changes only static presentation and tests. That rehearsal
 used a consistent copy of the migrated catalog and real temporary git-annex repositories: revision
 `1` became `2`, `drive-07` joined `ark` exactly once, lost/excluded `drive-02` remained unchanged,
 the new drive retained `unknown` evidence and zero executable capacity, a replay was a proven no-op,
-integrity was `ok`, and foreign keys were clean. The wheel SHA-256 is
-`561410e260386d60f9b48edd154548f5d1071f016d29cb9a72f9c29e3eaeabcd`.
+integrity was `ok`, and foreign keys were clean. The final wheel SHA-256 is
+`72341bf962e4a62c41be736fd87d7a00793ea5f78f8e41e61a485ae7029dcb0d`.
 
-The application-only live swap to `c190ce3` retained schema-v7 data/config/state paths, planner
-revision `1`, disabled startup, `resume=False`, idle Fill, and byte-identical drive inventory and
-proposal preview. Normalized Library planning output is identical before/after: non-feasible on
-`CAPACITY_EVIDENCE_UNKNOWN`, zero planned bytes, seven catalog drives, no `drive-07`, and totals
+The final application-only live swap from `c190ce3` to `8457c16` retained schema-v7
+data/config/state paths, planner revision `1`, disabled startup, `resume=False`, and idle Fill.
+Pre/post drive inventory, proposal preview, onboarding preview, normalized Library planning, and
+normalized Fill status are identical. Planning remains non-feasible on
+`CAPACITY_EVIDENCE_UNKNOWN`, with zero planned bytes, seven catalog drives, no `drive-07`, and totals
 `316/79/104/212/1/396`. The mounted Seagate preview is ready with zero blockers and an absent archive
-namespace, but no registration request has run.
+namespace; the served modal now exposes the complete binding, but no registration request has run.
 
 ## Current stop point
 
 The immutable migration candidate, stopped side-by-side live cutover, attended Drive #2 loss
 declaration, diagnostic-only application correction, read-only replacement preview, and disposable
-new-identity registration rehearsal are complete under DEC-072 through DEC-076. The portal is active
-on `c190ce3` against the same migrated v7 runtime at revision `1`; the service remains disabled and
+new-identity registration rehearsal are complete under DEC-072 through DEC-077. The portal is active
+on `8457c16` against the same migrated v7 runtime at revision `1`; the service remains disabled and
 Fill resume is absent. The old v2 runtime, prior service units/candidates, immutable seed, migration
 work, rollback bundle, and publication leftovers remain retained and matched. No data rollback was
 required.

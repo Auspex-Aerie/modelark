@@ -1814,3 +1814,15 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, modelark/drive_lifecycle.py, modelark/proposal.py, modelark/register.py, modelark/web/disk_api.py, modelark/web/drive_api.py, modelark/web/server.py, modelark/web/static/app.css, modelark/web/static/disk.js, modelark/web/static/index.html, tests/test_def029_gate1_contracts.py, tests/test_def029_gate2_contracts.py, tests/test_e2e_portal.py, tests/test_planner_revision_writers.py, tests/test_web_http_security.py
 - `related`: DEC-018, DEC-050, DEC-060, DEC-067, DEC-069, DEC-070, DEC-072, DEC-075, DEF-029, DEF-039, INC-022
 - `scope_boundary`: New-label registration only. No SMART, format, mount, old-label reuse, same-identity refresh, dependency-aware retirement, capacity reconciliation/admission, proposal publication/approval, Fill, archive-content placement, or evidence disposal.
+
+### DEC-077: Expose every registration binding at the operator gate
+- `id`: DEC-077
+- `date`: 2026-08-28
+- `status`: accepted; live operator apply pending
+- `triggered_by`: DEC-076 final operator-gate review
+- `decision`: The new-identity confirmation modal must show every storage/planning fact that the backend binds before mutation, including archive namespace state and path, new-identity role, active plan, and the requirement for separate post-registration reconciliation. Keep the exact typed phrase and dedicated registration endpoint unchanged; presentation must not introduce an alternate planner, inferred capacity, or implicit follow-on action.
+- `rationale`: A backend binding is not a meaningful attended control if the operator cannot see the bound facts. The earlier modal showed device and filesystem identity but left active-plan and archive-state details implicit, making the confirmation less reviewable than the mutation contract it guarded.
+- `impact`: Commit `8457c16` changes only the onboarding presentation and its contracts. The final full suite passed 938 tests with five known deprecation warnings in 287.55 seconds; Ruff and the standalone portal E2E passed; installed-wheel resource smoke proved the new fields were packaged. Wheel SHA-256: `72341bf962e4a62c41be736fd87d7a00793ea5f78f8e41e61a485ae7029dcb0d`. The application-only live swap from `c190ce3` preserved byte-identical drive inventory, proposal preview, onboarding preview, and canonical planning/Fill state: planner revision `1`, `drive-07` absent, Drive #2 lost/excluded, Fill idle, and `CAPACITY_EVIDENCE_UNKNOWN` with zero executable work.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, modelark/web/static/index.html, modelark/web/static/disk.js, tests/test_def029_gate2_contracts.py, tests/test_e2e_portal.py
+- `related`: DEC-067, DEC-070, DEC-075, DEC-076, DEF-029, DEF-039
+- `scope_boundary`: Operator-gate presentation and application replacement only. No SMART, format, mount, archive initialization, registration, reconciliation, capacity admission, proposal approval, Fill, old-label reuse, or evidence disposal.
