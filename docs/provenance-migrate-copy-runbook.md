@@ -5,11 +5,12 @@ replacement-media read-only qualification, immutable candidate freeze, stopped s
 cutover, attended diagnostic-only application swaps, and preview-bound replacement onboarding
 passed, including recovery from a cleanly refused archive-parent permission check and one successful
 new-identity registration plus its dedicated-local capacity bootstrap; stopped after separately
-bootstrapping the NAS, Drive #1, Drive #3, and replica Drive #4, exposing bounded reconciliation
-inventory classification, and reaching a feasible central plan on 2026-08-29**. LocalModelArk now
+bootstrapping the NAS, Drive #1, Drive #3, replica Drive #4, and Drive #5, exposing bounded
+reconciliation inventory classification, and retaining a feasible central plan on 2026-08-29**.
+LocalModelArk now
 runs schema v7 from corrected candidate commit `1d420e0`; the service remains disabled for login
 startup and was started without Fill resume. The preserved schema-v2 runtime, cutover capsule, and
-earlier application candidates remain rollback/evidence points. Remaining-drive capacity-evidence
+earlier application candidates remain rollback/evidence points. Drive #6 capacity-evidence
 restoration, proposal approval, and Fill remain separate gates.
 
 Use this runbook to exercise the provenance migration from the current development branch against a
@@ -935,29 +936,61 @@ The central planner now returns `FEASIBLE` with no capacity failures: `317` plan
 zero planned bytes, but they are not required by the current plan and therefore are not blockers.
 Lost/excluded Drive #2 likewise receives zero work. Fill remains idle and no execution started.
 
+## Executed Drive #5 dedicated-local reconciliation — 2026-08-29
+
+Drive #4 was cleanly removed from the single-drive dock and Drive #5 mounted at
+`/media/phaze/drive-05`. Passive inventory plus a host-visible read-only block check proved the exact
+registered identity before mutation: ext4 filesystem UUID
+`2d6429fb-8bd2-466f-8a5b-b16f76f7102a`, annex UUID
+`b5bbc45e-b15d-4cc4-b7e3-04fe29f75273`, and matching model/serial
+`WDC WD10EZEX-08WN4A0` / `WD-WCC6Y1JPZ5KH`. The operator explicitly confirmed that Drive #5 is
+dedicated ModelArk storage.
+
+One `drive reconcile drive-05 --dedicated` ran through live candidate `1d420e0`. The bounded report
+rendered `present=0 missing=0 debris=0 extra=2109` and stated that the extras are retained, not
+catalogued, and never deleted automatically. The operation completed as `bootstrapped`, established
+epoch/generation `1/1`, advanced planner revision exactly `7 → 8`, recorded fingerprint
+`37c485aab86bbadf45cbc4a7785d30985fb48cf920ec47eeb61a6234f31061dd`, anchored free space at
+`983,319,982,080` bytes, and admits `934,152,425,063` usable primary bytes. No catalogued claim was
+missing and no on-disk entry was deleted or adopted.
+
+The central planner remains `FEASIBLE` with no capacity failures: `317` planned, `79` done, `104`
+must, `213` bulk, `0` blocked, and `396` selected. The selection hash remains
+`b8eb1154a66ec52d8aef85846a8dfdb677cbc471491354b319be579228990dd5`; Drive #5 currently receives
+`917,246,746,803` planned bytes across `27` models. Drive #6 remains active/enabled with unknown
+evidence and zero planned bytes, but it is not required by the current plan and therefore is not a
+blocker. Lost/excluded Drive #2 likewise receives zero work. Fill remains idle and no execution
+started.
+
+Two follow-up API probes from the restricted execution environment reported connection refusal even
+though the same portal process remained active and listening and the operator could still reach it
+in the browser. Repeating the read-only API checks through the host-visible path succeeded and
+returned revision `8`, the Drive #5 anchor, and the feasible plan above. No service restart occurred;
+this is retained as a probe-path observation, not claimed as a ModelArk outage.
+
 ## Current stop point
 
 The immutable migration candidate, stopped side-by-side live cutover, attended Drive #2 loss
 declaration, diagnostic-only application correction, read-only replacement preview, and disposable
-new-identity registration rehearsal, live registration, and Drive #7/#0/#1/#3/#4 capacity
+new-identity registration rehearsal, live registration, and Drive #7/#0/#1/#3/#4/#5 capacity
 bootstraps are complete under DEC-072 through DEC-080. The portal is active on `1d420e0` against the
-same migrated v7 runtime at revision `7`; the service remains disabled and Fill resume is absent.
-The central plan is feasible with no blocked requirements; active/enabled Drive #5 and Drive #6
-remain evidence-unknown and unused. The old v2 runtime, prior service units/candidates (including the
+same migrated v7 runtime at revision `8`; the service remains disabled and Fill resume is absent.
+The central plan is feasible with no blocked requirements; active/enabled Drive #6 remains
+evidence-unknown and unused. The old v2 runtime, prior service units/candidates (including the
 bounded `e45c725` Drives-API failure),
 immutable seed, migration work, rollback bundle, and publication leftovers remain retained and
 matched. No data rollback was required.
 
 Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. Decide whether Drive #5 and Drive #6 should be admitted to the active placement fleet before
-   proposal review. They are not current blockers: leaving them offline/evidence-unknown keeps them at
-   zero planned bytes, while reconciling either one will advance revision and may redistribute the
-   feasible plan. Do not reconcile merely to make every registered row green.
-2. If admitting either disk, attach and mount one at a time—never lost `drive-02`—and first perform
-   read-only filesystem/annex identity qualification. Reconcile only the proven matching identity and
-   assert `--dedicated` only if its storage is actually exclusive to ModelArk. Recompute capacity only
-   through the central planner after each accepted reconciliation.
+1. Decide whether Drive #6 should be admitted to the active placement fleet before proposal review.
+   It is not a current blocker: leaving it offline/evidence-unknown keeps it at zero planned bytes,
+   while reconciling it will advance revision and may redistribute the feasible plan. Do not
+   reconcile merely to make every registered row green.
+2. If admitting Drive #6, attach and mount it—never lost `drive-02`—and first perform read-only
+   filesystem/annex identity qualification. Reconcile only the proven matching identity and assert
+   `--dedicated` only if its storage is actually exclusive to ModelArk. Recompute capacity only
+   through the central planner after the accepted reconciliation.
 3. Do not approve a proposal or start Fill until the final intended drive set is settled and the
    migrated live preview remains feasible, cross-surface identical, explicitly reviewed, and
    approved through the normal fenced workflow.
@@ -966,7 +999,7 @@ Stop here before any automatic work. The remaining gates are operational and evi
 
 Publication staging hardlinks and every failed/refused capsule remain retained evidence under
 DEC-063/DEF-038. No provenance repair, `adopt_current`, Fill, drive format, additional Drive
-#5/#6 reconciliation, replacement label reuse, proposal approval, PR merge, or rollback-artifact
+#6 reconciliation, replacement label reuse, proposal approval, PR merge, or rollback-artifact
 deletion has occurred.
 
 When adding later application-swap evidence to a retained cutover capsule, always use an explicit
