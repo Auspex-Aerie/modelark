@@ -34,6 +34,7 @@ import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from modelark import capacity_evidence, drive_fence, register
 from modelark import drive_mutation as dm
@@ -94,6 +95,29 @@ class Reconciliation:
     inventory: Inventory | None = None
 
 
+@dataclass(frozen=True)
+class ReconciliationProgress:
+    """A bounded operator-facing milestone; never identity or admission evidence."""
+    phase: str
+    completed: int = 0
+    total: int | None = None
+
+
+ProgressCallback = Callable[[ReconciliationProgress], None]
+_FILE_PROGRESS_INTERVAL = 1000
+
+
+def _emit_progress(
+    callback: ProgressCallback | None,
+    phase: str,
+    *,
+    completed: int = 0,
+    total: int | None = None,
+) -> None:
+    if callback is not None:
+        callback(ReconciliationProgress(phase, completed, total))
+
+
 def free_drift_tolerance_v1(alloc_unit_bytes: int) -> int:
     """Versioned diagnostic free-drift tolerance: one filesystem allocation unit + a bounded metadata
     allowance. NEVER capacity headroom — it only gates whether a refresh re-anchors or refuses."""
@@ -124,17 +148,31 @@ def _live_evidence(con, label: str) -> _LiveEvidence:
                          st.f_bavail * st.f_frsize, st.f_frsize, fingerprint, True)
 
 
-def _annex_key_present(dest, key: str, *, target_uuid) -> bool:
-    """Prove an annex key is physically present on the drive (its uuid appears in ``whereis``). The
-    worktree symlink is NOT the proof — ``git annex copy --to`` deposits the object without one."""
-    if not (key and target_uuid):
-        return False
+def _annex_keys_present(dest, keys, *, target_uuid) -> set[str]:
+    """Return catalogued keys recorded present on exactly ``target_uuid`` using one annex query.
+
+    ``whereis --all --in <uuid>`` reads the same annex location log as the former per-key calls, but
+    emits the keys for the requested target UUID in one process.  Any command failure returns no
+    proof, causing every annex claim to fail closed in the inventory.
+    """
+    wanted = {str(key) for key in keys if key}
+    if not wanted or not target_uuid:
+        return set()
     try:
-        out = subprocess.run(["git", "-C", str(dest), "annex", "whereis", "--key", key],
-                             capture_output=True, text=True, check=False)
+        out = subprocess.run(
+            [
+                "git", "-C", str(dest), "annex", "whereis", "--all",
+                "--in", str(target_uuid), "--format=${key}\\n",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     except OSError:
-        return False
-    return out.returncode == 0 and target_uuid in out.stdout
+        return set()
+    if out.returncode != 0:
+        return set()
+    return wanted.intersection(line for line in out.stdout.splitlines() if line)
 
 
 _DEBRIS_SUFFIXES = (".incomplete", ".tmp")
@@ -147,12 +185,21 @@ def _is_debris(relpath: str) -> bool:
 
 
 def _walk_files(root: Path):
-    for p in root.rglob("*"):
-        if p.is_file() and ".git" not in p.parts:
-            yield p
+    """Walk worktree files while pruning every Git metadata tree before descent."""
+    for current, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name != ".git"]
+        current_path = Path(current)
+        for filename in filenames:
+            yield current_path / filename
 
 
-def _inventory(con, label: str, dest) -> Inventory:
+def _inventory(
+    con,
+    label: str,
+    dest,
+    *,
+    progress: ProgressCallback | None = None,
+) -> Inventory:
     """Full, bounded, report-only reconciliation against every catalogued claim: prove each raw/annex
     copy present, recognize debris, and report unexplained extra content WITHOUT deleting it (the final
     free observation accounts for its bytes). An unprovable/absent claim is never counted present — it
@@ -160,27 +207,51 @@ def _inventory(con, label: str, dest) -> Inventory:
     dest = Path(dest)
     target_uuid = (con.execute("SELECT annex_uuid FROM drives WHERE drive_label=?",
                                [label]).fetchone() or [None])[0]
+    rows = con.execute(
+        "SELECT repo_id, rfilename, annex_key, repo_id || '/' || stored_relpath "
+        "FROM archived WHERE drive_label=? ORDER BY repo_id,rfilename", [label]
+    ).fetchall()
+    annex_keys = {str(row[2]) for row in rows if row[2]}
+    _emit_progress(progress, "inventory_started", total=len(rows))
+    _emit_progress(progress, "annex_membership_started", total=len(annex_keys))
+    proven_annex_keys = _annex_keys_present(dest, annex_keys, target_uuid=target_uuid)
+    _emit_progress(
+        progress,
+        "annex_membership_completed",
+        completed=len(proven_annex_keys),
+        total=len(annex_keys),
+    )
     present, missing = [], []
     claimed = set()
-    for repo_id, rfilename, annex_key, relpath in con.execute(
-            "SELECT repo_id, rfilename, annex_key, repo_id || '/' || stored_relpath "
-            "FROM archived WHERE drive_label=?", [label]).fetchall():
+    for repo_id, rfilename, annex_key, relpath in rows:
         claimed.add(relpath)
-        proven = (_annex_key_present(dest, annex_key, target_uuid=target_uuid) if annex_key
+        proven = (annex_key in proven_annex_keys if annex_key
                   else (dest / relpath).exists())
         (present if proven else missing).append((repo_id, rfilename))
     debris, extra = [], []
+    scanned = 0
+    _emit_progress(progress, "filesystem_scan_started")
     for path in _walk_files(dest):
+        scanned += 1
         rel = path.relative_to(dest).as_posix()
         if _is_debris(rel):
             debris.append(rel)
         elif rel not in claimed:
             extra.append(rel)
+        if scanned % _FILE_PROGRESS_INTERVAL == 0:
+            _emit_progress(progress, "filesystem_scan_progress", completed=scanned)
+    _emit_progress(progress, "filesystem_scan_completed", completed=scanned)
     return Inventory(present, missing, debris, extra)
 
 
-def _require_complete_inventory(con, label: str, dest) -> Inventory:
-    inv = _inventory(con, label, dest)
+def _require_complete_inventory(
+    con,
+    label: str,
+    dest,
+    *,
+    progress: ProgressCallback | None = None,
+) -> Inventory:
+    inv = _inventory(con, label, dest, progress=progress)
     if inv.missing:                                      # an unproved catalogued copy leaves it dirty
         raise dm.DriveMutationRefused("DRIVE_RECONCILIATION_REQUIRED", drive=label, missing=len(inv.missing))
     return inv
@@ -208,7 +279,8 @@ def _stable_identity_matches(ev: _LiveEvidence, persisted_fs, persisted_annex) -
 
 
 def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_drift: bool = False,
-                    blocking: bool = True) -> Reconciliation:
+                    blocking: bool = True,
+                    progress: ProgressCallback | None = None) -> Reconciliation:
     """Bootstrap / refresh / epoch-transition / recover one drive under the controller + drive fences,
     committing identity evidence + generation + anchor + authority atomically. See the module docstring
     for the full contract; raises a typed ``dm.DriveMutationRefused`` for every fail-closed path."""
@@ -235,7 +307,7 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
             with drive_fence.hold_drives_sorted(keyed, blocking=blocking):
                 dest = register.archive_path(con, label)
                 return _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now,
-                                          accept_drift, transition)
+                                          accept_drift, transition, progress)
     except drive_fence.FenceUnavailable as exc:
         raise dm.DriveMutationRefused("DRIVE_FENCE_UNAVAILABLE", **exc.evidence) from exc
 
@@ -250,9 +322,22 @@ def _final_observation(con, label: str, ev: _LiveEvidence) -> _LiveEvidence:
     return final
 
 
-def _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now, accept_drift, transition):
+def _decide_and_commit(
+    con,
+    label,
+    dest,
+    p_epoch,
+    p_gen,
+    p_fp,
+    p_cap,
+    ev,
+    now,
+    accept_drift,
+    transition,
+    progress,
+):
     if p_fp is None:                                     # (A) bootstrap: establish identity + first anchor
-        _require_complete_inventory(con, label, dest)
+        _require_complete_inventory(con, label, dest, progress=progress)
         final = _final_observation(con, label, ev)
         obs = final.observation()
 
@@ -268,7 +353,7 @@ def _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now, a
         return Reconciliation("bootstrapped", p_epoch, dm._immediate(con, _body), final.free)
 
     if transition:                                       # (D) capacity-epoch transition: reset the namespace
-        _require_complete_inventory(con, label, dest)
+        _require_complete_inventory(con, label, dest, progress=progress)
         final = _final_observation(con, label, ev)
         obs = final.observation()
         new_epoch = p_epoch + 1
@@ -286,7 +371,7 @@ def _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now, a
 
     if p_gen == 0:
         # Identity known but never dirty-advanced (generation 0 has no anchor namespace): open gen 1.
-        _require_complete_inventory(con, label, dest)
+        _require_complete_inventory(con, label, dest, progress=progress)
         final = _final_observation(con, label, ev)
         obs = final.observation()
 
@@ -305,7 +390,7 @@ def _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now, a
                             [label, p_epoch, p_gen]).fetchone()
         if owner is not None and owner[0] is not None:
             raise dm.DriveMutationRefused("DRIVE_RECOVERY_SESSION_ACTIVE", drive=label)
-        _require_complete_inventory(con, label, dest)
+        _require_complete_inventory(con, label, dest, progress=progress)
         final = _final_observation(con, label, ev)
         dm.publish_clean_anchor(con, label, p_epoch, p_gen, final.observation(), now)
         return Reconciliation("recovered", p_epoch, p_gen, final.free)
@@ -317,7 +402,7 @@ def _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now, a
     drifted = abs(ev.free - last_free) > free_drift_tolerance_v1(ev.alloc_unit)
     if drifted and not accept_drift:
         raise dm.DriveMutationRefused("DRIVE_FREE_DRIFT", drive=label, anchored=last_free, observed=ev.free)
-    _require_complete_inventory(con, label, dest)
+    _require_complete_inventory(con, label, dest, progress=progress)
     final = _final_observation(con, label, ev)
     obs = final.observation()
     op = "accept-drift" if drifted else "reconcile"

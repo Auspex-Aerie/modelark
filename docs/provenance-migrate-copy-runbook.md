@@ -805,19 +805,27 @@ is `ok`, foreign-key violations are zero, approval remains null, Fill is idle, c
 remain `316/79/104/212/1/396`, and the unknown-evidence target set is now exactly `drive-03` through
 `drive-06`.
 
-The walkthrough exposed two bounded issues without invalidating either reconciliation:
+The walkthrough exposed two bounded issues without invalidating either reconciliation. They are now
+remediated in the post-`e6af755` source candidate, pending the application-only live replacement:
 
-1. Passive portal inventory correlates only stored and observed hardware serial. Drive #0 has no
-   migrated stored serial, while Drive #1's USB enclosure reports bridge serial `5652314B56344C4B`
-   instead of stored disk serial `VR1KV4LK`. The UI therefore presents both proven mounted archives
-   as registered-but-unobserved plus unregistered observations. Onboarding still refuses because the
-   filesystem/annex UUIDs collide, so this is misleading presentation rather than an identity bypass.
-   The architectural fix is one shared observation resolver that prioritizes exact filesystem plus
-   annex identity, treats serial as supporting evidence, and exposes bridge mismatch explicitly.
-2. Full bootstrap inventory performs a separate `git annex whereis --key` subprocess per catalogued
-   row and then walks the complete archive tree without progress reporting. It remained fenced and
-   fail-closed, but took minutes for each populated drive. Batch annex membership and bounded
-   progress reporting should replace the N+1 opaque operator wait before public migration readiness.
+1. Passive inventory now enriches each disk with read-only mounted topology and routes correlation
+   through one central resolver. An exact unique filesystem/annex UUID pair is authoritative; serial
+   is supporting/fallback evidence only. A bridge mismatch is visible but never written back, and a
+   complete conflicting pair cannot fall back to a matching serial. Contracts reproduce both live
+   shapes: Drive #0's absent stored serial and Drive #1's `VR1KV4LK` → `5652314B56344C4B` bridge
+   discrepancy.
+2. Full bootstrap inventory now runs one `git annex whereis --all --in <target-uuid>` query, intersects
+   its result with the catalogued key set, and fails every annex claim closed if that command fails.
+   The worktree walk prunes `.git` before descent, so it never traverses `.git/annex/objects` merely
+   to ignore the results. Bounded CLI milestones cover claims, target-UUID membership, and worktree
+   scanning. Missing-copy refusal, extra/debris reporting, controller/drive fences, and the fresh
+   final observation are unchanged. The real Drive #0 map returned 2,131 target keys from the new
+   read-only query in about half a second.
+
+Expected-red commit `92ced97` failed all seven initial contract points. The implementation plus CLI
+and browser additions pass 80 focused contracts, 950 non-E2E tests with five known deprecation
+warnings, Ruff, JavaScript syntax, and the standalone portal E2E. Packaging and the application-only
+swap remain the next gate; no drive or catalog mutation occurred during this remediation.
 
 ## Current stop point
 
@@ -831,28 +839,26 @@ publication leftovers remain retained and matched. No data rollback was required
 
 Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. Record and remediate the central attached-identity presentation defect before declaring the
-   migration experience user-ready. Reuse one stable resolver across inventory and onboarding;
-   never update a stored serial or bind identity merely because a bridge reports a different value.
-2. Record and disposition the N+1/opaque full-inventory cost. Optimization must preserve the exact
-   per-key target-UUID proof, missing-copy refusal, extra/debris report, held fences, and fresh final
-   observation; do not trade correctness for speed.
-3. Attach and mount one remaining active drive at a time—never lost `drive-02`—using its normal
+1. Build and smoke the immutable candidate, then perform an application-only replacement against the
+   exact existing schema-v7 data/config/state paths. Prove planner revision `5`, null approval,
+   disabled startup, idle Fill, and canonical planning output are unchanged; prove the Drives view
+   now maps mounted Drive #0/#1 by stable identity and reports Drive #1's bridge serial explicitly.
+2. Attach and mount one remaining active drive at a time—never lost `drive-02`—using its normal
    operating-system procedure. First perform read-only filesystem/annex identity qualification;
    attached device names and serial observations alone are not registration or reconciliation
    authority.
-4. Reconcile only the proven matching registered identity. Assert `--dedicated` only for storage
+3. Reconcile only the proven matching registered identity. Assert `--dedicated` only for storage
    whose exclusivity policy is actually dedicated-local; shared/NAS/unfenceable storage must not be
    promoted by convenience. Preserve each response and require exactly one revision increment per
    successful bootstrap.
-5. Continue until the remaining failure labels `drive-03`, `drive-04`, `drive-05`, and `drive-06`
+4. Continue until the remaining failure labels `drive-03`, `drive-04`, `drive-05`, and `drive-06`
    have either valid identity-bound evidence or an explicit lifecycle/eligibility decision. Do not
    manufacture evidence for unavailable media.
-6. Recompute capacity only through the central planner after each accepted reconciliation. Legacy
+5. Recompute capacity only through the central planner after each accepted reconciliation. Legacy
    `capacity_bytes` and `free_bytes` remain diagnostic until their identity-bound gate passes.
-7. Do not approve a proposal or start Fill until the migrated live preview is feasible,
+6. Do not approve a proposal or start Fill until the migrated live preview is feasible,
    cross-surface identical, explicitly reviewed, and approved through the normal fenced workflow.
-8. Before public distribution, assign the schema-v7 release a package version distinct from the
+7. Before public distribution, assign the schema-v7 release a package version distinct from the
    released 0.2.0 source version (DEF-040); development package strings are not a safe migration gate.
 
 Publication staging hardlinks and every failed/refused capsule remain retained evidence under

@@ -8,9 +8,10 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from modelark import drive_bootstrap, drive_lifecycle
+from modelark import cli, drive_bootstrap, drive_lifecycle
 from modelark.core import db
 from modelark.web import disk_api
 
@@ -200,6 +201,7 @@ def test_inventory_queries_target_annex_uuid_once_and_fails_missing_key_closed(t
     assert command[:5] == ["git", "-C", str(dest), "annex", "whereis"]
     assert "--all" in command and "--in" in command and "ANNEX-00" in command
     assert all("--key" not in str(part) for part in command)
+    assert not hasattr(drive_bootstrap, "_annex_key_present")
     con.close()
 
 
@@ -232,6 +234,37 @@ def test_inventory_progress_is_phase_bounded_and_git_tree_is_pruned(tmp_path):
     assert "repo/extra.bin" in inventory.extra
     assert all("must-not-scan" not in item for item in inventory.extra)
     con.close()
+
+
+def test_drive_reconcile_cli_prints_progress_before_final_result(capsys):
+    connection = mock.Mock()
+
+    def reconcile(_con, label, **kwargs):
+        assert label == "drive-00"
+        progress = kwargs["progress"]
+        progress(drive_bootstrap.ReconciliationProgress("inventory_started", total=2))
+        progress(drive_bootstrap.ReconciliationProgress("annex_membership_started", total=2))
+        progress(drive_bootstrap.ReconciliationProgress(
+            "annex_membership_completed", completed=2, total=2
+        ))
+        progress(drive_bootstrap.ReconciliationProgress("filesystem_scan_started"))
+        progress(drive_bootstrap.ReconciliationProgress(
+            "filesystem_scan_completed", completed=17
+        ))
+        return drive_bootstrap.Reconciliation("bootstrapped", 1, 1, 900)
+
+    args = SimpleNamespace(label="drive-00", dedicated=True, accept_drift=False)
+    with mock.patch.object(cli.db, "connect", return_value=connection), \
+            mock.patch.object(drive_bootstrap, "reconcile_drive", side_effect=reconcile):
+        cli.cmd_drive_reconcile(args)
+
+    output = capsys.readouterr()
+    assert "inventory started (2 catalogued claims)" in output.err
+    assert "checking 2 annex keys in one target-UUID query" in output.err
+    assert "annex membership complete (2/2 keys proven)" in output.err
+    assert "archive worktree scan complete (17 files)" in output.err
+    assert "drive-00: bootstrapped  epoch=1 generation=1  free=900" in output.out
+    connection.close.assert_called_once_with()
 
 
 def test_drive_ui_explains_storage_identity_and_serial_discrepancy():

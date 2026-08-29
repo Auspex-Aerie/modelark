@@ -94,64 +94,134 @@ def observe_registered(
     con,
     devices: Iterable[Mapping[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
-    """Map passive hardware inventory to registered identities by unique exact serial only.
+    """Map passive hardware inventory to registered identities without mutating either side.
 
-    The mapping is deliberately read-only.  Unmatched devices are reported as unregistered and
-    never inherit a label, lifecycle, plan membership, or archived facts.
+    An exact, unique filesystem/annex UUID pair is authoritative.  Serial is supporting evidence
+    and a fallback only while no complete stable pair is observable.  A complete conflicting pair
+    can therefore never be overridden by a coincidentally matching disk or USB-bridge serial.
+    Unmatched devices never inherit a label, lifecycle, plan membership, or archived facts.
     """
     observed = [dict(item) for item in devices]
+
+    def _value(value: Any) -> str:
+        cleaned = str(value or "").strip()
+        return "" if cleaned == "—" else cleaned
+
+    def _pairs(item: Mapping[str, Any]) -> set[tuple[str, str]]:
+        return {
+            (fs_uuid, annex_uuid)
+            for identity in item.get("storage_identities") or []
+            if (fs_uuid := _value(identity.get("fs_uuid")))
+            and (annex_uuid := _value(identity.get("annex_uuid")))
+        }
+
+    device_pairs = {id(item): _pairs(item) for item in observed}
+    by_pair: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for item in observed:
+        for pair in device_pairs[id(item)]:
+            by_pair.setdefault(pair, []).append(item)
     by_serial: dict[str, list[dict[str, Any]]] = {}
     for item in observed:
-        serial = str(item.get("serial") or "").strip()
-        if serial and serial != "—":
+        serial = _value(item.get("serial"))
+        if serial:
             by_serial.setdefault(serial, []).append(item)
 
     registered_rows = con.execute(
         "SELECT drive_label,lifecycle,eligibility,identity_epoch,identity_fingerprint,"
-        "serial,hw_model,capacity_bytes,last_seen FROM drives ORDER BY drive_label"
+        "serial,hw_model,capacity_bytes,last_seen,fs_uuid,annex_uuid "
+        "FROM drives ORDER BY drive_label"
     ).fetchall()
     registered_serials: dict[str, int] = {}
+    registered_pairs: dict[tuple[str, str], int] = {}
     for row in registered_rows:
-        serial = str(row[5] or "").strip()
-        if serial and serial != "—":
+        serial = _value(row[5])
+        if serial:
             registered_serials[serial] = registered_serials.get(serial, 0) + 1
+        pair = (_value(row[9]), _value(row[10]))
+        if all(pair):
+            registered_pairs[pair] = registered_pairs.get(pair, 0) + 1
     registered: list[dict[str, Any]] = []
     matched_device_ids: set[int] = set()
+    conflict_labels: dict[int, set[str]] = {}
     for row in registered_rows:
         drive = dict(zip(
             (
                 "drive_label", "lifecycle", "eligibility", "identity_epoch",
                 "identity_fingerprint", "serial", "hw_model", "capacity_bytes", "last_seen",
+                "fs_uuid", "annex_uuid",
             ),
             row,
         ))
-        serial = str(drive.get("serial") or "").strip()
-        matches = by_serial.get(serial, []) if serial and serial != "—" else []
-        if registered_serials.get(serial, 0) > 1:
-            observation = "ambiguous_serial"
-            device = None
-            matched_device_ids.update(id(item) for item in matches)
-        elif len(matches) == 1:
-            observation = "attached_exact_serial"
-            device = matches[0]
+        serial = _value(drive.get("serial"))
+        pair = (_value(drive.get("fs_uuid")), _value(drive.get("annex_uuid")))
+        stable_matches = by_pair.get(pair, []) if all(pair) else []
+        device = None
+        serial_observation = None
+        if all(pair) and (registered_pairs.get(pair, 0) > 1 or len(stable_matches) > 1):
+            observation = "ambiguous_storage_identity"
+            matched_device_ids.update(id(item) for item in stable_matches)
+        elif all(pair) and len(stable_matches) == 1:
+            observation = "attached_exact_storage_identity"
+            device = stable_matches[0]
             matched_device_ids.add(id(device))
-        elif len(matches) > 1:
-            observation = "ambiguous_serial"
-            device = None
-            matched_device_ids.update(id(item) for item in matches)
-        elif serial:
-            observation = "not_attached"
-            device = None
+            observed_serial = _value(device.get("serial"))
+            if serial and observed_serial == serial:
+                serial_observation = "exact_supporting"
+            elif serial and observed_serial:
+                serial_observation = "mismatch_supporting_only"
+            elif serial:
+                serial_observation = "registered_only"
+            elif observed_serial:
+                serial_observation = "observed_without_registered_serial"
+            else:
+                serial_observation = "unreported"
         else:
-            observation = "identity_unproven"
-            device = None
-        registered.append({**drive, "observation": observation, "device": device})
+            serial_matches = by_serial.get(serial, []) if serial else []
+            conflicting = [
+                item for item in serial_matches
+                if device_pairs[id(item)] and pair not in device_pairs[id(item)]
+            ] if all(pair) else []
+            if conflicting:
+                observation = "stable_identity_conflict"
+                for item in conflicting:
+                    conflict_labels.setdefault(id(item), set()).add(str(drive["drive_label"]))
+            elif registered_serials.get(serial, 0) > 1:
+                observation = "ambiguous_serial"
+                matched_device_ids.update(id(item) for item in serial_matches)
+            else:
+                usable_serial_matches = [
+                    item for item in serial_matches
+                    if id(item) not in matched_device_ids
+                    and (not all(pair) or not device_pairs[id(item)])
+                ]
+                if len(usable_serial_matches) == 1:
+                    observation = "attached_exact_serial"
+                    device = usable_serial_matches[0]
+                    matched_device_ids.add(id(device))
+                elif len(usable_serial_matches) > 1:
+                    observation = "ambiguous_serial"
+                    matched_device_ids.update(id(item) for item in usable_serial_matches)
+                elif serial:
+                    observation = "not_attached"
+                else:
+                    observation = "identity_unproven"
+        result = {**drive, "observation": observation, "device": device}
+        if serial_observation is not None:
+            result["serial_observation"] = serial_observation
+        registered.append(result)
 
-    unregistered = [
-        {**item, "observation": "unregistered", "action_taken": False}
-        for item in observed
-        if id(item) not in matched_device_ids
-    ]
+    unregistered = []
+    for item in observed:
+        if id(item) in matched_device_ids:
+            continue
+        conflicts = sorted(conflict_labels.get(id(item), set()))
+        extra = ({"registered_labels": conflicts} if conflicts else {})
+        unregistered.append({
+            **item,
+            "observation": "identity_conflict" if conflicts else "unregistered",
+            "action_taken": False,
+            **extra,
+        })
     return {"registered": registered, "unregistered": unregistered}
 
 

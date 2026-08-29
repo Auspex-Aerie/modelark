@@ -7,8 +7,11 @@
   let onboardingPreview = null;
 
   const OBS = {
+    attached_exact_storage_identity: ["attached", "ok", "Exact filesystem and annex identity observed."],
     attached_exact_serial: ["attached", "ok", "Exact registered serial observed."],
     not_attached: ["not attached", "watch", "Not observed now. This means offline or missing only."],
+    stable_identity_conflict: ["identity conflict", "watch", "A matching serial reported a different filesystem or annex identity."],
+    ambiguous_storage_identity: ["ambiguous", "watch", "The same storage identity was observed or registered more than once."],
     ambiguous_serial: ["ambiguous", "watch", "More than one attached device reports this serial."],
     identity_unproven: ["identity unproven", "unknown", "No stored serial can prove attachment."],
     inventory_unavailable: ["inventory unavailable", "unknown", "Attached inventory could not be read."],
@@ -21,6 +24,11 @@
     const device = item.device
       ? `<br>observed ${esc(item.device.dev || "device")} · ${esc(item.device.model || "unknown model")} · ${esc(item.device.size || "?")}`
       : "";
+    const serialNote = item.serial_observation === "mismatch_supporting_only"
+      ? `<div class="disknote">Observed serial ${esc(item.device && item.device.serial || "unreported")} differs from the stored serial. The exact filesystem + annex identity wins; ModelArk did not rewrite either identity.</div>`
+      : item.serial_observation === "observed_without_registered_serial"
+        ? `<div class="disknote">No serial was stored. The exact filesystem + annex identity proves this attachment; the observed serial remains supporting evidence only.</div>`
+        : "";
     const review = item.lifecycle === "active" && item.observation === "not_attached"
       ? `<div class="driveacts"><button class="driveproblem" data-drive-index="${index}">Uh oh — review this drive</button></div>`
       : "";
@@ -32,19 +40,24 @@
       <div class="attrs">
         <div class="k">Observation</div><div class="v">${esc(obs[2])}</div>
         <div class="k">Stored serial</div><div class="v">${esc(item.serial || "unrecorded")}</div>
-      </div>${review}
+      </div>${serialNote}${review}
     </div>`;
   }
 
   function unregisteredCard(item, index) {
+    const conflict = item.observation === "identity_conflict";
+    const labels = (item.registered_labels || []).join(", ");
+    const note = conflict
+      ? `This serial resembles ${esc(labels || "a registered drive")}, but its filesystem + annex identity conflicts. Nothing was rebound; review the physical device and registered identity.`
+      : `No action taken. This hardware has no ModelArk label, role, plan membership, capacity authority, or inherited residency history.`;
+    const action = conflict ? "" : `<div class="driveacts"><button class="driveonboard" data-drive-index="${index}">Review onboarding</button></div>`;
     return `<div class="drive unknown">
-      <span class="pill unknown">unregistered</span>
+      <span class="pill unknown">${conflict ? "identity conflict" : "unregistered"}</span>
       <h3>${esc(item.dev || "attached device")}</h3>
       <div class="sub">${esc(item.model || "unknown model")} · ${esc(item.size || "?")} · ${esc(item.bus || "?")}<br>
         serial ${esc(item.serial || "unreported")}</div>
-      <div class="disknote">No action taken. This hardware has no ModelArk label, role, plan
-        membership, capacity authority, or inherited residency history.</div>
-      <div class="driveacts"><button class="driveonboard" data-drive-index="${index}">Review onboarding</button></div>
+      <div class="disknote">${note}</div>
+      ${action}
     </div>`;
   }
 

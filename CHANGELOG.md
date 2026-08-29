@@ -13,6 +13,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 - Preview-bound replacement-drive registration now shows the service identity, required write
   authority, exact attended permission commands when blocked, and ModelArk's temporary-to-final
   archive directory transition before any storage or catalog mutation.
+- Drive reconciliation now emits bounded annex-membership and filesystem-scan progress.
 
 ### Changed
 
@@ -23,6 +24,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
   documented backup-first provenance migration once; fresh installs require no action.
 - Provenance publication preserves and validates the optional `library.json` git-annex map locator in
   the new data directory, preventing a custom archive map from silently falling back to the default.
+- Passive attached-drive identity now prefers the exact filesystem/annex UUID pair; serial is
+  supporting/fallback evidence and bridge discrepancies are shown without rewriting the catalog.
 
 ### Fixed
 
@@ -33,6 +36,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 - A mounted, empty filesystem is no longer considered registration-ready unless the running
   service account can traverse and write its root; the physical preparation helper repeats that
   check before creating the hidden git-annex staging directory.
+- Full drive reconciliation no longer launches one `git annex whereis` process per archived row or
+  descends into `.git/annex/objects`; one target-UUID membership query and a pruned worktree walk
+  preserve the same missing-copy refusal and fresh-anchor boundary.
 
 ## 0.2.0 - 2026-07-20
 

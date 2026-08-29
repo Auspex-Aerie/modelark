@@ -487,14 +487,30 @@ def _drive_loss_flow(pg) -> None:
         "inventory_available": True,
         "observation_authority": "advisory_only",
         "message": "Attached inventory is observation only.",
-        "registered": [{
-            "drive_label": "drive-02", "lifecycle": "active", "eligibility": "enabled",
-            "identity_epoch": 3, "identity_fingerprint": "b" * 64,
-            "serial": "FAILED-SERIAL", "hw_model": "old disk",
-            "capacity_bytes": 4_000_000_000_000, "last_seen": "2026-08-01",
-            "observation": "not_attached", "device": None,
-            "plans": [{"plan_id": "ark", "is_active": True}],
-        }],
+        "registered": [
+            {
+                "drive_label": "drive-01", "lifecycle": "active", "eligibility": "enabled",
+                "identity_epoch": 1, "identity_fingerprint": "a" * 64,
+                "serial": "DISK-SERIAL", "hw_model": "archive disk",
+                "capacity_bytes": 8_000_000_000_000, "last_seen": "2026-08-28",
+                "fs_uuid": "FS-01", "annex_uuid": "ANNEX-01",
+                "observation": "attached_exact_storage_identity",
+                "serial_observation": "mismatch_supporting_only",
+                "device": {
+                    "dev": "/dev/mock-bridge", "size": "7.3T", "model": "USB bridge",
+                    "serial": "BRIDGE-SERIAL", "bus": "usb", "spinning": True,
+                },
+                "plans": [{"plan_id": "ark", "is_active": True}],
+            },
+            {
+                "drive_label": "drive-02", "lifecycle": "active", "eligibility": "enabled",
+                "identity_epoch": 3, "identity_fingerprint": "b" * 64,
+                "serial": "FAILED-SERIAL", "hw_model": "old disk",
+                "capacity_bytes": 4_000_000_000_000, "last_seen": "2026-08-01",
+                "observation": "not_attached", "device": None,
+                "plans": [{"plan_id": "ark", "is_active": True}],
+            },
+        ],
         "unregistered": [{
             "dev": "/dev/mock-seagate", "size": "7.3T", "model": "Seagate 8TB",
             "serial": "NEW-SEAGATE", "bus": "usb", "spinning": True,
@@ -611,6 +627,8 @@ def _drive_loss_flow(pg) -> None:
     pg.click("button[data-view='disk']")
     pg.wait_for_selector(".driveproblem")
     text = pg.inner_text("#driveBody")
+    assert "drive-01" in text and "filesystem and annex identity" in text.lower()
+    assert "BRIDGE-SERIAL" in text and "did not rewrite either identity" in text
     assert "drive-02" in text and "not attached" in text.lower()
     assert "Seagate 8TB" in text and "unregistered" in text.lower()
     assert smart_requests == [], "opening Drives must not run SMART"

@@ -168,6 +168,27 @@ and do not create these directories manually:
 The hidden directory is the recoverable preparation area. The final archive namespace appears only
 through ModelArk's atomic promotion during the separately confirmed registration action.
 
+## Drive identity and reconciliation
+
+The passive Drives view enriches an attached disk with read-only mounted-volume topology. An exact,
+unique filesystem UUID + annex UUID pair maps it to the registered identity even when an iSCSI layer
+has no stored hardware serial or a USB bridge reports its own serial. ModelArk displays that
+discrepancy and leaves the registered serial untouched. If a complete observed pair conflicts with
+the registered pair, serial cannot override it and no identity is rebound.
+
+After migration or new registration, establish capacity evidence explicitly for storage that is
+actually dedicated to the supported ModelArk writer:
+
+```bash
+modelark drive reconcile drive-NN --dedicated
+```
+
+The command now prints bounded inventory milestones. It queries the git-annex location log once for
+all keys recorded on the exact target annex UUID, treats a command failure or absent key as missing,
+and scans only the archive worktree—not `.git/annex/objects`—for extras/debris. Reconciliation remains
+under the controller and drive fences and publishes only from a fresh final identity/capacity
+observation. Do not use `--dedicated` for shared or otherwise unfenceable storage.
+
 ## SMART access
 
 The deployer never edits sudoers. If the Disk Health view should read SMART data, grant only the

@@ -172,7 +172,9 @@ authentication exists.
 - **Plans** — create or recall an archive set (its own drive fleet, budget, and capacity mode);
   you pick an active plan per session before the other tabs unlock.
 - **Catalog** — browse/curate the set within a size budget; filters, bulk select, finalize.
-- **Disk Health** — SMART for attached drives (vet a volume before it holds archives).
+- **Drives / Disk Health** — passive registered-drive identity plus separately requested SMART for
+  attached drives. A mounted archive is correlated by its exact filesystem UUID + annex UUID;
+  hardware serial remains supporting evidence and a USB-bridge mismatch never rewrites identity.
 - **Library** — what's actually archived and where, from the durable record (works offline).
 - **Fill** — the librarian's placement plan as a live run surface: **Start/Stop**, a "now
   fetching" panel (per-shard phase, throughput, ZipNN ratio, 24 h-cap gauge), a queue, and
@@ -361,6 +363,7 @@ modelark library plan                        # review the placement plan
 modelark library plan --apply                # run the fill from the CLI (stop the portal worker first)
 modelark restore --repo org/model --dest ./recovered  # verified restore to ./recovered/org/model
 modelark repair-hashes --repo org/model      # dry-run legacy restore-evidence audit
+modelark drive reconcile drive-01 --dedicated # identity/capacity anchor for dedicated storage
 modelark export                              # dump JSONL for git
 ```
 The fill runs either from the **Fill tab's Start button** (worker inside the running portal) or
@@ -368,6 +371,12 @@ from `library plan --apply`. SQLite/WAL allows concurrent readers, but do not ru
 fill controllers against the same plan; stop the portal worker before starting the CLI fill.
 Disk Health needs SMART access — grant passwordless sudo for `smartctl` (see **Manual setup**); don't run
 the portal as root.
+
+Use `drive reconcile --dedicated` only when the archive storage is in fact exclusive to ModelArk's
+supported writer. Reconciliation holds the controller/drive fences, proves every catalogued annex
+claim against the exact target annex UUID in one query, prunes Git metadata from its report-only
+worktree scan, refuses missing claims, and prints bounded progress before publishing a fresh anchor.
+Shared or unfenceable storage must not be promoted to dedicated authority for convenience.
 
 Formatting during registration is deliberately two-step and Linux-only. First review a real safety
 preflight, then repeat the exact device path as destructive confirmation:

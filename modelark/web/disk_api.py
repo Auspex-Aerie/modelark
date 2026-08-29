@@ -72,21 +72,40 @@ def _lsblk() -> list[dict]:
 
 
 def attached_inventory() -> dict:
-    """Return passive block-device inventory without running SMART or mutating hardware."""
+    """Return passive block-device inventory without running SMART or mutating hardware.
+
+    Mounted filesystem and annex identifiers are included so every consumer can use the same
+    stable-identity evidence instead of inventing a serial-only correlation rule.  The topology
+    probe remains read-only; an unmounted device naturally has no observable annex identity.
+    """
     available, disks = _lsblk_result()
+    devices = []
+    for item in disks:
+        dev = "/dev/" + item["NAME"]
+        topology = registration_topology(dev)
+        storage_identities = [
+            {
+                "dev": node.get("dev"),
+                "fs_uuid": node.get("fs_uuid"),
+                "annex_uuid": node.get("annex_uuid"),
+                "mountpoints": list(node.get("mountpoints") or []),
+                "archive_state": node.get("archive_state"),
+            }
+            for node in topology.get("nodes") or []
+            if node.get("fstype")
+        ]
+        devices.append({
+            "dev": dev,
+            "size": item.get("SIZE"),
+            "model": item.get("MODEL") or None,
+            "serial": item.get("SERIAL") or None,
+            "bus": item.get("TRAN") or None,
+            "spinning": item.get("ROTA") == "1",
+            "storage_identities": storage_identities,
+        })
     return {
         "available": available,
-        "devices": [
-            {
-                "dev": "/dev/" + item["NAME"],
-                "size": item.get("SIZE"),
-                "model": item.get("MODEL") or None,
-                "serial": item.get("SERIAL") or None,
-                "bus": item.get("TRAN") or None,
-                "spinning": item.get("ROTA") == "1",
-            }
-            for item in disks
-        ],
+        "devices": devices,
     }
 
 

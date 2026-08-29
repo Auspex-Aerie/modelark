@@ -274,16 +274,15 @@ def test_drive_bootstrap_reconcile_drive_with_real_live_evidence_type(tmp_path):
     inv = Inventory(present=[], missing=[], debris=[], extra=[])
     with mock.patch.object(dbp, "_live_evidence", return_value=live):
         with mock.patch.object(dbp, "_inventory", return_value=inv):
-            with mock.patch.object(dbp, "_annex_key_present", return_value=True):
-                with mock.patch.object(dbp, "_final_observation", return_value=live):
-                    before = _rev(con)
-                    try:
-                        dbp.reconcile_drive(con, "d0", now="2026-01-01T00:00:00", dedicated=True)
-                    except TypeError:
-                        dbp.reconcile_drive(
-                            con, "d0", now="2026-01-01T00:00:00", dedicated=True,
-                            accept_drift=False)
-                    after = _rev(con)
+            with mock.patch.object(dbp, "_final_observation", return_value=live):
+                before = _rev(con)
+                try:
+                    dbp.reconcile_drive(con, "d0", now="2026-01-01T00:00:00", dedicated=True)
+                except TypeError:
+                    dbp.reconcile_drive(
+                        con, "d0", now="2026-01-01T00:00:00", dedicated=True,
+                        accept_drift=False)
+                after = _rev(con)
     assert after == before + 1, (
         f"reconcile_drive must bump when it mutates; {before}→{after}")
     con.close()

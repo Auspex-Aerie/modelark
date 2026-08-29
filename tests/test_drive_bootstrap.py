@@ -27,7 +27,7 @@ Encoded invariants:
 
 Proposed production API (the names are the contract to confirm): modelark/drive_bootstrap.py exposing
 reconcile_drive(con, label, *, now, dedicated=False, accept_drift=False), the seams _live_evidence /
-_inventory / _annex_key_present, free_drift_tolerance_v1, and a single `drive reconcile <label>` command.
+_inventory / _annex_keys_present, free_drift_tolerance_v1, and a single `drive reconcile <label>` command.
 
 Disposable temp trees / synthetic drives / mocked physical seams only — never a live catalog/drive.
 """
@@ -357,7 +357,7 @@ def test_inventory_proves_raw_and_annex_content_present(tmp_path):
         (dest / "repo").mkdir(parents=True)
         (dest / "repo" / "raw.bin").write_bytes(b"bytes")
         bs = _bootstrap()
-        with mock.patch.object(bs, "_annex_key_present", return_value=True):
+        with mock.patch.object(bs, "_annex_keys_present", return_value={"KEY-1"}):
             inv = bs._inventory(con, "drive-00", dest)
         assert set(inv.present) >= {("repo", "raw.bin"), ("repo", "blob.gguf")}, inv.present
         assert not inv.missing and inv.complete, inv.missing
@@ -375,7 +375,7 @@ def test_inventory_fails_closed_on_missing_or_unprovable_claim(tmp_path):
         dest = tmp_path / "mount"
         (dest / "repo").mkdir(parents=True)
         bs = _bootstrap()
-        with mock.patch.object(bs, "_annex_key_present", return_value=False):
+        with mock.patch.object(bs, "_annex_keys_present", return_value=set()):
             inv = bs._inventory(con, "drive-00", dest)
         assert ("repo", "gone.bin") in inv.missing and ("repo", "blob.gguf") in inv.missing, inv.missing
         assert not inv.complete, "an unprovable/absent archived claim must never count as present"
@@ -396,7 +396,7 @@ def test_inventory_reports_extra_and_debris_without_deleting(tmp_path):
         extra = dest / "repo" / "mystery.bin"
         extra.write_bytes(b"unexplained")
         bs = _bootstrap()
-        with mock.patch.object(bs, "_annex_key_present", return_value=True):
+        with mock.patch.object(bs, "_annex_keys_present", return_value=set()):
             inv = bs._inventory(con, "drive-00", dest)
         assert ("repo", "raw.bin") in inv.present and inv.complete, inv
         assert any("incomplete" in str(d) for d in inv.debris), inv.debris

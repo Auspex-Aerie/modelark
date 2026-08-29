@@ -69,6 +69,18 @@ Most users should not need to re-download models or recreate their cart. They ma
 - resolve any typed provenance, policy, identity, or capacity blocker shown by the planner; and
 - approve a newly generated proposal before Fill can run.
 
+The Drives view uses the mounted archive's filesystem UUID + git-annex UUID as the stable registered
+identity. USB enclosures and iSCSI layers sometimes omit or replace a disk's hardware serial; when
+the stable pair matches, ModelArk shows the observed serial discrepancy as supporting evidence only
+and does not update the registered serial. A complete but different stable pair is an identity
+conflict and cannot fall back to a matching serial.
+
+Populated-drive reconciliation can take long enough to notice, but it should no longer be opaque.
+The CLI reports catalog-claim, annex-membership, and worktree-scan milestones. It proves recorded
+target-annex-UUID membership for all catalogued annex keys in one query and excludes `.git` metadata
+from the filesystem walk. A failed query or missing claim still refuses the clean anchor; the
+controller/drive fences and fresh final observation are unchanged.
+
 Existing archive drives do not need a blanket ownership rewrite merely because the catalog was
 migrated. The permission gate applies when registering a filesystem whose archive namespace is
 absent. ModelArk shows the service identity, current owner/mode, and its planned hidden staging plus

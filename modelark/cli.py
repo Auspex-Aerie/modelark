@@ -555,11 +555,46 @@ def cmd_drive_reconcile(args):
     from datetime import datetime, timezone
 
     from modelark import drive_bootstrap
+
+    def progress(event):
+        if event.phase == "inventory_started":
+            print(
+                f"{args.label}: inventory started ({event.total or 0} catalogued claims)",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif event.phase == "annex_membership_started":
+            print(
+                f"{args.label}: checking {event.total or 0} annex keys in one target-UUID query",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif event.phase == "annex_membership_completed":
+            print(
+                f"{args.label}: annex membership complete "
+                f"({event.completed}/{event.total or 0} keys proven)",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif event.phase == "filesystem_scan_started":
+            print(
+                f"{args.label}: scanning archive worktree (Git metadata pruned)",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif event.phase in {"filesystem_scan_progress", "filesystem_scan_completed"}:
+            suffix = "complete" if event.phase.endswith("completed") else "in progress"
+            print(
+                f"{args.label}: archive worktree scan {suffix} ({event.completed} files)",
+                file=sys.stderr,
+                flush=True,
+            )
+
     con = db.connect()
     try:
         r = drive_bootstrap.reconcile_drive(
             con, args.label, now=datetime.now(timezone.utc).isoformat(sep=" "),
-            dedicated=args.dedicated, accept_drift=args.accept_drift)
+            dedicated=args.dedicated, accept_drift=args.accept_drift, progress=progress)
     except drive_bootstrap.DriveMutationRefused as exc:
         # an offline/failed/unproven drive is an EXPECTED reconciliation outcome, not a crash: surface the
         # typed refusal as a clean operator message (the restore/hash-repair convention), not a traceback.
