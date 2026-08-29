@@ -3,11 +3,11 @@
 Status: **copied-runtime acceptance, Drive #2 loss rehearsal and live declaration,
 replacement-media read-only qualification, immutable candidate freeze, stopped side-by-side live
 cutover, attended diagnostic-only application swaps, and preview-bound replacement onboarding
-passed, including recovery from a cleanly refused archive-parent permission check; stopped before
-the operator registration retry on 2026-08-28**. LocalModelArk now runs schema v7 from permission-
-guidance candidate commit `e92c354`; the service remains disabled for login startup and was started
-without Fill resume. The preserved schema-v2 runtime, cutover capsule, and earlier application
-candidates remain rollback/evidence points. Live registration, capacity-evidence restoration,
+passed, including recovery from a cleanly refused archive-parent permission check and one successful
+new-identity registration; stopped before capacity reconciliation on 2026-08-28**. LocalModelArk now
+runs schema v7 from permission-guidance candidate commit `e92c354`; the service remains disabled for
+login startup and was started without Fill resume. The preserved schema-v2 runtime, cutover capsule,
+and earlier application candidates remain rollback/evidence points. Capacity-evidence restoration,
 proposal approval, and Fill remain separate gates.
 
 Use this runbook to exercise the provenance migration from the current development branch against a
@@ -717,46 +717,64 @@ and proposal preview are byte-identical; normalized Library and Fill output are 
 is still `1`; and the replacement filesystem still contains only `lost+found`. No registration,
 reconciliation, approval, archive-byte placement, or Fill state mutation occurred.
 
+## Executed live new-identity registration — 2026-08-28
+
+After a fresh read-only preview proved the corrected mount writable, the operator submitted the exact
+phrase `REGISTER NEW drive-07` once. The portal returned: `drive-07` registered as a new identity at
+revision `2`, joined plan `ark`, capacity evidence unknown, reconciliation not run, and zero inherited
+lost-drive facts.
+
+The immediate read-only acceptance proved:
+
+- `drive-07` is active/enabled, primary, attached by exact serial `ZR16L100`, and joined to `ark`
+  exactly once;
+- filesystem UUID `7db95a52-88f9-48c5-a39e-7a24f2d36588` and annex UUID
+  `6e40f9b6-7cf4-45e8-a32e-f87e6cc30885` agree across the catalog and promoted archive;
+- the local receipt binds state `prepared`, label `drive-07`, that filesystem UUID, serial
+  `ZR16L100`, and volume `/dev/sda1`;
+- the mount contains `modelark/` plus the pre-existing `lost+found`, with no hidden registration
+  staging sibling left behind;
+- `drive-07` has zero archived and replica rows, identity fingerprint and filesystem-capacity
+  authority remain unset, write authority remains `unknown`, and health is `unchecked` as designed;
+- Drive #2 remains lost/excluded with its separate identity and historical `ark` membership;
+- catalog integrity is `ok`, foreign-key violations are zero, active approval is null, planner
+  revision is exactly `2`, and Fill is idle; and
+- a repeated onboarding preview refuses with `DRIVE_ONBOARDING_IDENTITY_COLLISION` naming only
+  registered `drive-07`.
+
+Canonical planning remains fail-closed on `CAPACITY_EVIDENCE_UNKNOWN`: `drive-07` has zero usable and
+planned bytes until reconciliation, appears once among the seven active unknown-evidence targets,
+and lost `drive-02` appears zero times. Compatibility totals remain `316/79/104/212/1/396`.
+
 ## Current stop point
 
 The immutable migration candidate, stopped side-by-side live cutover, attended Drive #2 loss
 declaration, diagnostic-only application correction, read-only replacement preview, and disposable
-new-identity registration rehearsal are complete under DEC-072 through DEC-078. The portal is active
-on `e92c354` against the same migrated v7 runtime at revision `1`; the service remains disabled and
-Fill resume is absent. The old v2 runtime, prior service units/candidates, immutable seed, migration
-work, rollback bundle, and publication leftovers remain retained and matched. No data rollback was
-required.
+new-identity registration rehearsal plus live registration are complete under DEC-072 through
+DEC-078. The portal is active on `e92c354` against the same migrated v7 runtime at revision `2`; the
+service remains disabled and Fill resume is absent. The old v2 runtime, prior service units/candidates,
+immutable seed, migration work, rollback bundle, and publication leftovers remain retained and
+matched. No data rollback was required.
 
 Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. Operator apply gate: hard-refresh **Drives**, select **Review onboarding** on `/dev/sda`, and
-   confirm serial `ZR16L100`, mounted ext4 `/dev/sda1`, filesystem UUID
-   `7db95a52-88f9-48c5-a39e-7a24f2d36588`, absent archive namespace, proposed label `drive-07`,
-   active plan `ark`, registration-parent writable, the ModelArk-managed temporary/final directory
-   layout, and Drive #2 as separate/non-inherited history. The permission-command block should now
-   be hidden because the corrected mount is writable. Type the displayed exact phrase only after
-   this evidence agrees. Do not format, unmount, run SMART, or manually create directories merely to
-   clear this gate.
-2. After the registration response, stop and preserve evidence before reconciliation. The expected
-   result is one new `drive-07` identity and `ark` membership at revision `2`, no inherited Drive #2
-   facts, stale approval invalidated, and `CAPACITY_EVIDENCE_UNKNOWN` with zero executable capacity.
-   A network-unknown result requires refresh and inspection, not an automatic retry. DEF-029 remains
-   active for same-identity refresh and dependency-aware retirement.
-3. Restore identity-bound capacity evidence for eligible candidate drives through the existing
-   central reconciliation operation. Until then,
+1. Restore identity-bound capacity evidence for `drive-07` through the existing central
+   reconciliation operation, with the operator explicitly asserting dedicated-local authority for
+   this dedicated replacement filesystem. Until then,
    `CAPACITY_EVIDENCE_UNKNOWN` correctly permits no executable proposal.
-4. Recompute capacity only through the central planner after the new drive has its own registration,
-   plan membership, and current admission evidence. The currently attached Seagate contributes zero
-   capacity while it remains merely observed and unregistered.
-5. Do not approve a proposal or start Fill until the migrated live preview is feasible,
+2. Preserve the reconciliation response and stop again. Expect a new identity fingerprint,
+   filesystem-capacity evidence, `dedicated_local` write authority, generation `1`, a clean anchor,
+   and one further planner-revision increment. Do not use `--accept-drift` for this first bootstrap.
+3. Recompute capacity only through the central planner after the new drive has current admission
+   evidence. Registration-time `capacity_bytes` and `free_bytes` remain diagnostic until that gate.
+4. Do not approve a proposal or start Fill until the migrated live preview is feasible,
    cross-surface identical, explicitly reviewed, and approved through the normal fenced workflow.
-6. Before public distribution, assign the schema-v7 release a package version distinct from the
+5. Before public distribution, assign the schema-v7 release a package version distinct from the
    released 0.2.0 source version (DEF-040); development package strings are not a safe migration gate.
 
 Publication staging hardlinks and every failed/refused capsule remain retained evidence under
-DEC-063/DEF-038. No provenance repair, `adopt_current`, Fill, drive format, successful or partial
-live registration, capacity reconciliation, replacement label reuse, proposal approval, PR merge,
-or rollback-artifact deletion has occurred.
+DEC-063/DEF-038. No provenance repair, `adopt_current`, Fill, drive format, capacity reconciliation,
+replacement label reuse, proposal approval, PR merge, or rollback-artifact deletion has occurred.
 
 When adding later application-swap evidence to a retained cutover capsule, always use an explicit
 generation-prefixed destination filename and refuse an existing destination; never group-copy a

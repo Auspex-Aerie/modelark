@@ -1806,7 +1806,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEC-076: Make new-identity registration preview-bound and recoverable across disk, annex, and catalog state
 - `id`: DEC-076
 - `date`: 2026-08-28
-- `status`: accepted; live operator apply pending
+- `status`: accepted; live operator apply completed 2026-08-28
 - `triggered_by`: DEC-075 mounted preview gate, DEF-029 replacement requirement, and the operator-confirmed mounted Seagate observation
 - `decision`: Add one dedicated new-label registration action bound to the exact read-only preview: planner revision, device path, hardware serial, volume path, filesystem UUID, mount, archive-namespace state, proposed label, active plan, role, and exact typed phrase. Re-prove mounted source, filesystem type/UUID, serial, and non-system-disk status immediately before writing. Prepare a hidden git-annex clone with an exact local receipt and atomically promote it to `<mount>/modelark`; adopt or resume only that exact receipt, never an arbitrary annex or occupied namespace. Commit the new drive row, one active-plan membership, stale-approval invalidation, and one planner-revision bump through the central graph-write boundary. Leave identity fingerprint, filesystem capacity authority, and clean anchor unset until separately authorized reconciliation.
 - `rationale`: Filesystem initialization, git-annex map configuration, SQLite registration, plan membership, and approval invalidation cannot share one storage-engine transaction. A durable preparation receipt plus exact replay recognition makes the partial-success case inspectable and idempotent without deleting unknown files or blindly inheriting an unregistered annex. Keeping capacity authority unknown prevents nominal disk size or successful initialization from becoming executable placement evidence. The new-label-only path solves the current replacement while preserving Drive #2 as separate history and avoiding the unresolved same-identity refresh/retirement cases.
@@ -1818,7 +1818,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEC-077: Expose every registration binding at the operator gate
 - `id`: DEC-077
 - `date`: 2026-08-28
-- `status`: accepted; live operator apply pending
+- `status`: accepted; live operator apply completed 2026-08-28
 - `triggered_by`: DEC-076 final operator-gate review
 - `decision`: The new-identity confirmation modal must show every storage/planning fact that the backend binds before mutation, including archive namespace state and path, new-identity role, active plan, and the requirement for separate post-registration reconciliation. Keep the exact typed phrase and dedicated registration endpoint unchanged; presentation must not introduce an alternate planner, inferred capacity, or implicit follow-on action.
 - `rationale`: A backend binding is not a meaningful attended control if the operator cannot see the bound facts. The earlier modal showed device and filesystem identity but left active-plan and archive-state details implicit, making the confirmation less reviewable than the mutation contract it guarded.
@@ -1844,7 +1844,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEC-078: Make archive-parent write authority an attended onboarding prerequisite
 - `id`: DEC-078
 - `date`: 2026-08-28
-- `status`: accepted; live operator retry pending
+- `status`: accepted; live operator retry completed 2026-08-28
 - `triggered_by`: INC-047 and operator direction to detect the condition and present exact commands plus directory structure
 - `decision`: A mounted filesystem with an absent archive namespace is registration-ready only when the effective ModelArk service identity has write and execute access to its root. The read-only topology records service UID/GID/user/group and parent UID/GID/mode/access; onboarding emits `ARCHIVE_PARENT_NOT_WRITABLE` or `ARCHIVE_PARENT_WRITE_UNPROVEN` and withholds confirmation when that authority is absent. For a proven non-writable dedicated filesystem, the backend—not browser code—renders argv-safe `chown`, `chmod 0750`, and `stat` commands bound to the observed mount and service identity, plus non-recursive/dedicated-only guardrails. The preview always shows ModelArk's hidden `.modelark.registering-<label>/` preparation path and atomically promoted `modelark/` final path and states that the operator creates neither. The physical preparation helper repeats the access check immediately before clone. ModelArk never invokes sudo or mutates permissions.
 - `rationale`: Mount state, namespace emptiness, host ownership policy, archive initialization, catalog registration, and capacity admission are separate authorities. Promoting service write access into the same preview-bound contract makes the next action explicit and stale-safe without teaching the frontend an alternate policy or widening ModelArk into host provisioning. Root ownership is appropriate only for a dedicated archive filesystem; recursive ownership changes and shared-mount assumptions are rejected.
