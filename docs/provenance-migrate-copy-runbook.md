@@ -3,11 +3,12 @@
 Status: **copied-runtime acceptance, Drive #2 loss rehearsal and live declaration,
 replacement-media read-only qualification, immutable candidate freeze, stopped side-by-side live
 cutover, attended diagnostic-only application swap, and read-only replacement-onboarding preview
-passed on 2026-08-28**. LocalModelArk now runs schema v7 from candidate commit `e71e234`; the service
-remains disabled for login startup and
-was started without Fill resume. The preserved schema-v2 runtime, cutover capsule, and earlier
-application candidates remain rollback/evidence points. Replacement onboarding, capacity-evidence
-restoration, proposal approval, and Fill remain separate gates.
+passed, followed by a confirmation-bound new-identity registration candidate deployed and stopped
+before operator apply on 2026-08-28**. LocalModelArk now runs schema v7 from candidate commit
+`c190ce3`; the service remains disabled for login startup and was started without Fill resume. The
+preserved schema-v2 runtime, cutover capsule, and earlier application candidates remain
+rollback/evidence points. Live registration, capacity-evidence restoration, proposal approval, and
+Fill remain separate gates.
 
 Use this runbook to exercise the provenance migration from the current development branch against a
 production-shaped, disposable copy of the existing LocalModelArk deployment. The process is designed
@@ -626,29 +627,65 @@ one non-system ext4 volume `/dev/sda1`, filesystem UUID
 blocker/next action is `MOUNT_REQUIRED` / `mount_volume`. Drive #2 remains lost/excluded at identity
 epoch 1 with zero archived and replica rows, and the preview inherits none of its facts.
 
+## Prepared confirmation-bound new-identity registration — 2026-08-28
+
+DEC-076 implements the separately gated mutation anticipated by DEC-075. Candidate `c190ce3`
+requires the exact phrase `REGISTER NEW drive-07` and rebinds planner revision, device path, serial,
+volume path, filesystem UUID, mount, absent/prepared archive namespace, proposed label, active plan,
+and role before any write. Immediately before initialization it again proves the mounted source,
+filesystem type and UUID, hardware serial, and non-system-disk relationship. It runs no SMART,
+format, or mount operation.
+
+The physical phase clones the existing git-annex map into a hidden sibling, initializes a new annex
+identity, writes an exact local preparation receipt, and atomically promotes it to
+`<mount>/modelark`. Unknown content or an annex without that receipt is preserved and refused. If
+map synchronization succeeds but the catalog transaction fails, the receipt makes the exact retry
+recoverable without blind adoption or cleanup guessing. The catalog phase runs under the central
+graph-write boundary: it inserts `drive-07`, adds it once to the active `ark` plan, invalidates stale
+approval, and advances planner revision once. It does not inherit Drive #2 facts, reconcile the new
+identity, publish capacity authority, approve a proposal, or start Fill.
+
+The expected-red Gate-2 contract first failed in 11 places. Final focused lifecycle/writer/security
+result: 57 passed; the full suite passed 938 tests with five known deprecation warnings; Ruff was
+clean; standalone portal E2E passed the exact mounted-preview/confirmation/result flow; and the
+installed wheel passed resource smoke plus a production-shaped disposable rehearsal. The rehearsal
+used a consistent copy of the migrated catalog and real temporary git-annex repositories: revision
+`1` became `2`, `drive-07` joined `ark` exactly once, lost/excluded `drive-02` remained unchanged,
+the new drive retained `unknown` evidence and zero executable capacity, a replay was a proven no-op,
+integrity was `ok`, and foreign keys were clean. The wheel SHA-256 is
+`561410e260386d60f9b48edd154548f5d1071f016d29cb9a72f9c29e3eaeabcd`.
+
+The application-only live swap to `c190ce3` retained schema-v7 data/config/state paths, planner
+revision `1`, disabled startup, `resume=False`, idle Fill, and byte-identical drive inventory and
+proposal preview. Normalized Library planning output is identical before/after: non-feasible on
+`CAPACITY_EVIDENCE_UNKNOWN`, zero planned bytes, seven catalog drives, no `drive-07`, and totals
+`316/79/104/212/1/396`. The mounted Seagate preview is ready with zero blockers and an absent archive
+namespace, but no registration request has run.
+
 ## Current stop point
 
 The immutable migration candidate, stopped side-by-side live cutover, attended Drive #2 loss
-declaration, diagnostic-only application correction, and read-only replacement preview are complete
-under DEC-072 through DEC-075. The portal is active on `e71e234` against the same migrated v7 runtime
-at revision `1`; the service
-remains disabled and Fill resume is absent. The old v2 runtime, prior service units/candidates,
-immutable seed, migration work, rollback bundle, and publication leftovers remain retained and
-matched. No data rollback was required.
+declaration, diagnostic-only application correction, read-only replacement preview, and disposable
+new-identity registration rehearsal are complete under DEC-072 through DEC-076. The portal is active
+on `c190ce3` against the same migrated v7 runtime at revision `1`; the service remains disabled and
+Fill resume is absent. The old v2 runtime, prior service units/candidates, immutable seed, migration
+work, rollback bundle, and publication leftovers remain retained and matched. No data rollback was
+required.
 
 Stop here before any automatic work. The remaining gates are operational and evidence-bound:
 
-1. Operator visual gate: open **Drives**, select **Review onboarding** on `/dev/sda`, and confirm that
-   the modal shows serial `ZR16L100`, filesystem `/dev/sda1`, the UUID above, proposed label
-   `drive-07`, Drive #2 as separate/non-inherited history, and “not mounted.” Close the preview; it has
-   no apply action. Then mount `/dev/sda1` through the operator's normal OS procedure and refresh the
-   same preview. Do not format it or run SMART merely to clear this gate.
-2. After the mounted preview is reviewed, implement/rehearse and separately authorize the actual
-   new-label registration mutation. It must rebind the preview identity, refuse label/UUID/annex
-   collisions and occupied namespaces, initialize only the empty `modelark` namespace, add
-   `drive-07` to the active plan once, invalidate stale approval through the graph-write boundary,
-   and stop before reconciliation. DEF-029 remains active for same-identity refresh and retirement.
-3. Restore identity-bound capacity evidence for eligible candidate drives. Until then,
+1. Operator apply gate: hard-refresh **Drives**, select **Review onboarding** on `/dev/sda`, and
+   confirm serial `ZR16L100`, mounted ext4 `/dev/sda1`, filesystem UUID
+   `7db95a52-88f9-48c5-a39e-7a24f2d36588`, absent archive namespace, proposed label `drive-07`,
+   active plan `ark`, and Drive #2 as separate/non-inherited history. Type the displayed exact phrase
+   only after this evidence agrees. Do not format, unmount, or run SMART merely to clear this gate.
+2. After the registration response, stop and preserve evidence before reconciliation. The expected
+   result is one new `drive-07` identity and `ark` membership at revision `2`, no inherited Drive #2
+   facts, stale approval invalidated, and `CAPACITY_EVIDENCE_UNKNOWN` with zero executable capacity.
+   A network-unknown result requires refresh and inspection, not an automatic retry. DEF-029 remains
+   active for same-identity refresh and dependency-aware retirement.
+3. Restore identity-bound capacity evidence for eligible candidate drives through the existing
+   central reconciliation operation. Until then,
    `CAPACITY_EVIDENCE_UNKNOWN` correctly permits no executable proposal.
 4. Recompute capacity only through the central planner after the new drive has its own registration,
    plan membership, and current admission evidence. The currently attached Seagate contributes zero
@@ -659,8 +696,9 @@ Stop here before any automatic work. The remaining gates are operational and evi
    released 0.2.0 source version (DEF-040); development package strings are not a safe migration gate.
 
 Publication staging hardlinks and every failed/refused capsule remain retained evidence under
-DEC-063/DEF-038. No provenance repair, `adopt_current`, Fill, drive format/mount/register, replacement
-label reuse, proposal approval, PR merge, or rollback-artifact deletion has occurred.
+DEC-063/DEF-038. No provenance repair, `adopt_current`, Fill, drive format, live registration,
+capacity reconciliation, replacement label reuse, proposal approval, PR merge, or rollback-artifact
+deletion has occurred.
 
 When adding later application-swap evidence to a retained cutover capsule, always use an explicit
 generation-prefixed destination filename and refuse an existing destination; never group-copy a
