@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -157,9 +158,25 @@ def registration_topology(dev: str) -> dict:
         archive_state = "unmounted"
         annex_uuid = None
         registration_receipt = None
+        archive_parent_writable = None
+        archive_parent_uid = None
+        archive_parent_gid = None
+        archive_parent_mode = None
         if len(mountpoints) == 1:
-            archive = Path(mountpoints[0]) / "modelark"
+            mountpoint = Path(mountpoints[0])
+            archive = mountpoint / "modelark"
             archive_path = str(archive)
+            try:
+                mount_stat = mountpoint.stat()
+            except OSError:
+                pass
+            else:
+                archive_parent_writable = os.access(
+                    str(mountpoint), os.W_OK | os.X_OK
+                )
+                archive_parent_uid = mount_stat.st_uid
+                archive_parent_gid = mount_stat.st_gid
+                archive_parent_mode = f"{stat.S_IMODE(mount_stat.st_mode):04o}"
             if archive.is_symlink():
                 archive_state = "unsafe_path"
             elif not archive.exists():
@@ -194,6 +211,10 @@ def registration_topology(dev: str) -> dict:
             "archive_state": archive_state,
             "annex_uuid": annex_uuid,
             "registration_receipt": registration_receipt,
+            "archive_parent_writable": archive_parent_writable,
+            "archive_parent_uid": archive_parent_uid,
+            "archive_parent_gid": archive_parent_gid,
+            "archive_parent_mode": archive_parent_mode,
         })
 
     root_source = None

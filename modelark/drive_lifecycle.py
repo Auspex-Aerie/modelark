@@ -266,6 +266,14 @@ def onboarding_preview(
         }
         if raw_volume.get("registration_receipt") is not None:
             volume["registration_receipt"] = raw_volume.get("registration_receipt")
+        for key in (
+            "archive_parent_writable",
+            "archive_parent_uid",
+            "archive_parent_gid",
+            "archive_parent_mode",
+        ):
+            if key in raw_volume:
+                volume[key] = raw_volume.get(key)
         if not volume["fs_uuid"]:
             blockers.append("FILESYSTEM_IDENTITY_UNPROVEN")
         fs_collisions = [
@@ -312,6 +320,10 @@ def onboarding_preview(
             blockers.append("ANNEX_IDENTITY_PRESENT")
         elif volume["archive_state"] != "absent":
             blockers.append("ARCHIVE_NAMESPACE_OCCUPIED")
+        elif volume.get("archive_parent_writable") is False:
+            blockers.append("ARCHIVE_PARENT_NOT_WRITABLE")
+        elif volume.get("archive_parent_writable") is not True:
+            blockers.append("ARCHIVE_PARENT_WRITE_UNPROVEN")
 
     if "SYSTEM_DEVICE" in blockers:
         next_action = "refuse_system_device"
@@ -331,6 +343,10 @@ def onboarding_preview(
         next_action = "review_existing_annex"
     elif "PREPARED_REGISTRATION_MISMATCH" in blockers:
         next_action = "review_prepared_registration"
+    elif "ARCHIVE_PARENT_NOT_WRITABLE" in blockers:
+        next_action = "prepare_archive_permissions"
+    elif "ARCHIVE_PARENT_WRITE_UNPROVEN" in blockers:
+        next_action = "prove_archive_permissions"
     elif "MOUNT_REQUIRED" in blockers:
         next_action = "mount_volume"
     else:

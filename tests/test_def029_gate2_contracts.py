@@ -153,6 +153,7 @@ def test_topology_reports_service_write_access_without_writing(tmp_path):
 
     mount = tmp_path / "mounted-volume"
     mount.mkdir()
+    mount.chmod(0o755)
     lsblk = {
         "blockdevices": [{
             "path": "/dev/mock-seagate",

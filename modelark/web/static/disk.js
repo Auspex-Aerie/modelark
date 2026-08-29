@@ -101,7 +101,10 @@
       ? "filesystem " + volume.dev + " · " + volume.fstype + " · UUID " +
         (volume.fs_uuid || "unproven") + " · " + (volume.mounted ? "mounted" : "not mounted") +
         " · archive namespace " + (volume.archive_state || "unproven") +
-        (volume.archive_path ? " at " + volume.archive_path : "")
+        (volume.archive_path ? " at " + volume.archive_path : "") +
+        (volume.mounted ? " · registration parent " +
+          (volume.archive_parent_writable === true ? "writable" :
+            volume.archive_parent_writable === false ? "not writable" : "write access unproven") : "")
       : "No single registration filesystem was identified.";
     const registration = onboardingPreview.registration_preview || {};
     $("driveOnboardingPlan").textContent =
@@ -125,6 +128,8 @@
       review_archive_namespace: "The modelark path is already occupied and was not recognized as a safe fresh target.",
       review_existing_annex: "An existing git-annex identity is present. Use the recovery/re-registration workflow; do not treat it as fresh media.",
       review_prepared_registration: "A prepared registration receipt does not match this review. Stop and inspect it; do not adopt it automatically.",
+      prepare_archive_permissions: "Registration is blocked: ModelArk cannot create its staging and archive directories at the mounted filesystem root. Prepare dedicated ownership or an ACL outside ModelArk, then refresh; ModelArk will not use sudo or loosen permissions automatically.",
+      prove_archive_permissions: "Registration is blocked because write access to the mounted filesystem root could not be proven. Inspect the mount and permissions outside ModelArk, then refresh.",
       refresh_topology: "Topology could not be proven; refresh attached inventory.",
     };
     $("driveOnboardingNext").textContent = actions[onboardingPreview.next_action] ||

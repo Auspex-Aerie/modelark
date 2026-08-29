@@ -469,6 +469,13 @@ def prepare_new_identity_archive(
     if root_source and _parent_disk(volume_dev) == _parent_disk(root_source.split("[", 1)[0]):
         raise RuntimeError(
             f"refusing registration because {volume_dev} now backs the running system")
+    if not (archive.exists() or archive.is_symlink()) and not os.access(
+        str(mount_path), os.W_OK | os.X_OK
+    ):
+        raise RuntimeError(
+            f"archive parent {mount_path} is not writable by the ModelArk process; "
+            "prepare dedicated mount ownership or an ACL outside ModelArk, then refresh "
+            "the onboarding preview")
 
     lib = Path(library).expanduser().resolve() if library else library_root().resolve()
     if not _is_annex(lib):
