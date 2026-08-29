@@ -631,10 +631,11 @@ def _drive_loss_flow(pg) -> None:
     onboarding["preview"]["volume"].update({
         "mountpoints": ["/media/test/seagate"], "mounted": True,
         "archive_path": "/media/test/seagate/modelark", "archive_state": "absent",
+        "archive_parent_writable": False,
     })
     onboarding["preview"].update({
-        "blockers": [], "ready_for_registration": True,
-        "next_action": "review_registration",
+        "blockers": ["ARCHIVE_PARENT_NOT_WRITABLE"], "ready_for_registration": False,
+        "next_action": "prepare_archive_permissions",
     })
     onboarding["preview"]["registration_binding"].update({
         "mount": "/media/test/seagate",
@@ -643,6 +644,17 @@ def _drive_loss_flow(pg) -> None:
     })
     onboarding["preview"]["registration_preview"].update({
         "mount": "/media/test/seagate",
+    })
+    pg.click(".driveonboard")
+    pg.wait_for_selector("#driveOnboardingModal", state="visible")
+    assert "cannot create" in pg.inner_text("#driveOnboardingNext").lower()
+    assert pg.locator("#driveOnboardingApply").is_hidden()
+    pg.click("#driveOnboardingClose")
+
+    onboarding["preview"]["volume"]["archive_parent_writable"] = True
+    onboarding["preview"].update({
+        "blockers": [], "ready_for_registration": True,
+        "next_action": "review_registration",
     })
     pg.click(".driveonboard")
     pg.wait_for_selector("#driveOnboardingModal", state="visible")

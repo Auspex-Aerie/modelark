@@ -7,6 +7,8 @@ and reconciliation remain later operations.
 """
 from __future__ import annotations
 
+import json
+import os
 import sqlite3
 import subprocess
 from unittest import mock
@@ -67,7 +69,10 @@ def _device(**overrides) -> dict:
     return value
 
 
-def _mounted_topology(*, archive_state="absent", annex_uuid=None, receipt=None) -> dict:
+def _mounted_topology(
+    *, archive_state="absent", annex_uuid=None, receipt=None,
+    archive_parent_writable=True,
+) -> dict:
     return {
         "available": True,
         "requested_dev": "/dev/mock-seagate",
@@ -92,6 +97,10 @@ def _mounted_topology(*, archive_state="absent", annex_uuid=None, receipt=None) 
                 "archive_state": archive_state,
                 "annex_uuid": annex_uuid,
                 "registration_receipt": receipt,
+                "archive_parent_writable": archive_parent_writable,
+                "archive_parent_uid": 1000,
+                "archive_parent_gid": 1000,
+                "archive_parent_mode": "0755",
             },
         ],
     }
@@ -125,6 +134,62 @@ def test_mounted_preview_exposes_exact_registration_binding_and_confirmation():
         "role": "primary",
     }
     con.close()
+
+
+def test_mounted_preview_blocks_unwritable_archive_parent_before_registration():
+    con = _catalog()
+
+    preview = _preview(con, _mounted_topology(archive_parent_writable=False))
+
+    assert preview["ready_for_registration"] is False
+    assert preview["next_action"] == "prepare_archive_permissions"
+    assert "ARCHIVE_PARENT_NOT_WRITABLE" in preview["blockers"]
+    assert preview["volume"]["archive_parent_writable"] is False
+    con.close()
+
+
+def test_topology_reports_service_write_access_without_writing(tmp_path):
+    from modelark.web import disk_api
+
+    mount = tmp_path / "mounted-volume"
+    mount.mkdir()
+    lsblk = {
+        "blockdevices": [{
+            "path": "/dev/mock-seagate",
+            "type": "disk",
+            "size": 8_000_000_000_000,
+            "fstype": None,
+            "uuid": None,
+            "mountpoints": [None],
+            "children": [{
+                "path": "/dev/mock-seagate1",
+                "type": "part",
+                "size": 7_999_000_000_000,
+                "fstype": "ext4",
+                "uuid": "NEW-FS-UUID",
+                "mountpoints": [str(mount)],
+            }],
+        }],
+    }
+
+    def probe(args, **_kwargs):
+        if args[0] == "lsblk":
+            return subprocess.CompletedProcess(args, 0, json.dumps(lsblk), "")
+        if args[:3] == ["findmnt", "-nro", "SOURCE"]:
+            return subprocess.CompletedProcess(args, 0, "/dev/root-system\n", "")
+        return subprocess.CompletedProcess(args, 1, "", "not configured")
+
+    with mock.patch.object(disk_api.subprocess, "run", side_effect=probe), \
+            mock.patch.object(disk_api.os, "access", return_value=False) as access:
+        topology = disk_api.registration_topology("/dev/mock-seagate")
+
+    volume = next(node for node in topology["nodes"] if node["fstype"] == "ext4")
+    mount_stat = os.stat(mount)
+    assert volume["archive_parent_writable"] is False
+    assert volume["archive_parent_uid"] == mount_stat.st_uid
+    assert volume["archive_parent_gid"] == mount_stat.st_gid
+    assert volume["archive_parent_mode"] == "0755"
+    access.assert_called_once_with(str(mount), os.W_OK | os.X_OK)
 
 
 def test_exact_registration_adds_new_identity_once_without_admitting_capacity():
@@ -468,6 +533,45 @@ def test_physical_preparation_rechecks_hardware_serial_before_any_namespace_writ
     assert not (mount / ".modelark.registering-drive-07").exists()
 
 
+def test_physical_preparation_rechecks_mount_writability_before_git_clone(tmp_path):
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    calls = []
+
+    def exact_identity(*args, **_kwargs):
+        calls.append(args)
+        values = {"SOURCE": "/dev/mock-seagate1\n", "FSTYPE": "ext4\n", "UUID": "NEW-FS-UUID\n"}
+        if args == ("findmnt", "-nro", "SOURCE", "/"):
+            return subprocess.CompletedProcess(args, 0, "/dev/root-system\n", "")
+        if args[:2] == ("findmnt", "-nro"):
+            return subprocess.CompletedProcess(args, 0, values[args[2]], "")
+        if args[:3] == ("lsblk", "-nro", "PKNAME"):
+            return subprocess.CompletedProcess(args, 0, "mock-seagate\n", "")
+        if args[:3] == ("lsblk", "-dno", "SERIAL"):
+            return subprocess.CompletedProcess(args, 0, "NEW-SEAGATE\n", "")
+        return subprocess.CompletedProcess(args, 1, "", "not configured")
+
+    with mock.patch.object(register, "_run", side_effect=exact_identity), \
+            mock.patch.object(register.os, "access", return_value=False):
+        with pytest.raises(RuntimeError, match="not writable"):
+            register.prepare_new_identity_archive(
+                volume_dev="/dev/mock-seagate1",
+                mount=str(mount),
+                archive_path=str(mount / "modelark"),
+                label="drive-07",
+                fs_uuid="NEW-FS-UUID",
+                fstype="ext4",
+                serial="NEW-SEAGATE",
+                model="Seagate 8TB",
+                role="primary",
+                library=str(tmp_path / "library"),
+            )
+
+    assert not any(args[:2] == ("git", "clone") for args in calls)
+    assert not (mount / "modelark").exists()
+    assert not (mount / ".modelark.registering-drive-07").exists()
+
+
 def test_registration_ui_requires_exact_phrase_and_calls_only_dedicated_endpoint():
     from pathlib import Path
 
@@ -482,6 +586,7 @@ def test_registration_ui_requires_exact_phrase_and_calls_only_dedicated_endpoint
     assert 'post("/api/drive/register-new"' in script
     assert "archive namespace" in script
     assert "adds_to_active_plan" in script
+    assert "prepare_archive_permissions" in script
     assert "onboardingPreview.confirmation" in script
     assert 'u.path == "/api/drive/register-new"' in server
     assert "Network outcome unknown" in script
