@@ -632,10 +632,41 @@ def _drive_loss_flow(pg) -> None:
         "mountpoints": ["/media/test/seagate"], "mounted": True,
         "archive_path": "/media/test/seagate/modelark", "archive_state": "absent",
         "archive_parent_writable": False,
+        "archive_parent_uid": 0, "archive_parent_gid": 0, "archive_parent_mode": "0755",
+        "service_uid": 1000, "service_gid": 1000,
+        "service_user": "modelark", "service_group": "modelark",
     })
     onboarding["preview"].update({
         "blockers": ["ARCHIVE_PARENT_NOT_WRITABLE"], "ready_for_registration": False,
         "next_action": "prepare_archive_permissions",
+        "permission_remediation": {
+            "policy": "dedicated_mount_owner",
+            "mount": "/media/test/seagate",
+            "current": {"uid": 0, "gid": 0, "mode": "0755", "writable": False},
+            "required": {
+                "service_uid": 1000, "service_gid": 1000,
+                "service_user": "modelark", "service_group": "modelark", "mode": "0750",
+            },
+            "commands": [{
+                "argv": ["sudo", "chown", "--", "modelark:modelark", "/media/test/seagate"],
+                "display": "sudo chown -- modelark:modelark /media/test/seagate",
+                "purpose": "assign only the dedicated filesystem root to ModelArk",
+            }, {
+                "argv": ["sudo", "chmod", "--", "0750", "/media/test/seagate"],
+                "display": "sudo chmod -- 0750 /media/test/seagate",
+                "purpose": "limit the dedicated filesystem root to owner and group access",
+            }, {
+                "argv": ["stat", "-c", "%U:%G %a %n", "--", "/media/test/seagate"],
+                "display": "stat -c '%U:%G %a %n' -- /media/test/seagate",
+                "purpose": "verify ownership and mode before refreshing the preview",
+            }],
+            "guardrails": [
+                "Run only when this filesystem is dedicated to ModelArk.",
+                "Do not use recursive chown or chmod.",
+                "Do not create the staging or final archive directory manually.",
+                "Refresh the read-only preview after the commands; do not retry a stale modal.",
+            ],
+        },
     })
     onboarding["preview"]["registration_binding"].update({
         "mount": "/media/test/seagate",
@@ -644,10 +675,29 @@ def _drive_loss_flow(pg) -> None:
     })
     onboarding["preview"]["registration_preview"].update({
         "mount": "/media/test/seagate",
+        "directory_layout": {
+            "mount": "/media/test/seagate",
+            "temporary_path": "/media/test/seagate/.modelark.registering-drive-07",
+            "final_path": "/media/test/seagate/modelark",
+            "transition": "prepare_hidden_then_atomic_promote",
+            "operator_creates_directories": False,
+            "display": (
+                "/media/test/seagate/\n"
+                "├── .modelark.registering-drive-07/  temporary; ModelArk creates this\n"
+                "└── modelark/  final; atomically promoted from the temporary directory"
+            ),
+        },
     })
     pg.click(".driveonboard")
     pg.wait_for_selector("#driveOnboardingModal", state="visible")
     assert "cannot create" in pg.inner_text("#driveOnboardingNext").lower()
+    assert "you do this now" in pg.inner_text("#driveOnboardingRemediation").lower()
+    assert "sudo chown -- modelark:modelark /media/test/seagate" in pg.inner_text(
+        "#driveOnboardingCommands"
+    )
+    assert "do not use recursive" in pg.inner_text("#driveOnboardingGuardrails").lower()
+    assert ".modelark.registering-drive-07" in pg.inner_text("#driveOnboardingLayout")
+    assert "atomically promoted" in pg.inner_text("#driveOnboardingLayout").lower()
     assert pg.locator("#driveOnboardingApply").is_hidden()
     pg.click("#driveOnboardingClose")
 
@@ -655,6 +705,7 @@ def _drive_loss_flow(pg) -> None:
     onboarding["preview"].update({
         "blockers": [], "ready_for_registration": True,
         "next_action": "review_registration",
+        "permission_remediation": None,
     })
     pg.click(".driveonboard")
     pg.wait_for_selector("#driveOnboardingModal", state="visible")
@@ -662,6 +713,8 @@ def _drive_loss_flow(pg) -> None:
     assert "archive namespace absent" in pg.inner_text("#driveOnboardingVolume").lower()
     assert "active plan ark" in pg.inner_text("#driveOnboardingPlan").lower()
     assert "reconciliation required" in pg.inner_text("#driveOnboardingPlan").lower()
+    assert pg.locator("#driveOnboardingRemediation").is_hidden()
+    assert ".modelark.registering-drive-07" in pg.inner_text("#driveOnboardingLayout")
     assert pg.locator("#driveOnboardingApply").is_disabled()
     pg.fill("#driveOnboardingConfirm", "REGISTER NEW drive-07")
     assert pg.locator("#driveOnboardingApply").is_enabled()

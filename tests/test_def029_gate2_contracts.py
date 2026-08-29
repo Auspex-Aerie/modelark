@@ -101,6 +101,10 @@ def _mounted_topology(
                 "archive_parent_uid": 1000,
                 "archive_parent_gid": 1000,
                 "archive_parent_mode": "0755",
+                "service_uid": 1000,
+                "service_gid": 1000,
+                "service_user": "modelark",
+                "service_group": "modelark",
             },
         ],
     }
@@ -145,6 +149,65 @@ def test_mounted_preview_blocks_unwritable_archive_parent_before_registration():
     assert preview["next_action"] == "prepare_archive_permissions"
     assert "ARCHIVE_PARENT_NOT_WRITABLE" in preview["blockers"]
     assert preview["volume"]["archive_parent_writable"] is False
+    assert preview["permission_remediation"] == {
+        "policy": "dedicated_mount_owner",
+        "mount": "/media/test/seagate",
+        "current": {"uid": 1000, "gid": 1000, "mode": "0755", "writable": False},
+        "required": {
+            "service_uid": 1000,
+            "service_gid": 1000,
+            "service_user": "modelark",
+            "service_group": "modelark",
+            "mode": "0750",
+        },
+        "commands": [
+            {
+                "argv": [
+                    "sudo", "chown", "--", "modelark:modelark", "/media/test/seagate",
+                ],
+                "display": "sudo chown -- modelark:modelark /media/test/seagate",
+                "purpose": "assign only the dedicated filesystem root to ModelArk",
+            },
+            {
+                "argv": ["sudo", "chmod", "--", "0750", "/media/test/seagate"],
+                "display": "sudo chmod -- 0750 /media/test/seagate",
+                "purpose": "limit the dedicated filesystem root to owner and group access",
+            },
+            {
+                "argv": [
+                    "stat", "-c", "%U:%G %a %n", "--", "/media/test/seagate",
+                ],
+                "display": "stat -c '%U:%G %a %n' -- /media/test/seagate",
+                "purpose": "verify ownership and mode before refreshing the preview",
+            },
+        ],
+        "guardrails": [
+            "Run only when this filesystem is dedicated to ModelArk.",
+            "Do not use recursive chown or chmod.",
+            "Do not create the staging or final archive directory manually.",
+            "Refresh the read-only preview after the commands; do not retry a stale modal.",
+        ],
+    }
+    con.close()
+
+
+def test_mounted_preview_explains_exact_directory_transition():
+    con = _catalog()
+
+    layout = _preview(con)["registration_preview"]["directory_layout"]
+
+    assert layout == {
+        "mount": "/media/test/seagate",
+        "temporary_path": "/media/test/seagate/.modelark.registering-drive-07",
+        "final_path": "/media/test/seagate/modelark",
+        "transition": "prepare_hidden_then_atomic_promote",
+        "operator_creates_directories": False,
+        "display": (
+            "/media/test/seagate/\n"
+            "├── .modelark.registering-drive-07/  temporary; ModelArk creates this\n"
+            "└── modelark/  final; atomically promoted from the temporary directory"
+        ),
+    }
     con.close()
 
 
@@ -190,6 +253,10 @@ def test_topology_reports_service_write_access_without_writing(tmp_path):
     assert volume["archive_parent_uid"] == mount_stat.st_uid
     assert volume["archive_parent_gid"] == mount_stat.st_gid
     assert volume["archive_parent_mode"] == "0755"
+    assert volume["service_uid"] == os.geteuid()
+    assert volume["service_gid"] == os.getegid()
+    assert volume["service_user"]
+    assert volume["service_group"]
     access.assert_called_once_with(str(mount), os.W_OK | os.X_OK)
 
 
@@ -584,10 +651,15 @@ def test_registration_ui_requires_exact_phrase_and_calls_only_dedicated_endpoint
     assert 'id="driveOnboardingConfirm"' in html
     assert 'id="driveOnboardingApply"' in html
     assert 'id="driveOnboardingPlan"' in html
+    assert 'id="driveOnboardingRemediation"' in html
+    assert 'id="driveOnboardingCommands"' in html
+    assert 'id="driveOnboardingLayout"' in html
     assert 'post("/api/drive/register-new"' in script
     assert "archive namespace" in script
     assert "adds_to_active_plan" in script
     assert "prepare_archive_permissions" in script
+    assert "permission_remediation" in script
+    assert "directory_layout" in script
     assert "onboardingPreview.confirmation" in script
     assert 'u.path == "/api/drive/register-new"' in server
     assert "Network outcome unknown" in script
