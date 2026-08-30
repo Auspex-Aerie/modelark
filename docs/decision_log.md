@@ -1986,3 +1986,26 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/upgrading.md, CHANGELOG.md, README.md, pyproject.toml, modelark/__init__.py
 - `related`: DEC-072, DEC-082
 - `scope_boundary`: Release identity, documentation, artifact qualification, and local candidate installation only. No Git tag, Git push, package upload, public announcement, schema rewrite, catalog migration, proposal approval, Fill, drive, or archive-byte action is authorized.
+
+### DEC-084: Present ModelArk as an evidence-preserving storage primitive
+- `id`: DEC-084
+- `date`: 2026-08-30
+- `status`: accepted
+- `triggered_by`: Operator direction to make the 0.3.0 release approachable while naming the durable role ModelArk is growing into for later local-model and peer-to-peer work.
+- `decision`: Keep model artifact disaster recovery as the shipped product, but define the reusable core as artifact identity, manifests, placement, copy evidence, resumable movement, and verified materialization. Later local-model systems may request verified usable subsets from that core, and future P2P systems may transport sealed artifact sets without treating transport as usability proof. Do not market Usable Slice or P2P transport as implemented in 0.3.0. Keep the README as a concise product/evidence map; maintain fresh-install, operations, deployment, and migration commands in focused linked guides.
+- `rationale`: Model weights provide a demanding first workload, but coupling the archive to one inference cache would waste the evidence and delivery boundaries already built. Naming the primitive now guides later integration without overstating unfinished transport. Separating operator procedures from the landing page makes both the product story and safety instructions easier to follow and maintain.
+- `impact`: README product positioning and documentation information architecture now expose one approachable entry point, with detailed load/use/migration procedures in `docs/getting-started.md`, `docs/operations.md`, `docs/deployment.md`, and `docs/upgrading.md`. DEC-081 remains the concrete future Usable Slice delivery contract.
+- `docs_updated`: README.md, docs/getting-started.md, docs/operations.md, docs/upgrading.md, docs/legacy-cutover.md, contributing/contributions.md, docs/decision_log.md
+- `related`: DEC-003, DEC-019, DEC-049, DEC-059, DEC-081, DEF-041
+- `scope_boundary`: Product direction and documentation boundary only. No P2P protocol, peer discovery, remote trust model, Usable Slice executor, scratch transfer, archive mutation, proposal approval, Fill, or public package publication is implemented or authorized by this decision.
+
+### DEF-CATALOG-005: Revisit the fast-moving Spark-resident weight set
+- `id`: DEF-CATALOG-005
+- `date`: 2026-08-30
+- `status`: active
+- `triggered_by`: Operator chose the tested revision-9 migration/release path before Spark catalog expansion and noted that the Spark weights are already downloaded while weights and recipes change daily.
+- `observation`: DGXSpark's current `config/inference/weight_catalog.yml` names 24 kept or queued repository IDs. A live ModelArk catalog comparison found only `LiquidAI/LFM2.5-8B-A1B`, already selected; the other 23 are absent. Their current local residency reduces immediate recovery pressure, while their rapid recipe/weight churn makes today's list a poor stable preservation boundary.
+- `deferral`: Do not ingest or select the 23 missing Spark repositories before approving and releasing the feasible revision-9 plan. Preserve the DGXSpark catalog as the current discovery source and treat the Spark set as a later catalog/Usable Slice wave rather than expanding the first Fill.
+- `revisit_when`: Revisit when the first Spark Usable Slice is requested, a stable serving/profile snapshot is deliberately named, current Spark residency is at risk, or a specific changed repository needs ModelArk disaster-recovery coverage—whichever occurs first.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-081, DEC-082, DEC-084, DEF-041, DGXSpark:DEC-059, DGXSpark:DEC-077

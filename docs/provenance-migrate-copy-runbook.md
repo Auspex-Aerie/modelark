@@ -1070,11 +1070,10 @@ and proposal status is `missing`. No proposal was created or approved and no Fil
 DEC-083 also resolves DEF-040: the schema-v7 line is now package version `0.3.0`, distinct from the
 released schema-v2 `0.2.0` line. No tag or public package publication occurred.
 
-Before creating the human-reviewed proposal, settle the intended selection. DGXSpark's current
-`config/inference/weight_catalog.yml` names 24 kept or queued repository IDs checked against the live
-ModelArk catalog. Only `LiquidAI/LFM2.5-8B-A1B` is currently catalogued, and it is already selected;
-the other 23 require explicit discovery/ingest before selection. If those Spark-resident models are
-part of the first Fill, ingest and select them first, allow the canonical replan to advance revision,
-then create and review a fresh proposal. If they are a later catalog/Usable Slice wave, the operator
-may review revision 9 now. Never approve revision 9 and then treat that approval as covering later
-Spark catalog additions; the changed selection must invalidate it.
+The operator chose the tested revision-9 migration/release path before Spark catalog expansion.
+DGXSpark's current `config/inference/weight_catalog.yml` names 24 kept or queued repository IDs
+checked against the live ModelArk catalog. Only `LiquidAI/LFM2.5-8B-A1B` is currently catalogued,
+and it is already selected; the other 23 remain a later catalog/Usable Slice wave under
+DEF-CATALOG-005. They are already resident on the Sparks and their weights/recipes are changing
+daily, so they do not delay revision-9 review. Any later Spark selection change must advance the
+planner revision and invalidate the old approval; revision 9 never covers those additions.

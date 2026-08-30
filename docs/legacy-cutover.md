@@ -17,12 +17,13 @@ raw database/WAL sidecars for rollback evidence, copies `library.json`, migrates
 validates the current schema and foreign keys, and atomically publishes a new data directory. Its
 default mode is read-only inspection; `--execute` requires the exact `MODELARK-STOPPED` assertion.
 
-Current ModelArk catalogs use schema v2. During copied-data migration, the v1
+Current ModelArk catalogs use schema v7. During copied-data migration, the v1
 `plans.provisioning` values map without changing admission policy: `uncompressed` becomes
-`capacity_mode='guaranteed'` and `compressed` becomes `capacity_mode='compression_aware'`. A catalog
-newer than the installed program is refused. Once a copied catalog reaches v2, no legacy ModelDump
-binary may open it: that binary predates the monotonic version guard and can stamp the schema back to
-v1. The untouched source remains the only legacy rollback catalog.
+`capacity_mode='guaranteed'` and `compressed` becomes `capacity_mode='compression_aware'`; the normal
+migration chain then adds lifecycle, provenance, capacity-evidence, proposal, and execution controls.
+A catalog newer than the installed program is refused. Once a copied catalog reaches the current
+schema, no legacy ModelDump binary may open it: that binary predates the monotonic version guard and
+can stamp the schema backward. The untouched source remains the only legacy rollback catalog.
 
 ## Phase 0 — canonical rehearsal (safe now)
 
@@ -93,10 +94,10 @@ source database/WAL files, and copied runtime config. The destination manifest r
 foreign-key checks, source/destination row counts, the bootstrapped active plan, and the published
 catalog hash. The source remains in place and is the rollback authority.
 
-Confirm the destination reports `user_version=2`, has `plans.capacity_mode` and no
-`plans.provisioning` column, and preserves each plan's mapped policy. Do this against the copied
-destination only. Do not open that v2 destination with the stopped legacy executable, even for a
-read-only-looking command.
+Confirm the destination reports `user_version=7`, has `plans.capacity_mode` and no
+`plans.provisioning` column, contains the current provenance/capacity/proposal tables, and preserves
+each plan's mapped policy. Do this against the copied destination only. Do not open that schema-v7
+destination with the stopped legacy executable, even for a read-only-looking command.
 
 **Gate:** any failed integrity check, foreign-key violation, unexpected row-count change, missing
 `library.json`, or surprising annex root stops the cutover. Diagnose from the backup; do not repair the
@@ -173,11 +174,12 @@ Start the canonical portal once, still without auto-resume, and run:
   --config <CONFIG_PATH> --check
 ```
 
-Re-run the Phase 3 checks through the service.
-Then, with the operator watching `journalctl --user -u modelark.service -f`, rerun the deployer with
-the same explicit paths plus `--resume-fill --enable --start` and start the fill.
-Confirm it recognizes completed files, current drive capacity, the active plan, and the next expected
-work item before leaving it unattended.
+Re-run the Phase 3 checks through the service. Keep Fill stopped while drives are reconciled and the
+central plan becomes feasible. In the Fill portal, create and inspect one fresh immutable placement
+proposal, type its exact backend-issued approval phrase, and approve it. Approval must not start
+work. Only then, with the operator watching `journalctl --user -u modelark.service -f`, select
+**Start Fill** as the separate execution action. Confirm it recognizes completed files, current drive
+capacity, the active proposal, and the next expected work item before leaving it unattended.
 
 Acceptance requires all of the following:
 

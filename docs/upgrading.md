@@ -4,6 +4,20 @@ ModelArk upgrades application code normally, but it never silently rewrites an e
 schema is older than the installed release. Existing data is migrated through an explicit,
 backup-first, side-by-side procedure so the old runtime remains a usable rollback point.
 
+## The 0.2.0 → 0.3.0 boundary
+
+ModelArk 0.3.0 must not be started against a 0.2.0 data directory. Install the new release in a
+separate checkout/environment, stop every old writer, capture the complete old runtime, rehearse the
+provenance migration against a disposable copy, and publish schema v7 into a new empty data
+directory. Start the new portal without automatic Fill resume. Reconcile storage evidence, review
+one fresh immutable placement proposal, approve it explicitly, and start Fill only as a later
+operator action.
+
+The reusable commands and stop conditions are in
+[`provenance-live-cutover.md`](provenance-live-cutover.md). The longer
+[`provenance-migrate-copy-runbook.md`](provenance-migrate-copy-runbook.md) is the maintainer evidence
+record behind that public procedure; ordinary upgrades should begin with the live-cutover guide.
+
 ## Do I need to do anything?
 
 | Existing installation | Required action |
@@ -11,7 +25,7 @@ backup-first, side-by-side procedure so the old runtime remains a usable rollbac
 | Fresh install with no catalog | None. The current schema is created on first use. |
 | Existing catalog already at the current schema | Update/redeploy normally. |
 | SQLite catalog at schema v1–v6, including catalogs created by the released ModelArk 0.2.0 | Run the one-time provenance migration before starting the new service. |
-| Legacy checkout with DuckDB or pre-canonical runtime layout | Follow `legacy-cutover.md` first; install the `migration` extra when DuckDB conversion is required. |
+| Legacy checkout with DuckDB or pre-canonical runtime layout | Follow [`legacy-cutover.md`](legacy-cutover.md) first; install the `migration` extra when DuckDB conversion is required. |
 
 If a new ModelArk binary is pointed at an existing pre-v7 catalog, it refuses before changing the
 file and names `modelark-provenance-migrate`. This is expected protection, not catalog corruption.
