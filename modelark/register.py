@@ -36,6 +36,7 @@ _REGISTRATION_RECEIPT_KEYS = {
     "serial": "modelark.registration-serial",
     "volume_dev": "modelark.registration-volume-dev",
 }
+_DEFAULT_GIT_IDENTITY = ("ModelArk", "modelark@localhost.invalid")
 
 
 # ---- subprocess helpers -----------------------------------------------------
@@ -66,6 +67,20 @@ def _git(repo: Path, *args: str, check: bool = True) -> str:
     return _run("git", "-C", str(repo), *args, check=check).stdout.strip()
 
 
+def _pin_repo_identity(repo: Path, *, source: Path | None = None) -> None:
+    """Give ModelArk-managed metadata commits a repository-local identity.
+
+    Git does not copy ``user.name`` or ``user.email`` when cloning a repository.
+    Pin the source repository's effective identity, with a reserved ModelArk
+    fallback, so map and annex metadata do not depend on mutable global config.
+    """
+    identity_source = source or repo
+    name = _git(identity_source, "config", "--get", "user.name", check=False)
+    email = _git(identity_source, "config", "--get", "user.email", check=False)
+    _git(repo, "config", "--local", "user.name", name or _DEFAULT_GIT_IDENTITY[0])
+    _git(repo, "config", "--local", "user.email", email or _DEFAULT_GIT_IDENTITY[1])
+
+
 def _is_annex(repo: Path) -> bool:
     return (repo / ".git").exists() and _run(
         "git", "-C", str(repo), "annex", "version", check=False).returncode == 0
@@ -94,6 +109,7 @@ def ensure_library(path: Path | None = None) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     if not (path / ".git").exists():
         _git(path, "init", "-q")
+    _pin_repo_identity(path)
     _git(path, "annex", "init", "map")
     _git(path, "annex", "numcopies", "1")     # fleet default; irreplaceables bumped selectively
     # Seed an initial commit so drive clones check out a branch cleanly (cloning an
@@ -517,6 +533,7 @@ def prepare_new_identity_archive(
             recovered = True
         else:
             _run("git", "clone", str(lib), str(stage))
+            _pin_repo_identity(stage, source=lib)
             _git(stage, "annex", "init", label)
             for name in ("label", "fs_uuid", "serial", "volume_dev"):
                 _git(

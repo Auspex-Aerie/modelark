@@ -527,6 +527,8 @@ def test_physical_preparation_is_receipted_and_exactly_retryable(tmp_path):
     }
     assert not (mount / ".modelark.registering-drive-07").exists()
     assert register._git(library, "remote", "get-url", "drive-07") == str(mount / "modelark")
+    assert register._git(mount / "modelark", "config", "--local", "user.name") == "ModelArk Test"
+    assert register._git(mount / "modelark", "config", "--local", "user.email") == "modelark@example.invalid"
     smart.assert_not_called()
     mkfs.assert_not_called()
     mount_drive.assert_not_called()

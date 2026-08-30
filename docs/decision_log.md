@@ -2009,3 +2009,17 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `revisit_when`: Revisit when the first Spark Usable Slice is requested, a stable serving/profile snapshot is deliberately named, current Spark residency is at risk, or a specific changed repository needs ModelArk disaster-recovery coverage—whichever occurs first.
 - `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
 - `related`: DEC-081, DEC-082, DEC-084, DEF-041, DGXSpark:DEC-059, DGXSpark:DEC-077
+
+### INC-052: Drive preparation depended on ambient Git identity
+- `id`: INC-052
+- `date`: 2026-08-30
+- `status`: remediated in the 0.3.0 release candidate
+- `triggered_by`: Protected-branch qualification of PR #55 on clean Python 3.10 and 3.12 runners
+- `symptom`: The physical-preparation retry contract failed when `git annex init` attempted its first metadata commit in the newly cloned drive archive. Both runners reported `Author identity unknown`, while the same test passed on a development host with a configured global Git identity.
+- `root_cause`: The central map test repository had a repository-local identity, but Git intentionally does not copy `user.name` or `user.email` into clones. Drive preparation and first-time map creation therefore relied on mutable ambient Git configuration for ModelArk-generated metadata commits.
+- `blast_radius`: First-time library initialization or new-drive preparation on an account without a complete Git identity. The failure occurred before archive promotion, catalog registration, proposal approval, Fill, or byte placement; the hidden staging path remained recoverable under the existing exact receipt rules.
+- `why_not_caught_earlier`: Developer machines carried global Git identities, and the physical-preparation contract configured only the source map repository. It did not assert a local identity on the generated drive archive.
+- `remediation`: Pin a repository-local identity before map `git annex init`; after cloning a drive archive, copy the map's effective identity into local configuration with a reserved ModelArk fallback. The contract now asserts that both identity fields are local to the drive repository, so generated metadata never requires or mutates global Git configuration.
+- `docs_updated`: docs/decision_log.md, modelark/register.py, tests/test_def029_gate2_contracts.py
+- `related`: DEC-006, DEC-076, DEC-078, PR-055
+- `scope_boundary`: Git authorship for ModelArk-managed map and drive metadata only. No global Git configuration, archive identity, registration receipt, drive/catalog record, proposal, Fill, or archive byte is mutated by this remediation.
