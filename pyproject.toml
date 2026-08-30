@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "modelark"
-version = "0.2.0"
+version = "0.3.0"
 description = "Catalog, fetch, and verify open model weights across an offline drive library."
 readme = "README.md"
 license = "Apache-2.0"

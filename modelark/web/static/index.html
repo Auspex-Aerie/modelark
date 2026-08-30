@@ -148,8 +148,16 @@
   <div class="page">
     <h1 class="ph">Library Fill</h1>
     <p class="psub">The librarian's placement plan — where each model lands. Must-have copy&nbsp;#1 on the RAID, copy&nbsp;#2 on a replication drive (the dotted link); bulk consolidated onto the big primaries.</p>
+    <div class="proposal-docket" id="proposalDocket">
+      <div class="proposal-seal">Placement approval</div>
+      <div class="proposal-docket-copy">
+        <div class="proposal-state" id="proposalState" aria-live="polite">Checking approval…</div>
+        <div class="proposal-note">The backend authors one exact placement docket. Approval never starts Fill by itself.</div>
+      </div>
+      <button id="proposalReview" disabled>Review exact placement</button>
+    </div>
     <div class="fillrun" id="fillRun">
-      <button class="primary" id="fillStart">&#9654; Start fill</button>
+      <button class="primary" id="fillStart" disabled>&#9654; Start fill</button>
       <button id="fillStop" hidden>&#9632; Stop</button>
       <span class="fillstatus" id="fillStatus">idle — not running</span>
     </div>
@@ -181,6 +189,62 @@
     </div>
   </div>
 </section>
+
+<!-- DEF-036: backend-authored immutable proposal, exact operator confirmation, no Fill start. -->
+<div class="oopsie-overlay" id="proposalModal" role="dialog" aria-modal="true"
+     aria-labelledby="proposalHead" hidden>
+  <div class="oopsie-card proposal-card">
+    <div class="proposal-card-head">
+      <div>
+        <div class="proposal-kicker">Immutable placement docket</div>
+        <div class="oopsie-head" id="proposalHead">Review exact placement</div>
+      </div>
+      <div class="proposal-gate" id="proposalGate"></div>
+    </div>
+    <div class="oopsie-msg" id="proposalMessage">Review every assignment before approval. No archive bytes move in this dialog.</div>
+    <div class="proposal-meta">
+      <div><span>Plan</span><b id="proposalPlan"></b></div>
+      <div><span>Based on revision</span><b id="proposalRevision"></b></div>
+      <div><span>Capacity mode</span><b id="proposalCapacityMode"></b></div>
+      <div><span>Derivation</span><b id="proposalDerivation"></b></div>
+    </div>
+    <div class="proposal-hash-block">
+      <span>Canonical seal</span>
+      <code id="proposalCanonical"></code>
+    </div>
+    <div class="proposal-totals" id="proposalTotals"></div>
+    <div class="proposal-drives" id="proposalDrives"></div>
+    <div class="proposal-assignment-head">
+      <div>
+        <b>Exact requirement assignments</b>
+        <span id="proposalAssignmentCount"></span>
+      </div>
+      <input id="proposalAssignmentFilter" type="search"
+             placeholder="Filter repository, target, or source…" autocomplete="off">
+    </div>
+    <div class="proposal-assignment-wrap">
+      <table class="proposal-assignment-table">
+        <thead><tr>
+          <th>Kind</th><th>Repository</th><th>Target</th><th>Source</th>
+          <th class="num">Guaranteed</th><th>Epoch</th>
+        </tr></thead>
+        <tbody id="proposalAssignments"></tbody>
+      </table>
+    </div>
+    <div id="proposalConfirmation">
+      <label class="lossconfirm" for="proposalConfirm">
+        Type <code id="proposalPhrase"></code> to approve this exact stored proposal. Approval
+        rechecks current identity and capacity evidence under drive fences; it does not start Fill.
+      </label>
+      <input id="proposalConfirm" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="oopsie-failed proposal-refusal" id="proposalRefusal"></div>
+    <div class="oopsie-acts">
+      <button id="proposalCancel">Close without approving</button>
+      <button id="proposalApprove" class="primary" disabled>Approve exact placement</button>
+    </div>
+  </div>
+</div>
 
 <!-- DEF-023: a fill that fell over announces itself on open, until acknowledged -->
 <div class="oopsie-overlay" id="oopsieModal" hidden>
@@ -297,6 +361,7 @@
 <script src="/static/catalog.js"></script>
 <script src="/static/disk.js"></script>
 <script src="/static/library.js"></script>
+<script src="/static/proposal.js"></script>
 <script src="/static/fill.js"></script>
 <script src="/static/verify.js"></script>
 </body>

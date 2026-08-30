@@ -1,13 +1,13 @@
 # ModelArk
 
 [![CI](https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml/badge.svg)](https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml)
-[![Release: v0.2.0 Public Alpha](https://img.shields.io/badge/release-v0.2.0%20Public%20Alpha-orange)](CHANGELOG.md#020---2026-07-20)
+[![Release: v0.3.0 Public Alpha](https://img.shields.io/badge/release-v0.3.0%20Public%20Alpha-orange)](CHANGELOG.md#030---2026-08-30)
 [![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%E2%80%933.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![Linux](https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&logoColor=black)](docs/deployment.md)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy_Me_a_Coffee-support_AuspexLabs-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/auspexlabs?new=1)
 
-> 🚧 **ModelArk 0.2.0 — Public Alpha.** The archive pipeline, reconciled capacity engine, and
+> 🚧 **ModelArk 0.3.0 — Public Alpha.** The archive pipeline, reconciled capacity engine, and
 > verified restore command are implemented and extensively tested, and StreamZNN's write-time restore
 > proof has been validated on real archive data. "Alpha" reflects pre-1.0 interface stability and the
 > remaining operator-attended migrated-archive acceptance—not a prototype implementation. See
@@ -453,7 +453,7 @@ restore; file-level crash recovery; first-class Plans; on-demand physical re-ver
 portal's six operator views. `DIS-002` is production evidence for StreamZNN blobs, not a claim that
 the complete restore workflow has already passed the migrated-runtime acceptance.
 
-The current 0.2.0 public-alpha build has passed clean-install, installed-wheel, schema migration,
+The current 0.3.0 public-alpha build has passed clean-install, installed-wheel, schema migration,
 standalone, Playwright, hostile-web, read-only migrated-catalog, and capacity-ledger checks. The
 operator-attended migrated-runtime checklist has passed Phases A–F. Phase G still requires installing
 the reviewed hash-repair build, auditing and (if approved) repairing legacy Git-tracked hash evidence,

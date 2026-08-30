@@ -212,6 +212,26 @@ def _semantic_input_hash(con, plan_id: str, mutation: tuple) -> str:
     ).hexdigest()
 
 
+def _current_execution_config_hash(con, plan_id: str) -> str:
+    """Hash the same graph-affecting execution config used by pure preview."""
+    from modelark import wishlist as _wl
+    from modelark.execution_config import hash_config
+
+    selected_plan = plan_mod.get(con, plan_id)
+    capacity_mode = selected_plan["capacity_mode"] if selected_plan else "guaranteed"
+    try:
+        compression = dict(_wl.compression() or {})
+    except Exception:
+        compression = {"enabled": True, "codec": "streamznn", "level": 3}
+    return hash_config({
+        "capacity_mode": capacity_mode,
+        "policy_version": "1",
+        "solver_version": "1",
+        "compression": compression,
+        "numcopies_default": 1,
+    })
+
+
 def _requirement_set_hash(tasks: Sequence[Mapping]) -> str:
     ids = sorted(t["requirement_id"] for t in tasks)
     return hashlib.sha256(
@@ -594,20 +614,7 @@ def preview_pure(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", 
     files_n = _normalize_files_for_hash(files)
     semantic = _semantic_input_hash(con, plan_id, mutation)
     # Bind complete graph-affecting config at draft time (B7 / finding 25/35).
-    from modelark.execution_config import hash_config
-    from modelark import wishlist as _wl
-    try:
-        compression = dict(_wl.compression() or {})
-    except Exception:
-        compression = {"enabled": True, "codec": "streamznn", "level": 3}
-    cfg_values = {
-        "capacity_mode": capacity_mode,
-        "policy_version": "1",
-        "solver_version": "1",
-        "compression": compression,
-        "numcopies_default": 1,
-    }
-    cfg_hash = hash_config(cfg_values)
+    cfg_hash = _current_execution_config_hash(con, plan_id)
     header = _header_from_facts(
         plan_id=plan_id, based_on=rev, mutation=mutation, tasks=tasks_n,
         capacity_mode=capacity_mode, gate_b_code=gate,
@@ -863,6 +870,32 @@ def load_proposal(con, proposal_id: str) -> dict:
             "ORDER BY requirement_id, rfilename", [proposal_id])
     ]
     return d
+
+
+def review_input_status(con, stored: Mapping) -> dict:
+    """Read-only operator status for the inputs bound by a stored proposal.
+
+    This is deliberately not execution admission. It tells the portal whether selection/plan/
+    identity/config inputs still match the reviewed artifact; approval and Fill start still perform
+    their fenced capacity and exact-assignment revalidation.
+    """
+    mutation = (
+        stored.get("mutation_kind") or "adopt_current",
+        tuple(stored.get("mutation_args") or ()),
+    )
+    semantic_matches = (
+        _semantic_input_hash(con, stored["plan_id"], mutation)
+        == stored.get("semantic_input_hash")
+    )
+    execution_config_matches = (
+        _current_execution_config_hash(con, stored["plan_id"])
+        == stored.get("execution_config_hash")
+    )
+    return {
+        "current": semantic_matches and execution_config_matches,
+        "semantic_input_matches": semantic_matches,
+        "execution_config_matches": execution_config_matches,
+    }
 
 
 get_proposal = load_proposal

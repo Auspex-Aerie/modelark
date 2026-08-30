@@ -17,7 +17,8 @@ If a new ModelArk binary is pointed at an existing pre-v7 catalog, it refuses be
 file and names `modelark-provenance-migrate`. This is expected protection, not catalog corruption.
 For source checkouts and pre-release builds, do not use the Python package version string alone to
 decide whether migration is needed: the catalog schema and the binary's refusal are authoritative.
-The public release carrying schema v7 must have a version newer than 0.2.0.
+ModelArk 0.3.0 is the first public release line carrying schema v7; it is intentionally distinct
+from the released 0.2.0 schema-v2 line.
 
 ## What the provenance migration does
 

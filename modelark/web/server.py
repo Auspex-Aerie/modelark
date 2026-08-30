@@ -19,7 +19,7 @@ from modelark.core import platform as osplat
 from modelark.core import telemetry
 from modelark import plan, wishlist
 from modelark.web import (catalog_api, data, disk_api, drive_api, fill_api, fill_worker,
-                                 library_api, plan_api, selection_api, verify_api)
+                          library_api, plan_api, proposal_api, selection_api, verify_api)
 
 
 def auto_resume_fill(body: dict | None = None) -> dict:
@@ -221,6 +221,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(plan_api.shadow_explain())
             elif u.path == "/api/plan/preview":
                 self._json(plan_api.preview())
+            elif u.path == "/api/proposal/status":
+                self._json(proposal_api.status())
             elif u.path == "/api/verify/suspects":
                 self._json(verify_api.suspects())
             elif u.path == "/api/fill/status":
@@ -306,6 +308,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(plan_api.set_capacity_mode(body))
             elif u.path == "/api/plan/provisioning":
                 self._json(plan_api.set_provisioning(body))
+            elif u.path == "/api/proposal/draft":
+                self._mutation_result(proposal_api.create_draft(body))
+            elif u.path == "/api/proposal/approve":
+                self._mutation_result(proposal_api.approve(body))
             elif u.path == "/api/drive/declare-lost":
                 self._mutation_result(drive_api.declare_lost(body))
             elif u.path == "/api/drive/register-new":

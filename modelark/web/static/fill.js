@@ -226,7 +226,9 @@
       `${t.n_planned} to place · ${t.n_must} must-have · ${t.n_bulk} bulk` +
       (t.n_blocked ? ` · ${t.n_blocked} blocked` : "") + (t.n_done ? ` · ${t.n_done} done` : "");
     const start = document.getElementById("fillStart");
-    if (start) {
+    if (window.MA.proposal) {
+      window.MA.proposal.setPlanState(data);
+    } else if (start) {
       start.disabled = data.feasible === false;
       start.title = data.feasible === false
         ? `Plan admission blocked: ${(data.blocking_diagnostics || []).join(", ")}` : "";
@@ -329,6 +331,7 @@
 
   function renderRun(s) {
     lastStatus = s;
+    if (window.MA.proposal) window.MA.proposal.setRunning(!!(s && s.running));
     announceNotice(s); renderGatedPrompt(s); setRunUI(s); renderTelemetry(s);
     renderQueue(s); maybeRefreshQueueState(s); renderCards(s); renderPrompt(s);
   }
@@ -635,6 +638,7 @@
         return p;
       }
       renderBlockedNotice(p);
+      if (window.MA.proposal) window.MA.proposal.setPlanState(p);
       return p;
     }).catch(e => {
       MA.toast(String((e && e.message) || e || "preview failed"));
@@ -694,6 +698,7 @@
           return p2;
         }
         renderBlockedNotice(p2);
+        if (window.MA.proposal) window.MA.proposal.setPlanState(p2);
         return p2;
       }).catch(e => {
         MA.toast(String((e && e.message) || e || "preview failed"));
@@ -711,6 +716,10 @@
   }
 
   window.loadFill = function () {
+    if (window.MA.proposal) {
+      window.MA.proposal.resetPlan();
+      window.MA.proposal.refresh();
+    }
     refreshPlanBars();
     queueSig = null; queueCentered = false; lastQueueRepo = null;   // fresh load → rebuild + re-centre the queue once
     const graph = document.getElementById("fillGraph");

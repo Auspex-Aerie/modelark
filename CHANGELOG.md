@@ -4,8 +4,13 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-30
+
 ### Added
 
+- The Fill portal now authors one immutable placement proposal, presents every exact assignment for
+  human review, and requires the backend-issued confirmation phrase before approval. Approval never
+  starts Fill, and Fill remains gated when that approval is absent or stale.
 - An explicit `modelark-provenance-migrate` rehearsal/publication workflow for existing pre-v7 SQLite
   catalogs, with copied-runtime acceptance and a stopped side-by-side cutover guide.
 - Operator-confirmed missing-drive loss/exclusion in the portal, followed by one canonical replan;
