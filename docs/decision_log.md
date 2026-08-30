@@ -1932,3 +1932,31 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/deployment.md, README.md, CHANGELOG.md, modelark/drive_bootstrap.py, modelark/cli.py, tests/test_drive_bootstrap.py, tests/test_inc048_inc049_contracts.py
 - `related`: DEC-018, DEC-050, DEC-060, DEC-079, INC-049, INC-051
 - `scope_boundary`: Existing reconciliation-result propagation, bounded CLI presentation, documentation, qualification, and application-only replacement. No new inventory authority, path-level publication, persistence schema, content adoption, cleanup/deletion, Drive #3 rerun, Drive #4 mutation, proposal approval, Fill, or archive-byte placement.
+
+### DEC-081: Make Usable Slice a verified delivery contract for future ScintiLab
+- `id`: DEC-081
+- `date`: 2026-08-30
+- `status`: accepted
+- `triggered_by`: Operator direction to turn a selected subsection of the existing ModelArk catalog into a usable destination disk, with direct and scratch-backed transfer modes; DGXSpark DEC-077 names that project's future identity ScintiLab.
+- `decision`:
+  1. **Usable Slice** is ModelArk's operator-guided DR delivery boundary. The operator chooses a named subsection of the existing catalog plus an explicit consumer/layout profile; ModelArk freezes the required artifact closure before transfer. Broad catalog presence, remote-header evidence, or an archived blob alone must never be presented as proof that the slice is usable for the named consumer.
+  2. Delivery targets one explicitly listed destination disk and supports two execution topologies. **Direct** mode streams from the currently loaded source archive drive to the destination without a durable intermediate copy. **Scratch-backed** mode stages verified content so source-drive reads and destination writes can occur in separate attended phases. Scratch backends include a locally attached USB volume and Cloudflare R2.
+  3. Scratch is temporary transport state, not a ModelArk archive replica, desired-copy satisfaction, or final delivery proof. Each phase binds the exact source, scratch, and destination identities; checks capacity; transfers against a frozen manifest and digests; checkpoints resumable progress; and guides the operator to load the next required drive. The destination is published as usable only after final layout and content verification, with a durable delivery receipt recording the catalog snapshot, slice definition, artifact closure, transfer topology, destination identity, and verification result.
+  4. The future integration and repository-consolidation target is **ScintiLab**, currently the sibling **DGXSpark** folder/project; neither repository is renamed or moved by this decision. Reuse DGXSpark's accepted separation of `place`, occupancy, and `DataTransport` rather than creating an incompatible delivery stack. ModelArk owns archive evidence, slice closure, materialization, and the delivery receipt; ScintiLab owns downstream placement and consumption. R2 enters that shared design as an explicit object-store scratch/place adapter, not as an unnamed side channel.
+- `rationale`: Direct transfer minimizes intermediate capacity but requires the source and destination to be available together. Scratch decouples drive swaps, supports recovery between phases, and lets remote object space bridge machines or time. A frozen closure plus final receipt preserves ModelArk's evidence levels while giving ScintiLab one honest handoff contract instead of parallel USB, R2, and drive-to-drive workflows.
+- `impact`: Establishes the cross-project architecture and allocates implementation through DEF-041. No existing catalog, proposal, Fill, restore, drive-registration, archive-copy, or service behavior changes in this decision.
+- `docs_updated`: docs/decision_log.md
+- `related`: DEC-036, DEC-037, DEC-045, DEC-049, DEF-036, DEF-041, DGXSpark:DEC-059, DGXSpark:DEC-060, DGXSpark:DEC-064, DGXSpark:DEC-074, DGXSpark:DEC-077, DGXSpark:DEF-018, DGXSpark:DEF-020
+- `scope_boundary`: Product and integration contract only. No destination formatting, drive mutation, object-store credentials, R2 allocation/upload, USB registration, transfer execution, proposal approval, Fill start, repository move, or rename is authorized here.
+
+### DEF-041: Defer Usable Slice implementation for subsection delivery
+- `id`: DEF-041
+- `date`: 2026-08-30
+- `status`: active
+- `triggered_by`: DEC-081 defines the needed DR delivery boundary while DEF-036's operator-facing proposal approval surface is still the current pre-Fill gate.
+- `decision`: Do not build the Usable Slice CLI/portal workflow in the current service-recovery and proposal-approval slice. Defer the subsection selector and dependency closure, consumer/layout profiles, destination-disk wizard, guided source-drive schedule, direct executor, scratch executor, local-USB scratch registry, R2 credential/cost/lifecycle policy, resumable delivery journal, final verifier, and receipt schema. Existing verified restore remains the available lower-level recovery mechanism in the meantime.
+- `rationale`: The live catalog is ready for canonical planning but still has no approved proposal, and the proposal-approval implementation is unfinished. Mixing a new multi-drive/object-store writer into that gate would widen the current trust boundary before the existing archive workflow is usable again. The DEC fixes the destination architecture now so the feature is not lost and ScintiLab does not grow an incompatible transfer path meanwhile.
+- `impact`: A specific catalog subsection cannot yet be materialized through one guided, resumable command onto a non-ModelArk destination. Direct drive-to-drive delivery, local USB scratch, and R2 scratch remain manual compositions of lower-level restore and transfer operations and carry no Usable Slice receipt.
+- `revisit_when`: DEF-036 is accepted and deployed, and either the first real catalog subsection must be delivered to a non-ModelArk disk or ScintiLab (currently DGXSpark) begins its attached/object-store place resolver—whichever occurs first.
+- `docs_updated`: docs/decision_log.md
+- `related`: DEC-037, DEC-081, DEF-036, DEF-040, DGXSpark:DEC-059, DGXSpark:DEC-060, DGXSpark:DEC-064, DGXSpark:DEC-077, DGXSpark:DEF-018, DGXSpark:DEF-020
