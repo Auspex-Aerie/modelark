@@ -2023,3 +2023,16 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, modelark/register.py, tests/test_def029_gate2_contracts.py
 - `related`: DEC-006, DEC-076, DEC-078, PR-055
 - `scope_boundary`: Git authorship for ModelArk-managed map and drive metadata only. No global Git configuration, archive identity, registration receipt, drive/catalog record, proposal, Fill, or archive byte is mutated by this remediation.
+
+### DEF-042: Defer operator-directed replacement-drive advancement
+- `id`: DEF-042
+- `date`: 2026-08-30
+- `status`: active
+- `triggered_by`: Human review of the immutable revision-9 proposal showed `drive-07` active, enabled, primary, and capacity-qualified but assigned zero requirements, while its intended predecessor `drive-02` is lost/excluded. The operator observed that the replacement joined the back of the planner's line even though it could, and likely should, advance into Drive #2's former role.
+- `decision`: Defer a bound operator action that names a replacement/successor relationship and requests a partial replan which preferentially advances that drive into the predecessor's placement role while preserving unaffected assignments where feasible. Proceed with review of the unchanged revision-9 proposal; do not silently infer substitution from registration, capacity, label order, or hardware similarity, and do not mutate the current proposal or start Fill as part of this deferral.
+- `rationale`: Replacement affinity is operator intent, not a fact ModelArk can safely derive from an empty drive or a lost identity. It must become explicit versioned planner input, participate in deterministic feasibility and identity/capacity fences, explain any assignment changes, bump the planner revision, and produce a fresh canonical proposal for separate approval. Adding it inside the current approval dialog would invalidate the exact artifact already reviewed and reopen the completed migration/release gate. The present plan remains feasible and safely excludes Drive #2, so deferral costs utilization preference rather than correctness.
+- `impact`: Until resolved, an admitted replacement may remain unused when the canonical planner can satisfy the plan without it. Operators cannot say “advance Drive #7 into Drive #2's slot” or request a bounded successor replan; changing placement requires a later explicit planning workflow and fresh approval, never direct database edits or an execution-time override.
+- `revisit_when`: Revisit after the revision-9 approval/recovery cycle, and before the first plan where the operator wants Drive #7 populated as Drive #2's successor or replacement-drive affinity is needed for another lost/retired identity—whichever comes first.
+- `docs_updated`: docs/decision_log.md
+- `related`: DEC-049, DEC-067, DEC-076, DEC-081, DEC-082, DEF-041, RFC-002
+- `scope_boundary`: Deferral record only. No planner policy, drive identity/role, capacity evidence, assignment, planner revision, stored proposal, approval, Fill state, or archive byte changes here.
