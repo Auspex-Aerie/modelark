@@ -2036,3 +2036,17 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md
 - `related`: DEC-049, DEC-067, DEC-076, DEC-081, DEC-082, DEF-041, RFC-002
 - `scope_boundary`: Deferral record only. No planner policy, drive identity/role, capacity evidence, assignment, planner revision, stored proposal, approval, Fill state, or archive byte changes here.
+
+### INC-053: Fill drive cards hid lost and excluded lifecycle state
+- `id`: INC-053
+- `date`: 2026-08-30
+- `status`: open; remediation prepared on follow-up branch, not deployed
+- `triggered_by`: Live operator review immediately after approving the revision-9 proposal
+- `symptom`: The Fill chart continued to show lost/excluded `drive-02` after approval with the same dashed, faded empty-card treatment as active/enabled but unused `drive-07`. It displayed no unavailable icon, lifecycle label, or struck-through identity, so retaining historical plan membership could be misread as current execution eligibility.
+- `root_cause`: `librarian.plan_view` already publishes exact per-drive `lifecycle` and `eligibility`, but `modelark/web/static/fill.js::driveCard` consumed only tier, capacity, archived bytes, and planned work. Its generic `empty` class collapsed “lost and excluded” into “active but currently unused.”
+- `blast_radius`: Operator interpretation of the Fill chart only. Canonical planning, proposal serialization, approval revalidation, and execution projection already exclude the lost drive; the approved proposal gives Drive #2 zero requirements, so no write authority or archive placement was incorrect.
+- `why_not_caught_earlier`: Projection tests asserted lifecycle fields in the backend payload, while portal E2E exercised Fill with active drives and exercised loss only on the separate Drives screen. No browser contract required a lost plan-member card to remain visible with an explicit unavailable state.
+- `planned_remediation`: Preserve the card for durable identity/history, render a red `LOST · EXCLUDED` status plus struck-through label from backend-authored fields, keep active-but-unused cards visually distinct, add browser coverage, and document the difference and attended Start boundary. Do not filter the drive out or teach the browser an alternate eligibility policy.
+- `docs_updated`: docs/decision_log.md, docs/operations.md, docs/provenance-migrate-copy-runbook.md, modelark/web/static/fill.js, tests/test_e2e_portal.py
+- `related`: DEC-049, DEC-067, DEC-069, DEC-082, DEF-042
+- `scope_boundary`: Fill-chart lifecycle presentation, regression coverage, and operator documentation only. No drive lifecycle/eligibility, plan membership, assignment, proposal, planner revision, Fill session, or archive byte changes.

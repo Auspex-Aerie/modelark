@@ -1077,3 +1077,26 @@ and it is already selected; the other 23 remain a later catalog/Usable Slice wav
 DEF-CATALOG-005. They are already resident on the Sparks and their weights/recipes are changing
 daily, so they do not delay revision-9 review. Any later Spark selection change must advance the
 planner revision and invalidate the old approval; revision 9 never covers those additions.
+
+## Executed live revision-9 proposal approval; Fill deliberately idle — 2026-08-30
+
+The operator opened **Review exact placement** in candidate `a574d6b` and personally reviewed the
+complete 500-row docket. Stored proposal `8f41c6b6-211a-4f90-9d5f-54ffbc75da2a` is based on revision
+`9`, uses `guaranteed` capacity and `state_truncated` derivation, reports `FEASIBLE`, and has canonical
+seal `471b2ec32bda25a1eefb0b1773f1112e54d96d0a3b637854ffe1787bb6b91769`. Its totals are 396
+repositories, 500 requirements, 183 baseline-satisfied requirements, 317 executable requirements,
+20,014,224,990,197 guaranteed bytes, and 18,975,902,645,626 expected bytes.
+
+The operator entered the backend-issued exact phrase and selected **Approve exact placement**. The
+live status is `approved_current`; semantic input and execution configuration both match. Approval
+advanced the planner revision to `10` atomically while retaining the immutable proposal's
+`based_on_revision=9`, as designed for `adopt_current`. Fill remains `idle`, no execution session was
+started, and the service remains without automatic resume. **Start Fill** is deliberately postponed
+until the operator is physically present to answer drive-loading prompts.
+
+The attended review also exposed two follow-ups without invalidating approval. DEF-042 records the
+future operator-directed ability to advance replacement Drive #7 into lost Drive #2's former role.
+INC-053 records that the Fill chart retained Drive #2, correctly, but rendered no visible
+`lost/excluded` distinction even though the backend already supplied both fields. The UI remediation
+is prepared separately and changes presentation only; the approved proposal assigns Drive #2 zero
+requirements and receives no execution authority from the chart.

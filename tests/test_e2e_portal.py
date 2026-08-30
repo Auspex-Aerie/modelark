@@ -19,6 +19,7 @@ import time
 import urllib.request
 from pathlib import Path
 
+from modelark import plan
 from modelark.core import db
 
 PORT = 8099
@@ -82,6 +83,10 @@ def _seed(con) -> None:
         "VALUES('drive-replica','replica',0,1000000000,1000000000)"
     )
     con.execute(
+        "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes) "
+        "VALUES('drive-02','primary',0,4000000000000,0)"
+    )
+    con.execute(
         "INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
         "orig_bytes,stored_bytes,compressed,annex_key) VALUES("
         "'demo/small-llm','model.safetensors','model.safetensors','model.safetensors',"
@@ -107,6 +112,14 @@ def _seed(con) -> None:
                     "identity_proof,fence_proof,observed_at) "
                     "VALUES(?,1,1,?,?,?, 'dedicated_local','proof','fence','2026-07-15 00:00:00')",
                     (label, cap, cap, fp))
+
+    # Model the production history precisely: Drive 2 belonged to the Ark while placeable, then
+    # became lost/excluded. Startup bootstrap preserves that historical membership and must not
+    # silently make the unavailable drive disappear from the Fill projection.
+    plan.bootstrap(con)
+    con.execute(
+        "UPDATE drives SET lifecycle='lost',eligibility='excluded' WHERE drive_label='drive-02'"
+    )
 
 
 def _wait_port(port: int, timeout: int = 40) -> bool:
@@ -891,6 +904,14 @@ def _browser_flow() -> None:
             fill_note = pg.inner_text("#fillNote")
             assert "1 to place" in fill_note and "3 blocked" in fill_note, fill_note
             assert pg.locator("#fillStart").is_disabled()
+            lost = pg.locator("#dc-drive-02")
+            assert lost.count() == 1, "lost plan-member drive must remain visible"
+            assert "unavailable" in (lost.get_attribute("class") or "")
+            assert lost.get_attribute("data-lifecycle") == "lost"
+            assert lost.get_attribute("data-eligibility") == "excluded"
+            assert "LOST · EXCLUDED" in lost.inner_text()
+            assert "unavailable" not in (pg.locator("#dc-drive-00").get_attribute("class") or "")
+            print("  lost/excluded drive stayed visible with explicit unavailable status")
             print("  policy + capacity blockers rendered with disjoint totals; Start fill disabled")
 
             # ------------------------------------------------------------------
@@ -1125,9 +1146,11 @@ def main() -> None:
         assert db.DB_PATH.parent == data_dir and db.DB_PATH.is_file()
         print("  seeded models (giant, policy + capacity + hostile blockers) in an isolated catalog")
 
-        serve = Path(sys.executable).with_name("modelark")  # .venv-dev/bin/modelark
+        # Launch the exact checked-out source even when this test runs from a Git worktree whose
+        # shared development environment was installed editable from a different checkout.
+        serve = [sys.executable, "-m", "modelark"]
         proc = subprocess.Popen(
-            [str(serve), "--data-dir", str(data_dir), "--state-dir", str(state_dir),
+            [*serve, "--data-dir", str(data_dir), "--state-dir", str(state_dir),
              "serve", "--no-open", "--port", str(PORT)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
