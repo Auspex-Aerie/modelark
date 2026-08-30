@@ -31,6 +31,7 @@ import tempfile
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -38,7 +39,8 @@ from huggingface_hub import HfApi, get_token
 from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
 
 from modelark.core import db
-from modelark import archive_manifest, compress, register, wishlist
+from modelark import archive_hash, archive_manifest, capacity_evidence, compress, drive_mutation
+from modelark import register, wishlist
 
 # Download-stall resilience (INC-004 + the DEC-023 stage-2 watchdog). The built-in read timeout did
 # NOT catch a multi-hour hang (hf blocked/retried internally and never returned control; on 2026-07-09
@@ -86,6 +88,27 @@ class CapacityPreflightError(RuntimeError):
 
 class FetchTerminalError(RuntimeError):
     """A deterministic operator boundary that must not enter repo/network retry loops."""
+
+    def __init__(self, code: str, message: str, *, evidence: dict | None = None,
+                 actions: Sequence[str] = (), gate: str = "C"):
+        super().__init__(message)
+        self.code = code
+        self.evidence = evidence or {}
+        self.actions = tuple(actions)
+        self.gate = gate
+
+    def as_dict(self) -> dict:
+        return {
+            "code": self.code,
+            "message": str(self),
+            "evidence": dict(self.evidence),
+            "actions": list(self.actions),
+            "gate": self.gate,
+        }
+
+
+class FetchRequirementRefusal(RuntimeError):
+    """A typed repository-local refusal that does not stop unrelated fetch work."""
 
     def __init__(self, code: str, message: str, *, evidence: dict | None = None,
                  actions: Sequence[str] = (), gate: str = "C"):
@@ -160,14 +183,72 @@ class RunCtx:
     read_connection_factory: Callable[[], Any] | None = None
     check_hf_auth: bool = False
     request_action: Callable[[dict, float], str] = _timeout_action
+    # PR-09: authorized live session for worker catalog writes (session_write path).
+    session_id: str | None = None
+    fencing_token: int | None = None
+    # Frozen ExecutionConfig from SessionStart (finding 35) — transport must not reread globals.
+    execution_config: Any = None
 
     def q1(self, sql: str, params: list | None = None):
         with self.lock:
             return self.con.execute(sql, params if params is not None else []).fetchone()
 
     def write(self, fn: Callable[[Any], Any]):
+        """Catalog write under planner_revision discipline (PR-08 A3 / fetch archived path).
+
+        While a Fill session is live, writes must go through ``session_write`` with a
+        validated fencing token so they are not excluded by FILL_SESSION_ACTIVE.
+        """
         with self.lock:
-            return fn(self.con)
+            from modelark.proposal import GraphResult, graph_write
+
+            def op(c):
+                value = fn(c)
+                return GraphResult(proven_noop=False, value=value)
+
+            if self.session_id is not None and self.fencing_token is not None:
+                from modelark.execution_session import session_write
+                # session_write validates token, holds BEGIN IMMEDIATE, bumps revision.
+                result = session_write(
+                    self.con, self.session_id, int(self.fencing_token), op)
+                return getattr(result, "value", result)
+            return graph_write(self.con, op).value
+
+
+def get_frozen_execution_config(session_start):
+    """PR-09 / B7: transport consumes freeze from session start, never global reread."""
+    from modelark.execution_config import get_frozen_execution_config as _get
+    return _get(session_start)
+
+
+require_frozen_config = get_frozen_execution_config
+
+
+def _compression_from_ctx(ctx: RunCtx | None) -> dict:
+    """Resolve DEC-022 compression gate config from frozen ExecutionConfig when present.
+
+    Finding 35: once any ExecutionConfig freeze is attached to the RunCtx, transport
+    never rereads wishlist — including incomplete/malformed frozen mappings. Only the
+    CLI/plain-fetch path (no freeze object) may call wishlist.compression().
+    """
+    frozen = getattr(ctx, "execution_config", None) if ctx is not None else None
+    if frozen is not None:
+        # Literal operational defaults only — never wishlist.
+        base = {
+            "max_compress_ram_gb": 4.0,
+            "stream_compress": True,
+            "threads": 1,
+        }
+        values = getattr(frozen, "values", None)
+        if isinstance(values, Mapping):
+            frozen_comp = values.get("compression")
+            if isinstance(frozen_comp, Mapping):
+                base.update(dict(frozen_comp))
+            elif frozen_comp is not None and not isinstance(frozen_comp, Mapping):
+                # Malformed freeze: still no global reread; keep literal defaults.
+                pass
+        return base
+    return wishlist.compression()
 
 
 def finalized(con) -> list[str]:
@@ -372,18 +453,21 @@ class _HttpResp:
 
 
 def _run_monitored(cmd: list[str], progress: Callable[[], int], stall_secs: float,
-                   should_stop: Callable[[], bool]) -> dict:
+                   should_stop: Callable[[], bool], *, inherit_fds: Sequence[int] = ()) -> dict:
     """Run `cmd` as a child, watching `progress()` — a monotonically-growing byte count for the current
     operation (the `.incomplete` for a download, the `.znn` temp for a compress). KILL the child if it
     makes no progress for `stall_secs` (the hang the socket timeout can't catch) or a stop is requested.
     Returns {"outcome": "exited"|"stalled"|"stopped", "rc": int|None, "stderr": str}. The child writes
-    its real result to a file; here we only track liveness + the exit/kill disposition + a stderr tail."""
+    its real result to a file; here we only track liveness + the exit/kill disposition + a stderr tail.
+    `inherit_fds` are the held drive-fence descriptors the child inherits (pass_fds) so abrupt parent
+    death cannot release the physical fence while the child keeps writing."""
     err_fd, err_path = tempfile.mkstemp(suffix=".stderr")
     os.close(err_fd)
     outcome, rc = "exited", None
     try:
         with open(err_path, "w") as errf:
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=errf)
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=errf,
+                                    pass_fds=tuple(inherit_fds))
             best, last_grow = -1, time.monotonic()
             while True:
                 try:
@@ -406,7 +490,8 @@ def _run_monitored(cmd: list[str], progress: Callable[[], int], stall_secs: floa
 
 
 def _compress_isolated(local: Path, dtype: str, codec: str, threads: int,
-                       expected_sha256: str | None, should_stop: Callable[[], bool]) -> dict:
+                       expected_sha256: str | None, should_stop: Callable[[], bool],
+                       *, inherit_fds: Sequence[int] = ()) -> dict:
     """Compress + canary in a MONITORED child process (DEC-023 stage 3 + the stage-2 watchdog). A
     native compressor abort (ZipNN's double-free, INC-005) kills the child, not the portal; a HUNG
     compress is killed by the no-progress watchdog. Returns a dict whose `status` is one of:
@@ -433,7 +518,7 @@ def _compress_isolated(local: Path, dtype: str, codec: str, threads: int,
     # it to the shard size; floor at _COMPRESS_STALL_SECS for small shards. See INC-011.
     stall = max(_COMPRESS_STALL_SECS, int(local.stat().st_size / 1e9 * _COMPRESS_STALL_PER_GB))
     mon = _run_monitored([sys.executable, "-m", "modelark.compress_worker", request],
-                         progress, stall, should_stop)
+                         progress, stall, should_stop, inherit_fds=inherit_fds)
     try:
         if mon["outcome"] == "exited" and mon["rc"] == 0:
             result = json.loads(Path(res_path).read_text())
@@ -454,14 +539,16 @@ def _compress_isolated(local: Path, dtype: str, codec: str, threads: int,
         Path(res_path).unlink(missing_ok=True)
 
 
-def _annex_add(dest: Path, path: Path) -> str | None:
+def _annex_add(dest: Path, path: Path, *, inherit_fds: Sequence[int] = ()) -> str | None:
     rel = str(path.relative_to(dest))
-    subprocess.run(["git", "-C", str(dest), "annex", "add", rel], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(dest), "annex", "add", rel], check=True, capture_output=True,
+                   pass_fds=tuple(inherit_fds))                 # mutating child inherits the fence
     r = subprocess.run(["git", "-C", str(dest), "annex", "lookupkey", rel], capture_output=True, text=True)
-    return r.stdout.strip() or None
+    return r.stdout.strip() or None                            # lookupkey is read-only: no fence FD
 
 
-def _annex_metadata(dest: Path, key: str | None, repo_id: str, params, fmt: str, quant) -> None:
+def _annex_metadata(dest: Path, key: str | None, repo_id: str, params, fmt: str, quant,
+                    *, inherit_fds: Sequence[int] = ()) -> None:
     """#14: tag an archived blob's git-annex key with its model identity (model / params / format /
     quant), so the fleet is queryable (`git annex find --metadata model=…`) and a shelved drive is
     self-describing. Best-effort — a metadata failure never blocks the archive record."""
@@ -471,10 +558,11 @@ def _annex_metadata(dest: Path, key: str | None, repo_id: str, params, fmt: str,
     if params is not None:
         fields += ["-s", f"params={params}"]
     subprocess.run(["git", "-C", str(dest), "annex", "metadata", f"--key={key}", *fields],
-                   capture_output=True)
+                   capture_output=True, pass_fds=tuple(inherit_fds))   # mutating child inherits the fence
 
 
-def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, download_dir: Path, base: dict) -> Path:
+def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, download_dir: Path, base: dict,
+                    *, inherit_fds: Sequence[int] = ()) -> Path:
     """Download one file in a KILLABLE child process (DEC-023 stage-2 watchdog + INC-004). The parent
     kills the child if its `.incomplete` stops growing for _DL_STALL_SECS — the hang the socket timeout
     can't catch (the 2026-07-09 Falcon-H1 stall, blocked in poll() for hours) — then retries. Classic
@@ -512,7 +600,7 @@ def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, download_dir: Pat
                               "local_dir": str(download_dir), "result": res_path})
         try:
             mon = _run_monitored([sys.executable, "-m", "modelark.download_worker", request],
-                                 progress, _DL_STALL_SECS, ctx.should_stop)
+                                 progress, _DL_STALL_SECS, ctx.should_stop, inherit_fds=inherit_fds)
             if mon["outcome"] == "stopped":
                 raise _StopRequested()
             if mon["outcome"] == "exited" and mon["rc"] == 0:
@@ -563,6 +651,111 @@ def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, download_dir: Pat
     raise RuntimeError(last_detail)                     # exhausted retries → run() isolates the repo
 
 
+def _live_drive_evidence(con, label: str) -> dict | None:
+    """Read a drive's LIVE identity + filesystem evidence from low-level probes on the mounted volume —
+    never the catalog row. ``None`` when the drive is not mounted."""
+    path = register.archive_path(con, label)
+    if path is None:
+        return None
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        # registered but not statvfs-able right now (archive dir absent / unmounted / vanished
+        # mid-probe): identity is unknown, not an error. Returning None -> unproven observation ->
+        # the envelope refuses DRIVE_IDENTITY_UNPROVEN (a typed, handled terminal), never an OSError
+        # that would escape the refusal handler and crash the caller.
+        return None
+    return {
+        "fs_uuid": register.probe_fs_uuid(path),
+        "annex_uuid": register.probe_annex_uuid(path),
+        "serial": register.probe_serial(path),
+        "filesystem_capacity_bytes": st.f_blocks * st.f_frsize,
+        "free_bytes": st.f_bavail * st.f_frsize,
+    }
+
+
+def _observe_drive(con, label: str) -> drive_mutation.Observation:
+    """Fenced observation for the mutation envelope: prove the drive's identity from LIVE evidence — the
+    fingerprint is recomputed from the current volume (fs/annex/serial + filesystem capacity), NOT read
+    from the persisted row — and read its live filesystem free/capacity. Identity is unproven when the
+    drive is absent or exposes neither an fs nor an annex UUID."""
+    ev = _live_drive_evidence(con, label)
+    if ev is None or not (ev["fs_uuid"] or ev["annex_uuid"]):
+        return drive_mutation.Observation(
+            identity_proven=False, free_bytes=None, filesystem_capacity=None,
+            fingerprint=None, identity_proof="", fence_proof="")
+    fingerprint = capacity_evidence.identity_fingerprint_v1(
+        fs_uuid=ev["fs_uuid"], annex_uuid=ev["annex_uuid"], serial=ev["serial"],
+        filesystem_capacity_bytes=ev["filesystem_capacity_bytes"])
+    proof = json.dumps(
+        {"v": 1, "fs_uuid": ev["fs_uuid"], "annex_uuid": ev["annex_uuid"], "serial": ev["serial"]},
+        sort_keys=True, separators=(",", ":"))
+    return drive_mutation.Observation(
+        identity_proven=True, free_bytes=ev["free_bytes"],
+        filesystem_capacity=ev["filesystem_capacity_bytes"], fingerprint=fingerprint,
+        identity_proof=proof, fence_proof=proof)
+
+
+def observe_for_admission(con, label: str) -> "drive_mutation.Observation | None":
+    """Observation for the admission preview/reporting seam: ``None`` when the drive is NOT mounted (so
+    the seam derives the offline anchor/unknown path), else the fenced live observation (proven or not).
+    The per-file EXECUTION path uses :func:`_observe_drive` directly — there the drive is mounted and a
+    vanished/unproven volume must refuse, not fall through to an offline anchor."""
+    if register.archive_path(con, label) is None:
+        return None
+    return _observe_drive(con, label)
+
+
+def _reconcile_touched(con, label: str, dest, annex: bool, paths, keys) -> None:
+    """Generation-scoped reconciliation (never a full-drive scan) of the recorded touched set, per path:
+
+      * read the path's durable ``archived.annex_key``;
+      * a raw (non-annex) touched path requires its durable row and the physical file present;
+      * an annex touched path requires a NON-NULL durable key that AGREES with a writer-recorded key and
+        is proven the exact key present here — via the path's own ``lookupkey`` or ``whereis`` against the
+        drive's annex uuid (the worktree symlink is not proof; ``git annex copy --to`` never creates it).
+
+    A null, mismatched/unrelated, or unprovable annex key — or a missing row / absent raw file — raises
+    DRIVE_RECONCILIATION_REQUIRED so the generation stays dirty rather than being marked clean. Touched
+    paths are drive-relative (``repo_id`` + '/' + ``stored_relpath``)."""
+    if not paths and not keys:
+        return                              # nothing was touched on this drive -> nothing to reconcile
+    if dest is None:
+        # unresolvable/unmounted at close (archive_path -> None): a TYPED refusal, never a Path(None)
+        # TypeError that would escape the DriveMutationRefused handler and crash the caller.
+        raise drive_mutation.DriveMutationRefused("DRIVE_RECONCILIATION_REQUIRED", drive=label)
+    dest = Path(dest)
+    recorded = set(keys)                     # the keys the writer recorded for this generation
+    target_uuid = (con.execute(
+        "SELECT annex_uuid FROM drives WHERE drive_label=?", [label]).fetchone() or [None])[0] if annex else None
+    for relpath in paths:
+        row = con.execute(
+            "SELECT annex_key FROM archived WHERE drive_label=? AND repo_id || '/' || stored_relpath = ?",
+            [label, relpath]).fetchone()
+        if row is None:
+            raise drive_mutation.DriveMutationRefused(   # no durable row for a path the writer touched
+                "DRIVE_RECONCILIATION_REQUIRED", drive=label, path=relpath)
+        if not annex:
+            if not (dest / relpath).exists():            # a raw file must be physically present here
+                raise drive_mutation.DriveMutationRefused(
+                    "DRIVE_RECONCILIATION_REQUIRED", drive=label, path=relpath)
+            continue
+        durable_key = row[0]
+        if not durable_key or durable_key not in recorded:   # null durable key, or one the writer never recorded
+            raise drive_mutation.DriveMutationRefused(
+                "DRIVE_RECONCILIATION_REQUIRED", drive=label, path=relpath, key=durable_key)
+        try:
+            tracked = _annex_key_for_path(dest, dest / relpath)
+        except FetchTerminalError:
+            # a git-annex probe timeout (DownloadLocalError) leaves path-lookup unproven; the uuid check
+            # below may still prove the key, and failing that the typed refusal fires — never a
+            # FetchTerminalError escaping this function past run()'s DriveMutationRefused handler.
+            tracked = None
+        if not (_annex_key_on_uuid(dest, durable_key, target_uuid) or tracked == durable_key):
+            raise drive_mutation.DriveMutationRefused(   # the exact durable key is not provably present here
+                "DRIVE_RECONCILIATION_REQUIRED", drive=label, key=durable_key)
+
+
 def fetch_model(
     ctx: RunCtx,
     repo_id: str,
@@ -573,25 +766,108 @@ def fetch_model(
     *,
     manifest: Sequence[archive_manifest.ManifestFile] | None = None,
     before_file: Callable[[archive_manifest.ManifestFile], None] | None = None,
+    mutation_writer=None,
 ) -> dict:
     """Execute only the explicit task manifest, with a stale-work DB check per file.
 
     ``manifest=None`` retains the standalone fetch CLI behavior.  The reconciled fill always passes
     an exact missing manifest and a live-capacity guard, so the executor cannot silently broaden a
     task back to every repository file.
+
+    ``mutation_writer`` (the physical-mutation envelope's writer) supplies the held drive-fence FDs its
+    monitored/git children inherit, and records each published path + annex key for generation-scoped
+    reconciliation.  ``None`` is the pre-envelope/standalone path (no fences, no touched-set recording).
     """
     con = ctx.con
+    inherit_fds = mutation_writer.child_fence_fds if mutation_writer is not None else ()
     with ctx.lock:                                      # brief: read the plan + resume set
         task_manifest = tuple(manifest) if manifest is not None else tuple(
             archive_manifest.manifest_for_repo(con, repo_id)
         )
         files = [item.as_fetch_record() for item in task_manifest]
-        have = {r[0] for r in con.execute(
-            "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
-            [repo_id, drive_label]).fetchall()}
+        archived_names = {
+            row[0] for row in con.execute(
+                "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
+                [repo_id, drive_label],
+            ).fetchall()
+        }
+        # Standalone resume needs only presence.  Approved execution needs proof evidence, but only
+        # for exact task files that are already present; this keeps the legacy standalone/minimal-
+        # schema seam usable without weakening the approved path.
+        present_task_names = {
+            item.rfilename for item in task_manifest if item.rfilename in archived_names
+        }
+        archived_by_name = {}
+        if manifest is not None and present_task_names:
+            archived_rows = con.execute(
+                "SELECT rfilename,orig_sha256,compressed,annex_key FROM archived "
+                "WHERE repo_id=? AND drive_label=?",
+                [repo_id, drive_label],
+            ).fetchall()
+            archived_by_name = {
+                row[0]: (row[1], bool(row[2]), row[3]) for row in archived_rows
+                if row[0] in present_task_names
+            }
         params = (con.execute("SELECT params_b FROM models WHERE repo_id=?",   # #14: for key metadata
                               [repo_id]).fetchone() or [None])[0]
-    todo = [f for f in files if f["rfilename"] not in have]      # file-level resume after a crash
+    todo = []
+    for item, record in zip(task_manifest, files):
+        if item.rfilename not in archived_names:
+            todo.append(record)
+            continue
+        if manifest is None:
+            continue  # standalone/legacy resume retains presence behavior
+        archived = archived_by_name[item.rfilename]
+        orig_sha256, compressed, annex_key = archived
+        if archive_hash.content_satisfies(
+                approved_sha256=item.sha256,
+                orig_sha256=orig_sha256,
+                compressed=compressed,
+                annex_key=annex_key):
+            continue
+        try:
+            resolved = archive_hash.expected_sha256(
+                catalog_sha=None,
+                orig_sha256=orig_sha256,
+                compressed=compressed,
+                annex_key=annex_key,
+            )
+        except archive_hash.DigestEvidenceError as exc:
+            raise FetchRequirementRefusal(
+                "APPROVED_TARGET_DIGEST_MISMATCH",
+                f"archived content for {repo_id}/{item.rfilename} has conflicting digest evidence",
+                evidence={
+                    "repo_id": repo_id,
+                    "rfilename": item.rfilename,
+                    "drive_label": drive_label,
+                    "approved_sha256": item.sha256,
+                    "conflict": str(exc),
+                },
+                actions=("inspect_target", "disposition_required"),
+            ) from exc
+        evidence = {
+            "repo_id": repo_id,
+            "rfilename": item.rfilename,
+            "drive_label": drive_label,
+            "approved_sha256": item.sha256,
+            "resolved_sha256": resolved,
+            "archived_orig_sha256": orig_sha256,
+            "compressed": compressed,
+            "annex_key": annex_key,
+        }
+        if resolved is None:
+            raise FetchRequirementRefusal(
+                "APPROVED_TARGET_DIGEST_UNPROVABLE",
+                f"archived content for {repo_id}/{item.rfilename} cannot prove the approved digest",
+                evidence=evidence,
+                actions=("run_repair_drive", "resume_same_approval"),
+            )
+        raise FetchRequirementRefusal(
+            "APPROVED_TARGET_DIGEST_MISMATCH",
+            f"archived content for {repo_id}/{item.rfilename} differs from the approved digest",
+            evidence=evidence,
+            actions=("inspect_target", "disposition_required"),
+        )
     model_dir = dest / repo_id
     stage_dir = _download_stage_dir(dest, repo_id, annex)
     try:
@@ -622,7 +898,7 @@ def fetch_model(
             if before_file(item) is False:               # another durable writer satisfied stale work
                 continue
         ctx.on_progress({**base, "file_phase": "download"})
-        local = _download_shard(ctx, repo_id, f["rfilename"], stage_dir, base)
+        local = _download_shard(ctx, repo_id, f["rfilename"], stage_dir, base, inherit_fds=inherit_fds)
         # Every archived original needs durable restore evidence. Hugging Face does not publish a
         # sha256 for ordinary Git-tracked files such as .gitattributes, so checking only when the
         # catalog supplied one stranded those files at restore time (INC-017). Always hash the
@@ -645,7 +921,8 @@ def fetch_model(
             else:
                 ctx.on_progress({**base, "file_phase": "compress", "codec": codec})
                 dtype = compress.zipnn_dtype(f["quant"])
-                res = _compress_isolated(local, dtype, codec, compress_cfg["threads"], got, ctx.should_stop)
+                res = _compress_isolated(local, dtype, codec, compress_cfg["threads"], got,
+                                         ctx.should_stop, inherit_fds=inherit_fds)
                 if res["status"] in ("crash", "stalled", "over-cap"):
                     # INC-005: the compressor died natively (ZipNN double-free) or hung on this shard. The
                     # child absorbed it — store the shard RAW so the fill routes around it instead of
@@ -688,19 +965,30 @@ def fetch_model(
         )
         if annex:
             ctx.on_progress({**base, "file_phase": "annex"})
-            key = _annex_add(dest, stored)
-            _annex_metadata(dest, key, repo_id, params, f["fmt"], f["quant"])   # #14: self-describing key
+            key = _annex_add(dest, stored, inherit_fds=inherit_fds)
+            _annex_metadata(dest, key, repo_id, params, f["fmt"], f["quant"],   # #14: self-describing key
+                            inherit_fds=inherit_fds)
         else:
             key = None
         stored_sz = stored.stat().st_size
         stored_relpath = _stored_relative_path(stored, model_dir)
+        # DEC-053: Hub-confirmed when the manifest carried a digest that matched the
+        # downloaded bytes; otherwise ingestion-computed from the local hash.
+        provenance = "hub_confirmed" if f.get("sha256") else "ingestion_computed"
         ctx.write(lambda c: db.upsert(c, "archived", {
             "repo_id": repo_id, "rfilename": f["rfilename"], "stored_name": stored.name,
             "stored_relpath": stored_relpath,
             "drive_label": drive_label, "orig_sha256": got, "znn_sha256": znn_sha,
             "orig_bytes": f["size"], "stored_bytes": stored_sz,
             "compressed": compressed, "annex_key": key,
+            "orig_sha256_provenance": provenance,
         }, pk=["repo_id", "rfilename", "drive_label"], touch=["verified_at"]))
+        if mutation_writer is not None:
+            # record the touched write set AFTER physical publication + the durable archived row, so
+            # generation-scoped reconciliation validates exactly what landed (dest-relative path + key)
+            mutation_writer.record_touched(
+                drive_label, paths=[stored.relative_to(dest).as_posix()],
+                keys=[key] if key else [])
         done += 1
         dl_bytes += f["size"] or 0
         st["bytes"] += f["size"] or 0
@@ -721,14 +1009,15 @@ def fetch_model(
     # A task may be only the missing suffix of a copy.  Mark the model archived only when the target
     # now contains the complete canonical manifest; task completion itself is never inferred from
     # this presentation status.
-    with ctx.lock:
-        canonical = archive_manifest.manifest_for_repo(con, repo_id)
-        present = {row[0] for row in con.execute(
-            "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
-            [repo_id, drive_label],
-        ).fetchall()}
-        if {item.rfilename for item in canonical} <= present:
-            con.execute("UPDATE models SET status='archived' WHERE repo_id=?", [repo_id])
+    if manifest is None:
+        with ctx.lock:
+            canonical = archive_manifest.manifest_for_repo(con, repo_id)
+            present = {row[0] for row in con.execute(
+                "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
+                [repo_id, drive_label],
+            ).fetchall()}
+            if {item.rfilename for item in canonical} <= present:
+                con.execute("UPDATE models SET status='archived' WHERE repo_id=?", [repo_id])
     if done == len(todo) and stage_dir.exists():
         shutil.rmtree(stage_dir, ignore_errors=True)
     return {"repo_id": repo_id, "files": done, "skipped": len(files) - len(todo), "bytes": dl_bytes}
@@ -765,7 +1054,7 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
     result = {"stored_repos": [], "failed_repos": [], "capacity_failure": None,
               "terminal_failure": None, "terminal_repo": None,
               "throttled": False, "stopped": False, "drive_unwritable": False,
-              "gated_repos": [], "gated_retry": None}
+              "gated_repos": [], "gated_retry": None, "requirement_refusals": []}
     own = ctx is None                               # CLI/plain-fetch path owns its connection
     con = db.connect() if own else ctx.con
     if own:
@@ -831,139 +1120,191 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
             print(f"WARNING: {dest} is not a git-annex repo — storing verified files raw, "
                   f"not annex-tracked. (Run drive registration to enable annex.)")
         cap = (max_24h_gb or 0) * 1e9
-        compress_cfg = wishlist.compression()       # DEC-022 codec gate config (loaded once per run)
-        for k, rid in enumerate(ids):
-            if ctx.should_stop():
-                break
-            with ctx.lock:
-                used = _bytes_last_24h(con) if cap else 0
-            if cap and used >= cap:
-                print(f"  throttle: {used/1e12:.2f} TB downloaded in last 24h ≥ {cap/1e12:.2f} TB cap "
-                      f"— stopping at repo boundary (resumable, re-run to continue).")
-                ctx.write(lambda c: _event(c, None, "throttled", detail=f"{used/1e9:.0f} GB in 24h"))
-                ctx.on_progress({"phase": "throttled", "say":
-                                 f"  throttle: {used/1e12:.2f} TB in 24h ≥ cap — stopping (resumable)."})
-                result["throttled"] = True
-                break
-            if fits is not None and not fits(rid):
-                # #37 per-model failsafe: this drive's LIVE free can no longer hold `rid` in the plan's
-                # capacity mode (actual > estimate, or a compression-aware forecast coming up short).
-                # Break the batch so fill.execute re-plans — it re-homes rid onto another plan drive, or
-                # (nothing fits anywhere) stops cleanly as plan-capacity-stop. Prevents an ENOSPC mid-shard.
-                print(f"  [plan-capacity] {drive_label} full for {rid} — breaking batch to re-plan.")
-                ctx.on_progress({"phase": "plan-capacity", "drive": drive_label, "repo": rid,
-                                 "say": f"  {drive_label} full for {rid} — re-planning (add a drive if nothing else fits)."})
-                break
-            ctx.on_progress({"drive": drive_label, "repo": rid, "repo_index": k + 1, "n_repos": len(ids),
-                             "used_24h": used, "cap_24h": cap})
-            try:
-                task_args = {}
-                if task_manifests is not None:
-                    task_args["manifest"] = task_manifests.get(rid)
-                if before_file is not None:
-                    task_args["before_file"] = lambda item, _rid=rid: before_file(_rid, item)
-                r = fetch_model(ctx, rid, dest, drive_label, annex, compress_cfg, **task_args)
-                tag = f"{r['files']} files" + (f" (+{r['skipped']} already had)" if r["skipped"] else "")
-                print(f"  [archived] {rid}  ({tag})")
-                ctx.write(lambda c: _event(c, rid, "archived", bytes=r["bytes"], detail=tag))
-                result["stored_repos"].append(rid)
-            except _StopRequested:
-                result["stopped"] = True
-                break                                    # clean stop requested mid-shard (INC-004)
-            except CapacityPreflightError as exc:
-                result["capacity_failure"] = exc.failure
-                ctx.on_progress({"phase": "plan-capacity", "drive": drive_label, "repo": rid,
-                                 "code": exc.failure.code.value,
-                                 "say": f"  {drive_label} lacks safe workspace for {rid} — re-planning."})
-                break
-            except FetchTerminalError as exc:
-                result["terminal_failure"] = exc.as_dict()
-                result["terminal_repo"] = rid
-                print(f"  [{exc.code.lower():8}] {rid}: {exc}")
-                event_detail = f"{exc.code}: {str(exc)[:150]}"
-                ctx.write(lambda c: _event(c, rid, "terminal", detail=event_detail))
-                ctx.on_progress({
-                    "phase": "fetch-blocked", "repo": rid, "code": exc.code,
-                    "evidence": exc.evidence, "actions": list(exc.actions),
-                    "say": f"🔴 {exc}",
-                })
-                break
-            except ArchivePolicyError as e:
-                print(f"  [policy  ] {rid}: {e}")
-                detail = str(e)[:200]
-                ctx.write(lambda c: _event(c, rid, "policy", detail=detail))
-                result["failed_repos"].append(rid)
-            except GatedRepoError:
-                print(f"  [gated   ] {rid}  — needs accepted Hugging Face repository access")
-                ctx.write(lambda c: _event(c, rid, "auth", detail="gated / needs accepted access"))
-                if on_gated is None:                    # plain fetch/CLI compatibility: no prompt broker
-                    result["failed_repos"].append(rid)
-                    continue
-                action = on_gated(rid)
-                if action == "retry":
-                    result["gated_retry"] = rid
-                    break                               # reconcile and retry this repo immediately
-                if action in {"skip", "timeout"}:
-                    detail = json.dumps({
-                        "type": "access-gated", "resolution": action,
-                        "url": f"https://huggingface.co/{rid}",
-                    }, sort_keys=True)
-                    ctx.write(lambda c: _event(c, rid, "auth", detail=detail))
-                    result["gated_repos"].append({"repo": rid, "resolution": action})
-            except HfHubHTTPError as e:
-                code = getattr(getattr(e, "response", None), "status_code", None)
-                if code == 401:
-                    failure = _hf_auth_invalid_failure()
-                    result["terminal_failure"] = failure
-                    result["terminal_repo"] = rid
-                    ctx.write(lambda c: _event(c, rid, "auth", detail="configured HF credential rejected"))
-                    ctx.on_progress({
-                        "phase": "auth-invalid", "repo": rid, "code": failure["code"],
-                        "evidence": failure["evidence"], "actions": failure["actions"],
-                        "say": f"🔴 {failure['message']}",
-                    })
-                    break
-                if code == 429:
-                    ra = _retry_after(e)
-                    print(f"  [429     ] {rid} — HF rate limit"
-                          + (f", Retry-After={ra:.0f}s" if ra else "") + "; stopping (resumable).")
-                    ctx.write(lambda c: _event(c, rid, "rate_limited", wait_seconds=ra, detail="429; stopped run"))
-                    ctx.on_progress({"phase": "rate_limited", "say": f"  [429] {rid} — HF rate limit; stopping."})
-                    result["throttled"] = True
-                    break
-                print(f"  [error   ] {rid}: {str(e)[:100]}")
-                detail = str(e)[:200]
-                ctx.write(lambda c: _event(c, rid, "error", detail=detail))
-                result["failed_repos"].append(rid)
-            except RepositoryNotFoundError as e:
-                print(f"  [error   ] {rid}: {str(e)[:100]}")
-                ctx.write(lambda c: _event(c, rid, "error", detail="repo not found"))
-                result["failed_repos"].append(rid)
-            except Exception as e:                       # INC-004: isolate ANY other repo failure (stalled
-                print(f"  [error   ] {rid}: {type(e).__name__}: {str(e)[:100]}")   # download exhausted retries,
-                detail = f"{type(e).__name__}: {str(e)[:180]}"
-                ctx.write(lambda c: _event(c, rid, "error", detail=detail))
-                result["failed_repos"].append(rid)
-                if not _dest_writable(dest):             # the DRIVE went unwritable mid-batch (USB drop), not just this
-                    ctx.write(lambda c: _event(c, rid, "awaiting-drive",           # DEF-021: a disruption boundary
-                              detail=f"{drive_label} went unwritable mid-fill"))
-                    ctx.on_progress({"phase": "awaiting-drive", "awaiting_drive": drive_label,   # repo → bail; the guided
-                                     "say": f"⚠ {drive_label} stopped accepting writes mid-fill — re-seat it."})
-                    result["drive_unwritable"] = True
-                    break                                # re-plan loop re-awaits + write-probes it (no silent churn)
-                if ctx.should_stop():                    # canary fail, etc.) — log + move on, don't wedge the fill
-                    break
-        # DEC-006: propagate to the central map — sync the drive (commit + push the
-        # location log) then sync the map (merge the file tree into its index) so the map
-        # is both the authoritative "where" (location log) and a browsable "what".
-        if annex:
-            s = subprocess.run(["git", "-C", str(dest), "annex", "sync"], capture_output=True, text=True)
-            m = subprocess.run(["git", "-C", str(register.library_root()), "annex", "sync"],
-                               capture_output=True, text=True)
-            if s.returncode == 0 and m.returncode == 0:
-                print("  synced drive + map (location log + index)")
-            else:
-                print(f"  sync warning: {((s.stderr or s.stdout) + ' ' + (m.stderr or m.stdout)).strip()[:160]}")
+        # Finding 35: prefer frozen SessionStart config; never reread wishlist mid-session.
+        compress_cfg = _compression_from_ctx(ctx)
+
+        # RFC-002 / DEC-049 physical-mutation envelope: fence this drive, commit the dirty generation
+        # before any staging/download/publish, hold the drive fence across the whole batch, reconcile
+        # only the touched set, then publish a fresh clean anchor. Monitored/git children inherit the
+        # held fence FDs. An unproven/mismatched identity, an unavailable fence, or a reconciliation gap
+        # surfaces as a typed terminal (never a leaked exception) and leaves the generation durably dirty.
+        def _observe(label):
+            return _observe_drive(con, label)
+
+        def _reconcile(label, paths, keys):
+            return _reconcile_touched(con, label, dest, annex, paths, keys)
+
+        try:
+            with drive_mutation.drive_mutation(
+                    con, [drive_label], "fill", observe=_observe, reconcile=_reconcile,
+                    now=datetime.now(timezone.utc).isoformat(sep=" "),
+                    session_id=getattr(ctx, "session_id", None),
+                    fencing_token=getattr(ctx, "fencing_token", None),
+            ) as _writer:
+                for k, rid in enumerate(ids):
+                    if ctx.should_stop():
+                        break
+                    with ctx.lock:
+                        used = _bytes_last_24h(con) if cap else 0
+                    if cap and used >= cap:
+                        print(f"  throttle: {used/1e12:.2f} TB downloaded in last 24h ≥ {cap/1e12:.2f} TB cap "
+                              f"— stopping at repo boundary (resumable, re-run to continue).")
+                        ctx.write(lambda c: _event(c, None, "throttled", detail=f"{used/1e9:.0f} GB in 24h"))
+                        ctx.on_progress({"phase": "throttled", "say":
+                                         f"  throttle: {used/1e12:.2f} TB in 24h ≥ cap — stopping (resumable)."})
+                        result["throttled"] = True
+                        break
+                    if fits is not None and not fits(rid):
+                        # #37 per-model failsafe: this drive's LIVE free can no longer hold `rid` in the plan's
+                        # capacity mode (actual > estimate, or a compression-aware forecast coming up short).
+                        # Break the batch so fill.execute re-plans — it re-homes rid onto another plan drive, or
+                        # (nothing fits anywhere) stops cleanly as plan-capacity-stop. Prevents an ENOSPC mid-shard.
+                        print(f"  [plan-capacity] {drive_label} full for {rid} — breaking batch to re-plan.")
+                        ctx.on_progress({"phase": "plan-capacity", "drive": drive_label, "repo": rid,
+                                         "say": f"  {drive_label} full for {rid} — re-planning (add a drive if nothing else fits)."})
+                        break
+                    ctx.on_progress({"drive": drive_label, "repo": rid, "repo_index": k + 1, "n_repos": len(ids),
+                                     "used_24h": used, "cap_24h": cap})
+                    try:
+                        task_args = {}
+                        if task_manifests is not None:
+                            task_args["manifest"] = task_manifests.get(rid)
+                        if before_file is not None:
+                            task_args["before_file"] = lambda item, _rid=rid: before_file(_rid, item)
+                        r = fetch_model(ctx, rid, dest, drive_label, annex, compress_cfg,
+                                        mutation_writer=_writer, **task_args)
+                        tag = f"{r['files']} files" + (f" (+{r['skipped']} already had)" if r["skipped"] else "")
+                        print(f"  [archived] {rid}  ({tag})")
+                        ctx.write(lambda c: _event(c, rid, "archived", bytes=r["bytes"], detail=tag))
+                        result["stored_repos"].append(rid)
+                    except _StopRequested:
+                        result["stopped"] = True
+                        break                                    # clean stop requested mid-shard (INC-004)
+                    except CapacityPreflightError as exc:
+                        result["capacity_failure"] = exc.failure
+                        ctx.on_progress({"phase": "plan-capacity", "drive": drive_label, "repo": rid,
+                                         "code": exc.failure.code.value,
+                                         "say": f"  {drive_label} lacks safe workspace for {rid} — re-planning."})
+                        break
+                    except FetchRequirementRefusal as exc:
+                        refusal = {"repo_id": rid, **exc.as_dict()}
+                        result["requirement_refusals"].append(refusal)
+                        print(f"  [{exc.code.lower():8}] {rid}: {exc}")
+                        event_detail = f"{exc.code}: {str(exc)[:150]}"
+                        ctx.write(lambda c: _event(
+                            c, rid, "error", detail=event_detail))
+                        ctx.on_progress({
+                            "phase": "fetch-followup", "repo": rid, "code": exc.code,
+                            "evidence": exc.evidence, "actions": list(exc.actions),
+                            "say": f"⚠ {exc}",
+                        })
+                    except FetchTerminalError as exc:
+                        result["terminal_failure"] = exc.as_dict()
+                        result["terminal_repo"] = rid
+                        print(f"  [{exc.code.lower():8}] {rid}: {exc}")
+                        event_detail = f"{exc.code}: {str(exc)[:150]}"
+                        ctx.write(lambda c: _event(c, rid, "error", detail=event_detail))   # typed code in detail
+                        ctx.on_progress({
+                            "phase": "fetch-blocked", "repo": rid, "code": exc.code,
+                            "evidence": exc.evidence, "actions": list(exc.actions),
+                            "say": f"🔴 {exc}",
+                        })
+                        break
+                    except ArchivePolicyError as e:
+                        print(f"  [policy  ] {rid}: {e}")
+                        detail = str(e)[:200]
+                        ctx.write(lambda c: _event(c, rid, "policy", detail=detail))
+                        result["failed_repos"].append(rid)
+                    except GatedRepoError:
+                        print(f"  [gated   ] {rid}  — needs accepted Hugging Face repository access")
+                        ctx.write(lambda c: _event(c, rid, "auth", detail="gated / needs accepted access"))
+                        if on_gated is None:                    # plain fetch/CLI compatibility: no prompt broker
+                            result["failed_repos"].append(rid)
+                            continue
+                        action = on_gated(rid)
+                        if action == "retry":
+                            result["gated_retry"] = rid
+                            break                               # reconcile and retry this repo immediately
+                        if action in {"skip", "timeout"}:
+                            detail = json.dumps({
+                                "type": "access-gated", "resolution": action,
+                                "url": f"https://huggingface.co/{rid}",
+                            }, sort_keys=True)
+                            ctx.write(lambda c: _event(c, rid, "auth", detail=detail))
+                            result["gated_repos"].append({"repo": rid, "resolution": action})
+                    except HfHubHTTPError as e:
+                        code = getattr(getattr(e, "response", None), "status_code", None)
+                        if code == 401:
+                            failure = _hf_auth_invalid_failure()
+                            result["terminal_failure"] = failure
+                            result["terminal_repo"] = rid
+                            ctx.write(lambda c: _event(c, rid, "auth", detail="configured HF credential rejected"))
+                            ctx.on_progress({
+                                "phase": "auth-invalid", "repo": rid, "code": failure["code"],
+                                "evidence": failure["evidence"], "actions": failure["actions"],
+                                "say": f"🔴 {failure['message']}",
+                            })
+                            break
+                        if code == 429:
+                            ra = _retry_after(e)
+                            print(f"  [429     ] {rid} — HF rate limit"
+                                  + (f", Retry-After={ra:.0f}s" if ra else "") + "; stopping (resumable).")
+                            ctx.write(lambda c: _event(c, rid, "rate_limited", wait_seconds=ra, detail="429; stopped run"))
+                            ctx.on_progress({"phase": "rate_limited", "say": f"  [429] {rid} — HF rate limit; stopping."})
+                            result["throttled"] = True
+                            break
+                        print(f"  [error   ] {rid}: {str(e)[:100]}")
+                        detail = str(e)[:200]
+                        ctx.write(lambda c: _event(c, rid, "error", detail=detail))
+                        result["failed_repos"].append(rid)
+                    except RepositoryNotFoundError as e:
+                        print(f"  [error   ] {rid}: {str(e)[:100]}")
+                        ctx.write(lambda c: _event(c, rid, "error", detail="repo not found"))
+                        result["failed_repos"].append(rid)
+                    except Exception as e:                       # INC-004: isolate ANY other repo failure (stalled
+                        print(f"  [error   ] {rid}: {type(e).__name__}: {str(e)[:100]}")   # download exhausted retries,
+                        detail = f"{type(e).__name__}: {str(e)[:180]}"
+                        ctx.write(lambda c: _event(c, rid, "error", detail=detail))
+                        result["failed_repos"].append(rid)
+                        if not _dest_writable(dest):             # the DRIVE went unwritable mid-batch (USB drop), not just this
+                            ctx.write(lambda c: _event(c, rid, "awaiting-drive",           # DEF-021: a disruption boundary
+                                      detail=f"{drive_label} went unwritable mid-fill"))
+                            ctx.on_progress({"phase": "awaiting-drive", "awaiting_drive": drive_label,   # repo → bail; the guided
+                                             "say": f"⚠ {drive_label} stopped accepting writes mid-fill — re-seat it."})
+                            result["drive_unwritable"] = True
+                            break                                # re-plan loop re-awaits + write-probes it (no silent churn)
+                        if ctx.should_stop():                    # canary fail, etc.) — log + move on, don't wedge the fill
+                            break
+                # DEC-006: propagate to the central map — sync the drive (commit + push the location
+                # log) then sync the map (merge the file tree into its index) so the map is both the
+                # authoritative "where" (location log) and a browsable "what". The map sync names ONLY
+                # this drive's remote (drive_label) — the same explicit-remote form registration uses —
+                # never all remotes, so it cannot reach other (possibly offline) drives; both mutating
+                # sync children inherit the held drive-fence FDs.
+                if annex:
+                    s = subprocess.run(["git", "-C", str(dest), "annex", "sync"], capture_output=True,
+                                       text=True, pass_fds=tuple(_writer.child_fence_fds))
+                    m = subprocess.run(["git", "-C", str(register.library_root()), "annex", "sync",
+                                        drive_label],
+                                       capture_output=True, text=True, pass_fds=tuple(_writer.child_fence_fds))
+                    if s.returncode == 0 and m.returncode == 0:
+                        print("  synced drive + map (location log + index)")
+                    else:
+                        print(f"  sync warning: {((s.stderr or s.stdout) + ' ' + (m.stderr or m.stdout)).strip()[:160]}")
+        except drive_mutation.DriveMutationRefused as exc:
+            # entry: identity unproven/mismatched or fence unavailable; clean close: reconciliation gap.
+            # Surface a typed terminal without clobbering a per-repo terminal; the affected generation
+            # stays durably dirty with no clean anchor for recovery.
+            code = exc.code
+            evidence = {str(ek): str(ev) for ek, ev in exc.evidence.items()}
+            result["terminal_failure"] = result["terminal_failure"] or {
+                "code": code, "message": f"{code} on drive {drive_label}",
+                "evidence": evidence,
+                "actions": ["reconcile_drive", "retry_fill"], "gate": "C",
+            }
+            ctx.write(lambda c: _event(c, None, "error", detail=f"{code}: drive {drive_label}"))
+            ctx.on_progress({"phase": "fetch-blocked", "drive": drive_label, "code": code,
+                             "say": f"🔴 {code} on {drive_label} — reconcile required."})
         return result
     finally:
         if own:
@@ -1018,6 +1359,8 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
         "deferred_targets": [],
         "copied_targets": [],
         "copied_files": 0,
+        "completed_requirements": [],
+        "progressed_requirements": [],
         "failed": [],
     }
     try:
@@ -1025,7 +1368,13 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
         for task in tasks:
             grouped.setdefault((task.source_drive, task.target_drive), []).append(task)
         lib = register.library_root()
-        copied_any = False
+
+        def _observe(label):
+            return _observe_drive(con, label)
+
+        def _reconcile(label, paths, keys):
+            return _reconcile_touched(con, label, register.archive_path(con, label), True, paths, keys)
+
         for (source, target), group in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0] or "")):
             if source is None:
                 result["failed"].append({
@@ -1040,7 +1389,9 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                 target_uuid = (con.execute(
                     "SELECT annex_uuid FROM drives WHERE drive_label=?", [target]
                 ).fetchone() or [None])[0]
-            if source_path is None or not _dest_writable(Path(source_path)):
+            # non-mutating presence checks before the fence (DEF-022 resumable defer); the mutating
+            # writability probe runs after dirtying, inside the envelope.
+            if source_path is None or not Path(source_path).exists():
                 result.update(deferred=True, source_offline=True)
                 result["deferred_targets"].append(target)
                 ctx.on_progress({
@@ -1048,7 +1399,7 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                     "say": f"⏳ replica source {source} is offline/read-only — copy #2 deferred; re-seat it.",
                 })
                 continue
-            if target_path is None or not _dest_writable(Path(target_path)):
+            if target_path is None or not Path(target_path).exists():
                 result["deferred"] = True
                 result["deferred_targets"].append(target)
                 ctx.on_progress({
@@ -1063,92 +1414,225 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                 })
                 continue
             source_repo, target_repo = Path(source_path), Path(target_path)
-            remote = subprocess.run(
-                ["git", "-C", str(source_repo), "remote", "set-url", target, str(target_repo)],
-                capture_output=True,
-                text=True,
-            )
-            if remote.returncode != 0:
-                subprocess.run(
-                    ["git", "-C", str(source_repo), "remote", "add", target, str(target_repo)],
-                    capture_output=True,
-                    text=True,
-                )
-            ctx.on_progress({
-                "phase": "replica", "drive": target, "n_repos": len(group),
-                "say": f"-- replica {target} ← {source} ({len(group)} task(s)) --",
-            })
-            group_deferred = False
-            for task in sorted(group, key=lambda item: item.requirement_id):
-                for rfilename in task.budget.missing_files:
-                    with ctx.lock:
-                        if con.execute(
-                            "SELECT 1 FROM archived WHERE repo_id=? AND rfilename=? AND drive_label=?",
-                            [task.repo_id, rfilename, target],
-                        ).fetchone():
-                            continue
-                        source_row = con.execute(
-                            "SELECT stored_name,stored_relpath,orig_sha256,znn_sha256,orig_bytes,"
-                            "stored_bytes,compressed,annex_key FROM archived "
-                            "WHERE repo_id=? AND rfilename=? AND drive_label=?",
-                            [task.repo_id, rfilename, source],
-                        ).fetchone()
-                    if source_row is None or not source_row[7]:
-                        result["failed"].append({
-                            "code": "SOURCE_KEY_MISSING", "requirement_id": task.requirement_id,
-                            "repo": task.repo_id, "file": rfilename, "source": source,
+            try:
+                # Fence BOTH source (remote config + bookkeeping) and target (copy); every mutating git
+                # child inherits both held FDs, and the mutating writability probe runs after dirtying.
+                with drive_mutation.drive_mutation(
+                        con, [source, target], "replica", observe=_observe, reconcile=_reconcile,
+                        now=datetime.now(timezone.utc).isoformat(sep=" ")) as _writer:
+                    fds = tuple(_writer.child_fence_fds)
+                    if not _dest_writable(source_repo) or not _dest_writable(target_repo):
+                        result["deferred"] = True
+                        result["deferred_targets"].append(target)
+                        ctx.on_progress({
+                            "phase": "awaiting-drive", "awaiting_drive": target,
+                            "say": f"⏳ replica {source}→{target} unwritable under fence — deferred; re-seat it.",
                         })
                         continue
-                    key = source_row[7]
-                    copied = subprocess.run(
-                        ["git", "-C", str(source_repo), "annex", "copy", "--to", target, f"--key={key}"],
-                        capture_output=True,
-                        text=True,
+                    remote = subprocess.run(
+                        ["git", "-C", str(source_repo), "remote", "set-url", target, str(target_repo)],
+                        capture_output=True, text=True, pass_fds=fds,
                     )
-                    if copied.returncode != 0:
-                        if not _dest_writable(target_repo):
-                            result["deferred"] = True
-                            result["deferred_targets"].append(target)
-                            group_deferred = True
+                    if remote.returncode != 0:
+                        subprocess.run(
+                            ["git", "-C", str(source_repo), "remote", "add", target, str(target_repo)],
+                            capture_output=True, text=True, pass_fds=fds,
+                        )
+                    ctx.on_progress({
+                        "phase": "replica", "drive": target, "n_repos": len(group),
+                        "say": f"-- replica {target} ← {source} ({len(group)} task(s)) --",
+                    })
+                    group_deferred = False
+                    group_copied = False
+                    for task in sorted(group, key=lambda item: item.requirement_id):
+                        task_failed = False
+                        task_progressed = False
+                        satisfied_files: set[str] = set()
+                        for rfilename in task.budget.missing_files:
+                            with ctx.lock:
+                                source_row = con.execute(
+                                    "SELECT stored_name,stored_relpath,orig_sha256,znn_sha256,orig_bytes,"
+                                    "stored_bytes,compressed,annex_key,orig_sha256_provenance FROM archived "
+                                    "WHERE repo_id=? AND rfilename=? AND drive_label=?",
+                                    [task.repo_id, rfilename, source],
+                                ).fetchone()
+                                target_row = con.execute(
+                                    "SELECT orig_sha256,compressed,annex_key,"
+                                    "orig_sha256_provenance FROM archived "
+                                    "WHERE repo_id=? AND rfilename=? AND drive_label=?",
+                                    [task.repo_id, rfilename, target],
+                                ).fetchone()
+                            if source_row is None:
+                                result["failed"].append({
+                                    "code": "SOURCE_ROW_MISSING", "requirement_id": task.requirement_id,
+                                    "repo": task.repo_id, "file": rfilename, "source": source,
+                                })
+                                task_failed = True
+                                continue
+                            try:
+                                source_digest = archive_hash.expected_sha256(
+                                    catalog_sha=None,
+                                    orig_sha256=source_row[2],
+                                    compressed=bool(source_row[6]),
+                                    annex_key=source_row[7],
+                                )
+                            except archive_hash.DigestEvidenceError:
+                                result["failed"].append({
+                                    "code": "SOURCE_DIGEST_CONFLICT",
+                                    "requirement_id": task.requirement_id,
+                                    "repo": task.repo_id, "file": rfilename, "source": source,
+                                })
+                                task_failed = True
+                                continue
+                            if source_digest is None:
+                                result["failed"].append({
+                                    "code": "SOURCE_DIGEST_UNPROVABLE",
+                                    "requirement_id": task.requirement_id,
+                                    "repo": task.repo_id, "file": rfilename, "source": source,
+                                })
+                                task_failed = True
+                                continue
+                            if target_row is not None:
+                                decision = _classify_replica_heal(
+                                    source_orig_sha256=source_row[2],
+                                    source_compressed=bool(source_row[6]),
+                                    source_annex_key=source_row[7],
+                                    source_provenance=source_row[8],
+                                    target_orig_sha256=target_row[0],
+                                    target_compressed=bool(target_row[1]),
+                                    target_annex_key=target_row[2],
+                                    target_provenance=target_row[3],
+                                )
+                                if decision.action == "satisfied":
+                                    satisfied_files.add(rfilename)
+                                    continue
+                                try:
+                                    with ctx.lock:
+                                        healed = heal_replica_archived_from_source(
+                                            con,
+                                            source_drive=source,
+                                            target_drive=target,
+                                            repo_id=task.repo_id,
+                                            rfilename=rfilename,
+                                        )
+                                        healed_target = con.execute(
+                                            "SELECT orig_sha256,compressed,annex_key FROM archived "
+                                            "WHERE repo_id=? AND rfilename=? AND drive_label=?",
+                                            [task.repo_id, rfilename, target],
+                                        ).fetchone()
+                                except ReplicaHealError as exc:
+                                    result["failed"].append({
+                                        "code": "REPLICA_DIGEST_MISMATCH",
+                                        "requirement_id": task.requirement_id,
+                                        "repo": task.repo_id, "file": rfilename,
+                                        "source": source, "target": target,
+                                        "detail": str(exc),
+                                    })
+                                    task_failed = True
+                                    continue
+                                if (healed_target is not None
+                                        and archive_hash.content_satisfies(
+                                            approved_sha256=source_digest,
+                                            orig_sha256=healed_target[0],
+                                            compressed=bool(healed_target[1]),
+                                            annex_key=healed_target[2])):
+                                    if healed.get("status") in {"filled", "provenance_filled"}:
+                                        task_progressed = True
+                                    satisfied_files.add(rfilename)
+                                    continue
+                                result["failed"].append({
+                                    "code": "REPLICA_TARGET_UNPROVABLE",
+                                    "requirement_id": task.requirement_id,
+                                    "repo": task.repo_id, "file": rfilename, "target": target,
+                                })
+                                task_failed = True
+                                continue
+                            if not source_row[7]:
+                                result["failed"].append({
+                                    "code": "SOURCE_KEY_MISSING", "requirement_id": task.requirement_id,
+                                    "repo": task.repo_id, "file": rfilename, "source": source,
+                                })
+                                task_failed = True
+                                continue
+                            key = source_row[7]
+                            copied = subprocess.run(
+                                ["git", "-C", str(source_repo), "annex", "copy", "--to", target, f"--key={key}"],
+                                capture_output=True, text=True, pass_fds=fds,
+                            )
+                            if copied.returncode != 0:
+                                if not _dest_writable(target_repo):
+                                    result["deferred"] = True
+                                    result["deferred_targets"].append(target)
+                                    group_deferred = True
+                                    break
+                                result["failed"].append({
+                                    "code": "ANNEX_COPY_FAILED", "requirement_id": task.requirement_id,
+                                    "repo": task.repo_id, "file": rfilename, "target": target,
+                                })
+                                task_failed = True
+                                continue
+                            if not _annex_key_on_uuid(source_repo, key, target_uuid):
+                                result["failed"].append({
+                                    "code": "TARGET_KEY_UNVERIFIED", "requirement_id": task.requirement_id,
+                                    "repo": task.repo_id, "file": rfilename, "target": target,
+                                })
+                                task_failed = True
+                                continue
+                            (stored_name, stored_relpath, orig_sha, znn_sha, orig_bytes,
+                             stored_bytes, compressed, _, src_prov) = source_row
+                            arch_cols = {r[1] for r in con.execute("PRAGMA table_info(archived)")}
+                            row_payload = {
+                                "repo_id": task.repo_id, "rfilename": rfilename,
+                                "stored_name": stored_name, "stored_relpath": stored_relpath,
+                                "drive_label": target, "orig_sha256": orig_sha,
+                                "znn_sha256": znn_sha, "orig_bytes": orig_bytes,
+                                "stored_bytes": stored_bytes, "compressed": compressed,
+                                "annex_key": key,
+                            }
+                            if "orig_sha256_provenance" in arch_cols:
+                                row_payload["orig_sha256_provenance"] = src_prov
+                            ctx.write(lambda c, _row=dict(row_payload): db.upsert(
+                                c, "archived", _row,
+                                pk=["repo_id", "rfilename", "drive_label"],
+                                touch=["verified_at"],
+                            ))
+                            _writer.record_touched(
+                                target, paths=[f"{task.repo_id}/{stored_relpath}"], keys=[key])
+                            result["copied_files"] += 1
+                            group_copied = True
+                            task_progressed = True
+                            satisfied_files.add(rfilename)
+                        if group_deferred:
                             break
-                        result["failed"].append({
-                            "code": "ANNEX_COPY_FAILED", "requirement_id": task.requirement_id,
-                            "repo": task.repo_id, "file": rfilename, "target": target,
+                        if task_progressed:
+                            result["progressed_requirements"].append(task.requirement_id)
+                        if (not task_failed
+                                and set(task.budget.missing_files) <= satisfied_files):
+                            result["completed_requirements"].append(task.requirement_id)
+                    if group_copied and not group_deferred:
+                        # Propagate the landed copies into the central map, naming ONLY this group's
+                        # source+target remotes. This is now pair-scoped and per-group — rather than one
+                        # all-remotes `annex sync` after every group — so the sync stays inside this
+                        # pair's held drive fences and never reaches unrelated (possibly offline) drive
+                        # remotes; the sync child inherits the held FDs.
+                        subprocess.run(["git", "-C", str(lib), "annex", "sync", source, target],
+                                       capture_output=True, text=True, pass_fds=fds)
+                    if group_deferred:
+                        ctx.on_progress({
+                            "phase": "awaiting-drive", "awaiting_drive": target,
+                            "say": f"⏳ replica target {target} went unwritable mid-copy — deferred; re-seat it.",
                         })
-                        continue
-                    if not _annex_key_on_uuid(source_repo, key, target_uuid):
-                        result["failed"].append({
-                            "code": "TARGET_KEY_UNVERIFIED", "requirement_id": task.requirement_id,
-                            "repo": task.repo_id, "file": rfilename, "target": target,
-                        })
-                        continue
-                    stored_name, stored_relpath, orig_sha, znn_sha, orig_bytes, stored_bytes, compressed, _ = source_row
-                    ctx.write(lambda c, _task=task, _file=rfilename, _target=target, _values=(
-                        stored_name, stored_relpath, orig_sha, znn_sha, orig_bytes, stored_bytes,
-                        compressed, key,
-                    ): db.upsert(c, "archived", {
-                        "repo_id": _task.repo_id, "rfilename": _file,
-                        "stored_name": _values[0], "stored_relpath": _values[1],
-                        "drive_label": _target, "orig_sha256": _values[2],
-                        "znn_sha256": _values[3], "orig_bytes": _values[4],
-                        "stored_bytes": _values[5], "compressed": _values[6],
-                        "annex_key": _values[7],
-                    }, pk=["repo_id", "rfilename", "drive_label"], touch=["verified_at"]))
-                    result["copied_files"] += 1
-                    copied_any = True
-                if group_deferred:
-                    break
-            if group_deferred:
-                ctx.on_progress({
-                    "phase": "awaiting-drive", "awaiting_drive": target,
-                    "say": f"⏳ replica target {target} went unwritable mid-copy — deferred; re-seat it.",
+                    elif target not in result["deferred_targets"]:
+                        result["copied_targets"].append(target)
+            except drive_mutation.DriveMutationRefused as exc:
+                result["failed"].append({
+                    "code": exc.code, "target": target,
+                    "requirements": [task.requirement_id for task in group],
                 })
-            elif target not in result["deferred_targets"]:
-                result["copied_targets"].append(target)
-        if copied_any:
-            subprocess.run(["git", "-C", str(lib), "annex", "sync"], capture_output=True, text=True)
         result["deferred_targets"] = sorted(set(result["deferred_targets"]))
         result["copied_targets"] = sorted(set(result["copied_targets"]))
+        result["completed_requirements"] = sorted(set(result["completed_requirements"]))
+        result["progressed_requirements"] = sorted(set(result["progressed_requirements"]))
         return result
     finally:
         if own:
@@ -1225,17 +1709,232 @@ def run_replica(replica_assign: dict, source: str | None, ctx: RunCtx | None = N
                 continue
             print("    ok")
             subprocess.run(["git", "-C", str(lib), "annex", "sync"], capture_output=True, text=True)
-            ctx.write(lambda c: c.execute(   # mirror source's archived rows onto this replica label
-                "INSERT INTO archived (repo_id, rfilename, stored_name, stored_relpath, drive_label, orig_sha256, "
-                "znn_sha256, orig_bytes, stored_bytes, compressed, annex_key, verified_at) "
-                "SELECT repo_id, rfilename, stored_name, stored_relpath, ?, orig_sha256, znn_sha256, orig_bytes, "
-                "stored_bytes, compressed, annex_key, CURRENT_TIMESTAMP FROM archived WHERE drive_label=? AND "
-                f"repo_id IN ({','.join(['?']*len(repos))}) "
-                "ON CONFLICT (repo_id, rfilename, drive_label) DO NOTHING",
-                [label, source, *repos]))
+            def _mirror(c, _label=label, _source=source, _repos=repos):
+                cols = {r[1] for r in c.execute("PRAGMA table_info(archived)")}
+                has_prov = "orig_sha256_provenance" in cols
+                if has_prov:
+                    c.execute(
+                        "INSERT INTO archived (repo_id, rfilename, stored_name, stored_relpath, "
+                        "drive_label, orig_sha256, znn_sha256, orig_bytes, stored_bytes, compressed, "
+                        "annex_key, orig_sha256_provenance, verified_at) "
+                        "SELECT repo_id, rfilename, stored_name, stored_relpath, ?, orig_sha256, "
+                        "znn_sha256, orig_bytes, stored_bytes, compressed, annex_key, "
+                        "orig_sha256_provenance, CURRENT_TIMESTAMP FROM archived "
+                        f"WHERE drive_label=? AND repo_id IN ({','.join(['?'] * len(_repos))}) "
+                        "ON CONFLICT (repo_id, rfilename, drive_label) DO NOTHING",
+                        [_label, _source, *_repos],
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO archived (repo_id, rfilename, stored_name, stored_relpath, "
+                        "drive_label, orig_sha256, znn_sha256, orig_bytes, stored_bytes, compressed, "
+                        "annex_key, verified_at) "
+                        "SELECT repo_id, rfilename, stored_name, stored_relpath, ?, orig_sha256, "
+                        "znn_sha256, orig_bytes, stored_bytes, compressed, annex_key, "
+                        "CURRENT_TIMESTAMP FROM archived "
+                        f"WHERE drive_label=? AND repo_id IN ({','.join(['?'] * len(_repos))}) "
+                        "ON CONFLICT (repo_id, rfilename, drive_label) DO NOTHING",
+                        [_label, _source, *_repos],
+                    )
+            ctx.write(_mirror)
             result["copied_targets"].append(label)
             ctx.on_progress({"phase": "replica", "drive": label, "say": f"    ✓ replica {label} ok"})
         return result
     finally:
         if own:
             con.close()
+
+
+class ReplicaHealError(RuntimeError):
+    """Targeted replica archived-row heal refused (digest mismatch or missing source)."""
+
+
+@dataclass(frozen=True)
+class _ReplicaHealDecision:
+    action: str
+    fill_kind: str | None
+    source_resolved_sha256: str | None
+    target_resolved_sha256: str | None
+
+
+def _classify_replica_heal(
+    *,
+    source_orig_sha256: str | None,
+    source_compressed: bool,
+    source_annex_key: str | None,
+    source_provenance: str | None,
+    target_orig_sha256: str | None,
+    target_compressed: bool,
+    target_annex_key: str | None,
+    target_provenance: str | None,
+) -> _ReplicaHealDecision:
+    """Classify replica evidence without I/O, using the canonical digest resolver."""
+    try:
+        source_resolved = archive_hash.expected_sha256(
+            catalog_sha=None,
+            orig_sha256=source_orig_sha256,
+            compressed=source_compressed,
+            annex_key=source_annex_key,
+        )
+        target_resolved = archive_hash.expected_sha256(
+            catalog_sha=None,
+            orig_sha256=target_orig_sha256,
+            compressed=target_compressed,
+            annex_key=target_annex_key,
+        )
+    except archive_hash.DigestEvidenceError:
+        return _ReplicaHealDecision(
+            action="halt_contradiction",
+            fill_kind=None,
+            source_resolved_sha256=None,
+            target_resolved_sha256=None,
+        )
+    if source_resolved is None:
+        action = "noop"
+        fill_kind = None
+    elif archive_hash.content_satisfies(
+            approved_sha256=source_resolved,
+            orig_sha256=target_orig_sha256,
+            compressed=target_compressed,
+            annex_key=target_annex_key):
+        if target_orig_sha256 is None and source_orig_sha256:
+            action = "fill"
+            fill_kind = "digest"
+        elif (target_orig_sha256
+              and target_provenance is None
+              and source_provenance is not None):
+            action = "fill"
+            fill_kind = "provenance"
+        else:
+            action = "satisfied"
+            fill_kind = None
+    elif target_resolved is not None:
+        action = "halt_contradiction"
+        fill_kind = None
+    elif source_orig_sha256:
+        action = "fill"
+        fill_kind = "digest"
+    else:
+        # A source digest derived only from its annex key cannot certify unproven target bytes.
+        action = "noop"
+        fill_kind = None
+    return _ReplicaHealDecision(
+        action=action,
+        fill_kind=fill_kind,
+        source_resolved_sha256=source_resolved,
+        target_resolved_sha256=target_resolved,
+    )
+
+
+def heal_replica_archived_from_source(
+    con,
+    *,
+    source_drive: str,
+    target_drive: str,
+    repo_id: str,
+    rfilename: str,
+) -> dict:
+    """DEC-060 targeted replica heal: evidence fill, provenance fill, or contradiction halt.
+
+    Never invents a ``mirrored`` provenance class; never overwrites a non-null target digest
+    with a different source digest. Source provenance is copied verbatim only when resolved
+    evidence agrees or the target has no resolvable original-byte digest evidence. The pure
+    classifier also names whether a safe fill enriches digest+provenance or provenance alone.
+    """
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        cols = {r[1] for r in con.execute("PRAGMA table_info(archived)")}
+        if "orig_sha256_provenance" not in cols:
+            raise ReplicaHealError(
+                "archived.orig_sha256_provenance missing — catalog requires provenance schema"
+            )
+        src = con.execute(
+            "SELECT orig_sha256, orig_sha256_provenance, compressed, annex_key FROM archived "
+            "WHERE drive_label=? AND repo_id=? AND rfilename=?",
+            [source_drive, repo_id, rfilename],
+        ).fetchone()
+        if src is None:
+            raise ReplicaHealError(
+                f"source archived row missing: {repo_id}/{rfilename} on {source_drive}"
+            )
+        src_digest, src_prov, src_compressed, src_annex_key = src
+        tgt = con.execute(
+            "SELECT orig_sha256, orig_sha256_provenance, compressed, annex_key FROM archived "
+            "WHERE drive_label=? AND repo_id=? AND rfilename=?",
+            [target_drive, repo_id, rfilename],
+        ).fetchone()
+        if tgt is None:
+            raise ReplicaHealError(
+                f"target archived row missing: {repo_id}/{rfilename} on {target_drive}"
+            )
+        tgt_digest, tgt_prov, tgt_compressed, tgt_annex_key = tgt
+        decision = _classify_replica_heal(
+            source_orig_sha256=src_digest,
+            source_compressed=bool(src_compressed),
+            source_annex_key=src_annex_key,
+            source_provenance=src_prov,
+            target_orig_sha256=tgt_digest,
+            target_compressed=bool(tgt_compressed),
+            target_annex_key=tgt_annex_key,
+            target_provenance=tgt_prov,
+        )
+
+        if decision.action == "halt_contradiction":
+            raise ReplicaHealError(
+                f"replica heal halted: digest mismatch for {repo_id}/{rfilename} "
+                f"source={decision.source_resolved_sha256} "
+                f"target={decision.target_resolved_sha256}"
+            )
+
+        if decision.action == "fill" and decision.fill_kind == "digest":
+            updated = con.execute(
+                "UPDATE archived SET orig_sha256=?, orig_sha256_provenance=? "
+                "WHERE drive_label=? AND repo_id=? AND rfilename=? "
+                "AND orig_sha256 IS NULL AND compressed=? AND annex_key IS ?",
+                [src_digest, src_prov, target_drive, repo_id, rfilename,
+                 int(bool(tgt_compressed)), tgt_annex_key],
+            )
+            if updated.rowcount != 1:
+                raise ReplicaHealError(
+                    f"replica heal halted: target changed for {repo_id}/{rfilename}"
+                )
+            result = {
+                "status": "filled",
+                "orig_sha256": src_digest,
+                "orig_sha256_provenance": src_prov,
+            }
+        elif decision.action == "fill" and decision.fill_kind == "provenance":
+            updated = con.execute(
+                "UPDATE archived SET orig_sha256_provenance=? "
+                "WHERE drive_label=? AND repo_id=? AND rfilename=? "
+                "AND orig_sha256 IS ? AND compressed=? AND annex_key IS ? "
+                "AND orig_sha256_provenance IS NULL",
+                [src_prov, target_drive, repo_id, rfilename, tgt_digest,
+                 int(bool(tgt_compressed)), tgt_annex_key],
+            )
+            if updated.rowcount != 1:
+                raise ReplicaHealError(
+                    f"replica heal halted: target changed for {repo_id}/{rfilename}"
+                )
+            result = {
+                "status": "provenance_filled",
+                "orig_sha256": tgt_digest,
+                "orig_sha256_provenance": src_prov,
+            }
+        elif decision.action == "fill":
+            raise ReplicaHealError(
+                f"replica heal halted: unknown fill kind {decision.fill_kind!r} "
+                f"for {repo_id}/{rfilename}"
+            )
+        elif decision.action == "satisfied":
+            result = {"status": "noop", "reason": "target_complete"}
+        else:
+            result = {"status": "noop", "reason": "source_cannot_fill_target"}
+        con.commit()
+        return result
+    except BaseException:
+        try:
+            con.rollback()
+        except BaseException:
+            pass
+        raise

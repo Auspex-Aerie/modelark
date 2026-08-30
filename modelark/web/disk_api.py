@@ -11,8 +11,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
+from pathlib import Path, PurePosixPath
 
+from modelark import register as drive_register
 from modelark.core import platform as osplat
 
 
@@ -43,12 +46,14 @@ def _usb_id(name: str):
     return None
 
 
-def _lsblk() -> list[dict]:
+def _lsblk_result() -> tuple[bool, list[dict]]:
     try:
         r = subprocess.run(["lsblk", "-dn", "-P", "-o", "NAME,SIZE,MODEL,SERIAL,TYPE,TRAN,ROTA"],
                            capture_output=True, text=True, timeout=10)
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []
+        return False, []
+    if r.returncode != 0:
+        return False, []
     out = []
     for line in r.stdout.splitlines():
         d = dict(re.findall(r'(\w+)="([^"]*)"', line))
@@ -58,7 +63,243 @@ def _lsblk() -> list[dict]:
         if any(name.startswith(s) for s in _SKIP_PREFIX) or d.get("SIZE") in ("", "0B", "0"):
             continue
         out.append(d)
-    return out
+    return True, out
+
+
+def _lsblk() -> list[dict]:
+    """Compatibility helper for the existing SMART endpoint."""
+    return _lsblk_result()[1]
+
+
+def attached_inventory() -> dict:
+    """Return passive block-device inventory without running SMART or mutating hardware.
+
+    Mounted filesystem and annex identifiers are included so every consumer can use the same
+    stable-identity evidence instead of inventing a serial-only correlation rule.  The topology
+    probe remains read-only; an unmounted device naturally has no observable annex identity.
+    """
+    available, disks = _lsblk_result()
+    devices = []
+    for item in disks:
+        dev = "/dev/" + item["NAME"]
+        topology = registration_topology(dev)
+        storage_identities = [
+            {
+                "dev": node.get("dev"),
+                "fs_uuid": node.get("fs_uuid"),
+                "annex_uuid": node.get("annex_uuid"),
+                "mountpoints": list(node.get("mountpoints") or []),
+                "archive_state": node.get("archive_state"),
+            }
+            for node in topology.get("nodes") or []
+            if node.get("fstype")
+        ]
+        devices.append({
+            "dev": dev,
+            "size": item.get("SIZE"),
+            "model": item.get("MODEL") or None,
+            "serial": item.get("SERIAL") or None,
+            "bus": item.get("TRAN") or None,
+            "spinning": item.get("ROTA") == "1",
+            "storage_identities": storage_identities,
+        })
+    return {
+        "available": available,
+        "devices": devices,
+    }
+
+
+def _registration_device_path(dev: str) -> bool:
+    """Accept a concrete /dev path as one argv token; never interpret it through a shell."""
+    if not isinstance(dev, str) or not dev.startswith("/dev/") or len(dev) > 256:
+        return False
+    if any(char in dev for char in ("\x00", "\n", "\r")):
+        return False
+    return ".." not in PurePosixPath(dev).parts
+
+
+def _flatten_lsblk(nodes: list[dict]) -> list[dict]:
+    flattened: list[dict] = []
+    for node in nodes:
+        flattened.append(node)
+        flattened.extend(_flatten_lsblk(node.get("children") or []))
+    return flattened
+
+
+def _service_identity() -> tuple[int | None, int | None, str | None, str | None]:
+    """Return the effective account that performs portal drive preparation."""
+    uid = os.geteuid() if hasattr(os, "geteuid") else None
+    gid = os.getegid() if hasattr(os, "getegid") else None
+    user = str(uid) if uid is not None else None
+    group = str(gid) if gid is not None else None
+    try:
+        import pwd
+
+        if uid is not None:
+            user = pwd.getpwuid(uid).pw_name
+    except (ImportError, KeyError):
+        pass
+    try:
+        import grp
+
+        if gid is not None:
+            group = grp.getgrgid(gid).gr_name
+    except (ImportError, KeyError):
+        pass
+    return uid, gid, user, group
+
+
+def registration_topology(dev: str) -> dict:
+    """Read a prospective registration target's filesystem topology without SMART or writes."""
+    if not _registration_device_path(dev):
+        return {
+            "available": False,
+            "requested_dev": dev,
+            "system_backing": False,
+            "nodes": [],
+            "error": "invalid_device_path",
+        }
+    try:
+        result = subprocess.run(
+            [
+                "lsblk", "--json", "-b", "-p", "-o",
+                "PATH,TYPE,SIZE,FSTYPE,UUID,MOUNTPOINTS,MODEL,SERIAL,TRAN,ROTA",
+                dev,
+            ],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return {
+            "available": False,
+            "requested_dev": dev,
+            "system_backing": False,
+            "nodes": [],
+            "error": "lsblk_unavailable",
+        }
+    if result.returncode != 0:
+        return {
+            "available": False,
+            "requested_dev": dev,
+            "system_backing": False,
+            "nodes": [],
+            "error": "topology_probe_failed",
+        }
+    try:
+        roots = json.loads(result.stdout).get("blockdevices") or []
+    except (json.JSONDecodeError, AttributeError):
+        roots = []
+    raw_nodes = _flatten_lsblk(roots)
+    service_uid, service_gid, service_user, service_group = _service_identity()
+    nodes = []
+    for node in raw_nodes:
+        mountpoints = node.get("mountpoints") or []
+        if isinstance(mountpoints, str):
+            mountpoints = [mountpoints]
+        mountpoints = [str(item) for item in mountpoints if item]
+        archive_path = None
+        archive_state = "unmounted"
+        annex_uuid = None
+        registration_receipt = None
+        archive_parent_writable = None
+        archive_parent_uid = None
+        archive_parent_gid = None
+        archive_parent_mode = None
+        if len(mountpoints) == 1:
+            mountpoint = Path(mountpoints[0])
+            archive = mountpoint / "modelark"
+            archive_path = str(archive)
+            try:
+                mount_stat = mountpoint.stat()
+            except OSError:
+                pass
+            else:
+                archive_parent_writable = os.access(
+                    str(mountpoint), os.W_OK | os.X_OK
+                )
+                archive_parent_uid = mount_stat.st_uid
+                archive_parent_gid = mount_stat.st_gid
+                archive_parent_mode = f"{stat.S_IMODE(mount_stat.st_mode):04o}"
+            try:
+                if archive.is_symlink():
+                    archive_state = "unsafe_path"
+                elif not archive.exists():
+                    archive_state = "absent"
+                elif archive.is_dir() and (archive / ".git").exists():
+                    try:
+                        annex = subprocess.run(
+                            [
+                                "git", "-C", str(archive), "config", "--local", "--get",
+                                "annex.uuid",
+                            ],
+                            capture_output=True,
+                            text=True,
+                        )
+                    except FileNotFoundError:
+                        annex = None
+                    if annex is not None and annex.returncode == 0 and annex.stdout.strip():
+                        annex_uuid = annex.stdout.strip().splitlines()[0]
+                        registration_receipt = drive_register.registration_receipt(archive)
+                        archive_state = (
+                            "prepared_registration" if registration_receipt else "annex"
+                        )
+                    else:
+                        archive_state = "unrecognized"
+                else:
+                    archive_state = "unrecognized"
+            except OSError:
+                # Passive inventory must remain available when an unrelated mount (commonly a
+                # protected system/EFI volume) cannot be traversed by the service account.
+                archive_state = "inaccessible"
+                annex_uuid = None
+                registration_receipt = None
+        nodes.append({
+            "dev": node.get("path"),
+            "type": node.get("type"),
+            "size_bytes": int(node.get("size") or 0),
+            "fstype": node.get("fstype") or None,
+            "fs_uuid": node.get("uuid") or None,
+            "mountpoints": mountpoints,
+            "archive_path": archive_path,
+            "archive_state": archive_state,
+            "annex_uuid": annex_uuid,
+            "registration_receipt": registration_receipt,
+            "archive_parent_writable": archive_parent_writable,
+            "archive_parent_uid": archive_parent_uid,
+            "archive_parent_gid": archive_parent_gid,
+            "archive_parent_mode": archive_parent_mode,
+            "service_uid": service_uid,
+            "service_gid": service_gid,
+            "service_user": service_user,
+            "service_group": service_group,
+        })
+
+    root_source = None
+    try:
+        root = subprocess.run(
+            ["findmnt", "-nro", "SOURCE", "/"],
+            capture_output=True,
+            text=True,
+        )
+        if root.returncode == 0 and root.stdout.strip():
+            root_source = root.stdout.strip().splitlines()[0].split("[", 1)[0]
+    except FileNotFoundError:
+        pass
+    node_paths = {
+        os.path.realpath(str(node["dev"]))
+        for node in nodes
+        if node.get("dev")
+    }
+    system_backing = any("/" in node["mountpoints"] for node in nodes)
+    if root_source:
+        system_backing = system_backing or os.path.realpath(root_source) in node_paths
+    return {
+        "available": bool(nodes),
+        "requested_dev": dev,
+        "system_backing": system_backing,
+        "nodes": nodes,
+        "error": None if nodes else "device_not_found",
+    }
 
 
 # -d drivers to try, in order — covers most USB-SATA/USB-NVMe bridges.

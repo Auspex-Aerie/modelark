@@ -125,7 +125,7 @@ def test_execute_backs_up_migrates_validates_and_publishes(tmp_path):
         "nested/model.safetensors.znn"
     assert con.execute("SELECT plan_id,is_active FROM plans").fetchone() == ("ark", 1)
     assert con.execute("SELECT capacity_mode FROM plans").fetchone()[0] == "compression_aware"
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert con.execute("PRAGMA user_version").fetchone()[0] == db._SCHEMA_VERSION
     assert con.execute("SELECT drive_label FROM plan_drives").fetchone()[0] == "drive-01"
     con.close()
     run = backups / "modelark-migration-fixture"

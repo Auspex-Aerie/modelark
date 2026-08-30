@@ -58,9 +58,20 @@ def _seed(con) -> None:
         "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
         "VALUES('demo/replica-blocked','model.safetensors',2000000000,'safetensors','bf16')"
     )
+    # Hostile id/reason carrier for blocked-selection XSS contract (pickle-only → MANIFEST_POLICY).
+    con.execute(
+        "INSERT INTO models(repo_id,author,params_b,category,variant,license,downloads_30d,"
+        "gated,status) VALUES('demo/<script>alert(1)</script>','demo',1.0,'generative-llm',"
+        "'base','mit',5,'false','discovered')"
+    )
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+        "VALUES('demo/<script>alert(1)</script>','pytorch_model.bin',1000000,'pytorch','fp16')"
+    )
     con.executemany(
         "INSERT INTO selection(repo_id,finalized_at) VALUES(?,'2026-07-15')",
-        [("demo/tiny-llm",), ("demo/pickle-only",), ("demo/replica-blocked",)],
+        [("demo/tiny-llm",), ("demo/pickle-only",), ("demo/replica-blocked",),
+         ("demo/<script>alert(1)</script>",)],
     )
     con.execute(
         "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes) "
@@ -82,6 +93,20 @@ def _seed(con) -> None:
         "'demo/embed','model.safetensors','model.safetensors','model.safetensors',"
         "'drive-replica',1000000000,600000000,1,'KEY-embed')"
     )
+    # Reconcile both drives (proven identity + a matching clean anchor) so admission evidence is
+    # available offline (#35-C). A migrated drive would be `unknown` and capacity-block everything —
+    # the fail-closed migration default — masking the intended policy/replica-capacity blockers.
+    for label, cap, fp in (("drive-00", 10000000000000, "a" * 64), ("drive-replica", 1000000000, "b" * 64)):
+        con.execute("UPDATE drives SET identity_epoch=1, write_generation=1, filesystem_capacity_bytes=?, "
+                    "identity_fingerprint=?, write_authority='dedicated_local' WHERE drive_label=?",
+                    (cap, fp, label))
+        con.execute("INSERT INTO drive_dirty_generations(drive_label,identity_epoch,generation,"
+                    "operation_code) VALUES(?,1,1,'reconcile')", (label,))
+        con.execute("INSERT INTO drive_clean_anchors(drive_label,identity_epoch,generation,"
+                    "anchor_free_bytes,filesystem_capacity_bytes,identity_fingerprint,write_authority,"
+                    "identity_proof,fence_proof,observed_at) "
+                    "VALUES(?,1,1,?,?,?, 'dedicated_local','proof','fence','2026-07-15 00:00:00')",
+                    (label, cap, cap, fp))
 
 
 def _wait_port(port: int, timeout: int = 40) -> bool:
@@ -98,6 +123,728 @@ def _wait_port(port: int, timeout: int = 40) -> bool:
 def _get(path: str):
     with urllib.request.urlopen(BASE + path, timeout=10) as r:
         return json.load(r)
+
+
+_POLICY_BLOCKED_IDS = {
+    "demo/pickle-only",
+    "demo/<script>alert(1)</script>",
+}
+_DISMISS_BODY_KEYS = {"ids", "on", "expected_revision", "expected_selection_hash"}
+_MUTATION_ROUTE_SPECS = (
+    ("**/api/selection", "selection"),
+    ("**/api/selection/bulk", "selection_bulk"),
+    ("**/api/selection/clear", "selection_clear"),
+    ("**/api/selection/finalize", "selection_finalize"),
+    ("**/api/fill/start", "fill_start"),
+    ("**/api/proposal/**", "proposal"),
+)
+
+
+def _blocked_selection_flow(pg) -> None:
+    """Fill-tab blocked-selection notice (DEC-058). Fail closed if the real UI is absent.
+
+    Stable selectors (Gate-2 production must provide them):
+      #blockedSelection #blockedSelectionList #blockedDismiss #blockedReplan
+      #blockedSelectionList [data-repo-id]
+    """
+    # Exactly one notice container (no tautological count fallback).
+    pg.wait_for_selector("#blockedSelection", timeout=8000)
+    assert pg.locator("#blockedSelection").count() == 1
+    pg.wait_for_selector("#blockedSelectionList")
+
+    rows = pg.locator("#blockedSelectionList [data-repo-id]")
+    assert rows.count() == 2, (
+        f"exactly two policy-blocked rows required, got {rows.count()}")
+    # Both current policy-blocker fixtures are pickle-only; pin the canonical reason
+    # independently of the repository ID (name-only rows with "pickle" in the id fail).
+    expected_reason = "pickle-only weights are blocked by exclude.pickle_only=true"
+    row_ids = []
+    for i in range(rows.count()):
+        row = rows.nth(i)
+        rid = row.get_attribute("data-repo-id")
+        assert rid, f"row {i} missing data-repo-id"
+        row_ids.append(rid)
+        text = row.inner_text()
+        assert text.strip(), f"row {rid!r} must render non-empty text"
+        assert expected_reason in text.lower(), (
+            f"row {rid!r} must contain canonical policy reason "
+            f"{expected_reason!r}, got {text!r}")
+    assert set(row_ids) == _POLICY_BLOCKED_IDS, (
+        f"exact policy-blocked row set required, got {set(row_ids)}")
+    # Capacity-only blocker must not appear as a blocked-selection row.
+    assert pg.locator(
+        '#blockedSelectionList [data-repo-id="demo/replica-blocked"]').count() == 0
+    list_text = pg.inner_text("#blockedSelectionList")
+    assert "REQUIREMENT_EXCEEDS_USABLE_MAX" not in list_text
+    # Hostile id is literal text; no injected elements.
+    hostile = pg.locator(
+        '#blockedSelectionList [data-repo-id="demo/<script>alert(1)</script>"]')
+    assert hostile.count() == 1
+    assert "demo/<script>alert(1)</script>" in hostile.inner_text() or \
+        "demo/<script>alert(1)</script>" in (hostile.get_attribute("data-repo-id") or "")
+    assert pg.locator("#blockedSelectionList script").count() == 0
+    assert pg.locator("#blockedSelectionList img").count() == 0
+    # No other injected tags under the list that could execute from the reason/id.
+    assert pg.locator("#blockedSelectionList iframe").count() == 0
+    assert pg.locator("#blockedSelectionList object").count() == 0
+
+    assert pg.locator("#blockedDismiss").count() == 1
+    assert pg.locator("#blockedReplan").count() == 1
+    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
+
+    traffic = {
+        "preview_get": 0,
+        "bulk_post": [],
+        "mutations": [],
+    }
+    # Single handler mode switch avoids Playwright unroute/LIFO surprises across steps.
+    route_mode = {"preview": "pass", "bulk": "ban"}
+
+    def record_mutation(route, label):
+        traffic["mutations"].append({
+            "label": label,
+            "method": route.request.method,
+            "url": route.request.url,
+        })
+        # Never let accidental mutation hit the isolated server during these contracts.
+        route.fulfill(status=500, content_type="application/json",
+                      body=json.dumps({"ok": False, "error": "test-blocked-mutation"}))
+
+    # Intercept mutation-capable routes BEFORE Replan (and keep them for the suite).
+    # Bulk is handled separately via route_mode so Dismiss can switch stale→ok.
+    for pattern, label in _MUTATION_ROUTE_SPECS:
+        if label == "selection_bulk":
+            continue
+        pg.route(pattern, lambda route, lab=label: record_mutation(route, lab))
+
+    def preview_router(route):
+        if route.request.method != "GET":
+            traffic["mutations"].append({
+                "label": "preview_non_get",
+                "method": route.request.method,
+                "url": route.request.url,
+            })
+            route.fulfill(status=500, body="preview-non-get")
+            return
+        mode = route_mode["preview"]
+        if mode == "pass":
+            traffic["preview_get"] += 1
+            route.continue_()
+        elif mode == "hold":
+            traffic["preview_get"] += 1
+            held.append(route)
+        elif mode == "after_dismiss":
+            preview_after_dismiss["count"] += 1
+            traffic["preview_get"] += 1
+            route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({
+                    "ok": True, "plan_id": "ark", "based_on_revision": 99,
+                    "selection_before_hash": "a" * 64, "gate_b_code": "FEASIBLE",
+                    "gate_b_refusal": None,
+                }),
+            )
+        else:
+            route.continue_()
+
+    def bulk_router(route):
+        if route.request.method != "POST":
+            route.continue_()
+            return
+        mode = route_mode["bulk"]
+        traffic.setdefault("bulk_modes", []).append(mode)
+        if mode == "ban":
+            record_mutation(route, "selection_bulk")
+            return
+        traffic["bulk_post"].append(route.request.post_data_json)
+        if mode == "stale":
+            route.fulfill(
+                status=409, content_type="application/json",
+                body=json.dumps({
+                    "ok": False, "refused": True, "code": "PREVIEW_STALE",
+                    "error": "Selection changed since this preview. Replan before dismissing.",
+                    "evidence": {
+                        "current_revision": 2, "based_on_revision": 1,
+                        "selection_changed": False,
+                    },
+                    "actions": ["replan"],
+                }),
+            )
+        elif mode == "ok":
+            route.fulfill(
+                status=200, content_type="application/json",
+                body=json.dumps({
+                    "n": 2, "bytes": 0, "finalized": 2, "budget": 27,
+                    "cap_24h_gb": 1000, "by_cat": [],
+                    "refused": False,
+                }),
+            )
+        elif mode == "error500":
+            # INC-031 c02: HTTP 500 {error} without refused — must not re-preview.
+            route.fulfill(
+                status=500, content_type="application/json",
+                body=json.dumps({
+                    "error": "FILL_SESSION_ACTIVE: {'session_id': 'sess-cli'}",
+                }),
+            )
+        else:
+            record_mutation(route, "selection_bulk")
+
+    held = []
+    preview_after_dismiss = {"count": 0}
+    pg.route("**/api/plan/preview", preview_router)
+    pg.route("**/api/selection/bulk", bulk_router)
+
+    # --- Replan: preview GET only; zero mutation-route calls ---
+    route_mode["preview"] = "pass"
+    route_mode["bulk"] = "ban"
+    before_preview = traffic["preview_get"]
+    before_mut = len(traffic["mutations"])
+    pg.click("#blockedReplan")
+    for _ in range(40):
+        if traffic["preview_get"] > before_preview:
+            break
+        time.sleep(0.05)
+    assert traffic["preview_get"] == before_preview + 1, (
+        f"Replan must issue exactly one additional preview GET, "
+        f"before={before_preview} after={traffic['preview_get']}")
+    assert len(traffic["mutations"]) == before_mut, (
+        f"Replan must not call mutation routes, got {traffic['mutations'][before_mut:]}")
+    for _ in range(40):
+        if pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan"):
+            break
+        time.sleep(0.05)
+    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
+    assert set(
+        pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+            "els => els.map(e => e.getAttribute('data-repo-id'))")
+    ) == _POLICY_BLOCKED_IDS
+    print("  blocked-selection Replan: preview GET only, zero mutations")
+
+    # --- Network failure: hold request in flight, assert disabled, abort, restore ---
+    route_mode["preview"] = "hold"
+    held.clear()
+    before_list = pg.inner_text("#blockedSelectionList")
+    before_ids = set(
+        pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+            "els => els.map(e => e.getAttribute('data-repo-id'))"))
+    pg.click("#blockedReplan")
+    for _ in range(40):
+        if held:
+            break
+        time.sleep(0.05)
+    assert held, "Replan must produce a held preview request"
+    assert not pg.is_enabled("#blockedDismiss"), "Dismiss disabled while preview in flight"
+    assert not pg.is_enabled("#blockedReplan"), "Replan disabled while preview in flight"
+    held[0].abort("failed")
+    for _ in range(40):
+        if pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan"):
+            break
+        time.sleep(0.05)
+    assert pg.inner_text("#blockedSelectionList") == before_list, (
+        "network failure must retain displayed blocked evidence")
+    assert set(
+        pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+            "els => els.map(e => e.getAttribute('data-repo-id'))")
+    ) == before_ids
+    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
+    toast = pg.inner_text("#toast") if pg.locator("#toast").count() else ""
+    assert toast.strip(), f"network error must surface to the operator, toast={toast!r}"
+    print("  blocked-selection held-request network failure: disabled → abort → restore")
+
+    # --- PREVIEW_STALE 409: retain evidence, restore controls, exact Dismiss body ---
+    route_mode["preview"] = "pass"
+    route_mode["bulk"] = "stale"
+    traffic["bulk_post"].clear()
+    before_list = pg.inner_text("#blockedSelectionList")
+    pg.click("#blockedDismiss")
+    for _ in range(40):
+        t = pg.inner_text("#toast") if pg.locator("#toast").count() else ""
+        if "Replan before dismissing" in t or "PREVIEW_STALE" in t:
+            break
+        time.sleep(0.05)
+    toast = pg.inner_text("#toast")
+    assert "Replan before dismissing" in toast or "PREVIEW_STALE" in toast, (
+        f"PREVIEW_STALE must surface, toast={toast!r}")
+    assert pg.inner_text("#blockedSelectionList") == before_list
+    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
+    assert traffic["bulk_post"], "Dismiss must POST /api/selection/bulk"
+    body = traffic["bulk_post"][-1]
+    assert set(body.keys()) == _DISMISS_BODY_KEYS, (
+        f"Dismiss body exact keys required, got {sorted(body)}")
+    assert body["on"] is False
+    assert isinstance(body["expected_revision"], int)
+    assert isinstance(body["expected_selection_hash"], str) and body["expected_selection_hash"]
+    assert set(body["ids"]) == _POLICY_BLOCKED_IDS, (
+        f"Dismiss ids must be exact policy-blocked set, got {body['ids']!r}")
+    assert len(body["ids"]) == 2, "no duplicates or extras in Dismiss ids"
+    print("  blocked-selection PREVIEW_STALE + exact Dismiss CAS body")
+
+    # --- INC-031 c02: 500 {error} without refused must toast and not re-preview ---
+    route_mode["preview"] = "pass"
+    route_mode["bulk"] = "error500"
+    traffic["bulk_post"].clear()
+    before_preview = traffic["preview_get"]
+    before_list = pg.inner_text("#blockedSelectionList")
+    before_ids = set(
+        pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+            "els => els.map(e => e.getAttribute('data-repo-id'))"))
+    pg.click("#blockedDismiss")
+    for _ in range(40):
+        t = pg.inner_text("#toast") if pg.locator("#toast").count() else ""
+        if "FILL_SESSION_ACTIVE" in t or "sess-cli" in t:
+            break
+        time.sleep(0.05)
+    toast = pg.inner_text("#toast") if pg.locator("#toast").count() else ""
+    assert "FILL_SESSION_ACTIVE" in toast or "sess-cli" in toast, (
+        f"INC-031 c02: 500 error body must toast, toast={toast!r}")
+    assert pg.inner_text("#blockedSelectionList") == before_list, (
+        "INC-031 c02: 500 error body must retain blocked-notice evidence")
+    assert set(
+        pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+            "els => els.map(e => e.getAttribute('data-repo-id'))")
+    ) == before_ids
+    # Wait for the error branch to restore controls, then drain late GETs
+    # before asserting no re-preview (Codex Gate-1 MEDIUM / Gate-2 required).
+    for _ in range(40):
+        if pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan"):
+            break
+        time.sleep(0.05)
+    assert pg.is_enabled("#blockedDismiss") and pg.is_enabled("#blockedReplan")
+    for _ in range(10):
+        time.sleep(0.05)
+    assert traffic["preview_get"] == before_preview, (
+        f"INC-031 c02: 500 error body must not auto re-preview, "
+        f"before={before_preview} after={traffic['preview_get']}")
+    print("  blocked-selection INC-031 500 error body: toast, retain, no re-preview")
+
+    # --- Successful Dismiss: auto re-preview; notice clears; capacity remains ---
+    traffic["bulk_post"].clear()
+    preview_after_dismiss["count"] = 0
+    route_mode["bulk"] = "ok"
+    route_mode["preview"] = "after_dismiss"
+    with pg.expect_request(
+            lambda r: r.method == "GET" and "/api/plan/preview" in r.url,
+            timeout=8000) as preview_req:
+        pg.click("#blockedDismiss")
+    assert preview_req.value is not None
+    for _ in range(40):
+        if preview_after_dismiss["count"] >= 1:
+            break
+        time.sleep(0.05)
+    for _ in range(40):
+        if pg.locator("#blockedSelection").count() == 0:
+            break
+        if pg.locator("#blockedSelection").count() and pg.is_hidden("#blockedSelection"):
+            break
+        if pg.locator("#blockedSelectionList [data-repo-id]").count() == 0:
+            break
+        time.sleep(0.05)
+    assert traffic["bulk_post"], "successful Dismiss must POST bulk"
+    assert traffic.get("bulk_modes", [])[-1:] == ["ok"], (
+        f"success Dismiss bulk mode should be ok, got {traffic.get('bulk_modes')!r}")
+    # Route handler alone measures the automatic re-preview GET (no manual increment).
+    assert preview_after_dismiss["count"] == 1, (
+        f"successful Dismiss must issue exactly one automatic preview GET, "
+        f"got {preview_after_dismiss['count']}")
+    # Notice cleared of policy blockers.
+    remaining_ids = set()
+    if pg.locator("#blockedSelectionList [data-repo-id]").count():
+        remaining_ids = set(
+            pg.locator("#blockedSelectionList [data-repo-id]").evaluate_all(
+                "els => els.map(e => e.getAttribute('data-repo-id'))"))
+    assert remaining_ids.isdisjoint(_POLICY_BLOCKED_IDS), (
+        f"policy blockers must leave the notice, still have {remaining_ids}")
+    # Capacity blocker remains on the existing advisory/queue surface.
+    advisory = pg.inner_text("#fillAdvisories")
+    queue = pg.inner_text("#fillQueue")
+    assert "REQUIREMENT_EXCEEDS_USABLE_MAX" in advisory or "demo/replica-blocked" in queue
+    # No draft/approve/fill-start across Dismiss/Replan (mutation intercept retained).
+    assert not any(m["label"] == "fill_start" for m in traffic["mutations"]), traffic["mutations"]
+    assert not any(m["label"] == "proposal" for m in traffic["mutations"]), traffic["mutations"]
+
+    for pattern, _label in _MUTATION_ROUTE_SPECS:
+        try:
+            pg.unroute(pattern)
+        except Exception:
+            pass
+    try:
+        pg.unroute("**/api/plan/preview")
+    except Exception:
+        pass
+    try:
+        pg.unroute("**/api/selection/bulk")
+    except Exception:
+        pass
+    print("  blocked-selection notice + Dismiss/Replan contracts exercised")
+
+
+def _proposal_approval_flow(pg) -> None:
+    """Resolve DEF-036 on the disposable catalog without starting Fill.
+
+    Remove the three intentionally blocked fixtures through the real selection API, then exercise
+    the real draft/review/typed-confirmation/approval path. The approved proposal remains confined to
+    the temporary E2E catalog and no request may reach Fill start.
+    """
+    blocked_ids = sorted(_POLICY_BLOCKED_IDS | {"demo/replica-blocked"})
+    removed = pg.evaluate(
+        """async ids => await window.MA.post('/api/selection/bulk', {ids, on: false})""",
+        blocked_ids,
+    )
+    assert removed and removed.get("n") == 1, (
+        f"only demo/tiny-llm should remain selected, got {removed!r}")
+
+    starts = []
+
+    def forbid_start(route):
+        starts.append(route.request.post_data_json)
+        route.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({"error": "E2E must not start Fill"}),
+        )
+
+    pg.route("**/api/fill/start", forbid_start)
+    pg.evaluate("window.loadFill()")
+    pg.wait_for_selector("#proposalDocket")
+    for _ in range(80):
+        if pg.is_enabled("#proposalReview") and "Approval required" in pg.inner_text(
+                "#proposalState"):
+            break
+        time.sleep(0.1)
+    assert pg.is_enabled("#proposalReview")
+    assert pg.is_disabled("#fillStart")
+    assert "Approval required" in pg.inner_text("#proposalState")
+
+    pg.click("#proposalReview")
+    pg.wait_for_selector("#proposalModal", state="visible")
+    canonical = pg.inner_text("#proposalCanonical").strip()
+    assert len(canonical) == 64 and set(canonical) <= set("0123456789abcdef")
+    assert "ark" in pg.inner_text("#proposalPlan")
+    assert "FEASIBLE" in pg.inner_text("#proposalGate")
+    rows = pg.locator("#proposalAssignments [data-requirement-id]")
+    assert rows.count() == 1, f"expected one exact assignment, got {rows.count()}"
+    assert "demo/tiny-llm" in rows.first.inner_text()
+    assert "drive-00" in rows.first.inner_text()
+    assert pg.locator("#proposalAssignments script").count() == 0
+    assert pg.is_disabled("#proposalApprove")
+
+    phrase = pg.inner_text("#proposalPhrase").strip()
+    assert phrase.startswith("APPROVE ") and len(phrase) > len("APPROVE ")
+    pg.fill("#proposalConfirm", phrase)
+    assert pg.is_enabled("#proposalApprove")
+    pg.click("#proposalApprove")
+    pg.wait_for_selector("#proposalModal", state="hidden")
+    for _ in range(80):
+        if "Approved" in pg.inner_text("#proposalState") and pg.is_enabled("#fillStart"):
+            break
+        time.sleep(0.1)
+    assert "Approved" in pg.inner_text("#proposalState")
+    assert pg.is_enabled("#fillStart"), "feasible + current approval must enable Start"
+    live = pg.evaluate("async () => await window.MA.api('/api/proposal/status')")
+    assert live["state"] == "approved_current"
+    assert live["active_proposal"]["canonical_hash"] == canonical
+    assert starts == [], f"approval must not start Fill: {starts!r}"
+    pg.unroute("**/api/fill/start")
+    print("  proposal draft reviewed + explicitly approved; Fill remained stopped")
+
+
+def _drive_loss_flow(pg) -> None:
+    """Exercise DEC-069 entirely through mocked observations; never enumerate test-host disks."""
+    inventory = {
+        "ok": True,
+        "planner_revision": 11,
+        "inventory_available": True,
+        "observation_authority": "advisory_only",
+        "message": "Attached inventory is observation only.",
+        "registered": [
+            {
+                "drive_label": "drive-01", "lifecycle": "active", "eligibility": "enabled",
+                "identity_epoch": 1, "identity_fingerprint": "a" * 64,
+                "serial": "DISK-SERIAL", "hw_model": "archive disk",
+                "capacity_bytes": 8_000_000_000_000, "last_seen": "2026-08-28",
+                "fs_uuid": "FS-01", "annex_uuid": "ANNEX-01",
+                "observation": "attached_exact_storage_identity",
+                "serial_observation": "mismatch_supporting_only",
+                "device": {
+                    "dev": "/dev/mock-bridge", "size": "7.3T", "model": "USB bridge",
+                    "serial": "BRIDGE-SERIAL", "bus": "usb", "spinning": True,
+                },
+                "plans": [{"plan_id": "ark", "is_active": True}],
+            },
+            {
+                "drive_label": "drive-02", "lifecycle": "active", "eligibility": "enabled",
+                "identity_epoch": 3, "identity_fingerprint": "b" * 64,
+                "serial": "FAILED-SERIAL", "hw_model": "old disk",
+                "capacity_bytes": 4_000_000_000_000, "last_seen": "2026-08-01",
+                "observation": "not_attached", "device": None,
+                "plans": [{"plan_id": "ark", "is_active": True}],
+            },
+        ],
+        "unregistered": [{
+            "dev": "/dev/mock-seagate", "size": "7.3T", "model": "Seagate 8TB",
+            "serial": "NEW-SEAGATE", "bus": "usb", "spinning": True,
+            "observation": "unregistered", "action_taken": False,
+        }],
+    }
+    preview = {
+        "ok": True,
+        "preview": {
+            "drive_label": "drive-02", "planner_revision": 11,
+            "identity_epoch": 3, "identity_fingerprint": "b" * 64,
+            "archived_rows": 120, "archived_repositories": 40,
+            "replica_rows": 120, "confirmation": "DECLARE LOST drive-02",
+            "warning": "Not currently observed means offline or missing only.",
+        },
+    }
+    response = {
+        "ok": True,
+        "transition": {
+            "drive_label": "drive-02", "lifecycle": "lost", "eligibility": "excluded",
+            "planner_revision": 12,
+        },
+        "after": {
+            "totals": {"capacity": 5_000_000_000_000},
+            "replan": {
+                "root_code": "CAPACITY_EVIDENCE_UNKNOWN", "feasible": False,
+                "executable_tasks": 0, "target_counts": {}, "planner_revision": 12,
+            },
+            "replan_error": None,
+        },
+    }
+    onboarding = {
+        "ok": True,
+        "preview": {
+            "planner_revision": 11,
+            "observation_authority": "read_only",
+            "device": inventory["unregistered"][0],
+            "volume": {
+                "dev": "/dev/mock-seagate1", "type": "part",
+                "size_bytes": 8_000_000_000_000, "fstype": "ext4",
+                "fs_uuid": "NEW-FS-UUID", "mountpoints": [], "mounted": False,
+            },
+            "suggested_label": "drive-07",
+            "label_policy": "new_label_required",
+            "blockers": ["MOUNT_REQUIRED"],
+            "ready_for_registration": False,
+            "next_action": "mount_volume",
+            "confirmation": "REGISTER NEW drive-07",
+            "registration_binding": {
+                "planner_revision": 11, "dev": "/dev/mock-seagate",
+                "serial": "NEW-SEAGATE", "volume_dev": "/dev/mock-seagate1",
+                "fs_uuid": "NEW-FS-UUID", "mount": None,
+                "archive_path": None, "archive_state": "unmounted",
+                "label": "drive-07", "plan_id": "ark", "role": "primary",
+            },
+            "registration_preview": {
+                "dev": "/dev/mock-seagate1", "label": "drive-07", "mount": None,
+                "format": None, "role": "primary", "adds_to_active_plan": "ark",
+                "requires_reconcile_after_registration": True,
+                "inherited_from_lost_identity": [],
+            },
+            "separate_lost_identities": [{
+                "drive_label": "drive-02", "identity_epoch": 3,
+                "identity_fingerprint": "b" * 64, "archived_rows": 120,
+                "replica_rows": 120,
+                "plans": [{"plan_id": "ark", "is_active": True}],
+                "relationship": "not_inherited",
+            }],
+        },
+    }
+    submitted = []
+    smart_requests = []
+    onboarding_requests = []
+    registration_requests = []
+
+    pg.route("**/api/drives", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(inventory)))
+    pg.route("**/api/drive/loss-preview**", lambda route: route.fulfill(
+        status=200, content_type="application/json", body=json.dumps(preview)))
+
+    def onboarding_preview(route):
+        onboarding_requests.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(onboarding))
+
+    pg.route("**/api/drive/onboarding-preview**", onboarding_preview)
+
+    def register_new(route):
+        registration_requests.append(route.request.post_data_json)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "ok": True,
+            "registration": {
+                "changed": True, "already_registered": False,
+                "drive_label": "drive-07", "planner_revision": 12,
+                "plan_id": "ark", "archive_path": "/media/test/seagate/modelark",
+                "annex_uuid": "NEW-ANNEX", "approval_invalidated": True,
+                "capacity_evidence": "unknown_until_reconcile",
+                "reconciliation_required": True,
+                "inherited_from_lost_identity": [],
+            },
+        }))
+
+    pg.route("**/api/drive/register-new", register_new)
+
+    def declare(route):
+        submitted.append(route.request.post_data_json)
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(response))
+
+    pg.route("**/api/drive/declare-lost", declare)
+    pg.route("**/api/disk", lambda route: (
+        smart_requests.append(True),
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({"drives": []})),
+    ))
+
+    pg.click("button[data-view='disk']")
+    pg.wait_for_selector(".driveproblem")
+    text = pg.inner_text("#driveBody")
+    assert "drive-01" in text and "filesystem and annex identity" in text.lower()
+    assert "BRIDGE-SERIAL" in text and "did not rewrite either identity" in text
+    assert "drive-02" in text and "not attached" in text.lower()
+    assert "Seagate 8TB" in text and "unregistered" in text.lower()
+    assert smart_requests == [], "opening Drives must not run SMART"
+
+    pg.click(".driveonboard")
+    pg.wait_for_selector("#driveOnboardingModal", state="visible")
+    onboarding_text = pg.inner_text("#driveOnboardingModal")
+    assert "drive-07" in onboarding_text
+    assert "/dev/mock-seagate1" in onboarding_text
+    assert "not mounted" in onboarding_text.lower()
+    assert "drive-02" in onboarding_text and "never inherited" in onboarding_text.lower()
+    assert len(onboarding_requests) == 1
+    assert "dev=%2Fdev%2Fmock-seagate" in onboarding_requests[0]
+    assert "serial=NEW-SEAGATE" in onboarding_requests[0]
+    assert smart_requests == [], "onboarding preview must not run SMART"
+    pg.click("#driveOnboardingClose")
+
+    onboarding["preview"]["volume"].update({
+        "mountpoints": ["/media/test/seagate"], "mounted": True,
+        "archive_path": "/media/test/seagate/modelark", "archive_state": "absent",
+        "archive_parent_writable": False,
+        "archive_parent_uid": 0, "archive_parent_gid": 0, "archive_parent_mode": "0755",
+        "service_uid": 1000, "service_gid": 1000,
+        "service_user": "modelark", "service_group": "modelark",
+    })
+    onboarding["preview"].update({
+        "blockers": ["ARCHIVE_PARENT_NOT_WRITABLE"], "ready_for_registration": False,
+        "next_action": "prepare_archive_permissions",
+        "permission_remediation": {
+            "policy": "dedicated_mount_owner",
+            "mount": "/media/test/seagate",
+            "current": {"uid": 0, "gid": 0, "mode": "0755", "writable": False},
+            "required": {
+                "service_uid": 1000, "service_gid": 1000,
+                "service_user": "modelark", "service_group": "modelark", "mode": "0750",
+            },
+            "commands": [{
+                "argv": ["sudo", "chown", "--", "modelark:modelark", "/media/test/seagate"],
+                "display": "sudo chown -- modelark:modelark /media/test/seagate",
+                "purpose": "assign only the dedicated filesystem root to ModelArk",
+            }, {
+                "argv": ["sudo", "chmod", "--", "0750", "/media/test/seagate"],
+                "display": "sudo chmod -- 0750 /media/test/seagate",
+                "purpose": "limit the dedicated filesystem root to owner and group access",
+            }, {
+                "argv": ["stat", "-c", "%U:%G %a %n", "--", "/media/test/seagate"],
+                "display": "stat -c '%U:%G %a %n' -- /media/test/seagate",
+                "purpose": "verify ownership and mode before refreshing the preview",
+            }],
+            "guardrails": [
+                "Run only when this filesystem is dedicated to ModelArk.",
+                "Do not use recursive chown or chmod.",
+                "Do not create the staging or final archive directory manually.",
+                "Refresh the read-only preview after the commands; do not retry a stale modal.",
+            ],
+        },
+    })
+    onboarding["preview"]["registration_binding"].update({
+        "mount": "/media/test/seagate",
+        "archive_path": "/media/test/seagate/modelark",
+        "archive_state": "absent",
+    })
+    onboarding["preview"]["registration_preview"].update({
+        "mount": "/media/test/seagate",
+        "directory_layout": {
+            "mount": "/media/test/seagate",
+            "temporary_path": "/media/test/seagate/.modelark.registering-drive-07",
+            "final_path": "/media/test/seagate/modelark",
+            "transition": "prepare_hidden_then_atomic_promote",
+            "operator_creates_directories": False,
+            "display": (
+                "/media/test/seagate/\n"
+                "├── .modelark.registering-drive-07/  temporary; ModelArk creates this\n"
+                "└── modelark/  final; atomically promoted from the temporary directory"
+            ),
+        },
+    })
+    pg.click(".driveonboard")
+    pg.wait_for_selector("#driveOnboardingModal", state="visible")
+    assert "cannot create" in pg.inner_text("#driveOnboardingNext").lower()
+    assert "you do this now" in pg.inner_text("#driveOnboardingRemediation").lower()
+    assert "sudo chown -- modelark:modelark /media/test/seagate" in pg.inner_text(
+        "#driveOnboardingCommands"
+    )
+    assert "do not use recursive" in pg.inner_text("#driveOnboardingGuardrails").lower()
+    assert ".modelark.registering-drive-07" in pg.inner_text("#driveOnboardingLayout")
+    assert "atomically promoted" in pg.inner_text("#driveOnboardingLayout").lower()
+    assert pg.locator("#driveOnboardingApply").is_hidden()
+    pg.click("#driveOnboardingClose")
+
+    onboarding["preview"]["volume"]["archive_parent_writable"] = True
+    onboarding["preview"].update({
+        "blockers": [], "ready_for_registration": True,
+        "next_action": "review_registration",
+        "permission_remediation": None,
+    })
+    pg.click(".driveonboard")
+    pg.wait_for_selector("#driveOnboardingModal", state="visible")
+    assert "mounted" in pg.inner_text("#driveOnboardingVolume").lower()
+    assert "archive namespace absent" in pg.inner_text("#driveOnboardingVolume").lower()
+    assert "active plan ark" in pg.inner_text("#driveOnboardingPlan").lower()
+    assert "reconciliation required" in pg.inner_text("#driveOnboardingPlan").lower()
+    assert pg.locator("#driveOnboardingRemediation").is_hidden()
+    assert ".modelark.registering-drive-07" in pg.inner_text("#driveOnboardingLayout")
+    assert pg.locator("#driveOnboardingApply").is_disabled()
+    pg.fill("#driveOnboardingConfirm", "REGISTER NEW drive-07")
+    assert pg.locator("#driveOnboardingApply").is_enabled()
+    pg.click("#driveOnboardingApply")
+    pg.wait_for_selector("#driveEvent", state="visible")
+    assert registration_requests == [{
+        **onboarding["preview"]["registration_binding"],
+        "confirmation": "REGISTER NEW drive-07",
+    }]
+    registration_event = pg.inner_text("#driveEvent")
+    assert "registered as a new identity at revision 12" in registration_event
+    assert "capacity evidence remains unknown" in registration_event.lower()
+    assert "reconciliation not run" in registration_event.lower()
+    assert smart_requests == [], "registration must not implicitly run SMART"
+
+    pg.click(".driveproblem")
+    pg.wait_for_selector("#driveLossModal", state="visible")
+    assert "offline or missing only" in pg.inner_text("#driveLossWarning")
+    pg.click("#driveLossCancel")
+    assert submitted == [], "cancel must be a no-op"
+
+    pg.click(".driveproblem")
+    pg.fill("#driveLossConfirm", "DECLARE LOST drive-02")
+    assert pg.locator("#driveLossApply").is_enabled()
+    pg.click("#driveLossApply")
+    pg.locator("#driveEvent").filter(has_text="replanned at revision 12").wait_for()
+    assert submitted == [{
+        "drive_label": "drive-02", "expected_revision": 11,
+        "expected_identity_epoch": 3, "expected_identity_fingerprint": "b" * 64,
+        "confirmation": "DECLARE LOST drive-02",
+    }]
+    event = pg.inner_text("#driveEvent")
+    assert "replanned at revision 12" in event
+    assert "CAPACITY_EVIDENCE_UNKNOWN" in event and "lost-drive targets 0" in event
+    assert smart_requests == [], "loss/replan must not implicitly run SMART"
+
+    for pattern in (
+        "**/api/drives", "**/api/drive/loss-preview**", "**/api/drive/declare-lost",
+        "**/api/drive/onboarding-preview**", "**/api/drive/register-new", "**/api/disk",
+    ):
+        pg.unroute(pattern)
+    print("  advisory discovery + exact new registration + loss/replan UI exercised without SMART")
 
 
 def _browser_flow() -> None:
@@ -132,25 +879,48 @@ def _browser_flow() -> None:
             pg.wait_for_selector("#fillAdvisories .fadv.error")
             advisory = pg.inner_text("#fillAdvisories")
             assert "MANIFEST_POLICY" in advisory and "demo/pickle-only" in advisory
-            assert "CAPACITY_" in advisory
+            # #38 tiered_v2: structural exceed-max projects REQUIREMENT_EXCEEDS_USABLE_MAX (not
+            # a CAPACITY_*_SHORT proven free short, and not a CAPACITY_ string prefix).
+            assert "REQUIREMENT_EXCEEDS_USABLE_MAX" in advisory
             pg.wait_for_selector("#fillQueue .telq.blocked")
             blocked = pg.inner_text("#fillQueue")
             assert "demo/pickle-only" in blocked and "MANIFEST_POLICY" in blocked
-            assert "demo/replica-blocked" in blocked and "CAPACITY_" in blocked
-            assert pg.locator("#fillQueue .telq.blocked").count() == 2
+            assert "demo/replica-blocked" in blocked and "REQUIREMENT_EXCEEDS_USABLE_MAX" in blocked
+            # Two policy blockers (pickle + hostile XSS id) + one capacity blocker.
+            assert pg.locator("#fillQueue .telq.blocked").count() == 3
             fill_note = pg.inner_text("#fillNote")
-            assert "1 to place" in fill_note and "2 blocked" in fill_note, fill_note
+            assert "1 to place" in fill_note and "3 blocked" in fill_note, fill_note
             assert pg.locator("#fillStart").is_disabled()
             print("  policy + capacity blockers rendered with disjoint totals; Start fill disabled")
 
-            # The established drive's planned segment remains left-aligned; the durable archived
-            # occupancy trails in grey instead of pushing the useful planned colors to the right.
+            # ------------------------------------------------------------------
+            # Blocked-selection workflow (DEC-058 / Gate 1) — Fill-tab notice.
+            # Selectors: #blockedSelection #blockedSelectionList #blockedDismiss #blockedReplan
+            # Expected red until Gate-2 UI exists; e2e must not stay green without it.
+            # ------------------------------------------------------------------
+            _blocked_selection_flow(pg)
+
+            # Drive chart still renders under a blocked cart. With tiered_v2 whole-plan Gate-B,
+            # a structural blocker (replica exceed-max) yields 0 planned tasks on the bar while
+            # archived occupancy remains as a grey segarch trail. When planned segs also exist,
+            # they stay left of archived (pre-#38 layout contract).
+            pg.wait_for_selector("#dc-drive-00 .dcbarfill > .seg")
             segments = pg.locator("#dc-drive-00 .dcbarfill > .seg")
-            assert segments.count() >= 2
-            assert "segarch" not in (segments.first.get_attribute("class") or "")
-            assert "segarch" in (segments.last.get_attribute("class") or "")
-            assert segments.first.bounding_box()["x"] < segments.last.bounding_box()["x"]
-            print("  drive progress segments remain left-aligned")
+            n_seg = segments.count()
+            assert n_seg >= 1, "drive-00 bar must show at least archived occupancy"
+            classes = [(segments.nth(i).get_attribute("class") or "") for i in range(n_seg)]
+            assert any("segarch" in c for c in classes), f"expected segarch among {classes}"
+            foot = pg.inner_text("#dc-drive-00 .dcfoot")
+            assert "0 planned" in foot or "planned" in foot
+            if n_seg >= 2:
+                assert "segarch" not in (segments.first.get_attribute("class") or "")
+                assert "segarch" in (segments.last.get_attribute("class") or "")
+                assert segments.first.bounding_box()["x"] < segments.last.bounding_box()["x"]
+            print("  drive progress bar renders archived segment under blocked cart")
+
+            # 2b. Once blockers are explicitly removed, the same disposable catalog must support
+            # the complete DEF-036 proposal review/approval flow without starting Fill.
+            _proposal_approval_flow(pg)
 
             # 3. Library search and multi-drive filters operate over every archived model. Clicking
             # a fleet card toggles the same filter chip, while multiple drives use OR semantics.
@@ -177,26 +947,30 @@ def _browser_flow() -> None:
             assert "demo/small-llm" in pg.inner_text("#libBody")
             print("  library repository search + clickable multi-drive filters rendered")
 
-            # 4. open Catalog, wait for rows, confirm the giant is there
+            # 4. Rehearse drive discovery and the operator-confirmed loss flow with browser-level
+            # mock hardware evidence. No request reaches the host inventory or SMART endpoint.
+            _drive_loss_flow(pg)
+
+            # 5. open Catalog, wait for rows, confirm the giant is there
             pg.click("button[data-view='catalog']")
             time.sleep(2)
             pg.wait_for_selector("#tbody tr")
             assert pg.query_selector("tr[data-id='demo/giant-llm']"), "giant row missing from catalog"
             print("  catalog rendered")
-            # 5. tick the giant -> the over-cap banner should appear
+            # 6. tick the giant -> the over-cap banner should appear
             pg.check("tr[data-id='demo/giant-llm'] input[type=checkbox]")
             time.sleep(3)                                # selection round-trip + renderBudget
             pg.wait_for_selector("#capWarn", state="visible")
             msg = pg.inner_text("#capWarnMsg")
             assert "24-hour" in msg and "considerate" in msg, f"unexpected banner text: {msg!r}"
             print("  over-cap banner shown")
-            # 6. dismiss hides it
+            # 7. dismiss hides it
             pg.click("#capWarnDismiss")
             time.sleep(1)
             pg.wait_for_selector("#capWarn", state="hidden")
             print("  banner dismissed")
 
-            # 7. A bounded transport retry must be visibly identified as network work, with its
+            # 8. A bounded transport retry must be visibly identified as network work, with its
             # attempt count, instead of looking like rapid model churn or an unexplained stall.
             retry_status = {
                 "status": "running", "running": True, "phase": "primary",
@@ -222,7 +996,7 @@ def _browser_flow() -> None:
             pg.unroute("**/api/fill/status")
             print("  transient retry reason + attempt count rendered")
 
-            # 8. the same public hook used by the live Fill poll must show typed terminals without a
+            # 9. the same public hook used by the live Fill poll must show typed terminals without a
             # reload; verify the operator-facing evidence/action surface, not merely DOM presence.
             pg.evaluate("""
                 window.MA.showFillTerminal({
@@ -241,7 +1015,7 @@ def _browser_flow() -> None:
             assert "add_capacity" in pg.inner_text("#oopsieActions")
             print("  live typed fill terminal shown")
 
-            # 9. A gated repository is first-class interactive state: the retained notice toasts,
+            # 10. A gated repository is first-class interactive state: the retained notice toasts,
             # the second encounter displays the bounded prompt and a fixed-origin HF link, and the
             # operator decision is posted with the prompt id (stale tabs cannot answer a later one).
             pg.evaluate("document.getElementById('oopsieModal').hidden = true")
@@ -284,6 +1058,54 @@ def _browser_flow() -> None:
             pg.unroute("**/api/fill/gated-decision")
             pg.unroute("**/api/fill/status")
             print("  gated toast + retry/skip prompt rendered and resolved")
+
+            # 11. PR-01 portal mutation guard (RFC-002/DEC-049 #39 slice 1), tests-first: a selection
+            # removal the server refuses with a typed HTTP 409 must hold the prior checked/selected
+            # appearance and surface the refusal — WITHOUT issuing any rollback GET (no /api/models
+            # reload, no selection-summary refetch), since a refused mutation changed nothing canonical
+            # and a rollback fetch could clobber a concurrent allowed addition. The 409 is faked at the
+            # client boundary, so the server catalog is never changed.
+            refusal = {
+                "ok": False, "refused": True, "code": "FILL_SESSION_ACTIVE",
+                "error": "Selection finalization and removal are blocked while Fill is running.",
+                "actions": ["wait_for_fill", "stop_fill"],
+            }
+            rollback = {"models": 0, "selection": 0}
+
+            def selection_route(route):
+                if route.request.method == "POST":
+                    route.fulfill(status=409, content_type="application/json", body=json.dumps(refusal))
+                else:                                          # GET summary during a refusal = forbidden rollback
+                    rollback["selection"] += 1
+                    route.continue_()
+
+            def models_route(route):
+                rollback["models"] += 1                        # GET rows during a refusal = forbidden rollback
+                route.continue_()
+
+            pg.click("button[data-view='catalog']")
+            pg.wait_for_selector("#tbody tr")
+            row = "tr[data-id='demo/tiny-llm']"                # seeded finalized -> rendered selected
+            pg.wait_for_selector(f"{row} input[type=checkbox]:checked")
+            before_n = pg.inner_text("#selN")
+            pg.route("**/api/selection", selection_route)
+            pg.route("**/api/models**", models_route)
+            rollback["models"] = rollback["selection"] = 0     # count only the refused interaction
+            pg.click(f"{row} input[type=checkbox]")            # optimistic uncheck -> refused removal
+            for _ in range(40):
+                if "blocked while Fill is running" in pg.inner_text("#toast"):
+                    break
+                time.sleep(0.05)
+            toast = pg.inner_text("#toast")
+            assert "blocked while Fill is running" in toast, f"refusal toast missing: {toast!r}"
+            assert pg.is_checked(f"{row} input[type=checkbox]"), "refused row must stay checked"
+            assert "sel" in (pg.get_attribute(row, "class") or ""), "refused row must stay selected"
+            assert "deselected" not in toast and "finalized" not in toast, f"unexpected success toast: {toast!r}"
+            assert pg.inner_text("#selN") == before_n, "tally must be preserved (no refusal render)"
+            assert rollback == {"models": 0, "selection": 0}, f"refusal issued rollback GET(s): {rollback}"
+            pg.unroute("**/api/models**")
+            pg.unroute("**/api/selection")
+            print("  selection-removal 409 refusal held the row + tally with no rollback GET")
         except Exception:
             pg.screenshot(path="/tmp/e2e-fail.png")
             print("  (screenshot saved to /tmp/e2e-fail.png)")
@@ -301,7 +1123,7 @@ def main() -> None:
         _seed(con)
         con.close()
         assert db.DB_PATH.parent == data_dir and db.DB_PATH.is_file()
-        print("  seeded 6 models (1 giant, policy + capacity blockers) in an isolated catalog")
+        print("  seeded models (giant, policy + capacity + hostile blockers) in an isolated catalog")
 
         serve = Path(sys.executable).with_name("modelark")  # .venv-dev/bin/modelark
         proc = subprocess.Popen(

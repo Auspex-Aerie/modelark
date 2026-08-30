@@ -4,6 +4,52 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-30
+
+### Added
+
+- The Fill portal now authors one immutable placement proposal, presents every exact assignment for
+  human review, and requires the backend-issued confirmation phrase before approval. Approval never
+  starts Fill, and Fill remains gated when that approval is absent or stale.
+- An explicit `modelark-provenance-migrate` rehearsal/publication workflow for existing pre-v7 SQLite
+  catalogs, with copied-runtime acceptance and a stopped side-by-side cutover guide.
+- Operator-confirmed missing-drive loss/exclusion in the portal, followed by one canonical replan;
+  unregistered attached hardware remains advisory and never inherits the lost identity.
+- Preview-bound replacement-drive registration now shows the service identity, required write
+  authority, exact attended permission commands when blocked, and ModelArk's temporary-to-final
+  archive directory transition before any storage or catalog mutation.
+- Drive reconciliation now emits bounded annex-membership and filesystem-scan progress.
+
+### Changed
+
+- Planning now has one first-class authority shared by CLI, Library, portal preview, proposal
+  construction, and approval adapters. Capacity modes remain centrally managed policies rather than
+  alternate planners.
+- Existing pre-v7 catalogs are no longer auto-migrated on open. Users upgrading from 0.2.0 run the
+  documented backup-first provenance migration once; fresh installs require no action.
+- Provenance publication preserves and validates the optional `library.json` git-annex map locator in
+  the new data directory, preventing a custom archive map from silently falling back to the default.
+- Passive attached-drive identity now prefers the exact filesystem/annex UUID pair; serial is
+  supporting/fallback evidence and bridge discrepancies are shown without rewriting the catalog.
+
+### Fixed
+
+- Lost/excluded historical plan members now remain visible with their lifecycle/eligibility reason
+  while contributing no targets or admitted capacity.
+- Proposal preview can no longer bypass identity-bound capacity admission through stale legacy
+  `free_bytes`; all planning surfaces report the same typed root blocker and executable task set.
+- A mounted, empty filesystem is no longer considered registration-ready unless the running
+  service account can traverse and write its root; the physical preparation helper repeats that
+  check before creating the hidden git-annex staging directory.
+- Full drive reconciliation no longer launches one `git annex whereis` process per archived row or
+  descends into `.git/annex/objects`; one target-UUID membership query and a pruned worktree walk
+  preserve the same missing-copy refusal and fresh-anchor boundary.
+- Passive drive inventory now records protected or otherwise unreadable unrelated mount topology as
+  inaccessible evidence instead of allowing one system mount to abort the entire Drives API.
+- Successful drive reconciliation now retains its classified inventory in the domain result and
+  prints bounded present/missing/debris/extra counts, including explicit notice that unclaimed
+  content is retained rather than catalogued or deleted.
+
 ## 0.2.0 - 2026-07-20
 
 ### Added

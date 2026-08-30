@@ -246,7 +246,7 @@ def test_fetch_records_hash_for_hub_file_without_canonical_sha(tmp_path):
         storage_action="raw",
     ),)
 
-    def download(_ctx, _repo, rfilename, model_dir, _base):
+    def download(_ctx, _repo, rfilename, model_dir, _base, **_kw):
         path = model_dir / rfilename
         path.write_bytes(data)
         return path
@@ -274,7 +274,7 @@ def test_fetch_uses_computed_hash_for_canary_when_hub_sha_is_missing(tmp_path):
         storage_action="compress",
     ),)
 
-    def download(_ctx, _repo, rfilename, model_dir, _base):
+    def download(_ctx, _repo, rfilename, model_dir, _base, **_kw):
         path = model_dir / rfilename
         path.write_bytes(data)
         return path
@@ -306,7 +306,7 @@ def test_fetch_rejects_hub_hash_mismatch_before_archiving(tmp_path):
         format="safetensors", quant="gptq", storage_action="raw",
     ),)
 
-    def download(_ctx, _repo, rfilename, model_dir, _base):
+    def download(_ctx, _repo, rfilename, model_dir, _base, **_kw):
         path = model_dir / rfilename
         path.write_bytes(data)
         return path

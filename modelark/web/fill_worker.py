@@ -26,6 +26,10 @@ class FillWorker:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._lock = threading.Lock()
+        # Lifecycle gate (distinct from the state lock): linearizes start() against a guarded
+        # selection mutation so the two cannot both win. Only start() and guarded_mutation() take it;
+        # no state/progress/stop path does, so a mutation can never block worker progress.
+        self._gate = threading.Lock()
         self._state: dict = {"status": "idle", "message": ""}
         self._decision_event = threading.Event()
         self._decision_id: str | None = None
@@ -40,17 +44,32 @@ class FillWorker:
         (e.g. {"status": "paused"|"blocked", ...}) to classify a clean, non-completion end — the
         worker emits it verbatim instead of the default "done"/"fill complete". Refuses a second
         concurrent fill."""
-        with self._lock:
-            if self.running():
-                return {"ok": False, "error": "a fill is already running"}
-            self._stop.clear()
-            self._decision_event.clear()
-            self._decision_id = None
-            self._decision_response = None
-            self._state = {"status": "running", "message": "starting…"}
-            self._thread = threading.Thread(target=self._run, args=(work,), name="modelark-fill", daemon=True)
-            self._thread.start()
+        with self._gate:                             # claim the lifecycle gate before going live
+            with self._lock:
+                if self.running():
+                    return {"ok": False, "error": "a fill is already running"}
+                self._stop.clear()
+                self._decision_event.clear()
+                self._decision_id = None
+                self._decision_response = None
+                self._state = {"status": "running", "message": "starting…"}
+                self._thread = threading.Thread(target=self._run, args=(work,), name="modelark-fill", daemon=True)
+                self._thread.start()
         return {"ok": True}
+
+    def guarded_mutation(self, mutate):
+        """Run ``mutate()`` iff no Fill controller is live; otherwise refuse by returning ``None``.
+
+        Holds the lifecycle gate across the liveness check AND ``mutate()`` so a selection mutation
+        and a Fill start cannot both win: a mutation that wins the gate commits before start can claim
+        it, and once start has claimed the gate and gone live every mutation is refused. Keys on live
+        controller ownership (:meth:`running`), not the retained status string. Never holds the state
+        lock across the callback. Dependency-free: returning ``None`` is the whole contract — the
+        caller (selection_api) translates it into the typed refusal."""
+        with self._gate:
+            if self.running():
+                return None
+            return mutate()
 
     def request_stop(self) -> dict:
         """Ask the worker to stop at the next safe boundary (idempotent; safe to call on shutdown)."""

@@ -18,8 +18,14 @@ from urllib.parse import parse_qs, urlparse, urlsplit
 from modelark.core import platform as osplat
 from modelark.core import telemetry
 from modelark import plan, wishlist
-from modelark.web import (catalog_api, data, disk_api, fill_api, fill_worker,
-                                 library_api, plan_api, selection_api, verify_api)
+from modelark.web import (catalog_api, data, disk_api, drive_api, fill_api, fill_worker,
+                          library_api, plan_api, proposal_api, selection_api, verify_api)
+
+
+def auto_resume_fill(body: dict | None = None) -> dict:
+    """PR-09 / B8 systemd resume surface — same unified start_fill as portal/CLI."""
+    from modelark.execution_service import auto_resume_fill as _resume
+    return _resume(body or {})
 
 STATIC = Path(str(resources.files("modelark.web").joinpath("static")))
 MAX_REQUEST_BODY = 64 * 1024
@@ -113,6 +119,17 @@ class Handler(BaseHTTPRequestHandler):
         self._send(json.dumps(obj, default=str), "application/json", code,
                    {"Cache-Control": "no-store"})
 
+    def _selection_result(self, result):
+        """Selection mutations may return a typed refusal while a Fill is live (#39 slice 1);
+        surface it as 409 Conflict. Ordinary summaries and allowed additions stay 200."""
+        refused = isinstance(result, dict) and result.get("refused")
+        self._json(result, 409 if refused else 200)
+
+    def _mutation_result(self, result):
+        """Return typed mutation refusals as conflicts without hiding their evidence."""
+        refused = isinstance(result, dict) and result.get("refused")
+        self._json(result, 409 if refused else 200)
+
     def _request_authority(self) -> tuple[str, int] | None:
         authority = _authority(self.headers.get("Host"))
         if authority is None or authority[1] != self.server.server_port:
@@ -175,6 +192,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(selection_api.summary())
             elif u.path == "/api/disk":
                 self._json(disk_api.disk())
+            elif u.path == "/api/drives":
+                self._json(drive_api.overview())
+            elif u.path == "/api/drive/loss-preview":
+                self._json(drive_api.loss_preview((p.get("drive_label") or [""])[0]))
+            elif u.path == "/api/drive/onboarding-preview":
+                self._json(drive_api.onboarding_preview(
+                    (p.get("dev") or [""])[0],
+                    (p.get("serial") or [""])[0],
+                ))
             elif u.path == "/api/meta":
                 self._json({"os": osplat.OS_LABEL, "smart_supported": osplat.SMART_SUPPORTED})
             elif u.path == "/api/library":
@@ -193,6 +219,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(plan_api.cart())
             elif u.path == "/api/plan/explain":
                 self._json(plan_api.shadow_explain())
+            elif u.path == "/api/plan/preview":
+                self._json(plan_api.preview())
+            elif u.path == "/api/proposal/status":
+                self._json(proposal_api.status())
             elif u.path == "/api/verify/suspects":
                 self._json(verify_api.suspects())
             elif u.path == "/api/fill/status":
@@ -249,13 +279,15 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         try:
             if u.path == "/api/selection":
-                self._json(selection_api.toggle(body["id"], bool(body["on"])))
+                self._selection_result(selection_api.toggle(body["id"], bool(body["on"])))
             elif u.path == "/api/selection/bulk":
-                self._json(selection_api.bulk(body["ids"], bool(body["on"])))
+                # Pass the full body so DEC-058 CAS bindings (expected_revision /
+                # expected_selection_hash) reach selection_api.bulk.
+                self._selection_result(selection_api.bulk(body))
             elif u.path == "/api/selection/clear":
-                self._json(selection_api.clear())
+                self._selection_result(selection_api.clear())
             elif u.path == "/api/selection/finalize":
-                self._json(selection_api.finalize())
+                self._selection_result(selection_api.finalize())
             elif u.path == "/api/selection/oversize":
                 self._json(selection_api.oversize(body))
             elif u.path == "/api/fill/start":
@@ -276,6 +308,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(plan_api.set_capacity_mode(body))
             elif u.path == "/api/plan/provisioning":
                 self._json(plan_api.set_provisioning(body))
+            elif u.path == "/api/proposal/draft":
+                self._mutation_result(proposal_api.create_draft(body))
+            elif u.path == "/api/proposal/approve":
+                self._mutation_result(proposal_api.approve(body))
+            elif u.path == "/api/drive/declare-lost":
+                self._mutation_result(drive_api.declare_lost(body))
+            elif u.path == "/api/drive/register-new":
+                self._mutation_result(drive_api.register_new(body))
             elif u.path == "/api/verify/run":
                 self._json(verify_api.run(body))
             else:
@@ -305,11 +345,11 @@ def serve(port: int = 8077, open_browser: bool = True, resume: bool = False,
         except Exception:
             pass
     if resume:   # DEC-023 resume-on-boot: for the supervised systemd service, pick the fill back up unattended
-        r = fill_api.start({})   # plans in the worker thread (non-blocking); worker finishes 'done' if nothing to do
-        if r["ok"]:
+        r = auto_resume_fill({})  # PR-09: unified service entry (same as portal start)
+        if r.get("ok"):
             log.info("auto-resume: fill worker started — continuing at the next unfilled shard")
         else:
-            log.warning("auto-resume skipped", reason=r["error"])   # already running; drive-absent surfaces as worker 'error'
+            log.warning("auto-resume skipped", reason=r.get("error") or r.get("code"))
     signal.signal(signal.SIGTERM, lambda *a: (_ for _ in ()).throw(KeyboardInterrupt))
     try:
         httpd.serve_forever()

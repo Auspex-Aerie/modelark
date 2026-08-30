@@ -7,7 +7,7 @@ import threading
 from contextlib import contextmanager
 from unittest import mock
 
-from modelark.web import plan_api, selection_api, server
+from modelark.web import drive_api, plan_api, proposal_api, selection_api, server
 
 
 @contextmanager
@@ -136,6 +136,82 @@ def test_capacity_mode_route_and_deprecated_alias_dispatch():
     assert status == 200 and old_status == 200
     canonical.assert_called_once_with({"plan_id": "ark", "capacity_mode": "guaranteed"})
     legacy.assert_called_once_with({"plan_id": "ark", "mode": "uncompressed"})
+
+
+def test_drive_loss_route_uses_mutation_security_and_conflict_status():
+    refused = {"ok": False, "refused": {"code": "DRIVE_LOSS_PREVIEW_STALE"}}
+    with _portal() as httpd, mock.patch.object(
+            drive_api, "declare_lost", return_value=refused) as declare:
+        payload = {"drive_label": "drive-02"}
+        status, _, body = _request(
+            httpd,
+            "POST",
+            "/api/drive/declare-lost",
+            json.dumps(payload),
+            _mutation_headers(httpd),
+        )
+    assert status == 409 and json.loads(body) == refused
+    declare.assert_called_once_with(payload)
+
+
+def test_new_drive_registration_route_uses_mutation_security_and_conflict_status():
+    refused = {"ok": False, "refused": {"code": "DRIVE_REGISTRATION_PREVIEW_STALE"}}
+    with _portal() as httpd, mock.patch.object(
+            drive_api, "register_new", return_value=refused) as register_new:
+        payload = {"label": "drive-07"}
+        status, _, body = _request(
+            httpd,
+            "POST",
+            "/api/drive/register-new",
+            json.dumps(payload),
+            _mutation_headers(httpd),
+        )
+    assert status == 409 and json.loads(body) == refused
+    register_new.assert_called_once_with(payload)
+
+
+def test_proposal_status_and_mutation_routes_dispatch_with_conflict_status():
+    refused = {
+        "ok": False,
+        "refused": True,
+        "code": "PREVIEW_STALE",
+        "error": "PREVIEW_STALE",
+    }
+    with _portal() as httpd, \
+         mock.patch.object(proposal_api, "status", return_value={
+             "ok": True, "state": "missing"
+         }) as status_api, \
+         mock.patch.object(proposal_api, "create_draft", return_value=refused) as create, \
+         mock.patch.object(proposal_api, "approve", return_value={
+             "ok": True, "state": "approved_current"
+         }) as approve:
+        status, _, status_body = _request(httpd, "GET", "/api/proposal/status")
+        draft_body = {"ignored": "client authority"}
+        draft_status, _, draft_response = _request(
+            httpd,
+            "POST",
+            "/api/proposal/draft",
+            json.dumps(draft_body),
+            _mutation_headers(httpd),
+        )
+        approve_body = {
+            "proposal_id": "proposal-123",
+            "confirmation": "APPROVE proposal-123",
+        }
+        approve_status, _, approve_response = _request(
+            httpd,
+            "POST",
+            "/api/proposal/approve",
+            json.dumps(approve_body),
+            _mutation_headers(httpd),
+        )
+    assert status == 200 and json.loads(status_body)["state"] == "missing"
+    assert draft_status == 409 and json.loads(draft_response) == refused
+    assert approve_status == 200
+    assert json.loads(approve_response)["state"] == "approved_current"
+    status_api.assert_called_once_with()
+    create.assert_called_once_with(draft_body)
+    approve.assert_called_once_with(approve_body)
 
 
 def test_non_loopback_bind_is_refused_before_startup():

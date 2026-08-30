@@ -114,12 +114,63 @@ td.cb{width:34px;text-align:center}input[type=checkbox]{width:15px;height:15px;a
 .attrs .v.bad{color:var(--crit);font-weight:600}.attrs .v.warn{color:var(--warn)}
 .disknote{color:var(--warn);background:rgba(216,161,58,.1);border:1px solid rgba(216,161,58,.3);border-radius:8px;padding:10px 14px;margin-bottom:16px;font-size:.85rem}
 .fixcmd{display:block;margin-top:8px;background:#0b0f14;border:1px solid var(--line2);border-radius:6px;padding:8px 10px;font-family:ui-monospace,Menlo,monospace;font-size:.74rem;color:var(--steel);white-space:pre-wrap;word-break:break-all;user-select:all;cursor:text}
+.drivebar,.healthgate{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:10px}
+.drivebar button,.healthgate button,.driveacts button{background:var(--panel2);border:1px solid var(--line2);color:var(--steel);border-radius:8px;padding:7px 12px}
+.drivebar button:hover,.healthgate button:hover,.driveacts button:hover{border-color:var(--steel)}
+.driveacts{display:flex;gap:8px;margin-top:12px}.driveacts .driveproblem{color:var(--warn);border-color:rgba(216,161,58,.45)}
+.healthgate{border-top:1px solid var(--line);margin-top:28px;padding-top:20px}.healthgate .sub{color:var(--mut);font-size:.8rem;margin-top:3px}
+.driveevent{background:rgba(111,191,115,.1);border:1px solid rgba(111,191,115,.35);border-left:4px solid var(--ok);border-radius:9px;padding:12px 15px;margin-bottom:16px}
+.driveevent.blocked{background:rgba(216,161,58,.1);border-color:rgba(216,161,58,.35);border-left-color:var(--warn)}
+.driveevent b{display:block;margin-bottom:3px}.driveevent .sub{color:var(--mut);font-size:.8rem}
 #view-library .page{max-width:none}
 .libcontrols{display:flex;align-items:center;gap:12px;margin:-10px 0 9px}
 #libSearch{flex:1;max-width:720px;background:var(--panel);border:1px solid var(--line2);border-radius:8px;color:var(--ink);padding:9px 12px;font:inherit}
 #libSearch:focus{outline:none;border-color:var(--brass)}
 .libfilters{margin:0 0 12px}
 #libBody .stub{margin-top:8px}
+
+/* immutable placement proposal review (DEF-036) */
+.proposal-docket{display:flex;align-items:center;gap:14px;margin:0 0 12px;padding:12px 14px;
+  background:rgba(201,162,75,.08);border:1px solid rgba(201,162,75,.38);border-radius:9px}
+.proposal-seal{flex:none;color:var(--brass);font:700 10px/1 ui-monospace,Menlo,monospace;
+  letter-spacing:.1em;text-transform:uppercase}
+.proposal-docket-copy{flex:1;min-width:0}.proposal-state{font-weight:700;color:var(--ink)}
+.proposal-note{color:var(--mut);font-size:.76rem;margin-top:2px}
+#proposalReview{flex:none;background:var(--panel2);border:1px solid var(--brass);color:var(--brass);
+  border-radius:8px;padding:8px 13px;font-weight:700}
+#proposalReview:disabled{opacity:.45;cursor:not-allowed}
+.proposal-card{width:min(1120px,94vw);max-width:none;max-height:92vh;overflow-y:auto;border-top-color:var(--brass)}
+.proposal-card-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}
+.proposal-kicker{font:700 10px/1 ui-monospace,Menlo,monospace;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--brass);margin-bottom:7px}
+.proposal-gate{font:700 11px/1 ui-monospace,Menlo,monospace;color:var(--ok);
+  background:rgba(111,191,115,.16);border-radius:999px;padding:6px 10px}
+.proposal-meta,.proposal-totals{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:12px 0}
+.proposal-meta>div,.proposal-totals>div{display:flex;flex-direction:column;gap:3px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:7px;padding:8px 10px;min-width:0}
+.proposal-meta span,.proposal-totals span{color:var(--mut);font-size:.67rem;text-transform:uppercase;letter-spacing:.05em}
+.proposal-meta b,.proposal-totals b{font:600 12px ui-monospace,Menlo,monospace;overflow-wrap:anywhere}
+.proposal-hash-block{display:flex;align-items:center;gap:12px;background:#0b0f14;border:1px solid var(--line2);
+  border-radius:7px;padding:9px 11px;margin:10px 0}.proposal-hash-block span{color:var(--mut);font-size:.7rem;text-transform:uppercase}
+.proposal-hash-block code{color:var(--steel);font-size:.75rem;overflow-wrap:anywhere}
+.proposal-drives{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px;margin:12px 0}
+.proposal-drive{display:flex;flex-direction:column;gap:3px;border:1px solid var(--line);border-left:3px solid var(--steel);
+  border-radius:7px;padding:8px 10px}.proposal-drive b{font-family:ui-monospace,Menlo,monospace}
+.proposal-drive span{color:var(--mut);font-size:.73rem}
+.proposal-assignment-head{display:flex;justify-content:space-between;align-items:center;gap:14px;margin:16px 0 7px}
+.proposal-assignment-head>div{display:flex;flex-direction:column}.proposal-assignment-head span{color:var(--mut);font-size:.72rem}
+#proposalAssignmentFilter{width:min(360px,45%);background:#0b0f14;border:1px solid var(--line2);border-radius:7px;
+  color:var(--ink);padding:8px 10px}#proposalAssignmentFilter:focus{outline:none;border-color:var(--brass)}
+.proposal-assignment-wrap{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:7px}
+.proposal-assignment-table th{top:0}.proposal-assignment-table td{font-size:.76rem}
+.proposal-assignment-table .proposal-repo{font-family:ui-monospace,Menlo,monospace;white-space:normal;word-break:break-word}
+#proposalConfirm{width:100%;background:#0b0f14;border:1px solid var(--line2);border-radius:7px;color:var(--ink);
+  padding:9px 11px;font-family:ui-monospace,Menlo,monospace;margin-bottom:12px}
+#proposalConfirm:focus{outline:none;border-color:var(--brass)}
+.proposal-refusal{color:var(--crit)}
+@media(max-width:760px){.proposal-docket{align-items:flex-start;flex-wrap:wrap}.proposal-docket-copy{flex-basis:70%}
+  .proposal-meta,.proposal-totals{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .proposal-assignment-head{align-items:stretch;flex-direction:column}#proposalAssignmentFilter{width:100%}}
 
 /* plans (#35) */
 .navbtn.gated{opacity:.4;cursor:not-allowed}
@@ -187,5 +238,14 @@ td.cb{width:34px;text-align:center}input[type=checkbox]{width:15px;height:15px;a
 .oopsie-acts{display:flex;gap:10px;justify-content:flex-end}
 .oopsie-acts button,.oopsie-acts .modal-link{background:var(--panel2);border:1px solid var(--line2);color:var(--ink);border-radius:8px;padding:9px 16px;font-weight:600;text-decoration:none;font-size:.84rem}
 .oopsie-acts .primary{background:var(--brass);border-color:var(--brass);color:#1a1206}
+.oopsie-acts .danger{background:var(--crit);border-color:var(--crit);color:#180808}
+.oopsie-acts button:disabled{opacity:.4;cursor:not-allowed;filter:none}
 .oopsie-acts button:hover,.oopsie-acts .modal-link:hover{filter:brightness(1.08)}
 .gated-card{border-top-color:var(--brass);max-width:680px}
+.drive-loss-card{max-width:700px}.lossconfirm{display:block;color:var(--mut);font-size:.82rem;line-height:1.45;margin:12px 0 7px}
+.drive-onboarding-card{max-width:740px;max-height:90vh;overflow-y:auto;border-top-color:var(--steel)}
+.driveonboard-section{background:rgba(130,160,185,.08);border:1px solid rgba(130,160,185,.28);border-radius:8px;padding:11px 13px;margin:0 0 14px}
+.driveonboard-section[hidden]{display:none}.driveonboard-title{color:var(--ink);font-size:.82rem;font-weight:700;margin-bottom:5px}.driveonboard-copy,.driveonboard-guardrails{color:var(--mut);font-size:.76rem;line-height:1.45}.driveonboard-guardrails{margin-top:8px;color:var(--warn)}
+.lossconfirm code{color:var(--ink);background:#0b0f14;padding:2px 5px;border-radius:4px}
+#driveLossConfirm,#driveOnboardingConfirm{width:100%;background:#0b0f14;border:1px solid var(--line2);border-radius:7px;color:var(--ink);padding:9px 11px;font-family:ui-monospace,Menlo,monospace;margin-bottom:12px}
+#driveLossConfirm:focus,#driveOnboardingConfirm:focus{outline:none;border-color:var(--warn)}

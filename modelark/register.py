@@ -29,6 +29,14 @@ from modelark.core import platform as osplat
 
 DEFAULT_LIBRARY = Path.home() / "modelark-library"
 ARCHIVE_SUBDIR = "modelark"          # content lives under <mount>/modelark
+_REGISTRATION_RECEIPT_KEYS = {
+    "state": "modelark.registration-state",
+    "label": "modelark.registration-label",
+    "fs_uuid": "modelark.registration-fs-uuid",
+    "serial": "modelark.registration-serial",
+    "volume_dev": "modelark.registration-volume-dev",
+}
+_DEFAULT_GIT_IDENTITY = ("ModelArk", "modelark@localhost.invalid")
 
 
 # ---- subprocess helpers -----------------------------------------------------
@@ -59,6 +67,20 @@ def _git(repo: Path, *args: str, check: bool = True) -> str:
     return _run("git", "-C", str(repo), *args, check=check).stdout.strip()
 
 
+def _pin_repo_identity(repo: Path, *, source: Path | None = None) -> None:
+    """Give ModelArk-managed metadata commits a repository-local identity.
+
+    Git does not copy ``user.name`` or ``user.email`` when cloning a repository.
+    Pin the source repository's effective identity, with a reserved ModelArk
+    fallback, so map and annex metadata do not depend on mutable global config.
+    """
+    identity_source = source or repo
+    name = _git(identity_source, "config", "--get", "user.name", check=False)
+    email = _git(identity_source, "config", "--get", "user.email", check=False)
+    _git(repo, "config", "--local", "user.name", name or _DEFAULT_GIT_IDENTITY[0])
+    _git(repo, "config", "--local", "user.email", email or _DEFAULT_GIT_IDENTITY[1])
+
+
 def _is_annex(repo: Path) -> bool:
     return (repo / ".git").exists() and _run(
         "git", "-C", str(repo), "annex", "version", check=False).returncode == 0
@@ -87,6 +109,7 @@ def ensure_library(path: Path | None = None) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     if not (path / ".git").exists():
         _git(path, "init", "-q")
+    _pin_repo_identity(path)
     _git(path, "annex", "init", "map")
     _git(path, "annex", "numcopies", "1")     # fleet default; irreplaceables bumped selectively
     # Seed an initial commit so drive clones check out a branch cleanly (cloning an
@@ -338,16 +361,257 @@ def _add_to_active_plan(con, label: str) -> str:
     return ap["plan_id"]
 
 
-def register_drive(dev: str, label: str, mount: str | None = None,
+def _guard_existing_label(con, label: str) -> None:
+    """Refuse (re-)registering a label that already owns a drive row, BEFORE any physical, remote, or
+    catalog mutation. A blunt existing-label guard — never an identity comparison, refresh, or reuse:
+    collision-safe re-registration and retirement are the deferred lifecycle workflow (DEF-029)."""
+    if con.execute("SELECT 1 FROM drives WHERE drive_label=?", [label]).fetchone():
+        raise RuntimeError(
+            f"drive label '{label}' is already registered — re-registration is not supported here. "
+            f"Use the drive lifecycle workflow (identity-aware re-registration / retirement, DEF-029) "
+            f"to change or replace an existing drive.")
+
+
+def registration_receipt(archive: Path) -> dict[str, str] | None:
+    """Read the local, non-catalog receipt for a portal-prepared archive.
+
+    The receipt makes an interrupted cross-system registration recoverable without treating an
+    arbitrary unregistered annex as safe to adopt.  It is local git configuration, so it travels
+    with the initialized archive while remaining outside the shared map history.
+    """
+    archive = Path(archive)
+    if not archive.is_dir() or not (archive / ".git").exists():
+        return None
+    values = {
+        name: _git(archive, "config", "--local", "--get", key, check=False)
+        for name, key in _REGISTRATION_RECEIPT_KEYS.items()
+    }
+    if values["state"] != "prepared" or any(not values[name] for name in values):
+        return None
+    return values
+
+
+def _require_exact_registration_receipt(
+    archive: Path,
+    *,
+    label: str,
+    fs_uuid: str,
+    serial: str,
+    volume_dev: str,
+) -> str:
+    receipt = registration_receipt(archive)
+    expected = {
+        "state": "prepared",
+        "label": label,
+        "fs_uuid": fs_uuid,
+        "serial": serial,
+        "volume_dev": volume_dev,
+    }
+    if receipt != expected:
+        raise RuntimeError(
+            f"registration namespace {archive} already exists without the exact prepared "
+            f"receipt; expected={expected!r} observed={receipt!r}")
+    annex_uuid = _git(archive, "config", "--local", "--get", "annex.uuid", check=False)
+    if not annex_uuid:
+        raise RuntimeError(
+            f"registration namespace {archive} has a receipt but no git-annex UUID")
+    return annex_uuid
+
+
+def prepare_new_identity_archive(
+    *,
+    volume_dev: str,
+    mount: str,
+    archive_path: str,
+    label: str,
+    fs_uuid: str,
+    fstype: str,
+    serial: str,
+    model: str | None,
+    role: str,
+    library: str | None = None,
+) -> dict:
+    """Initialize or recover one exact new-label archive without SMART/format/mount work.
+
+    A hidden sibling is prepared first and carries an exact local receipt before its atomic rename
+    to ``<mount>/modelark``.  If a later map/catalog step fails, a retry may resume only that exact
+    receipt.  Unknown directories and annexes are never adopted or deleted.
+    """
+    if not re.fullmatch(r"drive-\d+", str(label)):
+        raise RuntimeError(f"invalid new drive label {label!r}")
+    if not all(isinstance(value, str) and value.strip()
+               for value in (volume_dev, mount, archive_path, fs_uuid, fstype, serial)):
+        raise RuntimeError("registration preparation requires exact device/filesystem identity")
+    if fstype not in {"ext4", "xfs"}:
+        raise RuntimeError(f"unsupported registration filesystem {fstype!r}")
+
+    mount_path = Path(mount).resolve()
+    archive = Path(archive_path).resolve()
+    expected_archive = mount_path / ARCHIVE_SUBDIR
+    if archive != expected_archive:
+        raise RuntimeError(
+            f"archive path {archive} is not the exact mounted namespace {expected_archive}")
+    if not mount_path.is_dir():
+        raise RuntimeError(f"registration mount is unavailable: {mount_path}")
+
+    source = _run("findmnt", "-nro", "SOURCE", "--target", str(mount_path),
+                  check=False).stdout.strip().splitlines()
+    live_fs = _run("findmnt", "-nro", "FSTYPE", "--target", str(mount_path),
+                   check=False).stdout.strip().splitlines()
+    live_uuid = _run("findmnt", "-nro", "UUID", "--target", str(mount_path),
+                     check=False).stdout.strip().splitlines()
+    if not source or os.path.realpath(source[0].split("[", 1)[0]) != os.path.realpath(volume_dev):
+        raise RuntimeError(
+            f"mounted source changed before registration: expected {volume_dev!r}, "
+            f"observed {(source[0] if source else None)!r}")
+    if not live_fs or live_fs[0] != fstype:
+        raise RuntimeError(
+            f"filesystem type changed before registration: expected {fstype!r}, "
+            f"observed {(live_fs[0] if live_fs else None)!r}")
+    if not live_uuid or live_uuid[0] != fs_uuid:
+        raise RuntimeError(
+            f"filesystem UUID changed before registration: expected {fs_uuid!r}, "
+            f"observed {(live_uuid[0] if live_uuid else None)!r}")
+    parent = _run("lsblk", "-nro", "PKNAME", volume_dev, check=False).stdout.strip()
+    serial_device = f"/dev/{parent.splitlines()[0]}" if parent else volume_dev
+    live_serial = _run(
+        "lsblk", "-dno", "SERIAL", serial_device, check=False
+    ).stdout.strip().splitlines()
+    if not live_serial or live_serial[0] != serial:
+        raise RuntimeError(
+            f"hardware serial changed before registration: expected {serial!r}, "
+            f"observed {(live_serial[0] if live_serial else None)!r}")
+    root_source = _run("findmnt", "-nro", "SOURCE", "/", check=False).stdout.strip()
+    if root_source and _parent_disk(volume_dev) == _parent_disk(root_source.split("[", 1)[0]):
+        raise RuntimeError(
+            f"refusing registration because {volume_dev} now backs the running system")
+    if not (archive.exists() or archive.is_symlink()) and not os.access(
+        str(mount_path), os.W_OK | os.X_OK
+    ):
+        raise RuntimeError(
+            f"archive parent {mount_path} is not writable by the ModelArk process; "
+            "prepare dedicated mount ownership or an ACL outside ModelArk, then refresh "
+            "the onboarding preview")
+
+    lib = Path(library).expanduser().resolve() if library else library_root().resolve()
+    if not _is_annex(lib):
+        raise RuntimeError(
+            f"existing git-annex map is unavailable at {lib}; registration will not create "
+            "or replace map authority implicitly")
+
+    expected_receipt = {
+        "state": "prepared",
+        "label": label,
+        "fs_uuid": fs_uuid,
+        "serial": serial,
+        "volume_dev": volume_dev,
+    }
+    recovered = False
+    if archive.exists() or archive.is_symlink():
+        if archive.is_symlink() or not archive.is_dir():
+            raise RuntimeError(f"refusing occupied or unsafe archive namespace {archive}")
+        annex_uuid = _require_exact_registration_receipt(
+            archive,
+            label=label,
+            fs_uuid=fs_uuid,
+            serial=serial,
+            volume_dev=volume_dev,
+        )
+        recovered = True
+    else:
+        stage = mount_path / f".{ARCHIVE_SUBDIR}.registering-{label}"
+        if stage.exists() or stage.is_symlink():
+            if stage.is_symlink() or not stage.is_dir():
+                raise RuntimeError(f"refusing occupied or unsafe registration staging path {stage}")
+            annex_uuid = _require_exact_registration_receipt(
+                stage,
+                label=label,
+                fs_uuid=fs_uuid,
+                serial=serial,
+                volume_dev=volume_dev,
+            )
+            recovered = True
+        else:
+            _run("git", "clone", str(lib), str(stage))
+            _pin_repo_identity(stage, source=lib)
+            _git(stage, "annex", "init", label)
+            for name in ("label", "fs_uuid", "serial", "volume_dev"):
+                _git(
+                    stage,
+                    "config",
+                    "--local",
+                    _REGISTRATION_RECEIPT_KEYS[name],
+                    expected_receipt[name],
+                )
+            _git(
+                stage,
+                "config",
+                "--local",
+                _REGISTRATION_RECEIPT_KEYS["state"],
+                expected_receipt["state"],
+            )
+            annex_uuid = _require_exact_registration_receipt(
+                stage,
+                label=label,
+                fs_uuid=fs_uuid,
+                serial=serial,
+                volume_dev=volume_dev,
+            )
+        os.replace(stage, archive)
+
+    description = f"{label} · {model or 'drive'} · {role}"
+    _git(archive, "annex", "describe", "here", description)
+    remotes = _git(lib, "remote", check=False).splitlines()
+    if label in remotes:
+        current_url = _git(lib, "remote", "get-url", label, check=False)
+        if Path(current_url).expanduser().resolve() != archive:
+            raise RuntimeError(
+                f"map remote {label!r} already points to {current_url!r}, not {str(archive)!r}")
+    else:
+        _git(lib, "remote", "add", label, str(archive))
+    _git(lib, "annex", "sync", label)
+
+    usage = shutil.disk_usage(mount_path)
+    return {
+        "archive_path": str(archive),
+        "annex_uuid": annex_uuid,
+        "free_bytes": int(usage.free),
+        "recovered_preparation": recovered,
+    }
+
+
+def register_drive(dev, label=None, mount: str | None = None,
                    format_fs: str | None = None, location: str | None = None,
                    library: str | None = None, dry_run: bool = False,
                    role: str = "primary", raid_backed: bool = False,
-                   skip_smart: bool = False, confirm_format: str | None = None) -> dict:
+                   skip_smart: bool = False, confirm_format: str | None = None,
+                   path: str | None = None, **_kw) -> dict:
     """Qualify, prepare, and register a drive as a fleet member. A RAID-backed LUN
     (iSCSI — auto-detected — or forced with raid_backed=True) has no physical SMART:
     redundancy is the array's, integrity is our sha256 + canary, so SMART is skipped.
     `skip_smart` (INC-002) registers a drive whose USB bridge won't pass SMART with an
-    'unchecked' verdict — an explicit operator override; verify health externally."""
+    'unchecked' verdict — an explicit operator override; verify health externally.
+
+    PR-09: when the first argument is a catalog connection (writer-matrix shape), refuse
+    while a live execution session exists before any physical work.
+    """
+    from modelark.execution_session import require_no_live_session
+
+    # Matrix / catalog-connection form: register_drive(con, "d-new", path=...).
+    if hasattr(dev, "execute") and callable(getattr(dev, "execute")):
+        require_no_live_session(dev)
+        # Live session refused above; remaining path still needs a real device string.
+        raise TypeError(
+            "register_drive requires a device path when no live session blocks the call")
+
+    # Normal device path: refuse while a live execution session exists BEFORE any
+    # physical SMART/format/mount work.
+    con = db.connect()
+    try:
+        require_no_live_session(con)
+        _guard_existing_label(con, label)      # before SMART, dry-run, or any physical/remote/catalog mutation
+    finally:
+        con.close()
     if confirm_format and not format_fs:
         raise ValueError("--confirm-format is valid only together with --format")
     if format_fs and not osplat.BLOCKDEV_OPS_SUPPORTED:
@@ -414,25 +678,47 @@ def register_drive(dev: str, label: str, mount: str | None = None,
     du = shutil.disk_usage(mp)
     con = db.connect()
     try:
-        db.upsert(con, "drives", {
-            "drive_label": label,
-            "fs_uuid": _fs_uuid(dev) or None,
-            "annex_uuid": annex_uuid or None,
-            "capacity_bytes": _disk_bytes(dev) or du.total,
-            "free_bytes": du.free,
-            "hw_model": base["model"] or None,
-            "serial": base["serial"] or None,
-            "physical_location": location,
-            "role": role,
-            "raid_backed": raid_backed,
-            "health": base["verdict"],
-            "last_seen": datetime.now(),
-            "notes": base.get("note") or (
-                f"SMART baseline: realloc={base['reallocated']} "
-                f"pending={base['pending']} offline_unc={base['offline_uncorrectable']} "
-                f"poh={base['power_on_hours']}h passed={base['smart_passed']}"),
-        }, pk=["drive_label"])
-        plan_id = _add_to_active_plan(con, label)       # #34: the drive joins the active plan's fixed set
+        from modelark.proposal import GraphResult, graph_write
+
+        def op(c):
+            db.upsert(c, "drives", {
+                "drive_label": label,
+                "fs_uuid": _fs_uuid(dev) or None,
+                "annex_uuid": annex_uuid or None,
+                "capacity_bytes": _disk_bytes(dev) or du.total,
+                "free_bytes": du.free,
+                "hw_model": base["model"] or None,
+                "serial": base["serial"] or None,
+                "physical_location": location,
+                "role": role,
+                "raid_backed": raid_backed,
+                "health": base["verdict"],
+                "last_seen": datetime.now(),
+                "notes": base.get("note") or (
+                    f"SMART baseline: realloc={base['reallocated']} "
+                    f"pending={base['pending']} offline_unc={base['offline_uncorrectable']} "
+                    f"poh={base['power_on_hours']}h passed={base['smart_passed']}"),
+            }, pk=["drive_label"])
+            # Membership without nested graph_write (single revision bump for registration).
+            from modelark import plan as plan_mod
+            ap = plan_mod.active(c)
+            if ap is None:
+                if plan_mod.get(c, plan_mod.DEFAULT_PLAN) is None:
+                    db.upsert(c, "plans", {
+                        "plan_id": plan_mod.DEFAULT_PLAN, "name": "Ark",
+                        "annex_root": str(ensure_library(None)),
+                        "capacity_mode": "guaranteed", "status": "active", "notes": None,
+                    }, pk=["plan_id"])
+                c.execute("UPDATE plans SET is_active=false")
+                c.execute("UPDATE plans SET is_active=true WHERE plan_id=?",
+                          [plan_mod.DEFAULT_PLAN])
+                ap = plan_mod.get(c, plan_mod.DEFAULT_PLAN)
+            db.upsert(c, "plan_drives",
+                      {"plan_id": ap["plan_id"], "drive_label": label},
+                      pk=["plan_id", "drive_label"])
+            return GraphResult(proven_noop=False, value=ap["plan_id"])
+
+        plan_id = graph_write(con, op).value
     finally:
         con.close()
 
@@ -452,6 +738,32 @@ def archive_path(con, label: str) -> Path | None:
     return Path(mp) / ARCHIVE_SUBDIR if mp else None
 
 
+# ---- live identity probes (read the mounted volume, never the catalog) ------
+# These back the fenced observation used by the physical-mutation envelope: identity is proven from the
+# CURRENT device, so a stale catalog row cannot vouch for a swapped/mismounted volume. Linux-only
+# (findmnt/lsblk); off-platform they degrade to None → identity unknown → the envelope refuses.
+
+def probe_fs_uuid(path) -> str | None:
+    """Live filesystem UUID of the volume containing `path`."""
+    out = _run("findmnt", "-fno", "UUID", "--target", str(path), check=False).stdout.strip()
+    return out.splitlines()[0] if out else None
+
+
+def probe_annex_uuid(path) -> str | None:
+    """Live git-annex UUID recorded in the archive repo at `path`, or None if absent."""
+    return _git(Path(path), "config", "annex.uuid", check=False) or None
+
+
+def probe_serial(path) -> str | None:
+    """Live hardware serial of the device backing `path` (supporting identity evidence), or None."""
+    src = _run("findmnt", "-fno", "SOURCE", "--target", str(path), check=False).stdout.strip()
+    src = src.splitlines()[0] if src else ""
+    if not src:
+        return None
+    out = _run("lsblk", "-dno", "SERIAL", src, check=False).stdout.strip()
+    return out.splitlines()[0] if out else None
+
+
 def list_drives(con) -> list[dict]:
     cols = ["drive_label", "hw_model", "serial", "health", "capacity_bytes",
             "free_bytes", "annex_uuid", "physical_location", "last_seen"]
@@ -464,6 +776,11 @@ def register_nas(remote: str = "nas", label: str = "drive-99", role: str = "repl
     librarian target. No SMART/mkfs — the special remote already receives content via
     `git annex copy --to <remote>`. Reads its uuid + directory from the map repo config, and
     the free/total from the mount the directory lives on (DEC-006, DEC-014)."""
+    con = db.connect()
+    try:
+        _guard_existing_label(con, label)      # before library/remote inspection or the catalog upsert
+    finally:
+        con.close()
     lib = library_root()
     uuid = _git(lib, "config", f"remote.{remote}.annex-uuid", check=False)
     directory = _git(lib, "config", f"remote.{remote}.annex-directory", check=False)

@@ -114,8 +114,14 @@ archive recovery proof.
 
 ## Updating or removing the service
 
-After pulling a reviewed release, rerun `python3 scripts/deploy.py` with the same explicit paths and
-resume choice, review the generated unit, then add `--start` to restart onto the new package.
+Before updating, check [`upgrading.md`](upgrading.md). A fresh install or already-current catalog can
+be redeployed normally. An existing pre-v7 catalog—including ModelArk 0.2.0's schema-v2 catalog—must
+complete the stopped, side-by-side provenance migration before the new service starts; the new binary
+will refuse rather than auto-migrate it.
+
+After pulling a reviewed release with no pending catalog migration, rerun `python3 scripts/deploy.py`
+with the same explicit paths and resume choice, review the generated unit, then add `--start` to
+restart onto the new package.
 
 To remove supervision without deleting data:
 
@@ -127,6 +133,64 @@ systemctl --user daemon-reload
 
 The virtual environment, data, state, configuration, archive drives, and git-annex map are
 intentionally left untouched. Delete or migrate them only as separate, explicit operations.
+
+## Dedicated drive permissions
+
+The supervised service runs as the ordinary user who deployed it. Before portal registration can
+initialize an existing mounted filesystem, the read-only onboarding preview proves that this service
+identity can traverse and write the filesystem root. A freshly created ext4 filesystem is commonly
+mounted with a root-owned top-level directory; being mounted and empty does not by itself make it
+registration-ready.
+
+When access is blocked, the portal shows **You do this now** with commands resolved to the observed
+absolute mount and effective service user/group. The rendered sequence has this shape:
+
+```bash
+sudo chown -- <service-user>:<service-group> /absolute/dedicated/mount
+sudo chmod -- 0750 /absolute/dedicated/mount
+stat -c '%U:%G %a %n' -- /absolute/dedicated/mount
+```
+
+Copy the portal's concrete commands rather than substituting a guessed account or path. This policy
+is only for a filesystem dedicated to ModelArk. Never apply either command recursively, and do not
+change the root owner of a shared filesystem without a separate host-level design. ModelArk does not
+invoke `sudo`, change permissions, or use successful mounting as authority to write.
+
+After running the commands, refresh the onboarding preview. Do not retry a stale confirmation modal
+and do not create these directories manually:
+
+```text
+/absolute/dedicated/mount/
+├── .modelark.registering-drive-NN/  temporary; ModelArk creates this
+└── modelark/                        final; atomically promoted from the temporary directory
+```
+
+The hidden directory is the recoverable preparation area. The final archive namespace appears only
+through ModelArk's atomic promotion during the separately confirmed registration action.
+
+## Drive identity and reconciliation
+
+The passive Drives view enriches an attached disk with read-only mounted-volume topology. An exact,
+unique filesystem UUID + annex UUID pair maps it to the registered identity even when an iSCSI layer
+has no stored hardware serial or a USB bridge reports its own serial. ModelArk displays that
+discrepancy and leaves the registered serial untouched. If a complete observed pair conflicts with
+the registered pair, serial cannot override it and no identity is rebound.
+
+After migration or new registration, establish capacity evidence explicitly for storage that is
+actually dedicated to the supported ModelArk writer:
+
+```bash
+modelark drive reconcile drive-NN --dedicated
+```
+
+The command now prints bounded inventory milestones. It queries the git-annex location log once for
+all keys recorded on the exact target annex UUID, treats a command failure or absent key as missing,
+and scans only the archive worktree—not `.git/annex/objects`—for extras/debris. A successful command
+returns that exact classified inventory and prints bounded `present / missing / debris / extra`
+counts. It never turns debris or extras into catalogued residency and never deletes them
+automatically. Reconciliation remains under the controller and drive fences and publishes only from
+a fresh final identity/capacity observation. Do not use `--dedicated` for shared or otherwise
+unfenceable storage.
 
 ## SMART access
 

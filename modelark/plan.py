@@ -78,11 +78,17 @@ def create(
         capacity_mode = legacy_mode
     else:
         capacity_mode = normalize_capacity_mode(capacity_mode or "guaranteed", warn_legacy=True)
-    db.upsert(con, "plans", {
-        "plan_id": plan_id, "name": name or plan_id,
-        "annex_root": annex_root or str(register.library_root()),
-        "capacity_mode": capacity_mode, "status": "active", "notes": notes,
-    }, pk=["plan_id"])
+    from modelark.proposal import GraphResult, graph_write
+
+    def op(c):
+        db.upsert(c, "plans", {
+            "plan_id": plan_id, "name": name or plan_id,
+            "annex_root": annex_root or str(register.library_root()),
+            "capacity_mode": capacity_mode, "status": "active", "notes": notes,
+        }, pk=["plan_id"])
+        return GraphResult(proven_noop=False)
+
+    graph_write(con, op)
     return get(con, plan_id)
 
 
@@ -110,16 +116,33 @@ def active(con) -> dict | None:
 
 
 def set_active(con, plan_id) -> dict:
+    """Switch active plan. No-op when already active (no revision bump). Real switch atomically
+    supersedes approvals, clears the global active pointer, flips is_active, and bumps once (A7).
+
+    PR-09: refuse while a live execution session exists even on the proven no-op path.
+    """
+    from modelark.execution_session import require_no_live_session
+    require_no_live_session(con)
     if get(con, plan_id) is None:
         raise ValueError(f"no such plan: {plan_id}")
-    con.execute("BEGIN")                                     # atomic flip — a crash between the two UPDATEs
-    try:                                                     # must never leave EVERY plan is_active=false
-        con.execute("UPDATE plans SET is_active=false")
-        con.execute("UPDATE plans SET is_active=true WHERE plan_id=?", [plan_id])
-        con.execute("COMMIT")
-    except Exception:
-        con.execute("ROLLBACK")
-        raise
+    current = active(con)
+    if current is not None and current["plan_id"] == plan_id:
+        return current  # proven no-op: preserve approval pointer and revision
+    from modelark.proposal import GraphResult, graph_write
+
+    def op(c):
+        # Supersede any approved proposal and clear the singleton pointer (A7).
+        c.execute(
+            "UPDATE placement_proposals SET lifecycle='superseded', "
+            "superseded_at=CURRENT_TIMESTAMP WHERE lifecycle='approved'")
+        c.execute(
+            "UPDATE planner_state SET active_approved_proposal_id=NULL WHERE singleton_id=1")
+        # Atomic flip — a crash between the two UPDATEs must never leave every plan inactive.
+        c.execute("UPDATE plans SET is_active=false")
+        c.execute("UPDATE plans SET is_active=true WHERE plan_id=?", [plan_id])
+        return GraphResult(proven_noop=False)
+
+    graph_write(con, op)
     return get(con, plan_id)
 
 
@@ -128,7 +151,13 @@ def set_capacity_mode(con, plan_id, mode) -> dict:
     mode = normalize_capacity_mode(mode, warn_legacy=True)
     if get(con, plan_id) is None:
         raise ValueError(f"no such plan: {plan_id}")
-    con.execute("UPDATE plans SET capacity_mode=? WHERE plan_id=?", [mode, plan_id])
+    from modelark.proposal import GraphResult, graph_write
+
+    def op(c):
+        c.execute("UPDATE plans SET capacity_mode=? WHERE plan_id=?", [mode, plan_id])
+        return GraphResult(proven_noop=False)
+
+    graph_write(con, op)
     return get(con, plan_id)
 
 
@@ -144,12 +173,29 @@ def set_provisioning(con, plan_id, mode) -> dict:
 
 def add_drive(con, plan_id, drive_label) -> None:
     """Idempotent — a re-registered drive (stable drive-NN key, DEC-018) re-adds to the same row."""
-    db.upsert(con, "plan_drives", {"plan_id": plan_id, "drive_label": drive_label},
-              pk=["plan_id", "drive_label"])
+    from modelark.proposal import GraphResult, graph_write
+
+    def op(c):
+        existed = c.execute(
+            "SELECT 1 FROM plan_drives WHERE plan_id=? AND drive_label=?",
+            [plan_id, drive_label]).fetchone()
+        db.upsert(c, "plan_drives", {"plan_id": plan_id, "drive_label": drive_label},
+                  pk=["plan_id", "drive_label"])
+        return GraphResult(proven_noop=bool(existed))
+
+    graph_write(con, op)
 
 
 def remove_drive(con, plan_id, drive_label) -> None:
-    con.execute("DELETE FROM plan_drives WHERE plan_id=? AND drive_label=?", [plan_id, drive_label])
+    from modelark.proposal import GraphResult, graph_write
+
+    def op(c):
+        cur = c.execute(
+            "DELETE FROM plan_drives WHERE plan_id=? AND drive_label=?",
+            [plan_id, drive_label])
+        return GraphResult(proven_noop=(getattr(cur, "rowcount", 1) == 0))
+
+    graph_write(con, op)
 
 
 def plan_drive_labels(con, plan_id) -> list[str]:
@@ -158,15 +204,44 @@ def plan_drive_labels(con, plan_id) -> list[str]:
 
 
 def bootstrap(con, plan_id=DEFAULT_PLAN) -> dict:
-    """Idempotent: ensure plan `ark` exists, owns every currently-registered drive, and is active if no
+    """Idempotent: ensure plan `ark` exists, owns every placeable registered drive, and is active if no
     plan is. Safe to call on every startup — creates nothing that exists, removes nothing. Called from
-    the portal serve() startup, the CLI `plan`/`library plan` commands, and registration (#34)."""
-    if get(con, plan_id) is None:
-        create(con, plan_id, name="Ark")
-    for row in con.execute("SELECT drive_label FROM drives").fetchall():
-        add_drive(con, plan_id, row[0])
-    if active(con) is None:
-        set_active(con, plan_id)
+    the portal serve() startup, the CLI `plan`/`library plan` commands, and registration (#34).
+
+    #37: only **missing active+enabled** drives are inserted into plan_drives. Existing membership
+    (including excluded/lost/retired historical rows) is preserved; axes are never mutated.
+    """
+    from modelark.proposal import GraphResult, graph_write
+
+    def op(c):
+        changed = False
+        if get(c, plan_id) is None:
+            db.upsert(c, "plans", {
+                "plan_id": plan_id, "name": "Ark",
+                "annex_root": str(register.library_root()),
+                "capacity_mode": "guaranteed", "status": "active", "notes": None,
+            }, pk=["plan_id"])
+            changed = True
+        for row in c.execute(
+            "SELECT drive_label FROM drives "
+            "WHERE lifecycle='active' AND eligibility='enabled' "
+            "ORDER BY drive_label"
+        ).fetchall():
+            existed = c.execute(
+                "SELECT 1 FROM plan_drives WHERE plan_id=? AND drive_label=?",
+                [plan_id, row[0]]).fetchone()
+            if not existed:
+                db.upsert(c, "plan_drives",
+                          {"plan_id": plan_id, "drive_label": row[0]},
+                          pk=["plan_id", "drive_label"])
+                changed = True
+        if active(c) is None:
+            c.execute("UPDATE plans SET is_active=false")
+            c.execute("UPDATE plans SET is_active=true WHERE plan_id=?", [plan_id])
+            changed = True
+        return GraphResult(proven_noop=not changed)
+
+    graph_write(con, op)
     return get(con, plan_id)
 
 
@@ -179,8 +254,12 @@ def _headroom(cap: int, raid_backed: bool) -> int:
 
 
 def capacity(con, plan_id) -> int:
-    """Σ (capacity − headroom) over the plan's drives — the nominal fleet size the plan can fill. Uses
-    the registration capacity snapshot (stable), NOT live free (that is the per-model failsafe's job)."""
+    """Σ (capacity − headroom) over the plan's placeable drives — the nominal fleet size the plan can
+    fill. Uses the registration capacity snapshot (stable), NOT live free (per-model failsafe).
+
+    #37: only active+enabled plan members contribute. Excluded/lost/retired historical membership
+    does not inflate usable fleet capacity.
+    """
     labels = plan_drive_labels(con, plan_id)
     if not labels:
         return 0
@@ -188,7 +267,8 @@ def capacity(con, plan_id) -> int:
     total = 0
     for _, cap, raid in con.execute(
             f"SELECT drive_label, coalesce(capacity_bytes, free_bytes, 0), coalesce(raid_backed, false) "
-            f"FROM drives WHERE drive_label IN ({ph})", labels).fetchall():
+            f"FROM drives WHERE drive_label IN ({ph}) "
+            f"AND lifecycle='active' AND eligibility='enabled'", labels).fetchall():
         total += max(0, cap - _headroom(cap, bool(raid)))
     return total
 

@@ -1,7 +1,7 @@
 # Contributing to ModelArk
 
 ModelArk is built in public and pre-1.0 — bug reports, fixes, docs, and curation ideas are all
-welcome. Expect rough edges, and read the honest gaps in the [README](../README.md#status) first.
+welcome. Expect rough edges, and read the [0.3.0 status](../README.md#030-status) first.
 
 By taking part you agree to the canonical [Code of Conduct](../CODE_OF_CONDUCT.md).
 
@@ -17,8 +17,9 @@ non-editable checkout-local install through `python3 scripts/deploy.py`; editabl
 development only.
 
 System packages for the full pipeline: `git-annex` (byte storage), `smartmontools` (Disk Health),
-and optionally `open-iscsi` (NAS LUN) or `xfsprogs` (XFS formatting). See the README's
-**Deploy** and **Manual setup** sections.
+and optionally `open-iscsi` (NAS LUN) or `xfsprogs` (XFS formatting). See
+[`docs/getting-started.md`](../docs/getting-started.md) and
+[`docs/deployment.md`](../docs/deployment.md).
 
 ## Running the tests
 
@@ -68,7 +69,8 @@ project's narrative; skim it to understand *why* things are the way they are.
 - **Match the surrounding style** — naming, comment density, idioms.
 - **Fail loud, not silent.** Direct access is the default; a missing value should crash at the
   source, not be papered over by a silent fallback that defers the bug to distant code.
-- **Respect the safety invariants** (README → *Safety invariants*): canary-before-drop, no silent
+- **Respect the safety invariants** ([README](../README.md#safety-by-construction)):
+  canary-before-drop, no silent
   under-replication, the codec gate. Don't weaken an integrity guarantee for speed.
 - **Keep the large-shard paths O(chunk).** The streaming compressor (StreamZNN) exists so a giant
   shard never buffers whole-file; don't reintroduce that.

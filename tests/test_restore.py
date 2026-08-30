@@ -106,6 +106,102 @@ def test_restore_asks_git_annex_for_dropped_content(tmp_path):
     ), calls
 
 
+# ---- PR-03c2: restore must not MUTATE an authoritative drive to retrieve a dropped blob ---------
+
+def _authoritative(con, label):
+    con.execute("INSERT INTO drives(drive_label, write_authority) VALUES(?, 'dedicated_local')", [label])
+
+
+def _unknown_drive(con, label):
+    con.execute("INSERT INTO drives(drive_label, write_authority) VALUES(?, 'unknown')", [label])
+
+
+def test_restore_suppresses_annex_get_on_an_authoritative_drive(tmp_path):
+    """A restore must not mutate an authoritative (dedicated_local) archive to fetch a dropped blob —
+    `git annex get` is suppressed even if the current generation is dirty. With no other recorded copy,
+    restore fails with ONE clear typed error rather than silently invalidating the drive's anchor."""
+    con = _mem()
+    repo, name, data = "org/model", "nested/config.json", b"from annex"
+    digest = _file(con, repo, name, data, "aux")
+    _authoritative(con, "drive-00")
+    archive = tmp_path / "drive"
+    (archive / ".git").mkdir(parents=True)                           # git-annex checkout, content DROPPED
+    _archived(con, repo, name, name, "drive-00", digest, False, f"SHA256E-s{len(data)}--{digest}.json")
+    calls = []
+
+    def annex(repo_path, *args):
+        calls.append(args)
+        if args[:2] == ("get", "--"):                                # today this retrieves; the guard forbids it
+            (archive / "org" / "model" / "nested").mkdir(parents=True, exist_ok=True)
+            (archive / "org" / "model" / name).write_bytes(data)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 1, "", "unexpected")
+
+    with mock.patch.object(restore.register, "archive_path", return_value=archive), \
+         mock.patch.object(restore, "_run_annex", side_effect=annex):
+        try:
+            restore.restore_repo(con, repo, tmp_path / "out")
+            raise AssertionError("retrieval that would mutate an authoritative drive must be refused")
+        except restore.RestoreError:
+            pass
+    assert not any(a and a[0] == "get" for a in calls), \
+        f"git annex get must be suppressed on an authoritative drive: {calls}"
+
+
+def test_restore_reads_local_content_on_an_authoritative_drive_unchanged(tmp_path):
+    """The guard suppresses only MUTATION: content already present on an authoritative drive restores
+    exactly as before, with no annex retrieval."""
+    con = _mem()
+    repo, name, data = "org/model", "nested/config.json", b"present locally"
+    digest = _file(con, repo, name, data, "aux")
+    _authoritative(con, "drive-00")
+    archive = tmp_path / "drive"
+    stored = archive / "org" / "model" / name
+    stored.parent.mkdir(parents=True)
+    stored.write_bytes(data)                                         # content LOCAL — no retrieval needed
+    _archived(con, repo, name, name, "drive-00", digest, False, f"SHA256E-s{len(data)}--{digest}.json")
+    calls = []
+    with mock.patch.object(restore.register, "archive_path", return_value=archive), \
+         mock.patch.object(restore, "_run_annex", side_effect=lambda *a: calls.append(a[1:])):
+        result = restore.restore_repo(con, repo, tmp_path / "out")
+    assert (tmp_path / "out" / "org" / "model" / name).read_bytes() == data
+    assert calls == [] and result["annex_retrievals"] == 0, f"local content needs no annex retrieval: {calls}"
+
+
+def test_restore_falls_back_from_authoritative_to_a_retrievable_copy(tmp_path):
+    """The authoritative copy (tried first, ORDER BY drive_label) is skipped rather than mutated, and the
+    recorded fallback copy on a non-authoritative drive — which has no anchor to invalidate — retrieves
+    normally, so restore completes."""
+    con = _mem()
+    repo, name, data = "org/model", "nested/config.json", b"fallback bytes"
+    digest = _file(con, repo, name, data, "aux")
+    _authoritative(con, "drive-00")                                  # tried first
+    _unknown_drive(con, "drive-01")
+    arch0, arch1 = tmp_path / "d0", tmp_path / "d1"
+    (arch0 / ".git").mkdir(parents=True)
+    (arch1 / ".git").mkdir(parents=True)
+    key = f"SHA256E-s{len(data)}--{digest}.json"
+    _archived(con, repo, name, name, "drive-00", digest, False, key)
+    _archived(con, repo, name, name, "drive-01", digest, False, key)
+    mounts = {"drive-00": arch0, "drive-01": arch1}
+    calls = []
+
+    def annex(repo_path, *args):
+        calls.append((Path(repo_path).name, args))
+        if args[:2] == ("get", "--") and Path(repo_path) == arch1:   # only the non-authoritative copy retrieves
+            (arch1 / "org" / "model" / "nested").mkdir(parents=True, exist_ok=True)
+            (arch1 / "org" / "model" / name).write_bytes(data)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return subprocess.CompletedProcess(args, 1, "", "unavailable")
+
+    with mock.patch.object(restore.register, "archive_path", side_effect=lambda c, d: mounts[d]), \
+         mock.patch.object(restore, "_run_annex", side_effect=annex):
+        restore.restore_repo(con, repo, tmp_path / "out")
+    assert (tmp_path / "out" / "org" / "model" / name).read_bytes() == data
+    assert not any(where == "d0" and args[0] == "get" for where, args in calls), \
+        f"the authoritative copy (drive-00 → d0) must not be retrieved by mutation: {calls}"
+
+
 def test_restore_real_git_annex_roundtrip(tmp_path):
     if shutil.which("git-annex") is None:
         return

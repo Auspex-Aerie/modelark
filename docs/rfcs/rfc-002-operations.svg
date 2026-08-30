@@ -1,0 +1,249 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1120" viewBox="0 0 1600 1120" role="img" aria-labelledby="title desc">
+  <title id="title">RFC-002 placement approval and execution operations</title>
+  <desc id="desc">A five-stage diagram showing preview, approval, start and resume, fixed-map drive mutation, projection refresh, and expired-session recovery. It distinguishes pure computation, durable catalog state, transactions, physical fencing, and typed stops.</desc>
+  <defs>
+    <style>
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #172033; }
+      .title { font-size: 30px; font-weight: 750; }
+      .subtitle { font-size: 15px; fill: #536079; }
+      .phase-title { font-size: 17px; font-weight: 750; }
+      .phase-note { font-size: 12px; fill: #68758d; }
+      .node-title { font-size: 15px; font-weight: 700; }
+      .node-copy { font-size: 12.5px; fill: #46536a; }
+      .tiny { font-size: 11px; fill: #637089; }
+      .pill { font-size: 11px; font-weight: 700; }
+      .phase-bg { fill: #ffffff; stroke: #dbe2ec; stroke-width: 1.2; }
+      .operator { fill: #f4f6f9; stroke: #7c879b; stroke-width: 1.5; }
+      .pure { fill: #eaf4ff; stroke: #3784c5; stroke-width: 1.6; }
+      .txn { fill: #fff4dc; stroke: #c88719; stroke-width: 1.6; }
+      .state { fill: #f1ecff; stroke: #7b5bc7; stroke-width: 1.6; }
+      .physical { fill: #e9f8ef; stroke: #339361; stroke-width: 1.6; }
+      .terminal { fill: #fff0f1; stroke: #c74b56; stroke-width: 1.6; }
+      .decision { fill: #fff9e9; stroke: #a87612; stroke-width: 1.6; }
+      .arrow { fill: none; stroke: #52627b; stroke-width: 2; marker-end: url(#arrow); }
+      .read { fill: none; stroke: #7c6bad; stroke-width: 1.8; stroke-dasharray: 6 5; marker-end: url(#arrow-purple); }
+      .loop { fill: none; stroke: #2e8060; stroke-width: 2; stroke-dasharray: 7 5; marker-end: url(#arrow-green); }
+      .terminal-arrow { fill: none; stroke: #b5404b; stroke-width: 2; marker-end: url(#arrow-red); }
+      .bus { fill: none; stroke: #b4becc; stroke-width: 1.5; stroke-dasharray: 4 5; }
+      .number { fill: #263650; }
+      .number-text { font-size: 13px; font-weight: 800; fill: #ffffff; text-anchor: middle; }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#52627b"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c6bad"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#2e8060"/>
+    </marker>
+    <marker id="arrow-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b5404b"/>
+    </marker>
+  </defs>
+
+  <rect width="1600" height="1120" fill="#f7f9fc"/>
+  <text x="48" y="49" class="title">Placement approval and fixed-map execution</text>
+  <text x="48" y="76" class="subtitle">RFC-002 authority flow — durable archive facts remain completion truth; proposals authorize work but never satisfy it.</text>
+
+  <g transform="translate(884 28)">
+    <rect x="0" y="0" width="112" height="27" rx="13.5" class="pure"/><text x="56" y="18" text-anchor="middle" class="pill">PURE CORE</text>
+    <rect x="121" y="0" width="112" height="27" rx="13.5" class="txn"/><text x="177" y="18" text-anchor="middle" class="pill">SHORT TXN</text>
+    <rect x="242" y="0" width="124" height="27" rx="13.5" class="state"/><text x="304" y="18" text-anchor="middle" class="pill">DURABLE STATE</text>
+    <rect x="375" y="0" width="126" height="27" rx="13.5" class="physical"/><text x="438" y="18" text-anchor="middle" class="pill">FENCE / I/O</text>
+    <rect x="510" y="0" width="108" height="27" rx="13.5" class="terminal"/><text x="564" y="18" text-anchor="middle" class="pill">TYPED STOP</text>
+  </g>
+
+  <!-- Phase 1 -->
+  <rect x="35" y="102" width="1530" height="158" rx="18" class="phase-bg"/>
+  <circle cx="64" cy="130" r="16" class="number"/><text x="64" y="135" class="number-text">1</text>
+  <text x="90" y="135" class="phase-title">Preview: derive one reviewable placement</text>
+  <text x="90" y="156" class="phase-note">All reads become one immutable input; only the pure core chooses placement.</text>
+
+  <rect x="60" y="178" width="210" height="58" rx="10" class="operator"/>
+  <text x="77" y="201" class="node-title">Operator intent</text>
+  <text x="77" y="220" class="node-copy">selection change or adopt_current</text>
+
+  <rect x="314" y="178" width="230" height="58" rx="10" class="pure"/>
+  <text x="331" y="201" class="node-title">Capture PlannerInput</text>
+  <text x="331" y="220" class="node-copy">facts + evidence + config hash</text>
+
+  <rect x="588" y="168" width="302" height="78" rx="10" class="pure"/>
+  <text x="605" y="191" class="node-title">Requirements → candidates → Gate B</text>
+  <text x="605" y="210" class="node-copy">bounded feasibility, then tiered_v2 improvement</text>
+  <text x="605" y="229" class="node-copy">unknown drives are diagnostic, never executable</text>
+
+  <rect x="934" y="178" width="232" height="58" rx="10" class="state"/>
+  <text x="951" y="201" class="node-title">Immutable draft proposal</text>
+  <text x="951" y="220" class="node-copy">exact targets, sources, files, budgets</text>
+
+  <rect x="1210" y="168" width="325" height="78" rx="10" class="state"/>
+  <text x="1227" y="191" class="node-title">Normalized proposal rows</text>
+  <text x="1227" y="210" class="node-copy">executable + baseline_satisfied requirements</text>
+  <text x="1227" y="229" class="node-copy">rows authoritative; computed canonical hash</text>
+
+  <path d="M270 207 H314" class="arrow"/><path d="M544 207 H588" class="arrow"/>
+  <path d="M890 207 H934" class="arrow"/><path d="M1166 207 H1210" class="arrow"/>
+
+  <!-- Phase 2 -->
+  <rect x="35" y="278" width="1530" height="158" rx="18" class="phase-bg"/>
+  <circle cx="64" cy="306" r="16" class="number"/><text x="64" y="311" class="number-text">2</text>
+  <text x="90" y="311" class="phase-title">Approve: validate the exact map; never solve again</text>
+  <text x="90" y="332" class="phase-note">The revision is a fast CAS check; freshly recomputed semantic facts are authoritative.</text>
+
+  <rect x="60" y="354" width="210" height="58" rx="10" class="operator"/>
+  <text x="77" y="377" class="node-title">Approve reviewed draft</text>
+  <text x="77" y="396" class="node-copy">proposal id + exact mutation</text>
+
+  <rect x="314" y="344" width="250" height="78" rx="10" class="pure"/>
+  <text x="331" y="367" class="node-title">Fresh authoritative capture</text>
+  <text x="331" y="386" class="node-copy">requirements + manifests + identities</text>
+  <text x="331" y="405" class="node-copy">config hash + current capacity evidence</text>
+
+  <rect x="608" y="354" width="240" height="58" rx="10" class="pure"/>
+  <text x="625" y="377" class="node-title">Validate exact assignment</text>
+  <text x="625" y="396" class="node-copy">no optimizer and no alternate target</text>
+
+  <rect x="892" y="344" width="274" height="78" rx="10" class="txn"/>
+  <text x="909" y="367" class="node-title">BEGIN IMMEDIATE</text>
+  <text x="909" y="386" class="node-copy">revision + semantic CAS; apply mutation</text>
+  <text x="909" y="405" class="node-copy">approve proposal; supersede old pointer</text>
+
+  <rect x="1210" y="344" width="325" height="78" rx="10" class="state"/>
+  <text x="1227" y="367" class="node-title">planner_state + approved proposal</text>
+  <text x="1227" y="386" class="node-copy">one active approval; revision advances</text>
+  <text x="1227" y="405" class="node-copy">approval authorizes, archived still satisfies</text>
+
+  <path d="M270 383 H314" class="arrow"/><path d="M564 383 H608" class="arrow"/>
+  <path d="M848 383 H892" class="arrow"/><path d="M1166 383 H1210" class="arrow"/>
+  <path d="M1373 246 V344" class="read"/>
+
+  <!-- Phase 3 -->
+  <rect x="35" y="454" width="1530" height="158" rx="18" class="phase-bg"/>
+  <circle cx="64" cy="482" r="16" class="number"/><text x="64" y="487" class="number-text">3</text>
+  <text x="90" y="487" class="phase-title">Start or resume: project only the remaining approved subset</text>
+  <text x="90" y="508" class="phase-note">Resume creates a new session and fencing token; terminal rows are never reactivated.</text>
+
+  <rect x="60" y="530" width="210" height="58" rx="10" class="operator"/>
+  <text x="77" y="553" class="node-title">Start / resume request</text>
+  <text x="77" y="572" class="node-copy">same approval or fresh preview</text>
+
+  <rect x="314" y="520" width="250" height="78" rx="10" class="pure"/>
+  <text x="331" y="543" class="node-title">Pure ExecutionProjection</text>
+  <text x="331" y="562" class="node-copy">approved proposal + durable progress</text>
+  <text x="331" y="581" class="node-copy">targets fixed; missing work only shrinks</text>
+
+  <rect x="608" y="520" width="260" height="78" rx="10" class="txn"/>
+  <text x="625" y="543" class="node-title">Create starting session</text>
+  <text x="625" y="562" class="node-copy">global live-session exclusion</text>
+  <text x="625" y="581" class="node-copy">new token + actual worker claim</text>
+
+  <rect x="912" y="530" width="238" height="58" rx="10" class="state"/>
+  <text x="929" y="553" class="node-title">Frozen ExecutionConfig</text>
+  <text x="929" y="572" class="node-copy">hash matched; transport cannot reread</text>
+
+  <rect x="1194" y="520" width="341" height="78" rx="10" class="physical"/>
+  <text x="1211" y="543" class="node-title">Fixed-map executor</text>
+  <text x="1211" y="562" class="node-copy">canonical exact task batches; no solver import</text>
+  <text x="1211" y="581" class="node-copy">hot-swap/gated/stop may defer, never remap</text>
+
+  <path d="M270 559 H314" class="arrow"/><path d="M564 559 H608" class="arrow"/>
+  <path d="M868 559 H912" class="arrow"/><path d="M1150 559 H1194" class="arrow"/>
+  <path d="M1373 422 V512 H439 V520" class="read"/>
+
+  <!-- Phase 4 -->
+  <rect x="35" y="630" width="1530" height="208" rx="18" class="phase-bg"/>
+  <circle cx="64" cy="658" r="16" class="number"/><text x="64" y="663" class="number-text">4</text>
+  <text x="90" y="663" class="phase-title">Write one approved file under a single physical-fence boundary</text>
+  <text x="90" y="684" class="phase-note">Universal order: controller flock → sorted drive flocks → short catalog transaction.</text>
+
+  <rect x="60" y="708" width="172" height="68" rx="10" class="physical"/>
+  <text x="77" y="731" class="node-title">Controller flock</text>
+  <text x="77" y="750" class="node-copy">exclude recovery while</text><text x="77" y="767" class="node-copy">starting generation</text>
+
+  <rect x="266" y="708" width="174" height="68" rx="10" class="physical"/>
+  <text x="283" y="731" class="node-title">Sorted drive flocks</text>
+  <text x="283" y="750" class="node-copy">held through publish;</text><text x="283" y="767" class="node-copy">child inherits FDs</text>
+
+  <rect x="474" y="708" width="166" height="68" rx="10" class="txn"/>
+  <text x="491" y="731" class="node-title">Mark generation dirty</text>
+  <text x="491" y="750" class="node-copy">owner session + token</text><text x="491" y="767" class="node-copy">before allocation</text>
+
+  <rect x="674" y="698" width="214" height="88" rx="10" class="physical"/>
+  <text x="691" y="721" class="node-title">Protected transport</text>
+  <text x="691" y="740" class="node-copy">preflight → stage → verify → canary</text>
+  <text x="691" y="759" class="node-copy">→ atomic publish → annex</text>
+  <text x="691" y="778" class="node-copy">frozen config; exact approved target</text>
+
+  <rect x="922" y="708" width="172" height="68" rx="10" class="state"/>
+  <text x="939" y="731" class="node-title">Archived fact</text>
+  <text x="939" y="750" class="node-copy">verified durable truth;</text><text x="939" y="767" class="node-copy">budget ledger advances</text>
+
+  <rect x="1128" y="708" width="184" height="68" rx="10" class="physical"/>
+  <text x="1145" y="731" class="node-title">Reconcile write set</text>
+  <text x="1145" y="750" class="node-copy">touched paths/annex keys;</text><text x="1145" y="767" class="node-copy">not a full-drive scan</text>
+
+  <rect x="1346" y="708" width="189" height="68" rx="10" class="state"/>
+  <text x="1363" y="731" class="node-title">Publish clean anchor</text>
+  <text x="1363" y="750" class="node-copy">generation CAS + current</text><text x="1363" y="767" class="node-copy">filesystem available bytes</text>
+
+  <path d="M232 742 H266" class="arrow"/><path d="M440 742 H474" class="arrow"/>
+  <path d="M640 742 H674" class="arrow"/><path d="M888 742 H922" class="arrow"/>
+  <path d="M1094 742 H1128" class="arrow"/><path d="M1312 742 H1346" class="arrow"/>
+  <path d="M1364 598 V630" class="arrow"/>
+
+  <rect x="60" y="797" width="1475" height="25" rx="12.5" fill="#f0f3f7"/>
+  <text x="798" y="814" text-anchor="middle" class="tiny">Any failure leaves completed archived facts durable; dirty generation remains evidence until identity-proven reconciliation.</text>
+
+  <!-- Phase 5 -->
+  <rect x="35" y="856" width="1530" height="220" rx="18" class="phase-bg"/>
+  <circle cx="64" cy="884" r="16" class="number"/><text x="64" y="889" class="number-text">5</text>
+  <text x="90" y="889" class="phase-title">Refresh, stop, or recover without changing placement silently</text>
+  <text x="90" y="910" class="phase-note">Projection refresh is batch/event based; recovery proves the stale writer and its children are excluded.</text>
+
+  <rect x="60" y="934" width="200" height="68" rx="10" class="pure"/>
+  <text x="77" y="957" class="node-title">Batch/event reprojection</text>
+  <text x="77" y="976" class="node-copy">recompute facts, evidence, hashes;</text><text x="77" y="993" class="node-copy">restore cumulative budget spend</text>
+
+  <path d="M326 934 L382 968 L326 1002 L270 968 Z" class="decision"/>
+  <text x="326" y="964" text-anchor="middle" class="node-title">Same map</text>
+  <text x="326" y="982" text-anchor="middle" class="node-copy">still valid?</text>
+
+  <rect x="420" y="924" width="244" height="68" rx="10" class="pure"/>
+  <text x="437" y="947" class="node-title">Yes: monotonic shrink</text>
+  <text x="437" y="966" class="node-copy">continue/resume same approval;</text><text x="437" y="983" class="node-copy">targets and sources unchanged</text>
+
+  <rect x="420" y="1002" width="244" height="54" rx="10" class="terminal"/>
+  <text x="437" y="1025" class="node-title">No: typed terminal</text>
+  <text x="437" y="1044" class="node-copy">fresh preview/approval required</text>
+
+  <path d="M260 968 H270" class="arrow"/><path d="M382 968 H420" class="loop"/>
+  <text x="391" y="956" class="tiny">yes</text>
+  <path d="M326 1002 V1029 H420" class="terminal-arrow"/><text x="337" y="1021" class="tiny">no</text>
+  <path d="M664 958 H688 V1064 H1548 V559 H1535" class="loop"/>
+
+  <line x1="706" y1="925" x2="706" y2="1048" class="bus"/>
+
+  <rect x="746" y="934" width="176" height="68" rx="10" class="terminal"/>
+  <text x="763" y="957" class="node-title">Expired live session</text>
+  <text x="763" y="976" class="node-copy">starting/running/stopping;</text><text x="763" y="993" class="node-copy">lease alone is insufficient</text>
+
+  <rect x="956" y="924" width="282" height="88" rx="10" class="physical"/>
+  <text x="973" y="947" class="node-title">Fence and prove exclusion</text>
+  <text x="973" y="966" class="node-copy">controller first → all proposal drives</text>
+  <text x="973" y="985" class="node-copy">check actual worker + inherited child locks</text>
+  <text x="973" y="1004" class="node-copy">never steal a held physical fence</text>
+
+  <rect x="1272" y="924" width="263" height="88" rx="10" class="state"/>
+  <text x="1289" y="947" class="node-title">Preserve dirty → terminalize</text>
+  <text x="1289" y="966" class="node-copy">operator reconciles while non-live</text>
+  <text x="1289" y="985" class="node-copy">then new session + new token;</text>
+  <text x="1289" y="1004" class="node-copy">the old row is never reactivated</text>
+
+  <path d="M922 968 H956" class="arrow"/><path d="M1238 968 H1272" class="arrow"/>
+
+  <path d="M1008 776 V844 H20 V968 H60" class="read"/>
+  <text x="744" y="850" class="tiny">durable progress and clean evidence feed the next projection</text>
+
+  <text x="48" y="1102" class="tiny">Solid arrows: authority/state transition · Purple dashed: read/validate durable state · Green dashed: safe continuation loop · Red: approval-changing stop</text>
+</svg>

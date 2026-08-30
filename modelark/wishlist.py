@@ -86,6 +86,16 @@ def download() -> dict:
     return cfg
 
 
+_ACCEPTANCE_DEFAULTS = {"fixture_sqlite_path": None}
+
+
+def acceptance() -> dict:
+    """Acceptance harness config: {fixture_sqlite_path} (DEC-052; null = typed skip)."""
+    cfg = dict(_ACCEPTANCE_DEFAULTS)
+    cfg.update(load().get("acceptance") or {})
+    return cfg
+
+
 # Logging (DEC-023 / #26). Relative paths live under the writable state directory; set `file` null
 # to disable the file sink (console only).
 _LOGGING_DEFAULTS = {"level": "INFO", "file": "logs/modelark.log", "max_mb": 20, "backups": 5, "console": True}

@@ -14,10 +14,11 @@ stopped.
 """
 from __future__ import annotations
 
-import shutil
+from datetime import datetime, timezone
 
+from modelark import admission
 from modelark import capacity as capacity_model
-from modelark import fetch, reconcile, register  # noqa: F401
+from modelark import fetch, reconcile
 
 _ZIPNN_FLOAT_RATIO = capacity_model.DEFAULT_FLOAT_RATIO
 _SIZE_MARGIN = capacity_model.EXPECTED_MARGIN
@@ -63,39 +64,33 @@ def est_stored_bytes(con, repo_id: str, float_ratio: float | None = None,
 
 
 def drives(con, plan_id: str | None = None) -> list[dict]:
-    """Registered drives with `remaining` usable space. For a MOUNTED drive we read the LIVE disk free
-    (`shutil.disk_usage`) — reality that already reflects archived bytes, real compression, AND any
-    cruft (orphan partials, raw working files) — minus headroom. This is the "account for it as we run"
-    fix (#31): the recorded `free_bytes` is a stale registration snapshot, so a drift there quietly
-    over/under-provisions. An UNMOUNTED drive falls back to `free_bytes − archived − headroom`.
-    `plan_id` restricts to that plan's FIXED drive set (`plan_drives`) — the only capacity the fill
-    (#33) is allowed to use; None = every registered drive (legacy / whole-fleet views)."""
+    """Registered drives with admission `remaining` free from the shared evidence seam (#35-C). A
+    mounted, identity-proven, drive-fenced volume is `live`; a clean offline drive uses its anchor;
+    anything else is `unknown` with zero `remaining` — there is no `free − archived − headroom`
+    reconstruction under `free`, and the legacy scalar is exposed only as a diagnostic. `plan_id`
+    restricts to that plan's FIXED drive set (`plan_drives`); None = every registered drive."""
     used = dict(con.execute(
         "SELECT drive_label, coalesce(sum(stored_bytes), 0) FROM archived GROUP BY 1").fetchall())
     where, params = "", []
     if plan_id is not None:
         where = "WHERE drive_label IN (SELECT drive_label FROM plan_drives WHERE plan_id=?)"
         params = [plan_id]
+    rows = con.execute(
+        "SELECT drive_label, coalesce(role,'primary'), coalesce(raid_backed, false), "
+        "coalesce(capacity_bytes, 0), free_bytes FROM drives "
+        f"{where} ORDER BY coalesce(capacity_bytes, 0) DESC, drive_label", params).fetchall()
+    now = datetime.now(timezone.utc).isoformat(sep=" ")
+    evidence = admission.preview_by_drive(
+        con, [row[0] for row in rows],
+        observe=lambda label: fetch.observe_for_admission(con, label), now=now)
     out = []
-    for label, role, raid_backed, cap, free in con.execute(
-            "SELECT drive_label, coalesce(role,'primary'), coalesce(raid_backed, false), "
-            "coalesce(capacity_bytes, free_bytes, 0), coalesce(free_bytes, 0) FROM drives "
-            f"{where} ORDER BY coalesce(capacity_bytes, free_bytes, 0) DESC, drive_label", params).fetchall():
+    for label, role, raid_backed, cap, legacy_free in rows:
         head = headroom_bytes(cap)
-        arch = used.get(label, 0)
-        mount = register.archive_path(con, label)          # live mount path, or None if not attached
-        live_free = None
-        if mount is not None:
-            try:
-                live_free = shutil.disk_usage(str(mount)).free
-            except OSError:
-                live_free = None
-        if live_free is not None:                          # MOUNTED: trust the disk (already nets out archived + cruft)
-            free_now, remaining = live_free, max(0, live_free - head)
-        else:                                              # UNMOUNTED: best-effort from the (empty-ish) snapshot
-            free_now, remaining = free, max(0, free - arch - head)
+        ev = evidence[label]
         out.append({"label": label, "role": role, "raid_backed": bool(raid_backed), "capacity": cap,
-                    "free": free_now, "headroom": head, "archived": arch, "remaining": remaining})
+                    "free": ev.observed_free, "headroom": head, "archived": used.get(label, 0),
+                    "remaining": ev.admissible_free, "evidence_kind": ev.kind, "evidence_code": ev.code,
+                    "legacy_free_bytes": legacy_free})
     return out
 
 
@@ -179,14 +174,21 @@ def placed_copies(con) -> dict[str, int]:
     """Per repo: how many drives hold a COMPLETE copy — ALL of the repo's planned files
     (safetensors + aux + gguf-when-no-safetensors, mirroring fetch.plan). Counting DISTINCT
     drives is too coarse (DEC-019): a drive with a half-fetched repo must NOT count toward
-    numcopies, or an interrupted copy would look 'done'."""
+    numcopies, or an interrupted copy would look 'done'.
+
+    #37: only **active** drives count (enabled or excluded). Lost/retired complete rows remain
+    in durable archived provenance but do not satisfy compatibility totals / queue completion.
+    """
     rows = con.execute(
         "WITH hasst AS (SELECT repo_id, max(CASE WHEN format='safetensors' THEN 1 ELSE 0 END) s "
         "               FROM files GROUP BY repo_id), "
         "planned AS (SELECT f.repo_id, count(*) n FROM files f JOIN hasst h USING(repo_id) "
         "            WHERE f.format IN ('safetensors','aux') OR (f.format='gguf' AND h.s=0) "
         "            GROUP BY f.repo_id), "
-        "perdrive AS (SELECT repo_id, drive_label, count(*) n FROM archived GROUP BY repo_id, drive_label) "
+        "perdrive AS (SELECT a.repo_id, a.drive_label, count(*) n FROM archived a "
+        "             JOIN drives d ON d.drive_label = a.drive_label "
+        "             WHERE d.lifecycle='active' "
+        "             GROUP BY a.repo_id, a.drive_label) "
         "SELECT pd.repo_id, count(*) FROM perdrive pd JOIN planned pl "
         "  ON pd.repo_id = pl.repo_id AND pd.n >= pl.n GROUP BY pd.repo_id").fetchall()
     return dict(rows)
@@ -287,7 +289,7 @@ def plan_placements(con, repos: list[str] | None = None, plan_id: str | None = N
 
 
 def _reconciled_projection(con, repos, plan_id, capacity_mode):
-    """Build one read-only graph/ledger snapshot using live free space where it is observable."""
+    """Compatibility adapter over the one first-class planning authority (DEC-067)."""
     if plan_id is None:
         row = con.execute(
             "SELECT plan_id FROM plans WHERE is_active ORDER BY plan_id LIMIT 1"
@@ -295,23 +297,12 @@ def _reconciled_projection(con, repos, plan_id, capacity_mode):
         if row is None:
             raise ValueError("no active plan; select a plan before requesting library placement")
         plan_id = row[0]
-    labels = [row[0] for row in con.execute(
-        "SELECT drive_label FROM plan_drives WHERE plan_id=? ORDER BY drive_label", [plan_id]
-    ).fetchall()]
-    live_free = {}
-    for label in labels:
-        path = register.archive_path(con, label)
-        if path is None:
-            continue
-        try:
-            live_free[label] = shutil.disk_usage(str(path)).free
-        except OSError:
-            pass
-    graph = reconcile.reconcile_plan(con, plan_id, repos)
-    ledger = capacity_model.plan_capacity(
-        con, graph, capacity_mode=capacity_mode, live_free_by_drive=live_free,
+    from modelark import planning
+
+    result = planning.preview(
+        con, plan_id, repos, capacity_mode=capacity_mode,
     )
-    return graph, ledger
+    return result
 
 
 def _diagnostic_payload(graph) -> list[dict]:
@@ -394,7 +385,9 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
     assignment and byte from ``reconcile_plan`` + ``plan_capacity``.  Policy-invalid repositories
     remain in typed diagnostics instead of raising on the first one or disappearing from the cart.
     """
-    graph, ledger = _reconciled_projection(con, repos, plan_id, capacity_mode)
+    snapshot = _reconciled_projection(con, repos, plan_id, capacity_mode)
+    graph, ledger = snapshot.graph, snapshot.capacity
+    drive_state = {item.drive_label: item for item in snapshot.drive_states}
     diagnostics = _diagnostic_payload(graph)
     failures = ledger.to_dict()["failures"]
     cats = dict(con.execute("SELECT repo_id, coalesce(category, '?') FROM models").fetchall())
@@ -403,7 +396,7 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
     ).fetchall())
     drive_rows = con.execute(
         "SELECT d.drive_label,coalesce(d.role,'primary'),coalesce(d.raid_backed,0),"
-        "coalesce(d.capacity_bytes,d.free_bytes,0) "
+        "coalesce(d.capacity_bytes,d.free_bytes,0),d.free_bytes "
         "FROM plan_drives pd JOIN drives d USING(drive_label) WHERE pd.plan_id=? "
         "ORDER BY d.drive_label",
         [graph.plan_id],
@@ -414,7 +407,7 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
         tasks_by_drive.setdefault(task.target_drive, []).append(task)
 
     out = []
-    for label, role, raid, drive_capacity in drive_rows:
+    for label, role, raid, drive_capacity, legacy_free in drive_rows:
         raid = bool(raid)
         tier = "raid" if raid else ("replica" if role == "replica" else "primary")
         models = []
@@ -430,12 +423,17 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
         models.sort(key=lambda item: (-item["size"], item["repo"], item["copy"]))
         drive_ledger = ledger_by_drive[label]
         safety_floor = drive_ledger.safety_floor
-        usable = max(0, int(drive_capacity or 0) - safety_floor)
+        usable = drive_ledger.usable_now                   # admission-authoritative (evidence), not nominal−floor
         planned = sum(item["size"] for item in models)
         out.append({
             "label": label, "tier": tier, "role": role, "raid_backed": raid,
+            "lifecycle": drive_state[label].lifecycle,
+            "eligibility": drive_state[label].eligibility,
             "capacity": int(drive_capacity or 0), "headroom": safety_floor,
-            "free": drive_ledger.physical_free, "usable": usable,
+            "free": drive_ledger.observed_free, "usable": usable,
+            "evidence_kind": drive_ledger.evidence_kind, "evidence_code": drive_ledger.evidence_code,
+            "observed_at": drive_ledger.observed_at, "identity_epoch": drive_ledger.identity_epoch,
+            "legacy_free_bytes": legacy_free,              # diagnostic only — never admission authority
             "planned_bytes": planned, "archived_bytes": int(archived.get(label, 0) or 0),
             "n_models": len(models),
             "fill_pct": round(planned / usable, 4) if usable else 0.0,
@@ -508,7 +506,8 @@ def queue_view(con, plan_id: str | None = None, capacity_mode: str = "guaranteed
     (queue_state) and positions each row under the drive of its NEXT unfinished copy — done rows
     settle under their copy#1 home (done-placement 'b'). Heavy (~one plan pass): the Fill tab fetches
     it once on open; the cheap queue_state refreshes state at model boundaries without re-planning."""
-    graph, ledger = _reconciled_projection(con, None, plan_id, capacity_mode)
+    snapshot = _reconciled_projection(con, None, plan_id, capacity_mode)
+    graph, ledger = snapshot.graph, snapshot.capacity
     diagnostics = _diagnostic_payload(graph)
     failures = ledger.to_dict()["failures"]
     copy1, copy2 = {}, {}
@@ -542,7 +541,8 @@ def queue_view(con, plan_id: str | None = None, capacity_mode: str = "guaranteed
         if repo in copy2:
             continue
         candidates = replica_candidates.get(repo, [])
-        hint = intent.pinned_target or (candidates[0] if candidates else None)
+        # #36a: reconcile emits no pin; the copy-2 hint is the eligible-tier candidate only.
+        hint = candidates[0] if candidates else None
         if hint:
             copy2[repo] = hint
             copy2_evidence[repo] = "eligible_hint"

@@ -233,6 +233,32 @@ def cmd_repair_hashes(args):
         raise SystemExit(1)
 
 
+def cmd_repair_drive(args):
+    """Explicit per-drive hash repair (DEC-054) — exact drive/epoch/fingerprint."""
+    from modelark import hash_repair, register
+    con = db.connect()
+    try:
+        try:
+            result = hash_repair.run_explicit_drive_repair(
+                con,
+                args.drive,
+                identity_epoch=int(args.identity_epoch),
+                identity_fingerprint=args.identity_fingerprint,
+                archive_resolver=register.archive_path,
+            )
+        except hash_repair.HashRepairError as exc:
+            raise SystemExit(f"drive repair failed: {exc}") from exc
+    finally:
+        con.close()
+    print(
+        f"drive repair: drive={args.drive} epoch={args.identity_epoch} "
+        f"status={result.get('status')} applied={result.get('applied')} "
+        f"unresolved={result.get('unresolved')}"
+    )
+    if result.get("detail"):
+        print(f"  detail: {result['detail']}")
+
+
 def cmd_library_init(args):
     from modelark import register
     path = register.ensure_library(Path(args.path).expanduser() if args.path else None)
@@ -373,7 +399,17 @@ def cmd_plan(args):
             print(f"Plan {p['plan_id']} ({p['name']}) — {'ACTIVE' if p['is_active'] else 'inactive'}, "
                   f"capacity mode={p['capacity_mode']}")
             print(f"  annex:  {p['annex_root']}")
-            print(f"  drives ({len(p['drives'])}): {', '.join(p['drives']) or '(none)'}")
+            drive_rows = con.execute(
+                "SELECT d.drive_label,d.lifecycle,d.eligibility "
+                "FROM plan_drives pd JOIN drives d USING(drive_label) "
+                "WHERE pd.plan_id=? ORDER BY d.drive_label",
+                [pid],
+            ).fetchall()
+            drive_summary = ", ".join(
+                f"{label}[{lifecycle}/{eligibility}]"
+                for label, lifecycle, eligibility in drive_rows
+            )
+            print(f"  drives ({len(drive_rows)}): {drive_summary or '(none)'}")
             print(f"  raw forecast           : {_tb(t['uncompressed'])}   "
                   f"({t['n_selection']} models, {t['n_must']} must-have · copy-aware)")
             print(f"  expected stored forecast: {_tb(t['compressed'])}   "
@@ -412,15 +448,61 @@ def cmd_plan(args):
         con.close()
 
 
+def start_fill_via_service(*, plan_id: str = "ark", proposal_id: str | None = None, **kwargs):
+    """PR-09 / B8 CLI adapter — single unified execution service entry."""
+    from modelark.execution_service import start_fill
+    return start_fill(plan_id=plan_id, proposal_id=proposal_id, **kwargs)
+
+
+def cmd_session_start(args):
+    """Installed CLI Fill entry: start (or refuse) an execution session via unified service."""
+    from modelark.proposal import Refusal
+    out = start_fill_via_service(
+        plan_id=getattr(args, "plan", None) or "ark",
+        proposal_id=getattr(args, "proposal_id", None),
+    )
+    if isinstance(out, Refusal):
+        payload = {
+            "ok": False, "code": out.code,
+            "evidence": getattr(out, "evidence", None),
+            "actions": list(getattr(out, "actions", ()) or ()),
+        }
+        print(json.dumps(payload, default=str))
+        raise SystemExit(2)
+    session = getattr(out, "session", out)
+    payload = {
+        "ok": True,
+        "session_id": getattr(session, "session_id", None),
+        "state": getattr(session, "state", None),
+        "fencing_token": getattr(session, "fencing_token", None),
+        "approved_proposal_id": getattr(session, "approved_proposal_id", None),
+    }
+    print(json.dumps(payload, default=str))
+
+
 def cmd_protect(args):
-    con = db.connect()
+    con = getattr(args, "con", None) or db.connect()
+    close = not getattr(args, "con", None)
     try:
-        for rid in args.repo:
-            con.execute("UPDATE models SET numcopies=? WHERE repo_id=?", [args.numcopies, rid])
+        from modelark.proposal import GraphResult, graph_write
+        from modelark.execution_session import require_no_live_session
+        require_no_live_session(con)
+
+        repos = list(getattr(args, "repo", None) or ())
+        if not repos and getattr(args, "repo_id", None):
+            repos = [args.repo_id]
+
+        def op(c):
+            for rid in repos:
+                c.execute("UPDATE models SET numcopies=? WHERE repo_id=?", [args.numcopies, rid])
+            return GraphResult(proven_noop=False)
+
+        graph_write(con, op)
         total = con.execute("SELECT count(*) FROM models WHERE coalesce(numcopies,1) >= 2").fetchone()[0]
     finally:
-        con.close()
-    print(f"set numcopies={args.numcopies} on {len(args.repo)} repo(s); "
+        if close:
+            con.close()
+    print(f"set numcopies={args.numcopies} on {len(repos)} repo(s); "
           f"{total} model(s) now must-have (numcopies>=2 → a replica-tier 2nd copy).")
 
 
@@ -463,8 +545,81 @@ def cmd_drive_list(args):
         return
     for d in drives:
         cap, free = _humanize(d["capacity_bytes"]), _humanize(d["free_bytes"])
+        # This is the raw hardware inventory; `free` is the registration-time snapshot, a diagnostic —
+        # admission-authoritative free (evidence) is shown by `library`/`plan` (#35-C), not here.
         print(f"{d['drive_label']:12} {str(d['hw_model'] or '-'):26} {str(d['serial'] or '-'):16} "
-              f"{str(d['health'] or '-'):8} {free}/{cap} free  {d['physical_location'] or ''}")
+              f"{str(d['health'] or '-'):8} {free}/{cap} reg-free  {d['physical_location'] or ''}")
+
+
+def cmd_drive_reconcile(args):
+    from datetime import datetime, timezone
+
+    from modelark import drive_bootstrap
+
+    def progress(event):
+        if event.phase == "inventory_started":
+            print(
+                f"{args.label}: inventory started ({event.total or 0} catalogued claims)",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif event.phase == "annex_membership_started":
+            print(
+                f"{args.label}: checking {event.total or 0} annex keys in one target-UUID query",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif event.phase == "annex_membership_completed":
+            print(
+                f"{args.label}: annex membership complete "
+                f"({event.completed}/{event.total or 0} keys proven)",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif event.phase == "filesystem_scan_started":
+            print(
+                f"{args.label}: scanning archive worktree (Git metadata pruned)",
+                file=sys.stderr,
+                flush=True,
+            )
+        elif event.phase in {"filesystem_scan_progress", "filesystem_scan_completed"}:
+            suffix = "complete" if event.phase.endswith("completed") else "in progress"
+            print(
+                f"{args.label}: archive worktree scan {suffix} ({event.completed} files)",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    con = db.connect()
+    try:
+        r = drive_bootstrap.reconcile_drive(
+            con, args.label, now=datetime.now(timezone.utc).isoformat(sep=" "),
+            dedicated=args.dedicated, accept_drift=args.accept_drift, progress=progress)
+    except drive_bootstrap.DriveMutationRefused as exc:
+        # an offline/failed/unproven drive is an EXPECTED reconciliation outcome, not a crash: surface the
+        # typed refusal as a clean operator message (the restore/hash-repair convention), not a traceback.
+        raise SystemExit(f"drive reconcile failed: {exc.code}") from exc
+    finally:
+        con.close()
+    if r.inventory is not None:
+        inventory = r.inventory
+        print(
+            f"{args.label}: inventory "
+            f"present={len(inventory.present)} missing={len(inventory.missing)} "
+            f"debris={len(inventory.debris)} extra={len(inventory.extra)}"
+        )
+        if inventory.debris:
+            print(
+                f"{args.label}: debris is retained, not catalogued, "
+                "and never deleted automatically"
+            )
+        if inventory.extra:
+            print(
+                f"{args.label}: extras are retained, not catalogued, "
+                "and never deleted automatically"
+            )
+    free = f"  free={r.anchor_free_bytes}" if r.anchor_free_bytes is not None else ""
+    print(f"{args.label}: {r.outcome}  epoch={r.identity_epoch} generation={r.generation}{free}")
 
 
 def main(argv=None):
@@ -563,6 +718,14 @@ def main(argv=None):
                     help="auto-resume the fill on boot if work remains (for the supervised systemd service, DEC-023)")
     sv.set_defaults(func=cmd_serve)
 
+    sess = sub.add_parser("session", help="execution session control (PR-09 Fill entry)")
+    sess_sub = sess.add_subparsers(dest="session_cmd", required=True)
+    ss = sess_sub.add_parser("start", help="start a Fill session for the active/approved proposal")
+    ss.add_argument("--proposal-id", dest="proposal_id", default=None,
+                    help="approved proposal id (default: active_approved_proposal_id)")
+    ss.add_argument("--plan", default="ark", help="plan id (default: ark)")
+    ss.set_defaults(func=cmd_session_start)
+
     ft = sub.add_parser("fetch", help="download the finalized wishlist onto a drive")
     ft.add_argument("--dest", help="explicit archive dir override (default: resolved from --drive)")
     ft.add_argument("--drive", help="registered drive label (e.g. drive-01) → its on-drive archive dir")
@@ -590,6 +753,21 @@ def main(argv=None):
         help="back up the catalog and apply every provable repair (default is read-only dry-run)",
     )
     rh.set_defaults(func=cmd_repair_hashes)
+
+    rd = sub.add_parser(
+        "repair-drive",
+        help="explicit per-drive hash repair (DEC-054; requires drive identity)",
+    )
+    rd.add_argument("--drive", required=True, help="drive label to repair")
+    rd.add_argument(
+        "--identity-epoch", required=True, type=int,
+        help="drive identity epoch the repair is bound to",
+    )
+    rd.add_argument(
+        "--identity-fingerprint", required=True,
+        help="64-hex identity fingerprint the repair is bound to",
+    )
+    rd.set_defaults(func=cmd_repair_drive)
 
     lib = sub.add_parser("library", help="the central git-annex map repo")
     libsub = lib.add_subparsers(dest="library_cmd", required=True)
@@ -632,6 +810,15 @@ def main(argv=None):
     reg.set_defaults(func=cmd_drive_register)
     dl = drsub.add_parser("list", help="list registered drives")
     dl.set_defaults(func=cmd_drive_list)
+    rec = drsub.add_parser("reconcile",
+                           help="bootstrap identity + first clean anchor, or recover a dirty generation")
+    rec.add_argument("label", help="the registered drive label to reconcile")
+    rec.add_argument("--dedicated", action="store_true",
+                     help="assert dedicated local storage no unsupported writer may modify (grants "
+                          "dedicated_local authority); omit for shared/NAS/unfenceable storage → unknown")
+    rec.add_argument("--accept-drift", dest="accept_drift", action="store_true",
+                     help="accept an above-tolerance free-space drift and re-anchor after full reconciliation")
+    rec.set_defaults(func=cmd_drive_reconcile)
 
     args = p.parse_args(argv)
     if args.data_dir is not None or args.state_dir is not None:

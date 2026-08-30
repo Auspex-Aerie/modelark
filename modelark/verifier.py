@@ -6,9 +6,12 @@ ON THE DRIVE:
                              re-verify candidates: a compressor raw-fallback (INC-005), an interrupted
                              partial copy, or an archive that landed within a window of a recorded
                              disruption event (fetch_events: awaiting-drive / compress-fallback / error).
+                             DEF-033: repositories whose recovery policy cannot be evaluated surface as
+                             typed ``unknown`` follow-ups (not false integrity / partial-copy).
   • reverify(con, repo)    — RECORD consistency always (offline-safe: all planned files archived and
                              Hub hashes agree when supplied) + a decompress-CANARY spot-check of
                              each stored blob when its drive is mounted (the DIS-002 proof, on demand).
+                             DEF-033: ArchivePolicyError is operator-visible unknown, not false-clean.
 
 The write-time canary (DEC-003/019) proves each shard at store time; this is the cheaper, on-demand
 re-check for exactly the shards a disruption (restart / crash / RO flip / raw-fallback) put in doubt.
@@ -23,6 +26,7 @@ from modelark import archive_hash, archive_manifest, compress, register
 _DISRUPTION_OUTCOMES = ("awaiting-drive", "compress-fallback", "error")
 _WINDOW_MIN = 15                    # an archive within ±this many minutes of a disruption is a suspect
 _FLOAT_SQL = ("bf16", "bfloat16", "fp16", "f16", "float16", "fp32", "f32", "float32")
+_POLICY_ERROR_CODE = "ARCHIVE_POLICY_UNKNOWN"
 
 
 def _stored_relpath(rfilename: str, stored_name: str | None, stored_relpath: str | None) -> PurePosixPath:
@@ -40,7 +44,7 @@ def _stored_relpath(rfilename: str, stored_name: str | None, stored_relpath: str
 
 
 def suspects(con) -> list[dict]:
-    """Typed operator follow-ups: archive-integrity suspects and unresolved gated access."""
+    """Typed operator follow-ups: integrity suspects, policy unknowns, and gated access."""
     acc: dict[str, dict] = {}
 
     def add(repo, drive, reason, va=None, *, kind="integrity", url=None, followup_at=None):
@@ -74,8 +78,9 @@ def suspects(con) -> list[dict]:
     ).fetchall():
         add(repo, drive, "float weights stored raw (compress fallback / over-budget)", va)
 
-    # 2. partial copy: compare exact canonical filename sets. Counts are unsafe because an extra
-    # archived filename can otherwise hide a missing required one, and old SQL omitted pickle.
+    # 2. partial copy: compare exact canonical filename sets against the recovery manifest.
+    # DEF-033: repositories in ManifestBatch.errors are not partial-copy integrity suspects;
+    # the union-of-archived-names fallback is never used (it false-flags multi-drive layouts).
     archived_rows = con.execute(
         "SELECT repo_id,drive_label,rfilename FROM archived ORDER BY repo_id,drive_label,rfilename"
     ).fetchall()
@@ -84,16 +89,27 @@ def suspects(con) -> list[dict]:
         con, repos, archive_manifest.recovery_policy()
     )
     present: dict[tuple[str, str], set[str]] = {}
-    archived_names: dict[str, set[str]] = {}
     for repo, drive, rfilename in archived_rows:
         present.setdefault((repo, drive), set()).add(rfilename)
-        archived_names.setdefault(repo, set()).add(rfilename)
     for (repo, drive), names in present.items():
+        if repo in manifest_batch.errors:
+            continue
         manifest = manifest_batch.manifests.get(repo)
-        required = ({item.rfilename for item in manifest} if manifest is not None
-                    else archived_names.get(repo, set()))
+        if manifest is None:
+            continue
+        required = {item.rfilename for item in manifest}
         if not required <= names:
             add(repo, drive, "partial copy (interrupted)")
+
+    # 2b. DEF-033: recovery-policy failures are neutral unknown follow-ups with original detail.
+    for repo, err in manifest_batch.errors.items():
+        reason = str(err)
+        repo_drives = sorted({d for (r, d) in present if r == repo})
+        if repo_drives:
+            for drive in repo_drives:
+                add(repo, drive, reason, kind="unknown")
+        else:
+            add(repo, None, reason, kind="unknown")
 
     # 3. disruption-window: an archive that landed within ±window of the repo's own disruption event
     q = ",".join(f"'{o}'" for o in _DISRUPTION_OUTCOMES)
@@ -145,7 +161,13 @@ def suspects(con) -> list[dict]:
 
 def reverify(con, repo_id: str, deep: bool = True) -> dict:
     """Re-verify one archived model. RECORD consistency is offline-safe; physical status remains
-    unknown for stored blobs whose drive is shelved, and missing bytes on a mounted drive fail."""
+    unknown for stored blobs whose drive is shelved, and missing bytes on a mounted drive fail.
+
+    DEF-033: when recovery_policy cannot evaluate the required manifest (ArchivePolicyError),
+    the result is operator-visible unknown (record_ok/missing None + policy_error), never a
+    false complete/verified claim. Known failures still take status precedence as failed while
+    retaining the structured policy_error evidence.
+    """
     catalog_sha = dict(con.execute("SELECT rfilename, sha256 FROM files WHERE repo_id=?", [repo_id]).fetchall())
     by_name: dict[str, list[dict]] = {}
     for rf, sn, sr, dl, osha, comp, key in con.execute(
@@ -158,8 +180,9 @@ def reverify(con, repo_id: str, deep: bool = True) -> dict:
         return {"repo": repo_id, "archived": False, "status": "not-archived", "ok": False,
                 "detail": "not archived — nothing to re-verify"}
 
-    # Verify bytes already accepted into the archive regardless of today's acquisition
-    # policy. For legacy/foreign unsupported formats, the durable records are the manifest.
+    # Capture policy evaluation honestly. Do not manufacture a planned set from archived rows.
+    policy_error: dict | None = None
+    planned_names: set[str] | None
     try:
         planned_names = {
             item.rfilename
@@ -167,17 +190,27 @@ def reverify(con, repo_id: str, deep: bool = True) -> dict:
                 con, repo_id, archive_manifest.recovery_policy()
             )
         }
-    except archive_manifest.ArchivePolicyError:
-        planned_names = set(by_name)
+    except archive_manifest.ArchivePolicyError as exc:
+        planned_names = None
+        policy_error = {"code": _POLICY_ERROR_CODE, "detail": str(exc)}
 
-    missing = sorted(planned_names - set(by_name))                    # planned but never archived
     sha_mismatch = [rf for rf, cs in by_name.items()                 # any stored HF-hash disagrees with catalog
                     if catalog_sha.get(rf) and any(c["orig"] and catalog_sha[rf] != c["orig"] for c in cs)]
-    record_ok = not missing and not sha_mismatch
+
+    if policy_error is not None:
+        missing = None
+        # Digest disagreement is a known inconsistency; otherwise record completeness is unknowable.
+        record_ok = False if sha_mismatch else None
+    else:
+        assert planned_names is not None
+        missing = sorted(planned_names - set(by_name))               # planned but never archived
+        record_ok = not missing and not sha_mismatch
 
     required = max(1, int((con.execute("SELECT coalesce(numcopies,1) FROM models WHERE repo_id=?",
                                        [repo_id]).fetchone() or [1])[0]))
     deep_checks, deep_ran, offline = [], False, set()
+    # Physical verification always walks archived records so known physical evidence is retained
+    # even when the planned set is unknowable.
     if deep:
         for rf, copies in by_name.items():
             for c in copies:
@@ -214,22 +247,36 @@ def reverify(con, repo_id: str, deep: bool = True) -> dict:
     unverifiable = any(d["ok"] is None for d in deep_checks)
     insufficient = []
     if deep:
-        for rf in planned_names:
+        # When the planned set is known, evaluate required copies per planned file; when
+        # unknowable, still evaluate observed archived files so insufficient copies fail closed.
+        names_for_copies = planned_names if planned_names is not None else set(by_name)
+        for rf in names_for_copies:
             healthy = sum(d["ok"] is True for d in deep_checks if d["file"] == rf)
             unknown_checked = sum(d["ok"] is None for d in deep_checks if d["file"] == rf)
             possible = healthy + unknown_checked + sum(c["drive"] in offline for c in by_name.get(rf, []))
             if possible < required:
                 insufficient.append(rf)
-    if not record_ok or checked_fail or insufficient:
+
+    independent_fail = bool(sha_mismatch or checked_fail or insufficient)
+    if policy_error is not None:
+        # Known failures take status precedence; physical PASS never upgrades policy-unknown.
+        if independent_fail:
+            status = "failed"
+        else:
+            status = "unknown"
+    elif not record_ok or checked_fail or insufficient:
         status = "failed"
     elif not deep or unverifiable or offline or any(
-            sum(d["ok"] is True for d in deep_checks if d["file"] == rf) < required for rf in planned_names):
+            sum(d["ok"] is True for d in deep_checks if d["file"] == rf) < required
+            for rf in (planned_names or ())):
         status = "unknown"
     else:
         status = "verified"
     deep_ok = status == "verified" if deep else None
 
     parts = [f"{len(by_name)} file(s) archived"]
+    if policy_error is not None:
+        parts.append("archive policy unknown")
     if missing:
         parts.append(f"{len(missing)} planned file(s) MISSING")
     if sha_mismatch:
@@ -237,13 +284,19 @@ def reverify(con, repo_id: str, deep: bool = True) -> dict:
     if insufficient:
         parts.append(f"{len(insufficient)} file(s) below required {required} checked/possible copies")
     parts.append("physical " + ("PASS" if status == "verified" else "FAIL" if status == "failed" else "UNKNOWN"))
-    return {"repo": repo_id, "archived": True, "record_ok": record_ok,
-            "missing": missing, "sha_mismatch": sha_mismatch,
-            "n_files": len(by_name), "required_copies": required, "status": status,
-            "offline_drives": sorted(offline), "insufficient": sorted(insufficient),
-            "deep_ran": deep_ran, "deep_ok": deep_ok,
-            "deep_checks": deep_checks[:24], "ok": status == "verified",
-            "detail": " · ".join(parts)}
+
+    result = {
+        "repo": repo_id, "archived": True, "record_ok": record_ok,
+        "missing": missing, "sha_mismatch": sha_mismatch,
+        "n_files": len(by_name), "required_copies": required, "status": status,
+        "offline_drives": sorted(offline), "insufficient": sorted(insufficient),
+        "deep_ran": deep_ran, "deep_ok": deep_ok,
+        "deep_checks": deep_checks[:24], "ok": status == "verified",
+        "detail": " · ".join(parts),
+    }
+    if policy_error is not None:
+        result["policy_error"] = policy_error
+    return result
 
 
 def reverify_many(con, repo_ids: list[str], deep: bool = True) -> list[dict]:

@@ -10,9 +10,20 @@ from argparse import Namespace
 from contextlib import contextmanager, redirect_stdout
 from unittest import mock
 
+import pytest
+
+import _admission_compat
 from modelark import cli, librarian
 from modelark.core import db
 from modelark.web import data, server
+
+
+@pytest.fixture(autouse=True)
+def _admission_snapshot_compat():
+    """#35-C: synthesize admission evidence from free_bytes (pre-cutover snapshot semantics) so the
+    library projections keep exercising the projection adapters, not the seam (covered by PR-04)."""
+    with _admission_compat.seam_patch():
+        yield
 
 
 def _empty_catalog() -> sqlite3.Connection:
@@ -84,6 +95,8 @@ def _assert_mixed_cart(plan: dict, queue: dict) -> None:
     assert plan["feasible"] is False
     assert plan["blocking_diagnostics"] == ["MANIFEST_POLICY"]
     assert plan["capacity_failures"] == []
+    assert plan["drives"][0]["lifecycle"] == "active"
+    assert plan["drives"][0]["eligibility"] == "enabled"
     assert plan["totals"]["n_selected"] == 2
     assert plan["totals"]["n_planned"] == 1
     assert plan["totals"]["n_blocked"] == 1
@@ -221,6 +234,8 @@ def test_http_plan_and_queue_return_typed_mixed_cart_instead_of_500():
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
-            fn()
+            # Mirror the autouse pytest fixture under the plain script runner (CI's `python "$t"`).
+            with _admission_compat.seam_patch():
+                fn()
             print(f"ok  {name}")
     print("all passed")

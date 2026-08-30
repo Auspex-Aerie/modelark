@@ -26,7 +26,11 @@ window.loadLibrary = async function () {
     `<b>${esc(t.n_models)}</b> model${t.n_models === 1 ? "" : "s"} · <b>${esc(t.n_files)}</b> files · `
     + `${esc(sz(t.raw))} → <b>${esc(sz(t.on_disk))}</b> on disk (${esc(pctSaved(t.raw, t.on_disk))}% saved) · `
     + `footprint ${esc(sz(t.physical))} across ${esc(t.n_drives)} drive${t.n_drives === 1 ? "" : "s"} · `
-    + `fleet ${esc(sz(t.capacity - t.free))} / ${esc(sz(t.capacity))} used`;
+    // Admission free comes from typed evidence and is rendered directly; a null total means unknown, so
+    // it is NEVER differenced against capacity (a zero/unknown must not read as "fully used").
+    + (t.free == null
+        ? `fleet ${esc(sz(t.capacity))} capacity · admission free unknown`
+        : `fleet ${esc(sz(t.free))} admission free / ${esc(sz(t.capacity))} capacity`);
 
   fleet.innerHTML = d.fleet.map(x => {
     const h = x.health || "unknown";
@@ -38,7 +42,9 @@ window.loadLibrary = async function () {
         <div class="k">Models</div><div class="v">${esc(x.n_models)}</div>
         <div class="k">Files</div><div class="v">${esc(x.n_files)}</div>
         <div class="k">On disk</div><div class="v">${esc(sz(x.on_disk))}</div>
-        <div class="k">Free</div><div class="v">${esc(sz(x.free))} / ${esc(sz(x.capacity))}</div>
+        <div class="k">Free</div><div class="v">${x.free == null
+          ? "unknown · " + esc(x.evidence_kind) + (x.legacy_free != null ? " (was " + esc(sz(x.legacy_free)) + ")" : "")
+          : esc(sz(x.free)) + " / " + esc(sz(x.capacity)) + " · " + esc(x.evidence_kind)}</div>
       </div>
     </button>`;
   }).join("") || '<div class="stub">No drives registered yet.</div>';

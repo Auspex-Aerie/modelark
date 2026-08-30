@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "modelark"
-version = "0.2.0"
+version = "0.3.0"
 description = "Catalog, fetch, and verify open model weights across an offline drive library."
 readme = "README.md"
 license = "Apache-2.0"
@@ -58,6 +58,7 @@ Security = "https://github.com/Auspex-Aerie/modelark/security/policy"
 [project.scripts]
 modelark = "modelark.cli:main"
 modelark-migrate = "scripts.migrate_legacy_runtime:main"
+modelark-provenance-migrate = "scripts.migrate_provenance:main"
 modelark-deploy = "scripts.deploy:main"
 
 [tool.setuptools.packages.find]

@@ -2,7 +2,8 @@
 
 Working plan for the fix effort opened after the 2026-07-20 placement/capacity audit, revised across
 review rounds toward an implementation-ready spec. The binding invariants go into the decision log, and
-the GitHub issues are rewritten/split to agree with it, **before any implementation begins**.
+authoritative scope-contract comments are appended to the unchanged GitHub issues **before any
+implementation begins**.
 RFC-002 (`docs/rfcs/002-first-class-placement-approval.md`) is the architecture and migration authority;
 this file remains the issue-level working plan.
 
@@ -13,15 +14,15 @@ reality problems. The immediate incident was resolved operationally (un-pinned G
 aborted-start stub files; restored `free_bytes` to its baseline contract). This effort addresses the
 underlying classes so they stop recurring.
 
-## Issues (GitHub — to be rewritten/split to match this plan + the DEC before implementation)
+## Issues (GitHub — original bodies are preserved; append-only comments bind implementation scope)
 
-| # | Title | Split |
-|---|---|---|
-| [#35](https://github.com/Auspex-Aerie/modelark/issues/35) | Free-space is a mutable field, recompute never persisted | append-only clean-anchor model |
-| [#36](https://github.com/Auspex-Aerie/modelark/issues/36) | Durable-partial pinning is disproportionate | → 36a emits alternatives+costs (reuse ranking owned by #38) |
-| [#37](https://github.com/Auspex-Aerie/modelark/issues/37) | No retire / un-archive / drive-loss recovery | → 37a–37d over orthogonal axes |
-| [#38](https://github.com/Auspex-Aerie/modelark/issues/38) | Placement strands small drives / wedges large blocks | shared feasibility+placement engine, `tiered_v2` |
-| [#39](https://github.com/Auspex-Aerie/modelark/issues/39) | Mid-fill add has no pre-commit preview | guard + normalized proposal/approval/session control |
+| # | Title | Delivery | Binding comment |
+|---|---|---|---|
+| [#35](https://github.com/Auspex-Aerie/modelark/issues/35) | Free-space is a mutable field, recompute never persisted | append-only clean-anchor model | [schema + contract](https://github.com/Auspex-Aerie/modelark/issues/35#issuecomment-5037967073) |
+| [#36](https://github.com/Auspex-Aerie/modelark/issues/36) | Durable-partial pinning is disproportionate | logical 36a emits alternatives+costs (reuse ranking owned by #38) | [contract](https://github.com/Auspex-Aerie/modelark/issues/36#issuecomment-5037967195) |
+| [#37](https://github.com/Auspex-Aerie/modelark/issues/37) | No retire / un-archive / drive-loss recovery | logical schema/gating + operation slices | [contract](https://github.com/Auspex-Aerie/modelark/issues/37#issuecomment-5037967307) |
+| [#38](https://github.com/Auspex-Aerie/modelark/issues/38) | Placement strands small drives / wedges large blocks | shared feasibility+placement engine, `tiered_v2` | [contract](https://github.com/Auspex-Aerie/modelark/issues/38#issuecomment-5037967462) |
+| [#39](https://github.com/Auspex-Aerie/modelark/issues/39) | Mid-fill add has no pre-commit preview | guard + normalized proposal/approval/session control | [contract + p95 gate](https://github.com/Auspex-Aerie/modelark/issues/39#issuecomment-5037967599), [workflow override](https://github.com/Auspex-Aerie/modelark/issues/39#issuecomment-5038287607) |
 
 Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID copy-#1 home.
 
@@ -39,8 +40,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    admission authority. Dirty invalidates the *offline anchor*, not a fresh fenced live read. A release
    or allocation is reflected by the next clean anchor after reconciliation — never by
    crediting a vanished catalog row or differencing a scalar watermark over mutable/tombstoned rows.
-   An anchor outside `[0, usable_capacity_for_epoch]` fails validation and yields `unknown`—it is never
-   silently clamped. Empty registration is the trivial first clean anchor; a full mounted inventory/
+   `anchor_free_bytes` is the raw identity-proven filesystem `available` observation; admission applies
+   the versioned safety floor exactly once when deriving usable free. An anchor outside
+   `[0, filesystem_capacity_for_epoch]` fails validation and yields `unknown`—it is never silently
+   clamped. Empty registration is the trivial first clean anchor; a full mounted inventory/
    reconciliation appends a fresh clean anchor for an already-populated drive — the supported recovery
    from `unknown`. Each anchor row is immutable; a resize is an explicit, audited `identity+capacity`
    epoch transition that appends a new anchor.
@@ -67,7 +70,9 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    is held and the dirty generation is durable. Anchor publication is a generation CAS: snapshot the
    generation, prove no active writer, reconcile, then append+clear only if the generation is unchanged
    and the writer lock is still idle; otherwise discard the candidate anchor and remain dirty. NULL
-   `stored_bytes` is missing evidence, never a proven zero.
+   `stored_bytes` is missing evidence, never a proven zero. #35 reserves nullable owner-session-id and
+   fencing-token fields on each dirty generation (both null or both present); they remain null until #39
+   begins attributing Fill mutations, avoiding a second dirty-state migration for session recovery.
 4. **Durable truth is never auto-deleted** — a verified `archived` row is removed only by an explicit,
    scoped, confirmed operation.
 5. **Drive properties are orthogonal:** durable `lifecycle` ∈ {active, lost, retired} and durable
@@ -93,9 +98,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    `INFEASIBLE_UNDER_ADMISSION_BUDGET`; **(3)** only after known-only infeasibility is proven and a
    relevant unknown drive exists, run a non-executable optimistic sensitivity search that gives each
    unknown drive its maximum **usable** capacity; an assignment relying on that capacity is
-   `CAPACITY_EVIDENCE_UNKNOWN` (name the drives to resolve); **(4)** if even the optimistic usable space
-   is exhaustively impossible, return `INFEASIBLE_EVEN_AT_OPTIMISTIC_USABLE_CAPACITY` with action
-   add-capacity/trim-selection/change-hard-constraints—not “resolve evidence”; **(5)** if the optimistic
+   `CAPACITY_EVIDENCE_UNKNOWN` (name the drives to resolve); **(4)** if packing is exhaustively impossible
+   under current known budgets even with relevant unknown drives at usable maximum,
+   return `INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX` with action free-known-capacity/add-capacity/
+   trim-selection/change-hard-constraints—not “resolve unknown evidence”; **(5)** if the optimistic
    search exhausts its deterministic bound, return `PACKING_INCONCLUSIVE` with the unknown-drive
    diagnostics. Never assert physical impossibility beyond the admitted/optimistic policy bounds. Gate B
    refuses start/commit on anything but `FEASIBLE`, naming the outcome **and the capacity mode under
@@ -129,7 +135,12 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    same-host process/per-drive writer
    lock and revalidates its token at safe boundaries. An expired catalog lease is not taken over while
    the prior physical lock is held; forced takeover marks affected drives dirty and requires
-   reconciliation before new writes. The commit
+   reconciliation before new writes. The worker's actual execution identity is distinct from the
+   controller/portal identity, and every monitored child that can write inherits the relevant drive-
+   fence FD so abrupt parent death cannot release exclusion while the child continues. Generation start
+   takes the controller fence before sorted drive fences; recovery takes that controller fence first,
+   revalidates expiry, snapshots owned generations, and locks every drive the proposal could mutate.
+   The commit
    protocol does **not** hold `BEGIN IMMEDIATE` across the solve: acquire lease →
    snapshot `planner_revision` → compute → `BEGIN IMMEDIATE` (short) → recheck revision+token → commit or
    abort. Every graph-affecting catalog mutation—including archive progress, anchor/dirty transitions,
@@ -145,8 +156,11 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    released so identity-proven reconciliation and other mutations cannot deadlock; resume performs the
    full authoritative validation and creates a new `starting` session with a fresh fencing token and an
    audit link to the immutable terminal predecessor. Terminal rows are never reactivated; multiple
-   historical rows may reference one approval, but at most one session may be live. The early portal
-   guard is explicitly portal-scoped.
+   historical rows may reference one approval, but a global partial unique constraint permits at most
+   one live session across every plan/approval. The early portal
+   guard is explicitly portal-scoped. Graph writers conservatively advance `planner_revision` unless
+   they prove canonical before/after equality; a false-positive bump is safe over-invalidation, while a
+   false-negative is an implementation defect caught by authoritative semantic recomputation.
 9. **Preview CAS, durable approval, and execution projection are three distinct contracts.**
    **(a) Preview→commit:** the preview is bound to one `planner_revision`; commit requires strict CAS and
    atomically applies the mutation and approves one immutable, normalized **PlacementProposal**; there is
@@ -167,7 +181,11 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
    await path. A legacy/migrated selection with no approved proposal is never grandfathered. Switching
    the active plan is allowed only without a live execution session; it atomically supersedes and clears
    the active approval, changes the plan, and bumps `planner_revision`. The newly active plan requires a
-   fresh preview/approval, and switching back never reactivates an old proposal.
+   fresh preview/approval, and switching back never reactivates an old proposal. Every desired
+   requirement has one normalized proposal row. An already-complete requirement is stored as a non-
+   executable `baseline_satisfied` row with its exact satisfying location and canonical satisfaction
+   certificate; losing it is expanded work and fails projection rather than disappearing from a task-
+   only loop.
 10. **Approval integrity is manifest-bound without expanding into provider versioning.** Each proposal
    stores a hash of the full canonical manifest and normalized rows only for missing files plus reused
    content that affected its tasks/costs. Existing upstream LFS SHA-256 and archived original hashes are
@@ -193,6 +211,9 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   differencing. Out-of-range anchors are integrity failures, never silently clamped.
 - **Recovery from `unknown`** = a mounted inventory/reconciliation (prove identity → inventory staging/
   orphans → reconcile catalog↔annex → generation-CAS a clean anchor). Populated drives fully supported.
+- Normal successful mutation close reconciles only the generation's recorded touched paths and annex
+  keys. Full-drive inventory is reserved for registration, crash recovery, unexplained drift, and
+  explicit repair; clean-anchor publication must not introduce a full-drive scan after every file.
 - **Registration is an untrusted preparation phase**: clone/annex-init may allocate before a trusted
   anchor exists, so the **first clean anchor is published only after init + reconciliation succeed**; a
   crash before that leaves the drive `unknown`, never a half-trusted baseline.
@@ -205,6 +226,9 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   reconciliation may append a new anchor only after explaining or explicitly acknowledging the drift.
 - Consolidate every consumer onto one evidence path (`library_api.py:23` currently reports raw
   `free_bytes`). Migration fail-closed: unprovable provenance ⇒ `unknown`, recover via the anchor path.
+- Reserve nullable `owner_session_id` + `owner_fencing_token` as a paired dirty-generation field in #35.
+  Operator/pre-#39 writes leave both null; #39 populates and validates them without requiring #35 to
+  create an early FK to the later session table.
 
 ### #36a — reconciler emits partial *alternatives* + deterministic costs (no choosing/pinning)
 - Root cause: `_choose_partial` (reconcile.py:353) sets a hard `pinned_target` before placement, honored
@@ -244,12 +268,19 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   Correction from review: canonical path already has the label tiebreak (capacity.py:753); only the
   legacy comparison path lacks it, and that is not execution authority.
 - Every verdict and task budget carries its capacity mode. `guaranteed` remains raw-bounded;
-  `compression_aware` exposes estimate risk and revalidates the remaining approved assignment after
-  each durable file/batch. Codec choice is part of the snapshotted config: a codec planned as raw uses a
+  `compression_aware` exposes estimate risk through fenced per-file admission and full remaining-map
+  revalidation at drive-batch/event boundaries. Codec choice is part of the snapshotted config: a codec
+  planned as raw uses a
   raw durable budget, and crash/canary/output-cap fallback may publish raw only after a current-evidence
   guard proves the raw result and workspace preserve the safety floor. An estimate overrun pauses the
   approved plan as `APPROVED_PLACEMENT_NO_LONGER_FEASIBLE`; completed bytes remain durable, and it never
   authorizes an optimizer rerun or target substitution.
+- Observed compression ratio is approval input but becomes progress-derived execution evidence after
+  approval. It is excluded from the execution-invariant hash and constrained instead by deterministic
+  per-file accounting of cumulative actual durable bytes since approval plus the recomputed remaining
+  forecast. A later session reconstructs cumulative spend from durable proposal-relative progress rather
+  than resetting it. An envelope overrun stops before the next file without forcing a full-catalog
+  projection.
 - `tiered_v2` named policy + decision entry + operator acknowledgement (small-drive idleness was
   intentional consolidation). Protected homes, primaries, replica grouping each specified.
 
@@ -270,7 +301,8 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   guarded-mutation primitive**, keyed on the fill controller **lease being live** — not the status
   string, which retains terminal states (`fill_worker.py:24`) and never resets to `idle` — including
   stopping-but-not-terminal, sharing the lock with `FillWorker.start()`. **Documented limitation:** an
-  external CLI controller is not detected here. Ships to **`main`** on its own branch.
+  external CLI controller is not detected here. It remains its own reviewable PR, now targeting the
+  isolated integration branch under the operator's frozen-lineage workflow.
 - **Final atomic contract:** lease + `planner_revision` per invariants 8–10. Preview binds to a **versioned
   canonical serialization built from the immutable planner-input object** (finalized selection,
   full-manifest hashes + task-relevant files/evidence + archive-policy version, `numcopies`, plan membership,
@@ -280,8 +312,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   version, archived facts/provenance, and the mutation) — excluding only display-only volatiles. The
   preview fingerprint binds the resulting exact **execution-authority task set** and the solver's
   placement-derivation mode (the latter is audit evidence, not an instruction to rerun the optimizer).
-  **Fill uses the immutable approved proposal plus its constrained execution projection and never
-  rereads the config file**; a raw mid-lease edit is unsupported and only observed at the next boundary.
+  **The executor/transport uses one frozen approved execution config and never reads the global config
+  file.** The control shell rereads graph-affecting config only at start/projection boundaries to compare
+  its canonical hash; a raw mid-lease edit yields `APPROVED_INPUT_CHANGED` at the next boundary and is
+  never adopted by the running transport.
   Commit runs the
   invariant-8 protocol (short write txn after the solve) requiring **all three**: (a)
   `planner_revision` unchanged; (b) the exact approved
@@ -299,6 +333,10 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   current `PlannerInput`, recompute the desired requirements and all semantic hashes, and compare those
   facts with normalized proposal rows. Revision equality permits the detailed check; it never replaces
   it. A missed bump is a writer defect but cannot authorize stale or expanded work.
+- **Unchanged-selection approval is explicit:** `adopt_current` previews and approves the already
+  finalized selection with equal before/after hashes and no selection-row mutation. It retains every
+  normal semantic check, CAS, exact assignment, approval lifecycle, pointer, and revision rule; this is
+  the required migration/reapproval path, not a bypass.
 - **Approval→start handoff:** commit approves the immutable proposal but holds no long-lived lease.
   `/api/fill/start` (and CLI start) acquires the execution lease, derives the execution projection
   **constrained to the approved target/source map**, applies only invariant 9's allowlisted monotonic
@@ -309,6 +347,11 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
   `optimization_resource_exhausted` can occur while producing a preview; that preview may instead show
   the canonical fallback for approval. It is not a commit/start reproduction outcome because those
   boundaries validate the already-approved assignment rather than replaying its derivation.
+- **Projection cadence is bounded:** perform full authoritative projection at start/resume, completed
+  drive-batch boundaries, and typed state-changing events (gated park/retry, hot-swap return, evidence
+  repair/recovery)—not after every file/task. Every file still performs cheap token/identity/live-free
+  admission while holding its drive fence, and successful durable files shrink the batch-local missing
+  set immediately. Full projection count scales with batches/events, not total tasks/files.
 - **Session-state mutation authority:** `starting`, `running`, and `stopping` retain the live lease and
   refuse every operator graph writer. `paused`/`blocked` are non-live historical terminals with the
   heartbeat/lease cleared and every physical lock released, so the operator can mount/reconcile an
@@ -342,9 +385,12 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
 
 ## Sequencing (revised)
 
-0. **Record the DEC** (invariants above).
-0b. **Rewrite/split the GitHub issues** to agree with the DEC + this plan.
-1. **Portal mutation guard** → **`main`** (independent; explicitly portal-only).
+0. **Record DEC-049** (invariants above).
+0b. **Append scope-contract comments to the GitHub issues** that agree with DEC-049 + this plan. Never
+    rewrite an original issue body. Treat #36a and the #37 phases as logical PR slices under their
+    existing parent issue unless a separately approved follow-up issue is needed.
+1. **Portal mutation guard** → first independent PR onto **`fix/placement-capacity-hardening`**
+   (explicitly portal-only; no separate `main` publication under the current workflow).
 2. **#35** — append-only clean-anchor evidence + mount-identity + dirty protocol + registration-prep +
    migration/recovery plus only the fact/evidence/write-mutation seams it needs (fix branch).
 3. **#36a** — reconciler emits hash/provenance-aware partial alternatives + deterministic costs while
@@ -359,24 +405,36 @@ Deferred on the roadmap, not re-filed: cross-drive shard spanning; multi-RAID co
 
 ## Workflow
 
-- **Decision log first**, then issue restructuring, then code.
-- **Portal guard ships independently to `main`.**
-- All migration work on the isolated long-lived branch `fix/placement-capacity-hardening`; **one
-  reviewable phase per PR**, targeting the fix branch; merge commits (no squash), branches retained.
-- **Sync `main` → fix branch** regularly; **never fix branch → `main` mid-effort** (public repo).
+- **Decision log first**, then append-only issue contracts, then code.
+- **Tests first in every phase PR:** freeze current behavior and add the scoped failing contract,
+  migration, and fault tests before accepting production changes. Tests and implementation may share a
+  PR, but their commits and review evidence remain separable.
+- **Portal guard remains an independent first PR, but targets the integration branch.**
+- All work uses the isolated long-lived integration branch `fix/placement-capacity-hardening`; each
+  implementation branch targets it via a bounded PR, merge commits (no squash), branches retained.
+- **Do not merge, rebase, or cherry-pick `main` into the integration branch during this review series.**
+  If a mainline security/correctness change becomes relevant, stop and ask the operator rather than
+  syncing opportunistically.
 - **Final integration PR** (fix branch → `main`) with copied-catalog shadow evidence + explicit rollback
   instructions.
+- The implementor follows `docs/plans/placement-capacity-implementor-handoff.md`, including tests-first
+  commits, Greptile polling, and mandatory human stop gates before production code, merge, and next slice.
 - Until step 6 lands, the portal guard covers only portal selection finalize/removal/clear. It does not
   fence discover/manifest refresh, protect/`numcopies`, plan or drive edits, external CLI writers, or the
   old executor's batch-boundary re-planning. Interim safety therefore depends on explicit
   single-operator discipline; the guard is containment, not the final no-drift guarantee.
 
-## Source of truth (pre-code blocker — accepted staging)
+## Source of truth (pre-code blocker — append-only issue history)
 
-Issue bodies #35–#39 still hold original text and contradict this plan; that's expected while drafting.
-Before any implementation PR: approve RFC-002; author the binding DEC; rewrite #35/#38/#39, split #36
-→ 36a (reuse ranking to #38), and #37 → schema/gating then 37a–37d operations; add invariants, failure
-codes, migration behavior, and test matrices.
+Issue bodies #35–#39 remain their original incident/problem statements permanently. DEC-049 and RFC-002
+are binding architecture; the latest authoritative maintainer comment on each issue binds its current
+implementation slice, failure codes, migration behavior, and tests. Later scope changes append a new
+superseding comment rather than editing prior history. Once an implementation PR exists, append its link
+to the issue; never put a speculative PR URL into the original contract comment.
+
+Phase-0 prerequisites completed 2026-07-21: DEC-049 is accepted and the binding comments above are
+published. Production work may begin with the tests-first portal guard/#35 slices; each future PR link is
+added as another issue comment.
 
 ## Acceptance material (per issue, before its PR)
 
@@ -391,6 +449,9 @@ codes, migration behavior, and test matrices.
   **registration crashes** (before row creation, during clone, during annex-init, before first anchor),
   mutating writability probe/staging-directory/temp/annex bookkeeping dirties before allocation and
   remains dirty across a crash (or the await probe is non-mutating),
+  paired nullable dirty-owner fields migrate in #35 with both-null/both-present enforcement, pre-#39
+  writes remain null, and #39 matching session/token attribution drives expired-session recovery,
+  normal close reconciles generation-touched paths/keys rather than scanning the full drive per file,
   NULL vs proven-zero `stored_bytes`, unprovable-provenance⇒`unknown`, migrated-catalog replay, every
   CLI/API/UI consumer.
 - **#36a/#38** — alternatives emitted without pinning; global feasibility (a partial fitting itself but
@@ -399,8 +460,10 @@ codes, migration behavior, and test matrices.
   provenance; candidate-specific reuse/workspace budgets; protected/bulk/replica;
   stop/crash durability; graded Gate-B outcomes; feasibility-existence vs optimization separation;
   **mixed known/unknown fleet precedence** (known-only feasible wins; known-only inconclusive remains
-  packing-inconclusive; proven-known-infeasible then unknown may-help; optimistic still-impossible;
-  optimistic inconclusive; a requirement below raw capacity but above every policy-permitted drive's
+  packing-inconclusive; proven-known-infeasible then unknown may-help;
+  `INFEASIBLE_WITH_UNKNOWN_AT_USABLE_MAX` means resolving unknown evidence alone cannot help but freeing
+  known capacity still may; optimistic inconclusive;
+  a requirement below raw capacity but above every policy-permitted drive's
   usable **post-safety-floor** capacity is structural, never evidence-unknown, and optimistic unknown-
   evidence search uses the same usable maximum), shuffled input/query order; deterministic large-block
   metric;
@@ -416,17 +479,27 @@ codes, migration behavior, and test matrices.
   two-copy policy, bootstrap eligibility, annex-success/DB-failure recovery, dry-run, idempotent reruns,
   tombstone reservation, retired identity reappearance stays retired and reinstate refuses it.
 - **#39** — lease acquire/renew/expiry/**crash recovery/operator takeover/fencing-token validation**,
-  physical-lock exclusion of an expired-but-live writer, forced-takeover→dirty/reconcile, no `BEGIN
+  physical-lock exclusion of an expired-but-live writer and monitored child, worker identity distinct
+  from controller/portal identity, controller-serialized generation-start/recovery, inherited child
+  fence across parent SIGKILL, forced-takeover→dirty/reconcile, no `BEGIN
   IMMEDIATE` held across the solve, cross-writer atomicity (portal + CLI writers), config-in-snapshot /
   no file reread mid-lease, concurrent previews, approval→later-start state drift, changed current
   admission-authoritative evidence, strict preview→commit `planner_revision` CAS plus authoritative
   requirement/hash recomputation when the revision matches (including a simulated missed-bump writer),
+  conservative graph-write change detection (bump unless a canonical no-op is proven),
   atomic mutation+
   proposal approval, rows-authoritative canonical hash with no writable blob, draft→approved→superseded
-  lifecycle, exact-approved-assignment capacity validation without optimizer rerun, alternate-feasible placement still
+  lifecycle, explicit `adopt_current` unchanged-selection preview/approval,
+  one proposal row per desired requirement plus exact `baseline_satisfied` certificates,
+  exact-approved-assignment capacity validation without optimizer rerun, alternate-feasible placement still
   requiring fresh approval through an explicit evidence-divergence terminal/UX, progress/evidence-
   compatible pure projection after one/many completed files and dirty→clean reconciliation, rejection
-  of expanded/remapped work, execution lease binding to
+  of expanded/remapped work, batch/event projection cadence with no per-file/full-catalog O(tasks²)
+  behavior plus the copied-catalog p95 gate (≤2.0 s full capture/recompute/projection; ≤500 ms pure
+  projection after 5 warm-ups over 30 measured runs), DEC-047 first-hit defer/continue,
+  same-task retry priority with no generic failure-budget consumption, prompt-stop handling, frozen
+  hash-validated execution config with no transport global read, cumulative-actual-plus-remaining
+  compression-envelope accounting preserved across session resume, execution lease binding to
   the rebased revision+fencing token, systemd auto-resume, missing legacy approval→fresh preview, same
   approved target offline→GATE-A await without re-preview, dirty offline target→mount/reconcile then
   compare, full-manifest structural drift and task-file/hash mismatch typed before execution, documented

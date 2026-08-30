@@ -3,12 +3,22 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from dataclasses import replace
 from unittest import mock
 
-from modelark import capacity, reconcile
+import pytest
+
+import _admission_compat
+from modelark import capacity, capacity_evidence, reconcile
 from modelark.core import db
 from modelark.web import plan_api
+
+
+@pytest.fixture(autouse=True)
+def _admission_snapshot_compat():
+    """#35-C: synthesize admission evidence from free_bytes (pre-cutover snapshot semantics) so these
+    tiered_v1 placement tests keep exercising placement, not the evidence seam (covered by PR-04)."""
+    with _admission_compat.seam_patch():
+        yield
 
 
 def _mem():
@@ -32,17 +42,19 @@ def _drive(con, label, *, role="primary", raid=False, capacity_bytes=10_000, fre
 def _repo(con, repo, *, copies=1, files=(("model.safetensors", 100, "safetensors", "bf16"),)):
     con.execute("INSERT INTO models(repo_id,numcopies) VALUES(?,?)", [repo, copies])
     con.execute("INSERT INTO selection(repo_id,finalized_at) VALUES(?,'2026-01-01')", [repo])
+    # #36a: manifest sha256 lets the matching archived orig_sha256 prove reuse.
     con.executemany(
-        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) VALUES(?,?,?,?,?)",
-        [(repo, name, size, fmt, quant) for name, size, fmt, quant in files],
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) VALUES(?,?,?,?,?,?)",
+        [(repo, name, size, fmt, quant, f"sha-{repo}-{name}") for name, size, fmt, quant in files],
     )
 
 
 def _archive(con, repo, drive, rows):
+    # Reusable archived content proves provenance: orig_sha256 matches the manifest sha256 for that file.
     con.executemany(
-        "INSERT INTO archived(repo_id,rfilename,drive_label,stored_bytes,orig_bytes,compressed) "
-        "VALUES(?,?,?,?,?,?)",
-        [(repo, name, drive, stored, original, int(stored < original))
+        "INSERT INTO archived(repo_id,rfilename,drive_label,orig_sha256,stored_bytes,orig_bytes,compressed) "
+        "VALUES(?,?,?,?,?,?,?)",
+        [(repo, name, drive, f"sha-{repo}-{name}", stored, original, int(stored < original))
          for name, stored, original in rows],
     )
 
@@ -78,8 +90,8 @@ def test_incident_shape_reserves_only_nine_missing_homes_and_fits():
         elif index < 124:
             _archive(con, repo, "raid", (("model.safetensors", 67, 100),))
 
-    graph = reconcile.reconcile_plan(con, "ark")
-    result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
+    graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
+    result = capacity.plan_capacity(con, graph)
     home_tasks = [item for item in result.tasks
                   if item.requirement_id.startswith("protected_home:")]
     replica_tasks = [item for item in result.tasks
@@ -99,8 +111,8 @@ def test_replica_workspace_is_max_while_durable_is_sum():
         repo = f"org/model-{index}"
         _repo(con, repo, copies=2, files=(("model.gguf", 100, "gguf", None),))
         _archive(con, repo, "raid", (("model.gguf", 100, 100),))
-    graph = reconcile.reconcile_plan(con, "ark")
-    result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
+    graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
+    result = capacity.plan_capacity(con, graph)
     ledger = next(item for item in result.ledgers if item.drive_label == "replica")
     assert result.feasible
     assert ledger.guaranteed_durable == 300
@@ -114,8 +126,8 @@ def test_unknown_zero_source_size_falls_back_to_replica_estimate():
     _drive(con, "replica", role="replica")
     _repo(con, "org/model", copies=2, files=(("model.gguf", 100, "gguf", None),))
     _archive(con, "org/model", "raid", (("model.gguf", 0, 100),))
-    graph = reconcile.reconcile_plan(con, "ark")
-    result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
+    graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
+    result = capacity.plan_capacity(con, graph)
     task = next(item for item in result.tasks if item.kind == reconcile.TaskKind.REPLICATE)
     assert task.budget.evidence == "estimate"
     assert task.budget.guaranteed_durable == 108
@@ -125,18 +137,23 @@ def test_manifest_policy_diagnostic_makes_shadow_capacity_infeasible():
     con = _mem()
     _drive(con, "primary")
     _repo(con, "pickle/model", files=(("pytorch_model.bin", 100, "pytorch", "fp16"),))
-    graph = reconcile.reconcile_plan(con, "ark")
-    result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
+    graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
+    result = capacity.plan_capacity(con, graph)
     assert result.blocking_diagnostics == ("MANIFEST_POLICY",)
     assert not result.feasible
+    # Evidence levels stay separate: gate_b_code is the pure ladder (empty placeable set packs as
+    # FEASIBLE); MANIFEST_POLICY stays on blocking_diagnostics — never copied into gate_b_code.
+    assert result.gate_b_code == "FEASIBLE"
+    assert result.gate_b_code not in result.blocking_diagnostics
+    assert not result.tasks
 
 
 def test_workspace_short_is_distinct_from_durable_short():
     con = _mem()
     _drive(con, "primary", capacity_bytes=1_000, free=200)
     _repo(con, "org/model")
-    graph = reconcile.reconcile_plan(con, "ark")
-    result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
+    graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
+    result = capacity.plan_capacity(con, graph)
     failure = result.failures[0]
     assert failure.code == capacity.FailureCode.CAPACITY_WORKSPACE_SHORT
     assert failure.required_bytes > failure.available_bytes
@@ -147,33 +164,53 @@ def test_dependent_replica_failure_is_deduplicated_to_missing_home_tier():
     con = _mem()
     _drive(con, "replica", role="replica", capacity_bytes=100)
     _repo(con, "org/model", copies=2)
-    graph = reconcile.reconcile_plan(con, "ark")
-    result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
-    assert [item.code for item in result.failures] == [capacity.FailureCode.TARGET_TIER_MISSING]
-    assert result.failures[0].requirement_id == "protected_home:org/model"
-    assert any(item.requirement_id == "protected_replica:org/model"
-               for item in result.unassigned_intents)
-
-
-def test_stale_home_pin_cannot_create_an_unledgered_feasible_task():
-    con = _mem()
-    _drive(con, "raid", raid=True)
-    _drive(con, "replica", role="replica")
-    _repo(con, "org/model", copies=2)
-    graph = reconcile.reconcile_plan(con, "ark")
-    home = next(item for item in graph.intents
-                if item.requirement_id == "protected_home:org/model")
-    stale_home = replace(home, pinned_target="removed-drive")
-    graph = replace(
-        graph,
-        intents=tuple(stale_home if item is home else item for item in graph.intents),
-    )
-    result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
+    graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
+    result = capacity.plan_capacity(con, graph)
+    # #36a: a home with no eligible tier has no candidate, so it is a reconcile blocking diagnostic
+    # (TARGET_TIER_MISSING) rather than a capacity failure. The dependent replica is still not reported
+    # as a spurious capacity failure — the missing home tier remains the single root cause.
     assert not result.feasible
-    assert all(item.target_drive != "removed-drive" for item in result.tasks)
-    failure = next(item for item in result.failures
-                   if item.requirement_id == "protected_home:org/model")
-    assert failure.code == capacity.FailureCode.GRAPH_INVARIANT
+    assert "TARGET_TIER_MISSING" in result.blocking_diagnostics
+    assert not any(item.requirement_id == "protected_replica:org/model" for item in result.failures)
+
+
+# (Removed test_stale_home_pin_cannot_create_an_unledgered_feasible_task: #36a removes _choose_partial /
+# WorkIntent.pinned_target entirely, so a stale reconcile-side pin can no longer exist. Placement now
+# chooses only among canonical candidates whose targets are in-plan drives.)
+
+
+def test_all_targets_unproven_is_infeasible_not_silently_dropped():
+    # gap #1: the only eligible drive holds the required file with NO provable provenance (a legacy row).
+    # The target is omitted (never overwritten), the requirement is blocked, and the plan is INFEASIBLE
+    # with a typed provenance diagnostic — never a silent feasible=True with zero tasks.
+    con = _mem()
+    _drive(con, "primary")
+    con.execute("INSERT INTO models(repo_id,numcopies) VALUES('org/m',1)")
+    con.execute("INSERT INTO selection(repo_id,finalized_at) VALUES('org/m','2026-01-01')")
+    con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+                "VALUES('org/m','model.safetensors',100,'safetensors','bf16')")     # no manifest sha256
+    con.execute("INSERT INTO archived(repo_id,rfilename,drive_label,orig_bytes,stored_bytes,compressed) "
+                "VALUES('org/m','model.safetensors','primary',100,100,0)")           # no orig_sha256 → unproven
+    graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
+    result = capacity.plan_capacity(con, graph)
+    assert graph.candidates.by_requirement == ()                                     # no candidate emitted
+    assert [b.reason for b in graph.candidates.blocked] == ["all_targets_unproven"]
+    assert "UNPROVEN_PROVENANCE" in result.blocking_diagnostics
+    assert not result.feasible
+
+
+def test_candidate_target_removed_after_reconcile_is_typed_stale_not_dropped():
+    # gap #1: a canonical candidate's drive leaves the plan between reconcile_plan() and plan_capacity().
+    # The requirement must surface as a typed stale-snapshot (TARGET_DRIVE_CHANGED), not vanish.
+    con = _mem()
+    _drive(con, "d1")
+    _repo(con, "org/m")
+    graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
+    con.execute("DELETE FROM plan_drives WHERE drive_label='d1'")                    # stale snapshot
+    result = capacity.plan_capacity(con, graph)
+    assert not result.feasible
+    assert any(item.requirement_id == "primary:org/m"
+               and item.code == capacity.FailureCode.TARGET_DRIVE_CHANGED for item in result.failures)
 
 
 def test_compression_aware_mode_can_fit_where_guaranteed_durable_cannot():
@@ -184,12 +221,12 @@ def test_compression_aware_mode_can_fit_where_guaranteed_durable_cannot():
         files=(("a.safetensors", 100, "safetensors", "bf16"),
                ("b.safetensors", 100, "safetensors", "bf16")),
     )
-    graph = reconcile.reconcile_plan(con, "ark")
+    graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
     guaranteed = capacity.plan_capacity(
-        con, graph, capacity_mode="guaranteed", compression_cfg=_cfg()
+        con, graph, capacity_mode="guaranteed"
     )
     aware = capacity.plan_capacity(
-        con, graph, capacity_mode="compression_aware", compression_cfg=_cfg()
+        con, graph, capacity_mode="compression_aware"
     )
     assert not guaranteed.feasible
     assert guaranteed.failures[0].code == capacity.FailureCode.CAPACITY_WORKSPACE_SHORT
@@ -205,21 +242,19 @@ def test_file_preflight_is_exact_at_workspace_boundary():
         workspace_peak_expected=137,
         evidence="estimate",
     )
-    exact = capacity.CapacityDrive(
-        drive_label="primary",
-        role="primary",
-        raid_backed=False,
-        capacity_bytes=1_000,
-        physical_free=259,
-        free_evidence=capacity.FreeEvidence.LIVE,
-        safety_floor=50,
-    )
+    def _drive(admissible):
+        # CapacityDrive is now backed by ONE Evidence record; usable_now == admissible_free (floor once).
+        return capacity.CapacityDrive(
+            drive_label="primary", role="primary", raid_backed=False, capacity_bytes=1_000,
+            evidence=capacity_evidence.Evidence(
+                kind="live", executable=True, admissible_free=admissible, observed_free=admissible + 50),
+            safety_floor=50)
+
+    exact = _drive(209)                                  # usable_now 209 == required peak (fits exactly)
     assert capacity.preflight_file(
         exact, file_budget, capacity.CapacityMode.GUARANTEED
     ) is None
-    short = capacity.CapacityDrive(
-        **{**exact.__dict__, "physical_free": 258}
-    )
+    short = _drive(208)                                  # usable_now 208 -> 1 byte short
     failure = capacity.preflight_file(
         short, file_budget, capacity.CapacityMode.GUARANTEED,
         requirement_id="primary:org/model", task_id="fetch:primary:org/model",
@@ -229,7 +264,13 @@ def test_file_preflight_is_exact_at_workspace_boundary():
     assert failure.shortfall_bytes == 1
 
 
-def test_tiered_v1_is_deterministic_raid_first_and_smallest_replica():
+def test_tiered_v2_is_deterministic_and_lexicographic():
+    """#38: tiered_v2 replaces RAID-first FFD with deterministic Gate-B + lex improve.
+
+    Pins the exact assignment this fixture produces under movement ≻ free-vector ≻ idle ≻
+    canonical (lex objectives are proven in pure Gate-1 contracts; this freezes the adapter
+    projection for a multi-drive mixed home/bulk/replica plan).
+    """
     con = _mem()
     _drive(con, "raid", raid=True, capacity_bytes=4_000)
     _drive(con, "primary-big", capacity_bytes=3_000)
@@ -239,18 +280,22 @@ def test_tiered_v1_is_deterministic_raid_first_and_smallest_replica():
     _repo(con, "org/protected", copies=2, files=(("p.gguf", 200, "gguf", None),))
     _repo(con, "org/bulk-a", files=(("a.gguf", 300, "gguf", None),))
     _repo(con, "org/bulk-b", files=(("b.gguf", 250, "gguf", None),))
-    graph = reconcile.reconcile_plan(con, "ark")
-    first = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
-    second = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
+    graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
+    first = capacity.plan_capacity(con, graph)
+    second = capacity.plan_capacity(con, graph)
     assert first.to_dict() == second.to_dict()
+    assert first.placement_policy == "tiered_v2"
+    assert first.feasible and first.gate_b_code == "FEASIBLE"
+    assert first.derivation_mode == "optimized"
     targets = {item.requirement_id: item.target_drive for item in first.tasks}
-    assert targets["protected_home:org/protected"] == "raid"
-    assert targets["primary:org/bulk-a"] == "raid"
-    assert targets["primary:org/bulk-b"] == "raid"
-    assert targets["protected_replica:org/protected"] == "replica-small"
-    assert first.batch_order == ("raid", "replica-small")
-    shadow = reconcile.shadow_report(con, "ark")
-    assert shadow["placement_comparison"]["target_equivalent"] is True
+    # Exact pins (measured under tiered_v2 lex improve — not membership ranges).
+    assert targets == {
+        "protected_home:org/protected": "raid",
+        "protected_replica:org/protected": "replica-small",
+        "primary:org/bulk-a": "primary-small",
+        "primary:org/bulk-b": "primary-small",
+    }
+    assert first.batch_order == ("raid", "primary-small", "replica-small")
 
 
 def test_portal_shadow_explain_uses_dedicated_read_only_connection():
@@ -264,7 +309,7 @@ def test_portal_shadow_explain_uses_dedicated_read_only_connection():
         result = plan_api.shadow_explain()
     connect.assert_called_once_with(read_only=True)
     forbidden_lock.__enter__.assert_not_called()
-    assert result["capacity"]["placement_policy"] == "tiered_v1"
+    assert result["capacity"]["placement_policy"] == "tiered_v2"
 
 
 def test_portal_shadow_explain_returns_typed_phase2_error_and_closes_connection():
@@ -296,9 +341,12 @@ def test_shadow_comparison_never_normalizes_away_changed_target():
         report = reconcile.shadow_report(con, "ark")
     comparison = report["placement_comparison"]
     assert comparison["target_equivalent"] is False
+    # Exact mismatch row: legacy librarian forced wrong-primary; tiered_v2 places on raid.
+    # Both tiered_v2 (canonical) and tiered_v1 (one-release alias) keys are required.
     assert comparison["target_mismatches"] == [{
         "requirement_id": "primary:org/model",
         "legacy": "wrong-primary",
+        "tiered_v2": "raid",
         "tiered_v1": "raid",
     }]
 
@@ -335,9 +383,9 @@ def test_phase2_candidate_cross_product_stays_bounded():
     con.execute("COMMIT")
     del files, archived
 
-    graph = reconcile.reconcile_plan(con, "ark")
+    from modelark import budgets
     calls = 0
-    original = capacity._fetch_budget
+    original = budgets.file_budget
 
     def counted(*args, **kwargs):
         nonlocal calls
@@ -346,8 +394,12 @@ def test_phase2_candidate_cross_product_stays_bounded():
 
     try:
         started = time.perf_counter()
-        with mock.patch.object(capacity, "_fetch_budget", side_effect=counted):
-            result = capacity.plan_capacity(con, graph, compression_cfg=_cfg())
+        # #36a: the candidate cross-product (one shared-seam budget per requirement×eligible-target) is
+        # built in reconcile_plan -> candidates(); placement wraps them without recomputation. Count the
+        # per-file budget calls there: 1000 repos × 10 eligible primaries × 1 missing file = 10k, bounded.
+        with mock.patch.object(budgets, "file_budget", side_effect=counted):
+            graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
+            result = capacity.plan_capacity(con, graph)
         elapsed = time.perf_counter() - started
         assert elapsed < 2.0, f"10k-candidate placement took {elapsed:.3f}s"
         assert calls == 10_000

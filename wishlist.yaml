@@ -3,6 +3,11 @@
 # Weight preference: safetensors, else GGUF, else explicitly opted-in inert pickle;
 # companion config/tokenizer/index files ride along.
 
+# DEC-052: optional path to an operator acceptance catalog (not committed).
+# When absent or missing on disk, B12 measurement skips with skipped_measurement.
+acceptance:
+  fixture_sqlite_path: null
+
 # Compression gate (DEC-022). Weights are stored ZipNN-compressed. Whole-file compress is
 # fastest but needs ~4x the shard in RAM (measured: ~3.67x + baseline). A shard whose est.
 # peak exceeds the budget below is handled out-of-RAM instead of OOM-ing the run.
