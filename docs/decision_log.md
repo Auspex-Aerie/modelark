@@ -1123,7 +1123,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - UPDATE 2026-08-21 — Operator: the live operator catalog file is **off-limits** until an explicit backup-first authorization. Lost-drive / mid-plan recovery and provenance-migration tests run on disposable copies, fixtures, and simulated-failure trees only. Do not open, copy, or publish against the live catalog.
 
 ### DEF-036: Provide an operator-facing proposal approval path before attended cutover
-- date: 2026-08-04 / status: deferred to the pre-cutover delivery gate / triggered_by: PR #55 whole-PR review / related: RFC-002, DEC-049, DEF-035, modelark/proposal.py, modelark/web/plan_api.py, modelark/web/fill_api.py / docs_updated: docs/decision_log.md
+- date: 2026-08-04 / status: resolved by DEC-082 / triggered_by: PR #55 whole-PR review / related: RFC-002, DEC-049, DEF-035, modelark/proposal.py, modelark/web/plan_api.py, modelark/web/fill_api.py / docs_updated: docs/decision_log.md
 - decision: `proposal.approve()` exists and is tested, but the installed portal/CLI exposes preview and start without an operator-facing approval action. RFC-002 requires one explicit `adopt_current` preview/approval after migration. The surface and UX remain a product decision; this entry prevents the requirement from disappearing without allocating DEC-061 prematurely.
 - revisit_when: before the attended post-migration preview/approval and before any Fill can resume on the migrated catalog.
 - UPDATE 2026-08-21 — Operator skipped DEF-036 for now and authorized INC-033 / INC-035 next. RFC-002 `adopt_current` after migration remains required before Fill resume; the installed approve surface is not this cycle.
@@ -1716,7 +1716,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEF-040: Give the public schema-v7 release a distinct package version
 - `id`: DEF-040
 - `date`: 2026-08-28
-- `status`: active
+- `status`: resolved by DEC-083
 - `triggered_by`: DEC-072 deployment identity review
 - `decision`: The locally validated candidate remains version `0.2.0` so the exact tested cutover artifact is not rebuilt during the operational transition. Before public distribution, assign the schema-v7 release a version newer than the released 0.2.0 and update release notes, upgrade examples, and artifact identity evidence together. Until then, source/pre-release operators must use catalog schema and the binary's monotonic-version refusal—not the package string alone—as the migration gate.
 - `rationale`: Reusing `0.2.0` for both the released schema-v2 source and the unreleased schema-v7 candidate makes support reports and upgrade decisions ambiguous. Changing it after local validation would create a different artifact and require a fresh release-candidate build/test cycle, while the catalog's schema guard already makes the local transition safe.
@@ -1960,3 +1960,29 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `revisit_when`: DEF-036 is accepted and deployed, and either the first real catalog subsection must be delivered to a non-ModelArk disk or ScintiLab (currently DGXSpark) begins its attached/object-store place resolver—whichever occurs first.
 - `docs_updated`: docs/decision_log.md
 - `related`: DEC-037, DEC-081, DEF-036, DEF-040, DGXSpark:DEC-059, DGXSpark:DEC-060, DGXSpark:DEC-064, DGXSpark:DEC-077, DGXSpark:DEF-018, DGXSpark:DEF-020
+
+### DEC-082: Put immutable placement review and approval in front of Fill
+- `id`: DEC-082
+- `date`: 2026-08-30
+- `status`: accepted; live application-only swap completed 2026-08-30
+- `triggered_by`: DEF-036's reached pre-Fill gate and the operator's direction to finish the remaining recovery work while reserving proposal approval for human interaction.
+- `decision`: The Fill portal creates one fresh `adopt_current` draft through the canonical proposal domain, displays the stored revision, hashes, capacity mode, totals, target-drive evidence, and every exact requirement assignment, and requires the backend-authored `APPROVE <proposal_id>` phrase. The browser supplies no planning fields. Approval calls the existing fenced stored-proposal revalidation path, never starts Fill, and enables Start only while the active approval remains current and the central plan remains feasible. Missing, stale, refused, or unavailable approval keeps Start disabled.
+- `rationale`: The operator must review the same immutable artifact execution will consume; a frontend-reconstructed placement or an approval side effect that starts work would create alternate authority and collapse review into execution. Keeping approval and Fill Start separate also permits a final catalog/selection edit without accidentally moving archive bytes.
+- `impact`: Commit `a574d6b` implements the backend adapter and portal docket. Exact-source qualification passed 957 non-E2E tests with five known deprecation warnings, 18 focused proposal/security/version tests, Ruff, JavaScript syntax, package build, and the previously completed standalone portal E2E review/approval path. The retained 0.3.0 wheel SHA-256 is `841cba53896e99bb9973438195d61ef7af53394641eead20cf8ea412800a5e7a`; source archive SHA-256 is `b17d1223820c67c3ba307fbd629156b3af8a6c273764dc30160adf55a57077f3`. The live application-only swap reuses the exact schema-v7 data/config/state paths, stays disabled for login startup, reports `resume=False`, and passes the deployment check. Revision `9`, selection hash `b8eb1154a66ec52d8aef85846a8dfdb677cbc471491354b319be579228990dd5`, and `FEASIBLE` are unchanged; Fill is idle and proposal status is deliberately `missing` until the operator reviews it. Served `proposal.js` matches candidate source SHA-256 `782bab974f9d56af271b714a68f55bf1d827aac4c7c35ec75a16ea14c054a0eb`.
+- `resolves`: DEF-036
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, CHANGELOG.md, README.md, modelark/proposal.py, modelark/web/proposal_api.py, modelark/web/server.py, modelark/web/static/app.css, modelark/web/static/fill.js, modelark/web/static/index.html, modelark/web/static/proposal.js
+- `related`: DEC-049, DEC-057, DEC-067, DEC-081, DEF-041, RFC-002
+- `scope_boundary`: Proposal drafting, exact human review/approval, Fill admission gating, qualification, and the retained application-only swap. No proposal was created or approved, Fill was not started or resumed, no selection/plan/drive/catalog/archive content was mutated, and no release was tagged or published.
+
+### DEC-083: Assign version 0.3.0 to the schema-v7 release line
+- `id`: DEC-083
+- `date`: 2026-08-30
+- `status`: accepted
+- `triggered_by`: DEF-040 and the operator's direction to resolve the remaining release-identity gate immediately.
+- `decision`: Assign package version `0.3.0` to the schema-v7 public-alpha release line in both build metadata and runtime version output. Keep `0.2.0` named in upgrade guidance as the released schema-v2 source line, and identify `0.3.0` as the first schema-v7 line. Version, changelog, upgrade guidance, build artifacts, and retained live candidate must advance together.
+- `rationale`: A distinct minor version makes support reports and migration decisions unambiguous while accurately signaling the catalog-schema and operator-workflow expansion. Reusing `0.2.0` would leave two incompatible schema generations with the same package identity; a patch-only version would understate the pre-1.0 compatibility boundary.
+- `impact`: `pyproject.toml`, `modelark.__version__`, README, changelog, and upgrade documentation now agree on `0.3.0`. Candidate `a574d6b` reports `modelark 0.3.0`; its retained wheel and source archive have the SHA-256 identities recorded by DEC-082, and the installed live portal uses that exact candidate. Tagging and public package publication remain separate, unauthorized actions.
+- `resolves`: DEF-040
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, docs/upgrading.md, CHANGELOG.md, README.md, pyproject.toml, modelark/__init__.py
+- `related`: DEC-072, DEC-082
+- `scope_boundary`: Release identity, documentation, artifact qualification, and local candidate installation only. No Git tag, Git push, package upload, public announcement, schema rewrite, catalog migration, proposal approval, Fill, drive, or archive-byte action is authorized.

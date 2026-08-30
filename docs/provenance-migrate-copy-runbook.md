@@ -1046,3 +1046,35 @@ generic basename such as `modelark.service` into the shared evidence directory. 
 immediately detected collision: the original `11d9d6d` unit was restored from its byte-preserved
 pre-swap copy and hash-verified, while the final unit was stored separately as
 `ce81288-modelark.service`. No live service or catalog state was affected.
+
+## Deployed proposal gate; final catalog choice and human approval pending — 2026-08-30
+
+DEC-082 resolves DEF-036 with exact candidate `a574d6b`. The portal now creates a backend-authored
+immutable proposal, displays its complete assignment docket, requires the exact backend phrase for
+approval, and keeps approval separate from Fill Start. Exact-source qualification passed 957
+non-E2E tests with five known warnings, 18 focused proposal/security/version tests, Ruff, JavaScript
+syntax, package build, and the prior standalone portal E2E review/approval path. The retained 0.3.0
+wheel SHA-256 is `841cba53896e99bb9973438195d61ef7af53394641eead20cf8ea412800a5e7a`; the source archive SHA-256
+is `b17d1223820c67c3ba307fbd629156b3af8a6c273764dc30160adf55a57077f3`.
+
+The application-only swap preserved the existing schema-v7 data, state, and config paths. The first
+deployer invocation installed the new unit but its child `systemctl` lacked the user-session bus and
+stopped before daemon reload or restart; the old service remained healthy throughout. Direct
+`systemctl --user daemon-reload` and `restart` then completed the intended boundary. The documented
+deployment check passes. The service is active on `a574d6b`, remains disabled for login startup,
+logs `resume=False`, and serves proposal JavaScript byte-identical to candidate source. Pre/post plan
+evidence is unchanged: revision `9`, selection hash
+`b8eb1154a66ec52d8aef85846a8dfdb677cbc471491354b319be579228990dd5`, gate `FEASIBLE`; Fill is idle
+and proposal status is `missing`. No proposal was created or approved and no Fill work ran.
+
+DEC-083 also resolves DEF-040: the schema-v7 line is now package version `0.3.0`, distinct from the
+released schema-v2 `0.2.0` line. No tag or public package publication occurred.
+
+Before creating the human-reviewed proposal, settle the intended selection. DGXSpark's current
+`config/inference/weight_catalog.yml` names 24 kept or queued repository IDs checked against the live
+ModelArk catalog. Only `LiquidAI/LFM2.5-8B-A1B` is currently catalogued, and it is already selected;
+the other 23 require explicit discovery/ingest before selection. If those Spark-resident models are
+part of the first Fill, ingest and select them first, allow the canonical replan to advance revision,
+then create and review a fresh proposal. If they are a later catalog/Usable Slice wave, the operator
+may review revision 9 now. Never approve revision 9 and then treat that approval as covering later
+Spark catalog additions; the changed selection must invalidate it.
