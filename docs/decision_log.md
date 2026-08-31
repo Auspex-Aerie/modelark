@@ -2050,3 +2050,32 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, docs/operations.md, docs/provenance-migrate-copy-runbook.md, modelark/web/static/fill.js, tests/test_e2e_portal.py
 - `related`: DEC-049, DEC-067, DEC-069, DEC-082, DEF-042
 - `scope_boundary`: Fill-chart lifecycle presentation, regression coverage, and operator documentation only. No drive lifecycle/eligibility, plan membership, assignment, proposal, planner revision, Fill session, or archive byte changes.
+
+### BOT-003: Greptile was tagged but its completed review was not polled
+- `id`: BOT-003
+- `date`: 2026-08-30
+- `status`: logged
+- `triggered_by`: Operator correction after the agent posted the PR #57 Greptile trigger and reported only that no response had arrived yet.
+- `claim`: Posting `@greptileai review` and checking immediately afterward was treated as sufficient handoff, so the agent stopped polling and missed the completed review state.
+- `correction`: A Greptile trigger starts a bounded review loop; it does not complete one. Poll on a five-minute interval, inspect summary, inline comments, check state, exact reviewed HEAD, and reaction groups, and recognize the thumbs-up reaction as the completion signal. Bound both the review iterations and unchanged polls, then return control to the operator.
+- `verified`: PR #57 iteration 1 completed against exact HEAD `5f2dcae3240cf590f382cca6de8130609b3207f4` with Greptile confidence `5/5`, no correctness or safety defect, a successful Greptile check, and a `THUMBS_UP` reaction on the trigger comment. Python 3.10, Python 3.12, and E2E were also green. The operator, not the agent's polling, surfaced that completed state.
+- `lesson`: Never infer review state from elapsed time or the absence of an immediate reply. Persist and report explicit iteration/poll counters, exact HEADs, review findings, and the completion emoji.
+- `docs_updated`: docs/decision_log.md
+- `related`: DEC-061, DEC-085, PR-057
+
+### DEC-085: Bound Greptile review loops and reference every iteration precisely
+- `id`: DEC-085
+- `date`: 2026-08-30
+- `status`: accepted
+- `triggered_by`: BOT-003 and the operator's explicit Greptile review-loop policy.
+- `decision`: Use the following project review protocol for Greptile:
+  1. Start iteration 1 by commenting directly on the PR with `@greptileai review`, request review of the whole current PR, and name the exact HEAD under review.
+  2. Poll at five-minute intervals. Read the Greptile summary, score, inline comments, check result, last-reviewed commit, and emoji reactions. A thumbs-up reaction signals completion, but never substitutes for reading and dispositioning the actual findings.
+  3. Follow Greptile findings, including nits, unless they conflict with an explicit operator instruction or a higher safety/correctness boundary; surface such a conflict instead of silently ignoring either authority.
+  4. After changes, push one reviewable HEAD and start the next numbered iteration with the exact new HEAD, prior finding, changed file/location, and relevant diff range so Greptile reviews the remediation rather than drifting across unrelated history.
+  5. Stop and return control to the operator after at most three Greptile review iterations, whether findings remain or not. Independently, if three consecutive five-minute polls show no review-state change, stop polling and wait for the operator.
+- `rationale`: Greptile is useful and sometimes intentionally exacting, but unbounded bot loops waste review credits and can drift from operator intent. Explicit commit/location references make each remediation auditable; bounded iteration and unchanged-poll ceilings guarantee a human gate. Emoji completion must be observed rather than assumed, while DEC-061's partial-review rule still prevents a badge or reaction from being mistaken for disposition when a requested question was not answered.
+- `impact`: PR review handoffs now carry two counters (`iteration N/3`, `unchanged poll N/3`), exact reviewed commits, focused remediation references, and an explicit operator stop. PR #57's substantive release/UI review completed at iteration `1/3` with zero findings; the policy-only ledger append that follows that reviewed HEAD is presented as iteration `2/3` with its exact location rather than being left outside the review record.
+- `docs_updated`: docs/decision_log.md
+- `related`: BOT-003, DEC-061, PR-055, PR-057
+- `scope_boundary`: Review orchestration and documentation only. This policy never authorizes automatic merge, tag, release publication, deployment, proposal mutation, Start Fill, or archive-byte work.
