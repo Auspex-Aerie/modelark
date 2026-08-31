@@ -6,6 +6,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## 0.3.0 - 2026-08-30
 
+ModelArk 0.3.0 is the first schema-v7 public-alpha release. It adds substantial backend disk-safety
+and operator-workflow protection: when an issue occurs, the system is designed to stop with typed
+evidence, preserve completed work, and direct the operator toward a documented retry, migration,
+recovery, or rollback path rather than guessing. See the [v0.3.0 release notes](docs/releases/v0.3.0.md)
+for the brief operator-facing summary.
+
 ### Added
 
 - The Fill portal now authors one immutable placement proposal, presents every exact assignment for
