@@ -17,9 +17,10 @@ working tree later**. It catalogs broadly, archives a curated set across offline
 keeps distinct evidence about every copy, and restores Hugging Face-compatible trees only after the
 complete result verifies.
 
-It is not an inference runtime and it does not turn a catalog row into a claim that a model is
-loadable. A stale location record is not presented as proof that a disk is healthy. Those evidence
-boundaries are the product.
+ModelArk is an evidence-driven storage and recovery system. It tracks model artifacts from discovery
+through ingestion, replication, and physical verification while preserving the distinction between
+historical records and current storage state. That trustworthy evidence trail is the foundation of
+the product.
 
 ```text
 catalog → curate → plan → review → approve → fill → verify → restore
