@@ -2066,7 +2066,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEC-085: Bound Greptile review loops and reference every iteration precisely
 - `id`: DEC-085
 - `date`: 2026-08-30
-- `status`: accepted
+- `status`: superseded by DEC-086
 - `triggered_by`: BOT-003 and the operator's explicit Greptile review-loop policy.
 - `decision`: Use the following project review protocol for Greptile:
   1. Start iteration 1 by commenting directly on the PR with `@greptileai review`, request review of the whole current PR, and name the exact HEAD under review.
@@ -2079,3 +2079,34 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md
 - `related`: BOT-003, DEC-061, PR-055, PR-057
 - `scope_boundary`: Review orchestration and documentation only. This policy never authorizes automatic merge, tag, release publication, deployment, proposal mutation, Start Fill, or archive-byte work.
+
+### BOT-004: A clean Greptile acceptance was incorrectly followed by a mandatory iteration
+- `id`: BOT-004
+- `date`: 2026-08-30
+- `status`: logged
+- `triggered_by`: Human PR #57 note: “iters are NOT mandatory. Iters are only needed on non-accept states.”
+- `claim`: DEC-085 treated every post-review ledger change as requiring another numbered Greptile iteration, so the agent requested iteration 2 even though iteration 1 already had the full accept state: exact current HEAD, `5/5`, no findings, successful check, and a thumbs-up completion reaction.
+- `correction`: Stop a Greptile loop immediately on a current-HEAD accept state. Additional iterations are remediation cycles only for non-accept states; they are not a quota to consume. Human-authored PR notes are part of review state and must be read and observed whenever encountered, before further polling, changes, or bot triggers.
+- `verified`: The human note was posted directly on PR #57 after iteration 2 was unnecessarily requested. Greptile iteration 2 also completed at `f0fbbb2d60c93f1f65b92054e3531ef0bfecd1d5` with `5/5`, no blocking failure, a successful check, and a thumbs-up reaction, confirming there is no basis for iteration 3.
+- `lesson`: A maximum is a ceiling, not a target. Evaluate accept/non-accept state before incrementing an iteration, and always include human comments in the state scan.
+- `docs_updated`: docs/decision_log.md
+- `related`: BOT-003, DEC-085, DEC-086, PR-057
+
+### DEC-086: Iterate Greptile only from a non-accept review state
+- `id`: DEC-086
+- `date`: 2026-08-30
+- `status`: accepted
+- `supersedes`: DEC-085
+- `triggered_by`: BOT-004 and the operator's human PR #57 note correcting mandatory-iteration behavior.
+- `decision`: Use the following bounded Greptile protocol:
+  1. Start iteration 1 by commenting directly on the PR with `@greptileai review`, request the whole current PR, and name the exact HEAD.
+  2. Poll at five-minute intervals. On every poll, read human-authored PR notes as well as the Greptile summary, score, inline findings, check state, last-reviewed commit, and emoji reactions. Observe human notes before taking another automated action; if a note conflicts with an earlier workflow assumption, the human note corrects it unless a higher safety boundary requires explicit escalation.
+  3. Define **accept** as Greptile completing against the current HEAD with `5/5`, no unresolved finding or blocking failure, a successful review check, and the thumbs-up completion reaction. On accept, stop the Greptile loop and return control to the operator. Do not request another iteration merely to reach the allowed maximum.
+  4. Define **non-accept** as an incomplete or stale-HEAD review, a score below `5/5`, a missing completion reaction, or any finding/nit requiring disposition. Follow findings, including nits, unless they conflict with explicit operator or safety authority; after a change, push one reviewable HEAD and request the next numbered iteration with exact prior finding, new HEAD, file/location, and diff range.
+  5. Permit at most three total review iterations. If the third iteration is still non-accept, stop and wait for the operator.
+  6. Independently, if three consecutive five-minute polls show no review-state change, stop polling and wait for the operator.
+- `rationale`: Greptile iterations exist to verify remediation, not to create ritual churn after acceptance. A precise accept predicate prevents unnecessary review-credit use, while the iteration and unchanged-poll ceilings retain the human stop. Reading human notes as first-class state prevents automation from continuing past an operator correction.
+- `impact`: PR #57's reviewed content is accepted by Greptile at iteration 2 with exact HEAD `f0fbbb2`, `5/5`, no findings, green review check, and thumbs up. This superseding policy record is the operator-directed response to the human note and is itself under direct human review; it does not manufacture iteration 3. Future handoffs report the current state as `accepted at iteration N/3` or `non-accept at iteration N/3`, plus the unchanged-poll counter only while polling is active.
+- `docs_updated`: docs/decision_log.md
+- `related`: BOT-003, BOT-004, DEC-061, DEC-085, PR-055, PR-057
+- `scope_boundary`: Review orchestration and documentation only. Accepting a Greptile review never authorizes merge, tag, release publication, deployment, proposal mutation, Start Fill, or archive-byte work.
