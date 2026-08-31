@@ -37,10 +37,14 @@
       .tierrow{display:flex;flex-wrap:wrap;gap:14px}
       .drivecard{flex:1 1 258px;max-width:340px;background:#fff;border:1px solid #d5dbe4;border-radius:6px;padding:13px 14px}
       .drivecard.empty{opacity:.55;border-style:dashed}
+      .drivecard.unavailable{opacity:1;border-color:#d9a5a1;background:#fff7f6}
+      .drivecard.unavailable .dclabel{color:#8f2d27;text-decoration:line-through;text-decoration-thickness:2px}
       .dchead{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}
       .dclabel{font:600 14px ui-monospace,Menlo,monospace}
+      .dcstatus{display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap}
       .dcbadge{font:600 10px/1 ui-monospace,monospace;letter-spacing:.06em;padding:3px 7px;border-radius:3px;color:#fff}
       .dcbadge.raid{background:#0f766e}.dcbadge.primary{background:#2c5f8f}.dcbadge.replica{background:#a8620a}
+      .dcstate{font:700 10px/1 ui-monospace,monospace;letter-spacing:.04em;padding:4px 7px;border-radius:3px;color:#fff;background:#a4342c}
       .dcbar{height:22px;background:#eef1f6;border-radius:4px;overflow:hidden;border:1px solid #e0e5ec}
       .dcbarfill{display:flex;height:100%}
       .seg{height:100%;min-width:1px;flex:0 0 auto}
@@ -153,10 +157,15 @@
     const segs = Object.entries(groups).sort((a, b) => b[1] - a[1]).map(([k, b]) =>
       `<div class="seg" style="width:${(100 * b / usable).toFixed(2)}%;background:${color(k)}" title="${esc(keyLabel(k))} (planned): ${esc(MA.gb(b))}"></div>`).join("");
     const badge = { raid: "RAID", primary: "PRIMARY", replica: "REPLICA" }[d.tier] || d.tier;
+    const lifecycle = d.lifecycle || "unknown";
+    const eligibility = d.eligibility || "unknown";
+    const unavailable = lifecycle !== "active" || eligibility !== "enabled";
+    const state = [lifecycle !== "active" ? lifecycle : "", eligibility !== "enabled" ? eligibility : ""]
+      .filter(Boolean).join(" · ").toUpperCase();
     const total = archived + (d.planned_bytes || 0);
     const totalPct = usable ? Math.min(100, Math.round(100 * total / usable)) : 0;
-    return `<div class="drivecard${(d.n_models || archived) ? "" : " empty"}" id="dc-${esc(d.label)}">
-      <div class="dchead"><span class="dclabel">${esc(d.label)}</span><span class="dcbadge ${esc(d.tier)}">${esc(badge)}</span></div>
+    return `<div class="drivecard${(d.n_models || archived) ? "" : " empty"}${unavailable ? " unavailable" : ""}" id="dc-${esc(d.label)}" data-lifecycle="${esc(lifecycle)}" data-eligibility="${esc(eligibility)}">
+      <div class="dchead"><span class="dclabel">${esc(d.label)}</span><span class="dcstatus"><span class="dcbadge ${esc(d.tier)}">${esc(badge)}</span>${unavailable ? `<span class="dcstate">⛔ ${esc(state)}</span>` : ""}</span></div>
       <div class="dcbar"><div class="dcbarfill">${segs}${archSeg}</div></div>
       <div class="dcfoot"><span>${totalPct}% · ${MA.gb(total)}/${MA.gb(usable)}</span><span>${d.n_models} planned</span></div>
       <div class="dcdone" id="done-${esc(d.label)}"${archived ? "" : " hidden"}>${archived ? doneRowHTML(archived, usable) : ""}</div>

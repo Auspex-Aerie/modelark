@@ -6,136 +6,118 @@
   <a href="pyproject.toml"><img alt="Python 3.10–3.12" src="https://img.shields.io/badge/python-3.10%E2%80%933.12-3776AB?logo=python&amp;logoColor=white"></a>
   <a href="docs/deployment.md"><img alt="Linux" src="https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&amp;logoColor=black"></a>
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
-  <a href="https://buymeacoffee.com/auspexlabs?new=1"><img alt="Buy Me a Coffee" src="https://img.shields.io/badge/Buy_Me_a_Coffee-support-AuspexLabs-FFDD00?logo=buymeacoffee&amp;logoColor=black"></a>
-  <a href="https://www.greptile.com/?utm_source=oss_badge&amp;utm_medium=readme&amp;utm_campaign=greptile_for_open_source"><img alt="Greptile: The War on Bugs" src="https://www.greptile.com/badge.svg"></a>
 </p>
 
 > **ModelArk 0.3.0 is a public alpha.** It is usable today as an operator-attended archive and
-> disaster-recovery system for open model artifacts. Interfaces can still change before 1.0, and
-> consequential storage work remains explicit and reviewable.
+> disaster-recovery system for open model artifacts. Storage work remains explicit and reviewable,
+> and interfaces can still change before 1.0.
 
-ModelArk helps you **store now, prove what you have, and recover later**. It catalogs open model
-artifacts broadly, archives a curated set across offline or attached git-annex storage, records
-distinct evidence about those copies, and restores verified Hugging Face-compatible trees when you
-need them.
+ModelArk helps you **preserve selected model artifacts, prove what you have, and recover a verified
+working tree later**. It catalogs broadly, archives a curated set across offline or attached drives,
+keeps distinct evidence about every copy, and restores Hugging Face-compatible trees only after the
+complete result verifies.
 
-It does not turn a catalog row into a claim that a model is loadable, or a stale location record into
-a claim that a disk is healthy. That evidence boundary is the point of the project.
-
-## What it does
-
-- Seeds an offline catalog of roughly 4,100 classified models, or discovers current metadata from
-  the Hugging Face Hub.
-- Curates explicit plans and shows the exact placement proposal before an operator approves it.
-- Archives supported artifacts across a finite drive fleet with capacity admission, resumable work,
-  content hashes, and lossless compression where it is safe and useful.
-- Tracks physical locations through git-annex while keeping catalog, remote-header, ingestion,
-  copy-location, and physical-verification evidence distinct.
-- Reconciles attached drives against stable filesystem and annex identity without silently adopting
-  unrelated files.
-- Restores into a hidden staging tree, verifies original-byte hashes, and publishes the recovered
-  model only after the complete result passes.
-
-The normal lifecycle is:
+It is not an inference runtime and it does not turn a catalog row into a claim that a model is
+loadable. A stale location record is not presented as proof that a disk is healthy. Those evidence
+boundaries are the product.
 
 ```text
 catalog → curate → plan → review → approve → fill → verify → restore
 ```
 
-Approval and execution are separate. Approving a placement never starts Fill.
-
-## A storage primitive, not only an archive app
-
-Model weights are the first demanding workload, but the durable core is more general: artifact
-identity, manifests, placement, copy evidence, resumable movement, and verified materialization.
-That makes ModelArk a storage primitive for later local-model work rather than another cache tied to
-one inference engine.
-
-The same boundary can support future peer-to-peer work: exchange a sealed artifact set, preserve its
-evidence, and materialize a verified destination without pretending transport alone proves
-usability. **Usable Slice**, local delivery adapters, and P2P transport are future work, not shipped
-0.3.0 features.
+Approval and execution are separate. Approving an exact placement never starts Fill.
 
 ## Start here
 
-Detailed commands live in focused guides so this page can stay readable:
-
-- [Fresh install and first archive](docs/getting-started.md)
-- [Operating ModelArk: plans, drives, Fill, verification, and restore](docs/operations.md)
-- [Upgrade from 0.2.0 or another pre-v7 catalog](docs/upgrading.md)
-- [Supervised Linux deployment and rollback](docs/deployment.md)
-- [Stopped side-by-side provenance migration](docs/provenance-live-cutover.md)
-
-ModelArk runs locally and the portal binds to `http://127.0.0.1:8077`. There is deliberately no
-remote-listen mode until authentication exists.
-
-## The evidence contract
-
-ModelArk keeps several statements separate because they answer different questions:
-
-| Evidence | What it means |
+| I want to… | Use this guide |
 |---|---|
-| Catalog metadata | The repository and declared artifacts are known. |
-| Remote-header verification | The declared safetensors layout or basic GGUF header structure was checked without downloading all tensor bytes. |
-| Ingestion evidence | Downloaded original bytes matched the available digest and any compressed representation passed a round-trip canary. |
-| Copy/location evidence | git-annex records that a particular annex remote should hold the content. |
+| Install ModelArk on a new Linux host and create the first archive | [Fresh install and first archive](docs/getting-started.md) |
+| Operate plans, drives, Fill, verification, and restore | [Operating ModelArk](docs/operations.md) |
+| Upgrade a 0.2.0 or other pre-v7 catalog | [Upgrading ModelArk](docs/upgrading.md) |
+| Install or update the supervised user service | [Deploying ModelArk](docs/deployment.md) |
+| Perform the stopped side-by-side provenance migration | [Live cutover procedure](docs/provenance-live-cutover.md) |
+
+The portal is local-only at `http://127.0.0.1:8077`. ModelArk deliberately has no remote-listen mode
+until authentication exists.
+
+## What ModelArk protects
+
+- A broad metadata catalog and an explicitly curated archive plan.
+- Supported model artifacts placed across a finite git-annex drive fleet.
+- Original and stored-byte hashes, copy locations, and physical-verification results without
+  collapsing them into one vague “available” state.
+- Verified restores published only after the requested tree is complete.
+
+## Evidence, not assumptions
+
+| Evidence | What it actually means |
+|---|---|
+| Catalog metadata | The repository and its declared artifacts are known. |
+| Remote-header verification | The declared safetensors layout or basic GGUF structure was checked without downloading every tensor byte. |
+| Ingestion evidence | Downloaded original bytes matched available digests; compressed representations also passed a round-trip canary. |
+| Copy/location evidence | git-annex records that a specific annex remote should hold the content. |
 | Physical verification | A mounted copy was read and verified again. |
-| Verified restore | The complete requested tree was reconstructed and passed its recorded original-byte hashes before publication. |
+| Verified restore | The full requested tree was reconstructed and passed its recorded original-byte hashes before publication. |
 
 See [capacity evidence](docs/capacity-evidence.md) and the [Fill pipeline](docs/fill_pipeline.md) for
 the detailed contracts.
 
-## Safety by construction
+## Safety and recovery
 
-- **No in-place catalog upgrades.** ModelArk 0.3.0 refuses pre-v7 catalogs and directs the operator
-  through a stopped, backup-first, side-by-side migration.
+- **No in-place legacy upgrade.** Pre-v7 catalogs are migrated through a stopped, backup-first,
+  side-by-side procedure.
+- **No inferred disk identity.** Filesystem and annex identity—not an enclosure label—authorize a
+  registered drive.
+- **No silent under-replication.** Missing capacity, identity, or provenance evidence remains a
+  typed blocker.
+- **No automatic approval or Fill.** The operator reviews one immutable proposal, approves its exact
+  placement, and starts execution separately.
 - **No canary, no drop.** A compressed artifact cannot replace its original until decompression
   reproduces the original digest.
-- **No silent under-replication.** Required copies remain explicit requirements; missing capacity or
-  identity evidence blocks work.
-- **No inferred drive identity.** A stable filesystem UUID plus annex UUID is authoritative;
-  enclosure serials are supporting observations.
-- **No automatic approval or Fill.** The operator reviews one immutable proposal, approves it with
-  its exact phrase, and starts work separately.
 - **No automatic deletion of extras.** Reconciliation reports unclaimed content but does not adopt
   or remove it.
 
-## 0.3.0 status
+## What changed in v0.3.0
 
-Version 0.3.0 is the first schema-v7 release line. It adds the backup-first provenance migration,
-identity-bound capacity evidence, canonical placement and approval, execution-session fencing,
-drive lifecycle handling, and the operator-facing exact proposal review.
+There are **a lot of backend disk-safety and workflow additions** in this release. If you run into an
+issue, ModelArk is designed to stop with evidence, preserve completed work, and give you a documented
+recovery, retry, migration, or rollback path instead of guessing.
 
-The release path is covered by the full test suite, installed-wheel migration smoke, packaging,
-hostile-web checks, and standalone browser acceptance. Alpha still means operator attention matters:
-large downloads can be expensive to retry, some USB bridges report weak SMART identity, functional
-model loading is not a verification tier yet, and supported artifact policy remains intentionally
-conservative.
+In brief, v0.3.0 adds:
 
-The [changelog](CHANGELOG.md), [roadmap](docs/roadmap.md), and append-only
-[decision ledger](docs/decision_log.md) carry the detailed status and rationale.
+- backup-first schema-v7 migration with rehearsal, no-clobber publication, and retained rollback;
+- identity-bound capacity admission, drive lifecycle handling, and safer reconciliation;
+- canonical placement planning with exact proposal review and explicit approval;
+- resumable, fenced Fill sessions with attended drive-loading workflow;
+- stronger provenance, hash repair, physical verification, and staged restore contracts; and
+- focused install, operations, deployment, upgrade, migration, and recovery guides.
 
-## Project map
+Read the [v0.3.0 release notes](docs/releases/v0.3.0.md) or the
+[changelog](CHANGELOG.md) for the complete release record.
 
-```text
-modelark.core        catalog and database primitives
-modelark             discovery, planning, archive, verification, and restore
-git-annex map        private byte/location authority
-drive fleet          the actual offline, attached, or network-backed content
-```
+## Becoming a storage primitive
 
-Useful deeper references:
+Model weights are the first demanding workload, but the durable core is more general: artifact
+identity, manifests, placement, copy evidence, resumable movement, and verified materialization.
+ModelArk is becoming an evidence-preserving storage primitive for later local-model tools rather
+than another cache tied to one inference engine.
 
-- [Architecture and placement hardening](docs/plans/placement-capacity-hardening.md)
-- [Migration acceptance record](docs/rfcs/001-migrated-runtime-acceptance.md)
-- [First-class placement and approval design](docs/rfcs/002-first-class-placement-approval.md)
-- [Deferred artifact-format support](docs/deferred-artifact-support.md)
-- [Security policy](SECURITY.md)
+That same boundary supports two future directions:
 
-## Contributing and support
+- **Usable Slice:** ask for a named subset of the existing catalog, then materialize and verify it
+  for a specific consumer or machine.
+- **Peer-to-peer transport:** exchange sealed artifact sets while preserving evidence instead of
+  treating successful transport as proof of usability.
 
-Bug reports, migration feedback, documentation fixes, curation ideas, and code contributions are
-welcome. See [Contributing](contributing/contributions.md) before opening a change.
+Usable Slice, local delivery adapters, scratch transfer, and P2P transport are future work—not
+shipped v0.3.0 features.
+
+## Project and support
+
+The [roadmap](docs/roadmap.md), [architecture plan](docs/plans/placement-capacity-hardening.md), and
+append-only [decision ledger](docs/decision_log.md) carry deeper status and rationale. See
+[Contributing](contributing/contributions.md) before opening a change, and report vulnerabilities
+through the [security policy](SECURITY.md).
 
 If ModelArk helps preserve the models you care about, you can
 [support AuspexLabs](https://buymeacoffee.com/auspexlabs?new=1). Testing and thoughtful failure

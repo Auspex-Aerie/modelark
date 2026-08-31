@@ -2023,3 +2023,90 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, modelark/register.py, tests/test_def029_gate2_contracts.py
 - `related`: DEC-006, DEC-076, DEC-078, PR-055
 - `scope_boundary`: Git authorship for ModelArk-managed map and drive metadata only. No global Git configuration, archive identity, registration receipt, drive/catalog record, proposal, Fill, or archive byte is mutated by this remediation.
+
+### DEF-042: Defer operator-directed replacement-drive advancement
+- `id`: DEF-042
+- `date`: 2026-08-30
+- `status`: active
+- `triggered_by`: Human review of the immutable revision-9 proposal showed `drive-07` active, enabled, primary, and capacity-qualified but assigned zero requirements, while its intended predecessor `drive-02` is lost/excluded. The operator observed that the replacement joined the back of the planner's line even though it could, and likely should, advance into Drive #2's former role.
+- `decision`: Defer a bound operator action that names a replacement/successor relationship and requests a partial replan which preferentially advances that drive into the predecessor's placement role while preserving unaffected assignments where feasible. Proceed with review of the unchanged revision-9 proposal; do not silently infer substitution from registration, capacity, label order, or hardware similarity, and do not mutate the current proposal or start Fill as part of this deferral.
+- `rationale`: Replacement affinity is operator intent, not a fact ModelArk can safely derive from an empty drive or a lost identity. It must become explicit versioned planner input, participate in deterministic feasibility and identity/capacity fences, explain any assignment changes, bump the planner revision, and produce a fresh canonical proposal for separate approval. Adding it inside the current approval dialog would invalidate the exact artifact already reviewed and reopen the completed migration/release gate. The present plan remains feasible and safely excludes Drive #2, so deferral costs utilization preference rather than correctness.
+- `impact`: Until resolved, an admitted replacement may remain unused when the canonical planner can satisfy the plan without it. Operators cannot say “advance Drive #7 into Drive #2's slot” or request a bounded successor replan; changing placement requires a later explicit planning workflow and fresh approval, never direct database edits or an execution-time override.
+- `revisit_when`: Revisit after the revision-9 approval/recovery cycle, and before the first plan where the operator wants Drive #7 populated as Drive #2's successor or replacement-drive affinity is needed for another lost/retired identity—whichever comes first.
+- `docs_updated`: docs/decision_log.md
+- `related`: DEC-049, DEC-067, DEC-076, DEC-081, DEC-082, DEF-041, RFC-002
+- `scope_boundary`: Deferral record only. No planner policy, drive identity/role, capacity evidence, assignment, planner revision, stored proposal, approval, Fill state, or archive byte changes here.
+
+### INC-053: Fill drive cards hid lost and excluded lifecycle state
+- `id`: INC-053
+- `date`: 2026-08-30
+- `status`: open; remediation prepared on follow-up branch, not deployed
+- `triggered_by`: Live operator review immediately after approving the revision-9 proposal
+- `symptom`: The Fill chart continued to show lost/excluded `drive-02` after approval with the same dashed, faded empty-card treatment as active/enabled but unused `drive-07`. It displayed no unavailable icon, lifecycle label, or struck-through identity, so retaining historical plan membership could be misread as current execution eligibility.
+- `root_cause`: `librarian.plan_view` already publishes exact per-drive `lifecycle` and `eligibility`, but `modelark/web/static/fill.js::driveCard` consumed only tier, capacity, archived bytes, and planned work. Its generic `empty` class collapsed “lost and excluded” into “active but currently unused.”
+- `blast_radius`: Operator interpretation of the Fill chart only. Canonical planning, proposal serialization, approval revalidation, and execution projection already exclude the lost drive; the approved proposal gives Drive #2 zero requirements, so no write authority or archive placement was incorrect.
+- `why_not_caught_earlier`: Projection tests asserted lifecycle fields in the backend payload, while portal E2E exercised Fill with active drives and exercised loss only on the separate Drives screen. No browser contract required a lost plan-member card to remain visible with an explicit unavailable state.
+- `planned_remediation`: Preserve the card for durable identity/history, render a red `LOST · EXCLUDED` status plus struck-through label from backend-authored fields, keep active-but-unused cards visually distinct, add browser coverage, and document the difference and attended Start boundary. Do not filter the drive out or teach the browser an alternate eligibility policy.
+- `docs_updated`: docs/decision_log.md, docs/operations.md, docs/provenance-migrate-copy-runbook.md, modelark/web/static/fill.js, tests/test_e2e_portal.py
+- `related`: DEC-049, DEC-067, DEC-069, DEC-082, DEF-042
+- `scope_boundary`: Fill-chart lifecycle presentation, regression coverage, and operator documentation only. No drive lifecycle/eligibility, plan membership, assignment, proposal, planner revision, Fill session, or archive byte changes.
+
+### BOT-003: Greptile was tagged but its completed review was not polled
+- `id`: BOT-003
+- `date`: 2026-08-30
+- `status`: logged
+- `triggered_by`: Operator correction after the agent posted the PR #57 Greptile trigger and reported only that no response had arrived yet.
+- `claim`: Posting `@greptileai review` and checking immediately afterward was treated as sufficient handoff, so the agent stopped polling and missed the completed review state.
+- `correction`: A Greptile trigger starts a bounded review loop; it does not complete one. Poll on a five-minute interval, inspect summary, inline comments, check state, exact reviewed HEAD, and reaction groups, and recognize the thumbs-up reaction as the completion signal. Bound both the review iterations and unchanged polls, then return control to the operator.
+- `verified`: PR #57 iteration 1 completed against exact HEAD `5f2dcae3240cf590f382cca6de8130609b3207f4` with Greptile confidence `5/5`, no correctness or safety defect, a successful Greptile check, and a `THUMBS_UP` reaction on the trigger comment. Python 3.10, Python 3.12, and E2E were also green. The operator, not the agent's polling, surfaced that completed state.
+- `lesson`: Never infer review state from elapsed time or the absence of an immediate reply. Persist and report explicit iteration/poll counters, exact HEADs, review findings, and the completion emoji.
+- `docs_updated`: docs/decision_log.md
+- `related`: DEC-061, DEC-085, PR-057
+
+### DEC-085: Bound Greptile review loops and reference every iteration precisely
+- `id`: DEC-085
+- `date`: 2026-08-30
+- `status`: superseded by DEC-086
+- `triggered_by`: BOT-003 and the operator's explicit Greptile review-loop policy.
+- `decision`: Use the following project review protocol for Greptile:
+  1. Start iteration 1 by commenting directly on the PR with `@greptileai review`, request review of the whole current PR, and name the exact HEAD under review.
+  2. Poll at five-minute intervals. Read the Greptile summary, score, inline comments, check result, last-reviewed commit, and emoji reactions. A thumbs-up reaction signals completion, but never substitutes for reading and dispositioning the actual findings.
+  3. Follow Greptile findings, including nits, unless they conflict with an explicit operator instruction or a higher safety/correctness boundary; surface such a conflict instead of silently ignoring either authority.
+  4. After changes, push one reviewable HEAD and start the next numbered iteration with the exact new HEAD, prior finding, changed file/location, and relevant diff range so Greptile reviews the remediation rather than drifting across unrelated history.
+  5. Stop and return control to the operator after at most three Greptile review iterations, whether findings remain or not. Independently, if three consecutive five-minute polls show no review-state change, stop polling and wait for the operator.
+- `rationale`: Greptile is useful and sometimes intentionally exacting, but unbounded bot loops waste review credits and can drift from operator intent. Explicit commit/location references make each remediation auditable; bounded iteration and unchanged-poll ceilings guarantee a human gate. Emoji completion must be observed rather than assumed, while DEC-061's partial-review rule still prevents a badge or reaction from being mistaken for disposition when a requested question was not answered.
+- `impact`: PR review handoffs now carry two counters (`iteration N/3`, `unchanged poll N/3`), exact reviewed commits, focused remediation references, and an explicit operator stop. PR #57's substantive release/UI review completed at iteration `1/3` with zero findings; the policy-only ledger append that follows that reviewed HEAD is presented as iteration `2/3` with its exact location rather than being left outside the review record.
+- `docs_updated`: docs/decision_log.md
+- `related`: BOT-003, DEC-061, PR-055, PR-057
+- `scope_boundary`: Review orchestration and documentation only. This policy never authorizes automatic merge, tag, release publication, deployment, proposal mutation, Start Fill, or archive-byte work.
+
+### BOT-004: A clean Greptile acceptance was incorrectly followed by a mandatory iteration
+- `id`: BOT-004
+- `date`: 2026-08-30
+- `status`: logged
+- `triggered_by`: Human PR #57 note: “iters are NOT mandatory. Iters are only needed on non-accept states.”
+- `claim`: DEC-085 treated every post-review ledger change as requiring another numbered Greptile iteration, so the agent requested iteration 2 even though iteration 1 already had the full accept state: exact current HEAD, `5/5`, no findings, successful check, and a thumbs-up completion reaction.
+- `correction`: Stop a Greptile loop immediately on a current-HEAD accept state. Additional iterations are remediation cycles only for non-accept states; they are not a quota to consume. Human-authored PR notes are part of review state and must be read and observed whenever encountered, before further polling, changes, or bot triggers.
+- `verified`: The human note was posted directly on PR #57 after iteration 2 was unnecessarily requested. Greptile iteration 2 also completed at `f0fbbb2d60c93f1f65b92054e3531ef0bfecd1d5` with `5/5`, no blocking failure, a successful check, and a thumbs-up reaction, confirming there is no basis for iteration 3.
+- `lesson`: A maximum is a ceiling, not a target. Evaluate accept/non-accept state before incrementing an iteration, and always include human comments in the state scan.
+- `docs_updated`: docs/decision_log.md
+- `related`: BOT-003, DEC-085, DEC-086, PR-057
+
+### DEC-086: Iterate Greptile only from a non-accept review state
+- `id`: DEC-086
+- `date`: 2026-08-30
+- `status`: accepted
+- `supersedes`: DEC-085
+- `triggered_by`: BOT-004 and the operator's human PR #57 note correcting mandatory-iteration behavior.
+- `decision`: Use the following bounded Greptile protocol:
+  1. Start iteration 1 by commenting directly on the PR with `@greptileai review`, request the whole current PR, and name the exact HEAD.
+  2. Poll at five-minute intervals. On every poll, read human-authored PR notes as well as the Greptile summary, score, inline findings, check state, last-reviewed commit, and emoji reactions. Observe human notes before taking another automated action; if a note conflicts with an earlier workflow assumption, the human note corrects it unless a higher safety boundary requires explicit escalation.
+  3. Define **accept** as Greptile completing against the current HEAD with `5/5`, no unresolved finding or blocking failure, a successful review check, and the thumbs-up completion reaction. On accept, stop the Greptile loop and return control to the operator. Do not request another iteration merely to reach the allowed maximum.
+  4. Define **non-accept** as an incomplete or stale-HEAD review, a score below `5/5`, a missing completion reaction, or any finding/nit requiring disposition. Follow findings, including nits, unless they conflict with explicit operator or safety authority; after a change, push one reviewable HEAD and request the next numbered iteration with exact prior finding, new HEAD, file/location, and diff range.
+  5. Permit at most three total review iterations. If the third iteration is still non-accept, stop and wait for the operator.
+  6. Independently, if three consecutive five-minute polls show no review-state change, stop polling and wait for the operator.
+- `rationale`: Greptile iterations exist to verify remediation, not to create ritual churn after acceptance. A precise accept predicate prevents unnecessary review-credit use, while the iteration and unchanged-poll ceilings retain the human stop. Reading human notes as first-class state prevents automation from continuing past an operator correction.
+- `impact`: PR #57's reviewed content is accepted by Greptile at iteration 2 with exact HEAD `f0fbbb2`, `5/5`, no findings, green review check, and thumbs up. This superseding policy record is the operator-directed response to the human note and is itself under direct human review; it does not manufacture iteration 3. Future handoffs report the current state as `accepted at iteration N/3` or `non-accept at iteration N/3`, plus the unchanged-poll counter only while polling is active.
+- `docs_updated`: docs/decision_log.md
+- `related`: BOT-003, BOT-004, DEC-061, DEC-085, PR-055, PR-057
+- `scope_boundary`: Review orchestration and documentation only. Accepting a Greptile review never authorizes merge, tag, release publication, deployment, proposal mutation, Start Fill, or archive-byte work.

@@ -73,6 +73,15 @@ Changing selection, plan membership, capacity policy, or relevant execution conf
 an approval stale. Return to **Review exact placement** and approve the newly authored proposal; do
 not reuse an earlier phrase or edit planner tables directly.
 
+The Fill chart retains every drive identity in the active plan so loss history is not erased. A
+`lost`, `retired`, or `excluded` drive remains visible with an unavailable marker and contributes no
+executable capacity or target work. An ordinary empty card instead means the drive is still eligible
+but the current proposal does not need it.
+
+Start Fill only while an operator can respond to its attended drive-loading prompts. If nobody is
+physically available, leave the current approval in place and Fill idle; approval alone moves no
+bytes, and a service started without explicit resume does not begin the session.
+
 Do not run two Fill controllers against one runtime. Stop a portal-owned worker before using any CLI
 execution surface. Completed files are durable, but the in-flight file may need another download.
 
