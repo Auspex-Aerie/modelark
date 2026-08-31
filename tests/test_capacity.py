@@ -397,7 +397,9 @@ def test_phase2_candidate_cross_product_stays_bounded():
         # #36a: the candidate cross-product (one shared-seam budget per requirement×eligible-target) is
         # built in reconcile_plan -> candidates(); placement wraps them without recomputation. Count the
         # per-file budget calls there: 1000 repos × 10 eligible primaries × 1 missing file = 10k, bounded.
-        with mock.patch.object(budgets, "file_budget", side_effect=counted):
+        # Keep the performance gate focused on planning. A Mock(side_effect=...) adds bookkeeping to
+        # every one of these 10k calls and makes the wall-clock bound depend on CI mock overhead.
+        with mock.patch.object(budgets, "file_budget", new=counted):
             graph = reconcile.reconcile_plan(con, "ark", compression_cfg=_cfg())
             result = capacity.plan_capacity(con, graph)
         elapsed = time.perf_counter() - started
