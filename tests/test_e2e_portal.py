@@ -967,6 +967,7 @@ def _browser_flow() -> None:
                 "done_by_drive": {"drive-00": 2000000000},
                 "archived_by_drive": {"drive-00": 2000000000},
                 "archived_by_drive_current": True,
+                "archived_stale_drives": [],
             }
             pg.route(
                 "**/api/fill/status",
@@ -988,6 +989,7 @@ def _browser_flow() -> None:
             stale_status = {
                 **reload_status,
                 "archived_by_drive_current": False,
+                "archived_stale_drives": ["drive-00"],
             }
             pg.route(
                 "**/api/fill/status",

@@ -98,7 +98,9 @@ def _log_event(log, ev: dict) -> None:
         log.info(ph, repo=ev.get("repo"))
 
 
-def _attach_archived_totals(ev: dict, previous: dict | None = None) -> dict:
+def _attach_archived_totals(
+        ev: dict, previous: dict | None = None,
+        stale_drives: list[str] | tuple[str, ...] | None = None) -> dict:
     """Attach the affected drive's post-commit durable occupancy to an archive-change event.
 
     ``done_by_drive`` is cumulative session telemetry, so a browser that reloads mid-session cannot
@@ -117,6 +119,7 @@ def _attach_archived_totals(ev: dict, previous: dict | None = None) -> dict:
     if not label:
         return ev
     totals = dict(previous or {})
+    stale = set(stale_drives or ())
     snapshot_id = next(_ARCHIVE_SNAPSHOT_IDS)
     try:
         with data._lock:
@@ -132,34 +135,37 @@ def _attach_archived_totals(ev: dict, previous: dict | None = None) -> dict:
             **ev,
             "archived_by_drive": totals,
             "archived_by_drive_current": False,
-            "archived_retry_drive": label,
+            "archived_stale_drives": sorted(stale | {label}),
             "archived_snapshot_id": snapshot_id,
         }
     totals[label] = int((row or [0])[0] or 0)
+    stale.discard(label)
     return {
         **ev,
         "archived_by_drive": totals,
-        "archived_by_drive_current": True,
-        "archived_retry_drive": None,
+        "archived_by_drive_current": not stale,
+        "archived_stale_drives": sorted(stale),
         "archived_snapshot_id": snapshot_id,
     }
 
 
 def _refresh_stale_archived_totals(status: dict) -> dict:
     """Retry a failed occupancy snapshot without obscuring the last confirmed evidence."""
-    if status.get("archived_by_drive_current") is not False:
+    stale = list(status.get("archived_stale_drives") or ())
+    if not stale:
         return status
     refreshed = _attach_archived_totals(
-        {"archive_changed": True, "drive": status.get("archived_retry_drive")},
+        {"archive_changed": True, "drive": stale[0]},
         status.get("archived_by_drive"),
+        stale,
     )
-    if refreshed.get("archived_by_drive_current") is not True:
+    if stale[0] in set(refreshed.get("archived_stale_drives") or ()):
         return status
     return {
         **status,
         "archived_by_drive": refreshed["archived_by_drive"],
-        "archived_by_drive_current": True,
-        "archived_retry_drive": None,
+        "archived_by_drive_current": refreshed["archived_by_drive_current"],
+        "archived_stale_drives": refreshed["archived_stale_drives"],
         "archived_snapshot_id": refreshed["archived_snapshot_id"],
     }
 
@@ -172,8 +178,8 @@ def _refresh_worker_archived_totals(worker: fill_worker.FillWorker) -> dict:
         return before
     update = {
         "archived_by_drive": refreshed["archived_by_drive"],
-        "archived_by_drive_current": True,
-        "archived_retry_drive": None,
+        "archived_by_drive_current": refreshed["archived_by_drive_current"],
+        "archived_stale_drives": refreshed["archived_stale_drives"],
         "archived_snapshot_id": refreshed["archived_snapshot_id"],
     }
     worker.compare_and_update(
@@ -236,8 +242,12 @@ def start(body: dict) -> dict:
         log = telemetry.get_logger("fill")
 
         def logged_emit(ev: dict) -> None:                  # tee every progress event into the log, then the UI
-            previous = fill_worker.WORKER.status().get("archived_by_drive")
-            ev = _attach_archived_totals(ev, previous)
+            worker_status = fill_worker.WORKER.status()
+            ev = _attach_archived_totals(
+                ev,
+                worker_status.get("archived_by_drive"),
+                worker_status.get("archived_stale_drives"),
+            )
             _log_event(log, ev)
             emit(ev)
 

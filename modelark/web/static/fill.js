@@ -503,12 +503,15 @@
     // A stored event carries post-commit durable totals. Use those as replacement values: cumulative
     // session `done_by_drive` overlaps a freshly loaded plan and would double-count after a reload.
     const liveArchived = (s && s.archived_by_drive) || {};
-    const archivedCurrent = !s || s.archived_by_drive_current !== false;
+    const hasPerDriveFreshness = !!(s && Array.isArray(s.archived_stale_drives));
+    const staleDrives = new Set(hasPerDriveFreshness ? s.archived_stale_drives : []);
     Object.keys(archivedBy).forEach(label => {
       const row = document.getElementById("done-" + label);
       if (!row) return;
       const total = Object.prototype.hasOwnProperty.call(liveArchived, label)
         ? (liveArchived[label] || 0) : (archivedBy[label] || 0);
+      const archivedCurrent = hasPerDriveFreshness
+        ? !staleDrives.has(label) : (!s || s.archived_by_drive_current !== false);
       if (!total) { row.hidden = true; row.innerHTML = ""; return; }
       row.hidden = false;
       row.classList.toggle("stale", !archivedCurrent);

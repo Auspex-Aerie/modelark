@@ -1598,6 +1598,10 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                             ))
                             _writer.record_touched(
                                 target, paths=[f"{task.repo_id}/{stored_relpath}"], keys=[key])
+                            ctx.on_progress({
+                                "phase": "replica", "drive": target, "archive_changed": True,
+                                "say": f"    ✓ replica {target} archive record updated",
+                            })
                             result["copied_files"] += 1
                             group_copied = True
                             task_progressed = True
@@ -1617,10 +1621,6 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                         # remotes; the sync child inherits the held FDs.
                         subprocess.run(["git", "-C", str(lib), "annex", "sync", source, target],
                                        capture_output=True, text=True, pass_fds=fds)
-                        ctx.on_progress({
-                            "phase": "replica", "drive": target, "archive_changed": True,
-                            "say": f"    ✓ replica {target} archive records updated",
-                        })
                     if group_deferred:
                         ctx.on_progress({
                             "phase": "awaiting-drive", "awaiting_drive": target,

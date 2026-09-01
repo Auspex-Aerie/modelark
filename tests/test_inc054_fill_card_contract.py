@@ -29,7 +29,7 @@ def test_stored_event_carries_exact_durable_totals_without_mutating_input():
         "drive-07": 7,
     }
     assert enriched["archived_by_drive_current"] is True
-    assert enriched["archived_retry_drive"] is None
+    assert enriched["archived_stale_drives"] == []
 
 
 def test_non_stored_event_does_not_query_or_change_shape():
@@ -55,7 +55,7 @@ def test_telemetry_enrichment_failure_never_fails_fill_progress():
     assert "archived_by_drive" not in event
     assert enriched["archived_by_drive"] == {"drive-00": 2}
     assert enriched["archived_by_drive_current"] is False
-    assert enriched["archived_retry_drive"] == "drive-00"
+    assert enriched["archived_stale_drives"] == ["drive-00"]
     assert isinstance(enriched["archived_snapshot_id"], int)
 
 
@@ -64,6 +64,7 @@ def test_failed_enrichment_marks_a_retained_snapshot_non_current():
     worker._emit({
         "archived_by_drive": {"drive-00": 2_000_000_000},
         "archived_by_drive_current": True,
+        "archived_stale_drives": [],
     })
     event = {
         "file_phase": "stored", "drive": "drive-00",
@@ -72,12 +73,15 @@ def test_failed_enrichment_marks_a_retained_snapshot_non_current():
 
     with mock.patch.object(fill_api.data, "conn", side_effect=RuntimeError("catalog unavailable")):
         worker._emit(fill_api._attach_archived_totals(
-            event, worker.status()["archived_by_drive"]
+            event,
+            worker.status()["archived_by_drive"],
+            worker.status()["archived_stale_drives"],
         ))
 
     status = worker.status()
     assert status["archived_by_drive"] == {"drive-00": 2_000_000_000}
     assert status["archived_by_drive_current"] is False
+    assert status["archived_stale_drives"] == ["drive-00"]
 
 
 def test_status_retry_replaces_last_confirmed_snapshot_after_recovery():
@@ -87,7 +91,7 @@ def test_status_retry_replaces_last_confirmed_snapshot_after_recovery():
     stale = {
         "archived_by_drive": {"drive-00": 2_000_000_000},
         "archived_by_drive_current": False,
-        "archived_retry_drive": "drive-00",
+        "archived_stale_drives": ["drive-00"],
         "archived_snapshot_id": 100,
     }
 
@@ -98,7 +102,7 @@ def test_status_retry_replaces_last_confirmed_snapshot_after_recovery():
     assert stale["archived_by_drive_current"] is False
     assert refreshed["archived_by_drive"] == {"drive-00": 3_000_000_000}
     assert refreshed["archived_by_drive_current"] is True
-    assert refreshed["archived_retry_drive"] is None
+    assert refreshed["archived_stale_drives"] == []
     assert refreshed["archived_snapshot_id"] != 100
 
 
@@ -110,7 +114,7 @@ def test_status_retry_persists_and_does_not_repeat_or_regress_after_recovery():
     worker._emit({
         "archived_by_drive": {"drive-00": 2_000_000_000},
         "archived_by_drive_current": False,
-        "archived_retry_drive": "drive-00",
+        "archived_stale_drives": ["drive-00"],
         "archived_snapshot_id": 200,
     })
 
@@ -127,27 +131,43 @@ def test_status_retry_persists_and_does_not_repeat_or_regress_after_recovery():
 
 
 def test_status_retry_cannot_overwrite_a_newer_worker_snapshot():
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE archived(drive_label TEXT, stored_bytes INTEGER)")
+    con.executemany(
+        "INSERT INTO archived VALUES(?,?)",
+        [("drive-00", 3), ("drive-04", 4)],
+    )
     worker = fill_api.fill_worker.FillWorker()
     worker._emit({
         "archived_by_drive": {"drive-00": 2},
         "archived_by_drive_current": False,
-        "archived_retry_drive": "drive-00",
+        "archived_stale_drives": ["drive-00"],
         "archived_snapshot_id": 300,
     })
-    worker._emit({
-        "archived_by_drive": {"drive-00": 4},
-        "archived_by_drive_current": True,
-        "archived_retry_drive": None,
-        "archived_snapshot_id": 301,
-    })
+
+    with mock.patch.object(fill_api.data, "conn", return_value=con):
+        recovered_a = fill_api._refresh_stale_archived_totals(worker.status())
+        drive_b = fill_api._attach_archived_totals(
+            {"phase": "replica", "drive": "drive-04", "archive_changed": True},
+            worker.status()["archived_by_drive"],
+            worker.status()["archived_stale_drives"],
+        )
+    worker._emit(drive_b)
 
     applied = worker.compare_and_update(
         {"archived_snapshot_id": 300},
-        {"archived_by_drive": {"drive-00": 3}, "archived_by_drive_current": True},
+        {
+            "archived_by_drive": recovered_a["archived_by_drive"],
+            "archived_by_drive_current": recovered_a["archived_by_drive_current"],
+            "archived_stale_drives": recovered_a["archived_stale_drives"],
+            "archived_snapshot_id": recovered_a["archived_snapshot_id"],
+        },
     )
 
     assert applied is False
-    assert worker.status()["archived_by_drive"] == {"drive-00": 4}
+    assert worker.status()["archived_by_drive"] == {"drive-00": 2, "drive-04": 4}
+    assert worker.status()["archived_by_drive_current"] is False
+    assert worker.status()["archived_stale_drives"] == ["drive-00"]
 
 
 def test_replica_commit_refreshes_only_its_target_drive():
@@ -164,3 +184,25 @@ def test_replica_commit_refreshes_only_its_target_drive():
         "drive-04": 4_000_000_000,
     }
     assert enriched["archived_by_drive_current"] is True
+    assert enriched["archived_stale_drives"] == []
+
+
+def test_success_on_another_drive_does_not_clear_a_pending_stale_drive():
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE archived(drive_label TEXT, stored_bytes INTEGER)")
+    con.execute("INSERT INTO archived VALUES(?,?)", ("drive-04", 4_000_000_000))
+    event = {"phase": "replica", "drive": "drive-04", "archive_changed": True}
+
+    with mock.patch.object(fill_api.data, "conn", return_value=con):
+        enriched = fill_api._attach_archived_totals(
+            event,
+            {"drive-00": 2_000_000_000},
+            ["drive-00"],
+        )
+
+    assert enriched["archived_by_drive"] == {
+        "drive-00": 2_000_000_000,
+        "drive-04": 4_000_000_000,
+    }
+    assert enriched["archived_by_drive_current"] is False
+    assert enriched["archived_stale_drives"] == ["drive-00"]
