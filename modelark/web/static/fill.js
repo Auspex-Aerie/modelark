@@ -120,6 +120,7 @@
       .fillprompt button{margin-left:10px;padding:5px 11px;border:1px solid #d8c98f;border-radius:4px;background:#fff;cursor:pointer}
       .drivecard.active{border-color:#2c5f8f;box-shadow:0 0 0 2px #2c5f8f33}
       .dcdone{margin-top:7px;display:flex;align-items:center;gap:7px;font:500 11px ui-monospace,monospace;color:#0b5b54}
+      .dcdone.stale{color:#8a6528}
       .dcdonebar{flex:1;height:5px;background:#eef1f6;border-radius:3px;overflow:hidden}
       .dcdonefill{height:100%;background:#0f766e;transition:width .4s ease}
       .planbars{background:#fff;border:1px solid #d7dde5;border-radius:11px;padding:15px 20px;margin:8px 0 14px;box-shadow:0 1px 3px rgba(6,14,22,.15)}
@@ -138,9 +139,12 @@
 
   // Archived occupancy is a device fact. It is intentionally separate from `usable`, which is the
   // admission-safe budget for new writes after current free-space evidence and headroom are applied.
-  const doneRowHTML = (archived, capacity) => {
+  const doneRowHTML = (archived, capacity, current = true) => {
     const pct = capacity ? Math.min(100, 100 * archived / capacity) : 0;
-    return `<div class="dcdonebar"><div class="dcdonefill" style="width:${pct.toFixed(1)}%"></div></div><span>${MA.gb(archived)} archived · ${MA.gb(capacity)} device</span>`;
+    const text = current
+      ? `${MA.gb(archived)} archived · ${MA.gb(capacity)} device`
+      : `last confirmed ${MA.gb(archived)} archived · ${MA.gb(capacity)} device · refreshing…`;
+    return `<div class="dcdonebar"><div class="dcdonefill" style="width:${pct.toFixed(1)}%"></div></div><span>${text}</span>`;
   };
 
   function driveCard(d) {
@@ -494,6 +498,7 @@
     // A stored event carries post-commit durable totals. Use those as replacement values: cumulative
     // session `done_by_drive` overlaps a freshly loaded plan and would double-count after a reload.
     const liveArchived = (s && s.archived_by_drive) || {};
+    const archivedCurrent = !s || s.archived_by_drive_current !== false;
     Object.keys(archivedBy).forEach(label => {
       const row = document.getElementById("done-" + label);
       if (!row) return;
@@ -501,7 +506,8 @@
         ? (liveArchived[label] || 0) : (archivedBy[label] || 0);
       if (!total) { row.hidden = true; row.innerHTML = ""; return; }
       row.hidden = false;
-      row.innerHTML = doneRowHTML(total, capacityBy[label] || 0);
+      row.classList.toggle("stale", !archivedCurrent);
+      row.innerHTML = doneRowHTML(total, capacityBy[label] || 0, archivedCurrent);
     });
     document.querySelectorAll(".drivecard").forEach(c => c.classList.remove("active"));
     if (s && s.drive) { const c = document.getElementById("dc-" + s.drive); if (c) c.classList.add("active"); }

@@ -948,6 +948,7 @@ def _browser_flow() -> None:
                 "file": "model.safetensors", "file_phase": "stored",
                 "done_by_drive": {"drive-00": 2000000000},
                 "archived_by_drive": {"drive-00": 2000000000},
+                "archived_by_drive_current": True,
             }
             pg.route(
                 "**/api/fill/status",
@@ -965,6 +966,27 @@ def _browser_flow() -> None:
             assert "4GB archived" not in reloaded_archived, reloaded_archived
             pg.unroute("**/api/fill/status")
             print("  mid-session reload did not double-count durable archived occupancy")
+
+            stale_status = {
+                **reload_status,
+                "archived_by_drive_current": False,
+            }
+            pg.route(
+                "**/api/fill/status",
+                lambda route: route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(stale_status)
+                ),
+            )
+            pg.evaluate("window.loadFill()")
+            for _ in range(40):
+                if "last confirmed" in pg.inner_text("#dc-drive-00 .dcdone"):
+                    break
+                time.sleep(0.1)
+            stale_archived = pg.inner_text("#dc-drive-00 .dcdone")
+            assert "last confirmed 2GB archived" in stale_archived, stale_archived
+            assert "refreshing" in stale_archived, stale_archived
+            pg.unroute("**/api/fill/status")
+            print("  failed live occupancy refresh stayed visibly last-confirmed")
 
             # 2b. Once blockers are explicitly removed, the same disposable catalog must support
             # the complete DEF-036 proposal review/approval flow without starting Fill.

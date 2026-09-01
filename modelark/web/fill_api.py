@@ -113,13 +113,28 @@ def _attach_archived_totals(ev: dict) -> dict:
                 "FROM archived GROUP BY drive_label ORDER BY drive_label"
             ).fetchall()
     except Exception:
-        # FillWorker merges event fields into retained state.  Clear any earlier successful
-        # snapshot explicitly so a transient read failure cannot leave stale occupancy presented
-        # as current; the UI will fall back to its durable plan baseline.
-        return {**ev, "archived_by_drive": None}
+        # FillWorker merges event fields into retained state. Mark the earlier snapshot non-current
+        # without erasing it: the UI can present it explicitly as last-confirmed evidence while the
+        # cheap status path retries the authoritative query.
+        return {**ev, "archived_by_drive_current": False}
     return {
         **ev,
         "archived_by_drive": {str(label): int(total or 0) for label, total in rows},
+        "archived_by_drive_current": True,
+    }
+
+
+def _refresh_stale_archived_totals(status: dict) -> dict:
+    """Retry a failed occupancy snapshot without obscuring the last confirmed evidence."""
+    if status.get("archived_by_drive_current") is not False:
+        return status
+    refreshed = _attach_archived_totals({"file_phase": "stored"})
+    if refreshed.get("archived_by_drive_current") is not True:
+        return status
+    return {
+        **status,
+        "archived_by_drive": refreshed["archived_by_drive"],
+        "archived_by_drive_current": True,
     }
 
 
@@ -241,7 +256,7 @@ def status() -> dict:
     """The worker's live status (phase, current drive/repo/file, rolling ratio, per-drive bytes,
     awaiting-drive prompt, terminal result) plus a live system-wide network download rate
     (`net_rx_bps`) sampled between polls. Cheap — polled by the Fill tab."""
-    s = fill_worker.WORKER.status()
+    s = _refresh_stale_archived_totals(fill_worker.WORKER.status())
     rx, now = _rx_bytes(), time.monotonic()
     if rx is not None:
         with _net_lock:
