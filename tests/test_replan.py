@@ -847,7 +847,8 @@ def test_replica_records_only_after_target_uuid_proof(tmp_path):
         return source if label == "drive-00" else target
 
     completed = mock.Mock(returncode=0, stdout="", stderr="")
-    ctx = fetch.RunCtx(con=con)
+    progress = []
+    ctx = fetch.RunCtx(con=con, on_progress=progress.append)
     with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
          mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
          mock.patch.object(fetch.register, "library_root", return_value=library), \
@@ -868,6 +869,10 @@ def test_replica_records_only_after_target_uuid_proof(tmp_path):
          mock.patch.object(fetch, "_annex_key_on_uuid", return_value=True):
         verified = fetch.run_replica_tasks([task], ctx=ctx)
     assert verified["failed"] == [] and verified["copied_files"] == 1
+    assert any(
+        event.get("archive_changed") is True and event.get("drive") == "drive-04"
+        for event in progress
+    ), progress
     row = con.execute(
         "SELECT orig_sha256,znn_sha256,stored_bytes,annex_key FROM archived "
         "WHERE repo_id='must' AND drive_label='drive-04'"

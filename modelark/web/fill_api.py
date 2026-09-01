@@ -9,6 +9,7 @@ the worker so the FillWorker wrapper flips status to 'error' (the emitted 'say' 
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import threading
@@ -23,6 +24,7 @@ from modelark.web import data, fill_worker
 # overnight). A clean 'done' or a user 'stopped' clears it.
 _TERMINAL_PATH = db.CATALOG_DIR / "last_fill.json"
 _OOPSIE = {"error", "blocked", "plan-capacity-stop", "paused"}
+_ARCHIVE_SNAPSHOT_IDS = itertools.count(1)
 
 
 def _persist_terminal(term: dict) -> None:
@@ -96,31 +98,50 @@ def _log_event(log, ev: dict) -> None:
         log.info(ph, repo=ev.get("repo"))
 
 
-def _attach_archived_totals(ev: dict) -> dict:
-    """Attach one post-commit durable occupancy snapshot to a completed-file event.
+def _attach_archived_totals(ev: dict, previous: dict | None = None) -> dict:
+    """Attach the affected drive's post-commit durable occupancy to an archive-change event.
 
     ``done_by_drive`` is cumulative session telemetry, so a browser that reloads mid-session cannot
     safely add it to a fresh ``/api/library/plan`` baseline: both may already contain the same write.
-    The stored event occurs after the archived-row commit, making this small grouped query an exact
-    replacement value for the display. Failure to enrich telemetry must never fail the Fill itself.
+    Only the final stored event (which carries ``done_by_drive``) and explicit replica completion
+    events occur after an archived-row commit. Query just that drive and merge it into the prior
+    snapshot; display telemetry must never turn a successful archive operation into a failed Fill.
     """
-    if ev.get("file_phase") != "stored":
+    changed = (
+        (ev.get("file_phase") == "stored" and "done_by_drive" in ev)
+        or ev.get("archive_changed") is True
+    )
+    if not changed:
         return ev
+    label = str(ev.get("drive") or "")
+    if not label:
+        return ev
+    totals = dict(previous or {})
+    snapshot_id = next(_ARCHIVE_SNAPSHOT_IDS)
     try:
         with data._lock:
-            rows = data.conn().execute(
-                "SELECT drive_label,coalesce(sum(stored_bytes),0) "
-                "FROM archived GROUP BY drive_label ORDER BY drive_label"
-            ).fetchall()
+            row = data.conn().execute(
+                "SELECT coalesce(sum(stored_bytes),0) FROM archived WHERE drive_label=?",
+                [label],
+            ).fetchone()
     except Exception:
         # FillWorker merges event fields into retained state. Mark the earlier snapshot non-current
         # without erasing it: the UI can present it explicitly as last-confirmed evidence while the
-        # cheap status path retries the authoritative query.
-        return {**ev, "archived_by_drive_current": False}
+        # cheap status path retries only this affected drive.
+        return {
+            **ev,
+            "archived_by_drive": totals,
+            "archived_by_drive_current": False,
+            "archived_retry_drive": label,
+            "archived_snapshot_id": snapshot_id,
+        }
+    totals[label] = int((row or [0])[0] or 0)
     return {
         **ev,
-        "archived_by_drive": {str(label): int(total or 0) for label, total in rows},
+        "archived_by_drive": totals,
         "archived_by_drive_current": True,
+        "archived_retry_drive": None,
+        "archived_snapshot_id": snapshot_id,
     }
 
 
@@ -128,14 +149,38 @@ def _refresh_stale_archived_totals(status: dict) -> dict:
     """Retry a failed occupancy snapshot without obscuring the last confirmed evidence."""
     if status.get("archived_by_drive_current") is not False:
         return status
-    refreshed = _attach_archived_totals({"file_phase": "stored"})
+    refreshed = _attach_archived_totals(
+        {"archive_changed": True, "drive": status.get("archived_retry_drive")},
+        status.get("archived_by_drive"),
+    )
     if refreshed.get("archived_by_drive_current") is not True:
         return status
     return {
         **status,
         "archived_by_drive": refreshed["archived_by_drive"],
         "archived_by_drive_current": True,
+        "archived_retry_drive": None,
+        "archived_snapshot_id": refreshed["archived_snapshot_id"],
     }
+
+
+def _refresh_worker_archived_totals(worker: fill_worker.FillWorker) -> dict:
+    """Retry and persist one stale snapshot without racing a newer worker event."""
+    before = worker.status()
+    refreshed = _refresh_stale_archived_totals(before)
+    if refreshed is before:
+        return before
+    update = {
+        "archived_by_drive": refreshed["archived_by_drive"],
+        "archived_by_drive_current": True,
+        "archived_retry_drive": None,
+        "archived_snapshot_id": refreshed["archived_snapshot_id"],
+    }
+    worker.compare_and_update(
+        {"archived_snapshot_id": before.get("archived_snapshot_id")},
+        update,
+    )
+    return worker.status()
 
 
 def _rx_bytes() -> int | None:
@@ -191,7 +236,8 @@ def start(body: dict) -> dict:
         log = telemetry.get_logger("fill")
 
         def logged_emit(ev: dict) -> None:                  # tee every progress event into the log, then the UI
-            ev = _attach_archived_totals(ev)
+            previous = fill_worker.WORKER.status().get("archived_by_drive")
+            ev = _attach_archived_totals(ev, previous)
             _log_event(log, ev)
             emit(ev)
 
@@ -256,7 +302,7 @@ def status() -> dict:
     """The worker's live status (phase, current drive/repo/file, rolling ratio, per-drive bytes,
     awaiting-drive prompt, terminal result) plus a live system-wide network download rate
     (`net_rx_bps`) sampled between polls. Cheap — polled by the Fill tab."""
-    s = _refresh_stale_archived_totals(fill_worker.WORKER.status())
+    s = _refresh_worker_archived_totals(fill_worker.WORKER)
     rx, now = _rx_bytes(), time.monotonic()
     if rx is not None:
         with _net_lock:

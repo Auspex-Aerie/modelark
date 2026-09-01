@@ -140,18 +140,23 @@
   // Archived occupancy is a device fact. It is intentionally separate from `usable`, which is the
   // admission-safe budget for new writes after current free-space evidence and headroom are applied.
   const doneRowHTML = (archived, capacity, current = true) => {
-    const pct = capacity ? Math.min(100, 100 * archived / capacity) : 0;
+    const capacityKnown = Number.isFinite(capacity) && capacity > 0;
+    const pct = capacityKnown ? Math.min(100, 100 * archived / capacity) : 0;
+    const device = capacityKnown ? `${MA.gb(capacity)} device` : "device size unknown";
     const text = current
-      ? `${MA.gb(archived)} archived · ${MA.gb(capacity)} device`
-      : `last confirmed ${MA.gb(archived)} archived · ${MA.gb(capacity)} device · refreshing…`;
-    return `<div class="dcdonebar"><div class="dcdonefill" style="width:${pct.toFixed(1)}%"></div></div><span>${text}</span>`;
+      ? `${MA.gb(archived)} archived · ${device}`
+      : `last confirmed ${MA.gb(archived)} archived · ${device} · refreshing…`;
+    const bar = capacityKnown
+      ? `<div class="dcdonebar"><div class="dcdonefill" style="width:${pct.toFixed(1)}%"></div></div>`
+      : "";
+    return `${bar}<span>${text}</span>`;
   };
 
   function driveCard(d) {
     const groups = {};
     for (const m of d.models) { const k = keyOf(m); groups[k] = (groups[k] || 0) + m.size; }
     const usable = d.usable || 0;
-    const capacity = d.capacity || 0;
+    const capacity = Number.isFinite(d.capacity) ? d.capacity : null;
     const archived = d.archived_bytes || 0;
     const planned = d.planned_bytes || 0;
     // The main bar is only new planned work against the current safe writable budget. Archived
@@ -219,7 +224,7 @@
     data.drives.forEach(d => {
       plannedBy[d.label] = d.planned_bytes;
       archivedBy[d.label] = d.archived_bytes || 0;   // durable: what's actually on the drive (survives restarts)
-      capacityBy[d.label] = d.capacity || 0;
+      capacityBy[d.label] = Number.isFinite(d.capacity) ? d.capacity : null;
     });
     const graph = document.getElementById("fillGraph");
     let html = "";
@@ -507,7 +512,7 @@
       if (!total) { row.hidden = true; row.innerHTML = ""; return; }
       row.hidden = false;
       row.classList.toggle("stale", !archivedCurrent);
-      row.innerHTML = doneRowHTML(total, capacityBy[label] || 0, archivedCurrent);
+      row.innerHTML = doneRowHTML(total, capacityBy[label], archivedCurrent);
     });
     document.querySelectorAll(".drivecard").forEach(c => c.classList.remove("active"));
     if (s && s.drive) { const c = document.getElementById("dc-" + s.drive); if (c) c.classList.add("active"); }

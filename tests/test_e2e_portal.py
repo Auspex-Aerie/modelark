@@ -939,6 +939,24 @@ def _browser_flow() -> None:
             assert "2GB archived" in archived and "device" in archived, archived
             print("  planned budget and archived device occupancy stayed separate")
 
+            unknown_capacity = _get("/api/library/plan")
+            for drive in unknown_capacity["drives"]:
+                if drive["label"] == "drive-00":
+                    drive["capacity"] = None
+            pg.route(
+                "**/api/library/plan",
+                lambda route: route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(unknown_capacity)
+                ),
+            )
+            pg.evaluate("window.loadFill()")
+            unknown_row = pg.inner_text("#dc-drive-00 .dcdone")
+            assert "2GB archived" in unknown_row, unknown_row
+            assert "device size unknown" in unknown_row, unknown_row
+            assert pg.locator("#dc-drive-00 .dcdonebar").count() == 0
+            pg.unroute("**/api/library/plan")
+            print("  unknown device size stayed unknown without an occupancy ratio")
+
             # A mid-session reload receives a fresh durable baseline and the worker's cumulative
             # session bytes for the same writes. The post-commit authoritative total replaces that
             # baseline; cumulative done_by_drive must not be added to it (Greptile iteration 1 P1).

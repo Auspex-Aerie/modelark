@@ -128,6 +128,18 @@ class FillWorker:
         with self._lock:
             return dict(self._state, running=self.running())
 
+    def compare_and_update(self, expected: dict, update: dict) -> bool:
+        """Merge ``update`` only while every expected status field still matches.
+
+        A status request may compute display evidence outside the worker lock.  This small CAS keeps
+        that refresh from overwriting a newer progress event when it publishes the recovered value.
+        """
+        with self._lock:
+            if any(self._state.get(key) != value for key, value in expected.items()):
+                return False
+            self._state.update(update)
+            return True
+
     def _emit(self, ev: dict) -> None:
         with self._lock:
             self._state.update(ev)
