@@ -113,7 +113,10 @@ def _attach_archived_totals(ev: dict) -> dict:
                 "FROM archived GROUP BY drive_label ORDER BY drive_label"
             ).fetchall()
     except Exception:
-        return ev
+        # FillWorker merges event fields into retained state.  Clear any earlier successful
+        # snapshot explicitly so a transient read failure cannot leave stale occupancy presented
+        # as current; the UI will fall back to its durable plan baseline.
+        return {**ev, "archived_by_drive": None}
     return {
         **ev,
         "archived_by_drive": {str(label): int(total or 0) for label, total in rows},

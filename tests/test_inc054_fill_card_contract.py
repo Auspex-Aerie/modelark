@@ -39,4 +39,18 @@ def test_non_stored_event_does_not_query_or_change_shape():
 def test_telemetry_enrichment_failure_never_fails_fill_progress():
     event = {"file_phase": "stored", "done_by_drive": {"drive-00": 1}}
     with mock.patch.object(fill_api.data, "conn", side_effect=RuntimeError("catalog unavailable")):
-        assert fill_api._attach_archived_totals(event) is event
+        enriched = fill_api._attach_archived_totals(event)
+
+    assert "archived_by_drive" not in event
+    assert enriched == {**event, "archived_by_drive": None}
+
+
+def test_failed_enrichment_clears_a_snapshot_retained_by_the_worker():
+    worker = fill_api.fill_worker.FillWorker()
+    worker._emit({"archived_by_drive": {"drive-00": 2_000_000_000}})
+    event = {"file_phase": "stored", "done_by_drive": {"drive-00": 3_000_000_000}}
+
+    with mock.patch.object(fill_api.data, "conn", side_effect=RuntimeError("catalog unavailable")):
+        worker._emit(fill_api._attach_archived_totals(event))
+
+    assert worker.status()["archived_by_drive"] is None
