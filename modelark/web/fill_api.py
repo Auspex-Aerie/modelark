@@ -96,6 +96,30 @@ def _log_event(log, ev: dict) -> None:
         log.info(ph, repo=ev.get("repo"))
 
 
+def _attach_archived_totals(ev: dict) -> dict:
+    """Attach one post-commit durable occupancy snapshot to a completed-file event.
+
+    ``done_by_drive`` is cumulative session telemetry, so a browser that reloads mid-session cannot
+    safely add it to a fresh ``/api/library/plan`` baseline: both may already contain the same write.
+    The stored event occurs after the archived-row commit, making this small grouped query an exact
+    replacement value for the display. Failure to enrich telemetry must never fail the Fill itself.
+    """
+    if ev.get("file_phase") != "stored":
+        return ev
+    try:
+        with data._lock:
+            rows = data.conn().execute(
+                "SELECT drive_label,coalesce(sum(stored_bytes),0) "
+                "FROM archived GROUP BY drive_label ORDER BY drive_label"
+            ).fetchall()
+    except Exception:
+        return ev
+    return {
+        **ev,
+        "archived_by_drive": {str(label): int(total or 0) for label, total in rows},
+    }
+
+
 def _rx_bytes() -> int | None:
     """System-wide bytes received across all NICs except loopback (Linux /sys). None if unreadable
     (off-Linux) — the download rate then just shows '—'. This is a whole-host figure by design
@@ -149,6 +173,7 @@ def start(body: dict) -> dict:
         log = telemetry.get_logger("fill")
 
         def logged_emit(ev: dict) -> None:                  # tee every progress event into the log, then the UI
+            ev = _attach_archived_totals(ev)
             _log_event(log, ev)
             emit(ev)
 

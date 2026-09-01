@@ -491,11 +491,14 @@
   }
 
   function renderCards(s) {
-    const done = (s && s.done_by_drive) || {};    // live delta THIS session, added on top of the durable base
+    // A stored event carries post-commit durable totals. Use those as replacement values: cumulative
+    // session `done_by_drive` overlaps a freshly loaded plan and would double-count after a reload.
+    const liveArchived = (s && s.archived_by_drive) || {};
     Object.keys(archivedBy).forEach(label => {
       const row = document.getElementById("done-" + label);
       if (!row) return;
-      const total = (archivedBy[label] || 0) + (done[label] || 0);
+      const total = Object.prototype.hasOwnProperty.call(liveArchived, label)
+        ? (liveArchived[label] || 0) : (archivedBy[label] || 0);
       if (!total) { row.hidden = true; row.innerHTML = ""; return; }
       row.hidden = false;
       row.innerHTML = doneRowHTML(total, capacityBy[label] || 0);

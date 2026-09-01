@@ -939,6 +939,33 @@ def _browser_flow() -> None:
             assert "2GB archived" in archived and "device" in archived, archived
             print("  planned budget and archived device occupancy stayed separate")
 
+            # A mid-session reload receives a fresh durable baseline and the worker's cumulative
+            # session bytes for the same writes. The post-commit authoritative total replaces that
+            # baseline; cumulative done_by_drive must not be added to it (Greptile iteration 1 P1).
+            reload_status = {
+                "status": "running", "running": True, "phase": "primary",
+                "drive": "drive-00", "repo": "demo/tiny-llm",
+                "file": "model.safetensors", "file_phase": "stored",
+                "done_by_drive": {"drive-00": 2000000000},
+                "archived_by_drive": {"drive-00": 2000000000},
+            }
+            pg.route(
+                "**/api/fill/status",
+                lambda route: route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(reload_status)
+                ),
+            )
+            pg.evaluate("window.loadFill()")
+            for _ in range(40):
+                if "2GB archived" in pg.inner_text("#dc-drive-00 .dcdone"):
+                    break
+                time.sleep(0.1)
+            reloaded_archived = pg.inner_text("#dc-drive-00 .dcdone")
+            assert "2GB archived" in reloaded_archived, reloaded_archived
+            assert "4GB archived" not in reloaded_archived, reloaded_archived
+            pg.unroute("**/api/fill/status")
+            print("  mid-session reload did not double-count durable archived occupancy")
+
             # 2b. Once blockers are explicitly removed, the same disposable catalog must support
             # the complete DEF-036 proposal review/approval flow without starting Fill.
             _proposal_approval_flow(pg)
