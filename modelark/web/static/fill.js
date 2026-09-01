@@ -17,7 +17,7 @@
     ["primary", "Primary · bulk (re-fetchable, 1 copy)"],
     ["replica", "Replication · must-have copy #2"],
   ];
-  let mode = "type", last = null, statusTimer = null, plannedBy = {}, lastStatus = null, archivedBy = {}, usableBy = {}, pollFails = 0, queueSig = null, queueCentered = false;
+  let mode = "type", last = null, statusTimer = null, plannedBy = {}, lastStatus = null, archivedBy = {}, capacityBy = {}, pollFails = 0, queueSig = null, queueCentered = false;
   let queueModels = null, queueDrives = null, placedMap = {}, lastQueueRepo = null, placedLoaded = false;   // one-row-per-model queue state
 
   const hashColor = s => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${h % 360} 42% 50%)`; };
@@ -48,7 +48,6 @@
       .dcbar{height:22px;background:#eef1f6;border-radius:4px;overflow:hidden;border:1px solid #e0e5ec}
       .dcbarfill{display:flex;height:100%}
       .seg{height:100%;min-width:1px;flex:0 0 auto}
-      .seg.segarch{background:#c7cfd9}
       .dcfoot{display:flex;justify-content:space-between;margin-top:8px;font:500 12px ui-monospace,monospace;color:#5c6675;font-variant-numeric:tabular-nums}
       .filllegend{display:flex;flex-wrap:wrap;gap:12px;margin:22px 0 4px;font-size:12px;color:#333}
       .lgi{display:flex;align-items:center;gap:6px}
@@ -137,38 +136,37 @@
     document.head.appendChild(s);
   }
 
-  // "archived" = durable bytes on the drive (+ live session delta), filling toward its usable space.
-  const doneRowHTML = (archived, usable) => {
-    const pct = usable ? Math.min(100, 100 * archived / usable) : 0;
-    return `<div class="dcdonebar"><div class="dcdonefill" style="width:${pct.toFixed(1)}%"></div></div><span>${MA.gb(archived)} archived</span>`;
+  // Archived occupancy is a device fact. It is intentionally separate from `usable`, which is the
+  // admission-safe budget for new writes after current free-space evidence and headroom are applied.
+  const doneRowHTML = (archived, capacity) => {
+    const pct = capacity ? Math.min(100, 100 * archived / capacity) : 0;
+    return `<div class="dcdonebar"><div class="dcdonefill" style="width:${pct.toFixed(1)}%"></div></div><span>${MA.gb(archived)} archived · ${MA.gb(capacity)} device</span>`;
   };
 
   function driveCard(d) {
     const groups = {};
     for (const m of d.models) { const k = keyOf(m); groups[k] = (groups[k] || 0) + m.size; }
-    const usable = d.usable || 1;
+    const usable = d.usable || 0;
+    const capacity = d.capacity || 0;
     const archived = d.archived_bytes || 0;
-    // True fill = what's PLANNED (category segments) + what's ALREADY archived (grey). Planned work
-    // stays left-aligned; emitting the large archived segment first pushed the useful colors to the
-    // far right on an established drive and regressed the original progress-bar reading direction.
-    const archSeg = archived > 0
-      ? `<div class="seg segarch" style="width:${(100 * archived / usable).toFixed(2)}%" title="already archived: ${MA.gb(archived)}"></div>`
-      : "";
+    const planned = d.planned_bytes || 0;
+    // The main bar is only new planned work against the current safe writable budget. Archived
+    // occupancy is rendered separately against nominal device capacity below the card.
     const segs = Object.entries(groups).sort((a, b) => b[1] - a[1]).map(([k, b]) =>
-      `<div class="seg" style="width:${(100 * b / usable).toFixed(2)}%;background:${color(k)}" title="${esc(keyLabel(k))} (planned): ${esc(MA.gb(b))}"></div>`).join("");
+      `<div class="seg" style="width:${(usable ? 100 * b / usable : 0).toFixed(2)}%;background:${color(k)}" title="${esc(keyLabel(k))} (planned): ${esc(MA.gb(b))}"></div>`).join("");
     const badge = { raid: "RAID", primary: "PRIMARY", replica: "REPLICA" }[d.tier] || d.tier;
     const lifecycle = d.lifecycle || "unknown";
     const eligibility = d.eligibility || "unknown";
     const unavailable = lifecycle !== "active" || eligibility !== "enabled";
     const state = [lifecycle !== "active" ? lifecycle : "", eligibility !== "enabled" ? eligibility : ""]
       .filter(Boolean).join(" · ").toUpperCase();
-    const total = archived + (d.planned_bytes || 0);
-    const totalPct = usable ? Math.min(100, Math.round(100 * total / usable)) : 0;
+    const plannedRatio = Number.isFinite(d.fill_pct) ? d.fill_pct : (usable ? planned / usable : 0);
+    const plannedPct = Math.max(0, Math.min(100, Math.round(100 * plannedRatio)));
     return `<div class="drivecard${(d.n_models || archived) ? "" : " empty"}${unavailable ? " unavailable" : ""}" id="dc-${esc(d.label)}" data-lifecycle="${esc(lifecycle)}" data-eligibility="${esc(eligibility)}">
       <div class="dchead"><span class="dclabel">${esc(d.label)}</span><span class="dcstatus"><span class="dcbadge ${esc(d.tier)}">${esc(badge)}</span>${unavailable ? `<span class="dcstate">⛔ ${esc(state)}</span>` : ""}</span></div>
-      <div class="dcbar"><div class="dcbarfill">${segs}${archSeg}</div></div>
-      <div class="dcfoot"><span>${totalPct}% · ${MA.gb(total)}/${MA.gb(usable)}</span><span>${d.n_models} planned</span></div>
-      <div class="dcdone" id="done-${esc(d.label)}"${archived ? "" : " hidden"}>${archived ? doneRowHTML(archived, usable) : ""}</div>
+      <div class="dcbar" title="planned work against the safe writable budget"><div class="dcbarfill">${segs}</div></div>
+      <div class="dcfoot"><span>${plannedPct}% · ${MA.gb(planned)} / ${MA.gb(usable)} writable budget</span><span>${d.n_models} planned</span></div>
+      <div class="dcdone" id="done-${esc(d.label)}"${archived ? "" : " hidden"}>${archived ? doneRowHTML(archived, capacity) : ""}</div>
     </div>`;
   }
 
@@ -213,11 +211,11 @@
   function render(data) {
     last = data;
     ensureStyle();
-    plannedBy = {}; archivedBy = {}; usableBy = {};
+    plannedBy = {}; archivedBy = {}; capacityBy = {};
     data.drives.forEach(d => {
       plannedBy[d.label] = d.planned_bytes;
       archivedBy[d.label] = d.archived_bytes || 0;   // durable: what's actually on the drive (survives restarts)
-      usableBy[d.label] = d.usable || 1;
+      capacityBy[d.label] = d.capacity || 0;
     });
     const graph = document.getElementById("fillGraph");
     let html = "";
@@ -500,7 +498,7 @@
       const total = (archivedBy[label] || 0) + (done[label] || 0);
       if (!total) { row.hidden = true; row.innerHTML = ""; return; }
       row.hidden = false;
-      row.innerHTML = doneRowHTML(total, usableBy[label] || 1);
+      row.innerHTML = doneRowHTML(total, capacityBy[label] || 0);
     });
     document.querySelectorAll(".drivecard").forEach(c => c.classList.remove("active"));
     if (s && s.drive) { const c = document.getElementById("dc-" + s.drive); if (c) c.classList.add("active"); }

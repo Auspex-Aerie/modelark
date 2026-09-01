@@ -26,18 +26,20 @@
   }
 
   function renderDocket() {
+    const seal = byId("proposalSeal");
     const state = byId("proposalState");
     const button = byId("proposalReview");
-    if (!state || !button) return;
+    if (!seal || !state || !button) return;
 
     const kind = status && status.state;
+    seal.textContent = kind === "approved_current" ? "Ready to fill" : "Placement approval";
     if (requestPending) {
       state.textContent = "Preparing exact placement…";
       button.textContent = "Preparing…";
       button.disabled = true;
     } else if (kind === "approved_current") {
       const active = status.active_proposal || {};
-      state.textContent = `Approved · revision ${status.planner_revision} · ${active.proposal_id || "current proposal"}`;
+      state.textContent = `Revision ${status.planner_revision} approved · ${active.proposal_id || "current proposal"}`;
       button.textContent = "Placement approved";
       button.disabled = true;
     } else if (kind === "approved_stale") {
