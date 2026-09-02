@@ -109,6 +109,17 @@ def test_plan_view_rows_carry_evidence_kind_and_provenance():
     con.close()
 
 
+def test_plan_view_keeps_unknown_nominal_capacity_distinct_from_legacy_free():
+    con = _mem()
+    _migrated(con, "drive-09", capacity_bytes=None, free=999)
+
+    row = next(item for item in librarian.plan_view(con, plan_id="ark")["drives"])
+
+    assert row["capacity"] is None
+    assert row["legacy_free_bytes"] == 999
+    con.close()
+
+
 # --------------------------------------------------------------------------- library_api fleet/total
 
 def test_library_api_fleet_and_total_free_from_evidence_legacy_diagnostic():

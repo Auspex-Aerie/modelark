@@ -96,6 +96,73 @@ def _log_event(log, ev: dict) -> None:
         log.info(ph, repo=ev.get("repo"))
 
 
+def _archive_change_drive(ev: dict) -> str | None:
+    """Return the affected drive only for an event emitted after an archive-row commit."""
+    changed = (
+        (ev.get("file_phase") == "stored" and "done_by_drive" in ev)
+        or ev.get("archive_changed") is True
+    )
+    label = str(ev.get("drive") or "")
+    return label if changed and label else None
+
+
+def _read_archived_total(label: str) -> int:
+    """Read one drive's current durable occupancy without holding the worker-state lock."""
+    with data._lock:
+        row = data.conn().execute(
+            "SELECT coalesce(sum(stored_bytes),0) FROM archived WHERE drive_label=?",
+            [label],
+        ).fetchone()
+    return int((row or [0])[0] or 0)
+
+
+def _observe_archive_change(worker: fill_worker.FillWorker, ev: dict) -> None:
+    """Refresh one changed drive without granting its event authority over other drives.
+
+    ``done_by_drive`` is cumulative session telemetry, so a browser that reloads mid-session cannot
+    safely add it to a fresh ``/api/library/plan`` baseline: both may already contain the same write.
+    Only the final stored event (which carries ``done_by_drive``) and explicit replica completion
+    events occur after an archived-row commit. Mark that drive stale, query just its durable total,
+    then publish through the worker's generation-guarded per-drive merge. Display telemetry must
+    never turn a successful archive operation into a failed Fill.
+    """
+    label = _archive_change_drive(ev)
+    if label is None:
+        return
+    generation = worker.mark_archive_changed(label)
+    try:
+        total = _read_archived_total(label)
+    except Exception:
+        return
+    worker.confirm_archive_total(label, generation, total)
+
+
+def _refresh_worker_archived_totals(worker: fill_worker.FillWorker) -> dict:
+    """Retry stale drives through a response-consistent per-drive refresh plan.
+
+    A running request attempts at most one drive.  After that database read, a fresh worker-authored
+    plan either returns a captured running snapshot (so the browser polls again) or observes terminal
+    and drains every still-unattempted generation before returning terminal.  Each generation is
+    attempted only once per request, so display-enrichment failures remain bounded and fail-open.
+    """
+    attempted: set[tuple[str, int]] = set()
+    snapshot, targets = worker.archive_refresh_plan()
+    while targets:
+        for label, generation in targets:
+            attempted.add((label, generation))
+            try:
+                total = _read_archived_total(label)
+            except Exception:
+                continue
+            worker.confirm_archive_total(label, generation, total)
+
+        snapshot, targets = worker.archive_refresh_plan(attempted)
+        if snapshot.get("status") == "running":
+            return snapshot
+
+    return snapshot
+
+
 def _rx_bytes() -> int | None:
     """System-wide bytes received across all NICs except loopback (Linux /sys). None if unreadable
     (off-Linux) — the download rate then just shows '—'. This is a whole-host figure by design
@@ -149,6 +216,7 @@ def start(body: dict) -> dict:
         log = telemetry.get_logger("fill")
 
         def logged_emit(ev: dict) -> None:                  # tee every progress event into the log, then the UI
+            _observe_archive_change(fill_worker.WORKER, ev)
             _log_event(log, ev)
             emit(ev)
 
@@ -213,7 +281,7 @@ def status() -> dict:
     """The worker's live status (phase, current drive/repo/file, rolling ratio, per-drive bytes,
     awaiting-drive prompt, terminal result) plus a live system-wide network download rate
     (`net_rx_bps`) sampled between polls. Cheap — polled by the Fill tab."""
-    s = fill_worker.WORKER.status()
+    s = _refresh_worker_archived_totals(fill_worker.WORKER)
     rx, now = _rx_bytes(), time.monotonic()
     if rx is not None:
         with _net_lock:

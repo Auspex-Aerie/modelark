@@ -396,7 +396,7 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
     ).fetchall())
     drive_rows = con.execute(
         "SELECT d.drive_label,coalesce(d.role,'primary'),coalesce(d.raid_backed,0),"
-        "coalesce(d.capacity_bytes,d.free_bytes,0),d.free_bytes "
+        "d.capacity_bytes,d.free_bytes "
         "FROM plan_drives pd JOIN drives d USING(drive_label) WHERE pd.plan_id=? "
         "ORDER BY d.drive_label",
         [graph.plan_id],
@@ -429,7 +429,8 @@ def plan_view(con, repos: list[str] | None = None, plan_id: str | None = None,
             "label": label, "tier": tier, "role": role, "raid_backed": raid,
             "lifecycle": drive_state[label].lifecycle,
             "eligibility": drive_state[label].eligibility,
-            "capacity": int(drive_capacity or 0), "headroom": safety_floor,
+            "capacity": int(drive_capacity) if drive_capacity is not None else None,
+            "headroom": safety_floor,
             "free": drive_ledger.observed_free, "usable": usable,
             "evidence_kind": drive_ledger.evidence_kind, "evidence_code": drive_ledger.evidence_code,
             "observed_at": drive_ledger.observed_at, "identity_epoch": drive_ledger.identity_epoch,

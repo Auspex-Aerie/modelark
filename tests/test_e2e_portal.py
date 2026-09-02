@@ -528,6 +528,10 @@ def _proposal_approval_flow(pg) -> None:
     assert pg.is_enabled("#proposalReview")
     assert pg.is_disabled("#fillStart")
     assert "Approval required" in pg.inner_text("#proposalState")
+    assert pg.text_content("#proposalSeal") == "Placement approval"
+    assert pg.inner_text("#proposalDocket .proposal-note") == (
+        "No data moves until you select Start fill."
+    )
 
     pg.click("#proposalReview")
     pg.wait_for_selector("#proposalModal", state="visible")
@@ -549,10 +553,11 @@ def _proposal_approval_flow(pg) -> None:
     pg.click("#proposalApprove")
     pg.wait_for_selector("#proposalModal", state="hidden")
     for _ in range(80):
-        if "Approved" in pg.inner_text("#proposalState") and pg.is_enabled("#fillStart"):
+        if "approved" in pg.inner_text("#proposalState") and pg.is_enabled("#fillStart"):
             break
         time.sleep(0.1)
-    assert "Approved" in pg.inner_text("#proposalState")
+    assert "approved" in pg.inner_text("#proposalState")
+    assert pg.text_content("#proposalSeal") == "Ready to fill"
     assert pg.is_enabled("#fillStart"), "feasible + current approval must enable Start"
     live = pg.evaluate("async () => await window.MA.api('/api/proposal/status')")
     assert live["state"] == "approved_current"
@@ -922,22 +927,86 @@ def _browser_flow() -> None:
             _blocked_selection_flow(pg)
 
             # Drive chart still renders under a blocked cart. With tiered_v2 whole-plan Gate-B,
-            # a structural blocker (replica exceed-max) yields 0 planned tasks on the bar while
-            # archived occupancy remains as a grey segarch trail. When planned segs also exist,
-            # they stay left of archived (pre-#38 layout contract).
-            pg.wait_for_selector("#dc-drive-00 .dcbarfill > .seg")
+            # a structural blocker (replica exceed-max) yields 0 planned tasks. Archived occupancy
+            # remains visible as a separate device-capacity fact; it is never added to or divided by
+            # the safe writable budget for new work (INC-054).
+            pg.wait_for_selector("#dc-drive-00 .dcdone:not([hidden])")
             segments = pg.locator("#dc-drive-00 .dcbarfill > .seg")
-            n_seg = segments.count()
-            assert n_seg >= 1, "drive-00 bar must show at least archived occupancy"
-            classes = [(segments.nth(i).get_attribute("class") or "") for i in range(n_seg)]
-            assert any("segarch" in c for c in classes), f"expected segarch among {classes}"
+            assert segments.count() == 0, "archived bytes must not enter the planned-work bar"
             foot = pg.inner_text("#dc-drive-00 .dcfoot")
-            assert "0 planned" in foot or "planned" in foot
-            if n_seg >= 2:
-                assert "segarch" not in (segments.first.get_attribute("class") or "")
-                assert "segarch" in (segments.last.get_attribute("class") or "")
-                assert segments.first.bounding_box()["x"] < segments.last.bounding_box()["x"]
-            print("  drive progress bar renders archived segment under blocked cart")
+            assert "0%" in foot and "writable budget" in foot and "0 planned" in foot, foot
+            archived = pg.inner_text("#dc-drive-00 .dcdone")
+            assert "2GB archived" in archived and "device" in archived, archived
+            print("  planned budget and archived device occupancy stayed separate")
+
+            unknown_capacity = _get("/api/library/plan")
+            for drive in unknown_capacity["drives"]:
+                if drive["label"] == "drive-00":
+                    drive["capacity"] = None
+            pg.route(
+                "**/api/library/plan",
+                lambda route: route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(unknown_capacity)
+                ),
+            )
+            pg.evaluate("window.loadFill()")
+            unknown_row = pg.inner_text("#dc-drive-00 .dcdone")
+            assert "2GB archived" in unknown_row, unknown_row
+            assert "device size unknown" in unknown_row, unknown_row
+            assert pg.locator("#dc-drive-00 .dcdonebar").count() == 0
+            pg.unroute("**/api/library/plan")
+            print("  unknown device size stayed unknown without an occupancy ratio")
+
+            # A mid-session reload receives a fresh durable baseline and the worker's cumulative
+            # session bytes for the same writes. The post-commit authoritative total replaces that
+            # baseline; cumulative done_by_drive must not be added to it (Greptile iteration 1 P1).
+            reload_status = {
+                "status": "running", "running": True, "phase": "primary",
+                "drive": "drive-00", "repo": "demo/tiny-llm",
+                "file": "model.safetensors", "file_phase": "stored",
+                "done_by_drive": {"drive-00": 2000000000},
+                "archived_by_drive": {"drive-00": 2000000000},
+                "archived_by_drive_current": True,
+                "archived_stale_drives": [],
+            }
+            pg.route(
+                "**/api/fill/status",
+                lambda route: route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(reload_status)
+                ),
+            )
+            pg.evaluate("window.loadFill()")
+            for _ in range(40):
+                if "2GB archived" in pg.inner_text("#dc-drive-00 .dcdone"):
+                    break
+                time.sleep(0.1)
+            reloaded_archived = pg.inner_text("#dc-drive-00 .dcdone")
+            assert "2GB archived" in reloaded_archived, reloaded_archived
+            assert "4GB archived" not in reloaded_archived, reloaded_archived
+            pg.unroute("**/api/fill/status")
+            print("  mid-session reload did not double-count durable archived occupancy")
+
+            stale_status = {
+                **reload_status,
+                "archived_by_drive_current": False,
+                "archived_stale_drives": ["drive-00"],
+            }
+            pg.route(
+                "**/api/fill/status",
+                lambda route: route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(stale_status)
+                ),
+            )
+            pg.evaluate("window.loadFill()")
+            for _ in range(40):
+                if "last confirmed" in pg.inner_text("#dc-drive-00 .dcdone"):
+                    break
+                time.sleep(0.1)
+            stale_archived = pg.inner_text("#dc-drive-00 .dcdone")
+            assert "last confirmed 2GB archived" in stale_archived, stale_archived
+            assert "refreshing" in stale_archived, stale_archived
+            pg.unroute("**/api/fill/status")
+            print("  failed live occupancy refresh stayed visibly last-confirmed")
 
             # 2b. Once blockers are explicitly removed, the same disposable catalog must support
             # the complete DEF-036 proposal review/approval flow without starting Fill.

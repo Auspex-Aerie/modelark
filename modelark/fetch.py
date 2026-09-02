@@ -1598,6 +1598,10 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                             ))
                             _writer.record_touched(
                                 target, paths=[f"{task.repo_id}/{stored_relpath}"], keys=[key])
+                            ctx.on_progress({
+                                "phase": "replica", "drive": target, "archive_changed": True,
+                                "say": f"    ✓ replica {target} archive record updated",
+                            })
                             result["copied_files"] += 1
                             group_copied = True
                             task_progressed = True
