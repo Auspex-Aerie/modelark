@@ -60,7 +60,6 @@ class FillWorker:
                 self._decision_event.clear()
                 self._decision_id = None
                 self._decision_response = None
-                self._archive_generations = {}
                 self._state = {"status": "running", "message": "starting…"}
                 self._thread = threading.Thread(target=self._run, args=(work,), name="modelark-fill", daemon=True)
                 self._thread.start()
@@ -160,14 +159,17 @@ class FillWorker:
             self._state["archived_by_drive_current"] = False
             return generation
 
-    def stale_archive_target(self) -> tuple[str, int] | None:
-        """Return one stale drive and its current generation for a status-path retry."""
+    def stale_archive_targets(self) -> list[tuple[str, int]]:
+        """Return retry tokens for stale drives: one while running, all when terminal.
+
+        Running polls stay cheap.  A terminal status request drains every pending drive because the
+        browser stops periodic polling after Fill ends.
+        """
         with self._lock:
             stale = sorted(self._state.get("archived_stale_drives") or ())
-            if not stale:
-                return None
-            label = stale[0]
-            return label, self._archive_generations.get(label, 0)
+            if self.running():
+                stale = stale[:1]
+            return [(label, self._archive_generations.get(label, 0)) for label in stale]
 
     def confirm_archive_total(self, drive: str, generation: int, stored_bytes: int) -> bool:
         """Publish one drive's durable total iff no newer change superseded its read."""

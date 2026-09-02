@@ -138,16 +138,17 @@ def _observe_archive_change(worker: fill_worker.FillWorker, ev: dict) -> None:
 
 
 def _refresh_worker_archived_totals(worker: fill_worker.FillWorker) -> dict:
-    """Retry and persist one stale drive through the same per-drive merge as Fill events."""
-    target = worker.stale_archive_target()
-    if target is None:
-        return worker.status()
-    label, generation = target
-    try:
-        total = _read_archived_total(label)
-    except Exception:
-        return worker.status()
-    worker.confirm_archive_total(label, generation, total)
+    """Retry stale drives through the same per-drive merge as Fill events.
+
+    A running Fill retries one drive per cheap poll.  Once terminal, the browser no longer polls, so
+    the first status request attempts every pending drive once and leaves only failed reads stale.
+    """
+    for label, generation in worker.stale_archive_targets():
+        try:
+            total = _read_archived_total(label)
+        except Exception:
+            continue
+        worker.confirm_archive_total(label, generation, total)
     return worker.status()
 
 

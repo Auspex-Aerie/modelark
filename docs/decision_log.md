@@ -2142,3 +2142,15 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, modelark/web/fill_api.py, modelark/web/fill_worker.py, tests/test_inc054_fill_card_contract.py
 - `related`: INC-054, DEC-019, DEC-020, DEC-086, PR-060
 - `scope_boundary`: Live Fill archive-occupancy evidence and its process-local synchronization only. No database schema, durable archive row, planner/capacity policy, drive identity/lifecycle/eligibility, assignment, proposal, approval, Fill start/stop authority, or archive-byte operation changes.
+
+### DEC-088: Keep archive refresh tokens process-monotonic and drain terminal staleness
+- `id`: DEC-088
+- `date`: 2026-09-01
+- `status`: accepted
+- `triggered_by`: PR #60 iteration 7 review of DEC-087 at exact HEAD `944bac2`; Codex found generation reuse across Fill restarts and more than one stale drive surviving the browser's final terminal poll.
+- `decision`: Per-drive archive generations remain monotonic for the lifetime of `FillWorker` and are not reset when a new Fill starts. While Fill is running, each status request retries at most one stale drive; once Fill is terminal, a status request attempts every drive that was stale at the start of that request exactly once, retaining only failed or superseded observations as stale.
+- `rationale`: Reusing a generation after restart can let a delayed prior-run read match and overwrite newer same-drive evidence. Retrying only one drive is appropriate for a frequent live poll but cannot converge when the browser stops polling at terminal state. Process-monotonic tokens reject delayed prior-run confirmations, and bounded terminal draining restores every available drive without holding the worker lock across database reads or turning display enrichment into Fill failure.
+- `impact`: `modelark/web/fill_worker.py` preserves generation counters across run-state resets and selects one or all retry tokens according to live controller state; `modelark/web/fill_api.py` applies each target independently; contracts cover delayed prior-run confirmation, terminal multi-drive recovery, and the one-drive live-poll ceiling.
+- `docs_updated`: docs/decision_log.md, modelark/web/fill_api.py, modelark/web/fill_worker.py, tests/test_inc054_fill_card_contract.py
+- `related`: DEC-087, INC-054, DEC-086, PR-060
+- `scope_boundary`: Process-local archive-display freshness across Fill lifecycle transitions only. No persistent schema, catalog/archive mutation semantics, planner/capacity policy, drive identity, proposal/approval, Fill execution authority, or archive-byte operation changes.

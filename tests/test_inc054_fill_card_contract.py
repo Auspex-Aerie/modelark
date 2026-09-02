@@ -102,6 +102,19 @@ def test_older_same_drive_read_cannot_overwrite_a_newer_generation():
     assert worker.status()["archived_stale_drives"] == []
 
 
+def test_archive_generations_remain_unique_across_fill_restarts():
+    worker = fill_api.fill_worker.FillWorker()
+    old_generation = worker.mark_archive_changed("drive-00")
+    assert worker.start(lambda _should_stop, _emit: None) == {"ok": True}
+    worker._thread.join()
+    new_generation = worker.mark_archive_changed("drive-00")
+
+    assert new_generation > old_generation
+    assert worker.confirm_archive_total("drive-00", new_generation, 4) is True
+    assert worker.confirm_archive_total("drive-00", old_generation, 3) is False
+    assert worker.status()["archived_by_drive"] == {"drive-00": 4}
+
+
 def test_drive_event_cannot_restore_another_drives_stale_snapshot():
     """Greptile iteration 6: B finishes after A's recovery and must patch only B."""
     worker = _worker_with_total("drive-00", 2)
@@ -143,6 +156,52 @@ def test_status_snapshot_cannot_mutate_worker_owned_archive_evidence():
 
     assert worker.status()["archived_by_drive"] == {"drive-00": 3}
     assert worker.status()["archived_stale_drives"] == []
+
+
+def test_terminal_status_drains_every_stale_drive_once():
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE archived(drive_label TEXT, stored_bytes INTEGER)")
+    con.executemany(
+        "INSERT INTO archived VALUES(?,?)",
+        [("drive-00", 3), ("drive-04", 4)],
+    )
+    worker = _worker_with_total("drive-00", 2)
+    drive_b_generation = worker.mark_archive_changed("drive-04")
+    assert worker.confirm_archive_total("drive-04", drive_b_generation, 2) is True
+    worker.mark_archive_changed("drive-00")
+    worker.mark_archive_changed("drive-04")
+
+    with mock.patch.object(fill_api.data, "conn", return_value=con):
+        status = fill_api._refresh_worker_archived_totals(worker)
+
+    assert status["running"] is False
+    assert status["archived_by_drive"] == {"drive-00": 3, "drive-04": 4}
+    assert status["archived_by_drive_current"] is True
+    assert status["archived_stale_drives"] == []
+
+
+def test_running_status_retries_only_one_stale_drive_per_poll():
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE archived(drive_label TEXT, stored_bytes INTEGER)")
+    con.executemany(
+        "INSERT INTO archived VALUES(?,?)",
+        [("drive-00", 3), ("drive-04", 4)],
+    )
+    worker = _worker_with_total("drive-00", 2)
+    drive_b_generation = worker.mark_archive_changed("drive-04")
+    assert worker.confirm_archive_total("drive-04", drive_b_generation, 2) is True
+    worker.mark_archive_changed("drive-00")
+    worker.mark_archive_changed("drive-04")
+
+    with (
+        mock.patch.object(worker, "running", return_value=True),
+        mock.patch.object(fill_api.data, "conn", return_value=con),
+    ):
+        status = fill_api._refresh_worker_archived_totals(worker)
+
+    assert status["archived_by_drive"] == {"drive-00": 3, "drive-04": 2}
+    assert status["archived_by_drive_current"] is False
+    assert status["archived_stale_drives"] == ["drive-04"]
 
 
 def test_replica_commit_refreshes_only_its_target_drive():
