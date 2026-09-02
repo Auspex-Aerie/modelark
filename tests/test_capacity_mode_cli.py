@@ -29,6 +29,22 @@ def test_canonical_capacity_mode_cli(tmp_path):
     assert "capacity mode → guaranteed" in changed.stdout
 
 
+def test_planning_import_does_not_initialize_zipnn():
+    root = Path(__file__).parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import modelark.capacity; raise SystemExit('zipnn' in sys.modules)",
+        ],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_legacy_cli_aliases_map_and_print_deprecation(tmp_path):
     created = _run(
         tmp_path, "plan", "create", "--id", "legacy", "--provisioning", "compressed",

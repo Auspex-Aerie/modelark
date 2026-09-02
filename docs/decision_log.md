@@ -2243,3 +2243,16 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: CHANGELOG.md, docs/decision_log.md, docs/operations.md, modelark/placement.py, modelark/capacity.py, modelark/planning.py, modelark/proposal.py, modelark/web/proposal_api.py, modelark/web/server.py, modelark/web/static/app.css, modelark/web/static/index.html, modelark/web/static/proposal.js, tests/test_def042_successor_plan.py, tests/test_e2e_portal.py
 - `related`: DEC-049, DEC-067, DEC-076, DEC-081, DEC-082, DEC-091, INC-053, RFC-002
 - `scope_boundary`: Successor draft authority, bounded deterministic placement preference, exact review explanation, approval handoff, tests, and operator documentation only. No schema migration, persistent automatic replacement inference, drive lifecycle/identity/role/capacity mutation, current live proposal, planner revision, Fill session, archive-byte operation, service deployment, merge, tag, or publication is changed or authorized here.
+
+### INC-057: ZipNN transitively initialized Torch during planning CLI startup
+- `id`: INC-057
+- `date`: 2026-09-02
+- `status`: remediated
+- `triggered_by`: Python 3.10 and 3.12 CI on main commit `08d0f5e` and successor-plan PR #63
+- `symptom`: `test_canonical_capacity_mode_cli` failed because an otherwise successful canonical `plan create` printed Torch's new `torch.jit.script` deprecation warning to stderr. The same unrelated warning appeared in both supported Python jobs; browser E2E remained green.
+- `root_cause`: Planning imports compression budget constants through `capacity` → `compress` → `streamznn`. Both codec modules imported ZipNN at module load, and the current ZipNN/Torch dependency resolved by CI emits a `FutureWarning` while importing Torch. A generic no-`deprecated` CLI assertion exposed the unnecessary eager dependency initialization. The failure already existed on current main and was not caused by successor placement.
+- `impact`: CI and clean CLI presentation only. Planning results, proposal authority, drive evidence, Fill state, and archive bytes were unchanged. Codec behavior still uses the same ZipNN constructor at the moment an actual compression or decompression operation begins.
+- `remediation`: Load ZipNN lazily inside the two codec-construction helpers and add a subprocess regression proving that importing planning capacity does not initialize `zipnn`. Keep the existing clean canonical-CLI assertion.
+- `docs_updated`: CHANGELOG.md, docs/decision_log.md, modelark/compress.py, modelark/streamznn.py, tests/test_capacity_mode_cli.py
+- `related`: DEC-092, PR-062, PR-063
+- `scope_boundary`: Dependency import timing, CLI warning containment, regression coverage, and this incident record only. No codec format, compression parameters, planner semantics, schema, proposal, Fill session, drive state, archive bytes, service deployment, merge, tag, or publication is changed or authorized here.
