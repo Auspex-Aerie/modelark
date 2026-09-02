@@ -1100,3 +1100,23 @@ INC-053 records that the Fill chart retained Drive #2, correctly, but rendered n
 `lost/excluded` distinction even though the backend already supplied both fields. The UI remediation
 is prepared separately and changes presentation only; the approved proposal assigns Drive #2 zero
 requirements and receives no execution authority from the chart.
+
+## Post-v0.3.0 Fill evidence patch and replacement identity — 2026-09-02
+
+The operator merged PR #60 and approved an attended application-only replacement. Candidate
+`086c321` was initially installed against the same schema-v7 data/state/config paths with Fill idle,
+automatic resume absent, and the user service still disabled. The stopped rollback bundle retained
+the previous unit plus catalog, library-locator, and wishlist snapshots. Pre/post metadata, proposal,
+Drives, plan, preview, and totals responses matched; normalized Fill state remained `idle` with
+`running=false`. Proposal `8f41c6b6-211a-4f90-9d5f-54ffbc75da2a` remained `approved_current` at
+planner revision `10` and kept canonical seal
+`471b2ec32bda25a1eefb0b1773f1112e54d96d0a3b637854ffe1787bb6b91769`. Drive #2 remained
+`lost/excluded`; Drive #7 remained `active/enabled/not_attached`. No Fill session or archive-byte
+operation ran.
+
+PR #62 review then found that both the prior `a574d6b` candidate and post-tag `086c321` candidate
+reported `modelark 0.3.0`, despite distinct behavior and artifact hashes. INC-055 records that
+release-identity defect. DEC-091 assigns the post-v0.3.0 fixes package/runtime version `0.3.1` and
+requires a replacement candidate plus this runbook, changelog, README, upgrade guide, and patch
+release note to advance together. The qualified 0.3.1 candidate and final live evidence are pending
+at this preparation checkpoint; no tag or public package publication is implied.

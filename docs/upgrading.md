@@ -4,6 +4,13 @@ ModelArk upgrades application code normally, but it never silently rewrites an e
 schema is older than the installed release. Existing data is migrated through an explicit,
 backup-first, side-by-side procedure so the old runtime remains a usable rollback point.
 
+## The 0.3.0 → 0.3.1 boundary
+
+ModelArk 0.3.1 uses the same schema-v7 catalog as 0.3.0. This is an application-only update: retain
+the current runtime as rollback, stop the service, install or deploy 0.3.1 against the same explicit
+data/state/config paths, and start it without automatic Fill resume. Confirm the current proposal,
+plan, Drives, and idle Fill state after restart. No provenance migration is required.
+
 ## The 0.2.0 → 0.3.0 boundary
 
 ModelArk 0.3.0 must not be started against a 0.2.0 data directory. Install the new release in a
@@ -31,8 +38,8 @@ If a new ModelArk binary is pointed at an existing pre-v7 catalog, it refuses be
 file and names `modelark-provenance-migrate`. This is expected protection, not catalog corruption.
 For source checkouts and pre-release builds, do not use the Python package version string alone to
 decide whether migration is needed: the catalog schema and the binary's refusal are authoritative.
-ModelArk 0.3.0 is the first public release line carrying schema v7; it is intentionally distinct
-from the released 0.2.0 schema-v2 line.
+ModelArk 0.3.0 is the first public release line carrying schema v7; 0.3.1 retains that schema and is
+intentionally distinct from the released 0.2.0 schema-v2 line.
 
 ## What the provenance migration does
 
