@@ -2194,7 +2194,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### INC-055: Post-tag Fill fixes reused the v0.3.0 package/runtime identity
 - `id`: INC-055
 - `date`: 2026-09-02
-- `status`: remediation prepared by DEC-091; live replacement pending
+- `status`: remediated by DEC-091; live application-only replacement completed 2026-09-02
 - `triggered_by`: Codex review of PR #62 at exact HEAD `43f0dd2`
 - `symptom`: The retained `a574d6b` proposal-gate candidate and materially different post-v0.3.0 `086c321` Fill-evidence candidate both report `modelark 0.3.0`. A support report or rollback check using the supported `modelark --version` surface therefore cannot distinguish them.
 - `root_cause`: PR #60 advanced runtime behavior after tag `v0.3.0`, but its release scope did not advance build metadata or runtime version output. The attended application-only cutover verified schema compatibility, exact commit and artifact hashes, but did not re-apply DEC-083's requirement that the version, changelog, release documentation, artifacts, and retained live candidate move together.
@@ -2207,12 +2207,26 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEC-091: Assign version 0.3.1 to the post-v0.3.0 Fill evidence patch
 - `id`: DEC-091
 - `date`: 2026-09-02
-- `status`: accepted; live application-only replacement pending
+- `status`: accepted; live application-only replacement completed 2026-09-02
 - `triggered_by`: INC-055 and the operator's direction to follow and iterate on the PR #62 P2 findings
 - `decision`: Identify the post-v0.3.0 Fill capacity/lifecycle presentation and per-drive occupancy fixes as patch release `0.3.1`. Advance build metadata, runtime `--version`, changelog, README, upgrade guidance, patch release notes, retained artifacts, live candidate, and provenance runbook together. Keep schema v7 unchanged; upgrade from 0.3.0 is an application-only replacement with the same explicit data/state/config paths, the service disabled for login startup, and automatic Fill resume absent.
 - `rationale`: Commit and artifact hashes remain the strongest exact identities, but the supported version surface must still distinguish behavior-changing retained candidates. A patch version accurately describes reviewed corrections on the existing public-alpha schema line; reusing 0.3.0 contradicts DEC-083, while a new minor version would overstate compatibility impact.
-- `impact`: `tests/test_release_identity.py` now binds project metadata, runtime output, installed distribution metadata, changelog, README, and a same-version release note. The exact qualified candidate, artifact digests, rollback location, pre/post live evidence, and final incident status will be appended before review handoff.
-- `resolves`: INC-055 after the qualified 0.3.1 candidate replaces the live 0.3.0-identified hotfix
+- `impact`: `tests/test_release_identity.py` binds project metadata, runtime output, installed distribution metadata, changelog, README, and a same-version release note. Exact candidate `4a26d37` passed 973 non-E2E tests with one skip and five known deprecation warnings, the standalone portal E2E, Ruff, the focused release-identity regression, package build, installed-wheel identity/asset checks, and an isolated non-resuming HTTP smoke test. Retained wheel SHA-256 is `2c3bf9bc01b0d3ebc1d36379d4ee4c9f6e8c4fc92ba5199a2d74bdd68af81f3f`; source archive SHA-256 is `dcb58bd037a52074b1405737974176a5342e234f3987186bb3382f6beac28786`. The application-only live replacement retained the stopped `086c321` unit plus stable data/config rollback copies under private capsule `candidates/4a26d37/evidence/cutover-20260902-4a26d37`, reused the exact schema-v7 data/state/config paths, and left the user service disabled with `resume=False`. Metadata, proposal, Drives, preview, and totals responses are byte-identical; Library plan identity matches after removing only its observation timestamp; normalized Fill is idle; and catalog, library locator, and wishlist hashes remain byte-identical. Proposal `8f41c6b6-211a-4f90-9d5f-54ffbc75da2a`, planner revision `10`, canonical seal `471b2ec32bda25a1eefb0b1773f1112e54d96d0a3b637854ffe1787bb6b91769`, Drive #2 `lost/excluded`, and Drive #7 `active/enabled/not_attached` are unchanged. Served `fill.js` matches source SHA-256 `49d9b89b817b15f35f998eb60981d76b57b8f5f67ced322c59c6f3d0438f8ce2`. No schema migration, Fill session, drive mutation, archive-byte operation, tag, publication, or merge occurred.
+- `resolves`: INC-055
 - `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, README.md, CHANGELOG.md, docs/upgrading.md, docs/releases/v0.3.1.md, contributing/contributions.md, pyproject.toml, modelark/__init__.py, tests/test_release_identity.py
 - `related`: DEC-067, DEC-082, DEC-083, DEC-087, DEC-088, DEC-089, DEC-090, DEF-042, PR-060, PR-062
 - `scope_boundary`: Patch release identity, documentation, regression coverage, immutable application candidate, user-service unit, rollback/evidence capture, and health verification only. No schema migration, catalog semantics, selection, plan membership, assignment, planner revision, stored proposal, approval, Fill session, drive lifecycle/identity/capacity evidence, Drive #7 attachment or reconciliation, archive byte, tag, public package publication, or merge is changed or authorized here.
+
+### INC-056: Deployment check hint dropped an explicitly selected sibling venv
+- `id`: INC-056
+- `date`: 2026-09-02
+- `status`: contained; explicit-path check passed and helper correction remains open
+- `triggered_by`: DEC-091 live application-only replacement verification
+- `symptom`: After installing a service from retained source `candidates/4a26d37/source` with retained sibling environment `candidates/4a26d37/venv`, `modelark-deploy` printed a follow-up `--check` command containing only `--source`. Running that literal hint defaulted to `SOURCE/.venv` and reported the deployed executable missing even though the service was healthy and running from the explicitly selected sibling venv.
+- `root_cause`: The deployment helper renders the unit from its fully resolved source/venv paths but its success hint reconstructs an abbreviated check command that omits a non-default `--venv` selection.
+- `blast_radius`: Operator-facing post-deploy verification ergonomics only. The installed unit, running command, runtime package, HTTP portal, catalog, proposal, Fill state, and archive bytes are unaffected. Repeating `--check` with the exact explicit `--source` and `--venv` used for deployment passed.
+- `why_not_caught_earlier`: Existing deployment tests and prior cutovers use checkout-local `.venv` layouts, where the abbreviated hint resolves to the same executable and hides the omission.
+- `planned_remediation`: Make the emitted check command preserve every non-default identity needed to address the installed candidate, add a sibling-venv regression, and keep the check read-only. Until then, copied/retained candidate runbooks must repeat `--source` and `--venv` explicitly.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-046, DEC-083, DEC-091, PR-062
+- `scope_boundary`: Incident record and verified explicit-path workaround only. No deploy-helper code, installed unit, service state, data/config/state path, schema, proposal, Fill authority, drive state, archive byte, tag, publication, or merge changes are authorized here.
