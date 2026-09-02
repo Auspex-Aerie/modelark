@@ -167,7 +167,7 @@ class FillWorker:
         """
         with self._lock:
             stale = sorted(self._state.get("archived_stale_drives") or ())
-            if self.running():
+            if self._state.get("status") == "running":
                 stale = stale[:1]
             return [(label, self._archive_generations.get(label, 0)) for label in stale]
 

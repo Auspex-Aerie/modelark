@@ -170,11 +170,16 @@ def test_terminal_status_drains_every_stale_drive_once():
     assert worker.confirm_archive_total("drive-04", drive_b_generation, 2) is True
     worker.mark_archive_changed("drive-00")
     worker.mark_archive_changed("drive-04")
+    worker._emit({"status": "done"})
 
-    with mock.patch.object(fill_api.data, "conn", return_value=con):
+    with (
+        mock.patch.object(worker, "running", return_value=True),
+        mock.patch.object(fill_api.data, "conn", return_value=con),
+    ):
         status = fill_api._refresh_worker_archived_totals(worker)
 
-    assert status["running"] is False
+    assert status["status"] == "done"
+    assert status["running"] is True
     assert status["archived_by_drive"] == {"drive-00": 3, "drive-04": 4}
     assert status["archived_by_drive_current"] is True
     assert status["archived_stale_drives"] == []
@@ -192,6 +197,7 @@ def test_running_status_retries_only_one_stale_drive_per_poll():
     assert worker.confirm_archive_total("drive-04", drive_b_generation, 2) is True
     worker.mark_archive_changed("drive-00")
     worker.mark_archive_changed("drive-04")
+    worker._emit({"status": "running"})
 
     with (
         mock.patch.object(worker, "running", return_value=True),

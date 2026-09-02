@@ -2154,3 +2154,15 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, modelark/web/fill_api.py, modelark/web/fill_worker.py, tests/test_inc054_fill_card_contract.py
 - `related`: DEC-087, INC-054, DEC-086, PR-060
 - `scope_boundary`: Process-local archive-display freshness across Fill lifecycle transitions only. No persistent schema, catalog/archive mutation semantics, planner/capacity policy, drive identity, proposal/approval, Fill execution authority, or archive-byte operation changes.
+
+### DEC-089: Key archive retry breadth to published Fill state
+- `id`: DEC-089
+- `date`: 2026-09-01
+- `status`: accepted
+- `triggered_by`: Greptile PR #60 iteration 8 finding at exact HEAD `8d31993` that `_run` can publish terminal status immediately before its thread exits, leaving liveness true during the browser's final poll.
+- `decision`: Select one stale archive retry only when the worker's locked, published `status` is exactly `running`; select all pending retries for every published terminal or idle state regardless of whether the worker thread is still completing its final instructions.
+- `rationale`: The browser decides whether to continue polling from published status, not thread liveness. Using a different signal inside retry selection created a short but real disagreement where the response was terminal, the browser stopped, and the worker refreshed only one drive. One locked state predicate makes backend recovery breadth match the consumer's polling decision.
+- `impact`: `FillWorker.stale_archive_targets` now uses its retained status under the existing lock. Regression coverage holds thread liveness true after publishing `done` and proves all stale drives recover in that same terminal response, while published `running` still limits each poll to one drive.
+- `docs_updated`: docs/decision_log.md, modelark/web/fill_worker.py, tests/test_inc054_fill_card_contract.py
+- `related`: DEC-087, DEC-088, INC-054, PR-060
+- `scope_boundary`: Archive-display retry selection only. No worker start/stop semantics, browser polling policy, persistent evidence, planner/proposal authority, catalog/archive mutation, or archive-byte operation changes.
