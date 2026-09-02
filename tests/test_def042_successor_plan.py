@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
+
+import pytest
 
 from modelark import (
     archive_manifest,
     budgets,
     candidates,
+    execution_session,
     execution_service,
     placement,
     proposal,
@@ -238,6 +242,9 @@ def _successor_fact_db() -> sqlite3.Connection:
         "CREATE TABLE selection(repo_id TEXT, finalized_at TEXT);"
         "CREATE TABLE models(repo_id TEXT, numcopies INTEGER);"
         "INSERT INTO models VALUES('org/a',1);"
+        "CREATE TABLE archived(repo_id TEXT, rfilename TEXT, drive_label TEXT, "
+        "orig_sha256 TEXT, stored_bytes INTEGER, orig_bytes INTEGER, "
+        "compressed INTEGER, annex_key TEXT);"
     )
     return con
 
@@ -288,6 +295,53 @@ def test_invalidated_successor_facts_report_stale_instead_of_raising():
     assert status["semantic_input_matches"] is False
     assert review["successor_drive"] == "drive-07"
     assert review["moved_to_successor"] == 1
+
+
+def test_fill_projection_refuses_when_successor_predecessor_leaves_plan():
+    con = _successor_fact_db()
+    mutation = ("successor_replan", ("drive-02", "drive-07", "approved-10"))
+    baseline = {
+        "proposal_id": "approved-10",
+        "plan_id": "ark",
+        "lifecycle": "approved",
+        "tasks": [],
+    }
+    successor = {
+        "proposal_id": "successor-11",
+        "plan_id": "ark",
+        "lifecycle": "approved",
+        "mutation_kind": mutation[0],
+        "mutation_args": mutation[1],
+        "tasks": [],
+        "files": [],
+    }
+    services = SimpleNamespace(
+        observe_exact_capacity=lambda *_args, **_kwargs: {
+            "drive-07": SimpleNamespace(
+                kind="offline", executable=True, admissible_free=8_000
+            )
+        }
+    )
+
+    with mock.patch("modelark.proposal.load_proposal", return_value=baseline):
+        successor["semantic_input_hash"] = proposal._semantic_input_hash(
+            con, "ark", mutation
+        )
+        con.execute(
+            "DELETE FROM plan_drives WHERE plan_id='ark' AND drive_label='drive-02'"
+        )
+        with pytest.raises(proposal.Refusal) as caught:
+            execution_session._catalog_projection_bundle(
+                con,
+                successor,
+                ["drive-07"],
+                services,
+                {"capacity_mode": "guaranteed"},
+            )
+
+    assert caught.value.code == "APPROVED_INPUT_CHANGED"
+    assert caught.value.evidence["reason"] == "semantic_input_unavailable"
+    assert caught.value.evidence["cause_code"] == "SUCCESSOR_DRIVE_NOT_IN_PLAN"
 
 
 def test_successor_versions_are_bound_into_preview_and_fill_config():

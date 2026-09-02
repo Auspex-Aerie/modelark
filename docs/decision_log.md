@@ -2270,3 +2270,17 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, modelark/proposal.py, modelark/execution_service.py, modelark/web/proposal_api.py, modelark/web/static/proposal.js, tests/test_def042_successor_plan.py
 - `related`: DEC-067, DEC-092, INC-057, PR-063
 - `scope_boundary`: Successor status/currentness, execution-config identity, regression coverage, and this incident record only. No ordinary proposal version/hash changes, schema migration, live proposal, planner revision, Fill session, drive state, archive bytes, service deployment, merge, tag, or publication is changed or authorized here.
+
+### INC-059: Fill projection swallowed typed successor-context refusal
+- `id`: INC-059
+- `date`: 2026-09-02
+- `status`: remediated before merge
+- `triggered_by`: Codex review of PR #63 at exact head `e4866df`
+- `symptom`: Removing an unavailable predecessor from its plan after approving a successor proposal made proposal status correctly report stale, but direct Fill projection could continue with the proposal's stored semantic hash. The predecessor does not need to appear among executable task drives, so later drive-fence checks did not necessarily observe its removal.
+- `root_cause`: The execution projection compatibility path caught every exception from semantic-input reconstruction and substituted the previously approved hash. That broad fallback failed to distinguish an incomplete legacy schema from a typed domain refusal proving that current proposal authority could no longer be reconstructed.
+- `impact`: Pre-merge successor branch only; no deployed successor proposal or Fill session existed. Without remediation, a direct Fill-start request could pass semantic comparison after the successor context had been invalidated by supported plan mutation.
+- `remediation`: At the execution boundary, convert every typed semantic-reconstruction refusal into `APPROVED_INPUT_CHANGED` with the original refusal code retained as evidence. Preserve the narrow untyped fallback for partial legacy catalog fixtures, but never allow a typed authority failure to self-confirm from stored proposal data. Add a regression that removes the predecessor from plan membership and proves projection refuses with cause `SUCCESSOR_DRIVE_NOT_IN_PLAN`.
+- `verification`: The focused successor/session/projection/config suite passes 36 tests; Ruff and `git diff --check` pass; and the complete non-browser suite passes 981 tests with one skip and five known warnings. A sandbox-only run first produced 17 loopback `PermissionError` failures; the identical suite passed when allowed to bind its ephemeral localhost test servers.
+- `docs_updated`: docs/decision_log.md, modelark/execution_session.py, tests/test_def042_successor_plan.py
+- `related`: DEC-067, DEC-092, INC-058, PR-063
+- `scope_boundary`: Fill-time semantic revalidation and regression evidence only. No planner assignment, proposal content, schema, live proposal, planner revision, drive state, Fill session, archive bytes, service deployment, merge, tag, or publication is changed or authorized here.
