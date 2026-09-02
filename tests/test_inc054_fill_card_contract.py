@@ -210,6 +210,57 @@ def test_running_status_retries_only_one_stale_drive_per_poll():
     assert status["archived_stale_drives"] == ["drive-04"]
 
 
+def test_running_to_terminal_status_drains_every_unattempted_stale_drive():
+    worker = _worker_with_total("drive-00", 2)
+    drive_b_generation = worker.mark_archive_changed("drive-04")
+    assert worker.confirm_archive_total("drive-04", drive_b_generation, 2) is True
+    worker.mark_archive_changed("drive-00")
+    worker.mark_archive_changed("drive-04")
+    worker._emit({"status": "running"})
+    reads = []
+
+    def read_total(label):
+        reads.append(label)
+        if len(reads) == 1:
+            worker._emit({"status": "done"})
+        return {"drive-00": 3, "drive-04": 4}[label]
+
+    with mock.patch.object(fill_api, "_read_archived_total", side_effect=read_total):
+        status = fill_api._refresh_worker_archived_totals(worker)
+
+    assert reads == ["drive-00", "drive-04"]
+    assert status["status"] == "done"
+    assert status["archived_by_drive"] == {"drive-00": 3, "drive-04": 4}
+    assert status["archived_by_drive_current"] is True
+    assert status["archived_stale_drives"] == []
+
+
+def test_terminal_transition_does_not_repeat_a_failed_generation():
+    worker = _worker_with_total("drive-00", 2)
+    drive_b_generation = worker.mark_archive_changed("drive-04")
+    assert worker.confirm_archive_total("drive-04", drive_b_generation, 2) is True
+    worker.mark_archive_changed("drive-00")
+    worker.mark_archive_changed("drive-04")
+    worker._emit({"status": "running"})
+    reads = []
+
+    def read_total(label):
+        reads.append(label)
+        if len(reads) == 1:
+            worker._emit({"status": "done"})
+            raise RuntimeError("catalog unavailable")
+        return 4
+
+    with mock.patch.object(fill_api, "_read_archived_total", side_effect=read_total):
+        status = fill_api._refresh_worker_archived_totals(worker)
+
+    assert reads == ["drive-00", "drive-04"]
+    assert status["status"] == "done"
+    assert status["archived_by_drive"] == {"drive-00": 2, "drive-04": 4}
+    assert status["archived_by_drive_current"] is False
+    assert status["archived_stale_drives"] == ["drive-00"]
+
+
 def test_replica_commit_refreshes_only_its_target_drive():
     con = sqlite3.connect(":memory:")
     con.execute("CREATE TABLE archived(drive_label TEXT, stored_bytes INTEGER)")

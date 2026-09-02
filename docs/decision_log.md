@@ -2166,3 +2166,15 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, modelark/web/fill_worker.py, tests/test_inc054_fill_card_contract.py
 - `related`: DEC-087, DEC-088, INC-054, PR-060
 - `scope_boundary`: Archive-display retry selection only. No worker start/stop semantics, browser polling policy, persistent evidence, planner/proposal authority, catalog/archive mutation, or archive-byte operation changes.
+
+### DEC-090: Linearize archive refresh work with its returned Fill snapshot
+- `id`: DEC-090
+- `date`: 2026-09-02
+- `status`: accepted
+- `triggered_by`: Greptile PR #60 iteration 9 finding at exact HEAD `68d793e` that Fill could become terminal after a running-width retry was selected but before the response snapshot was captured.
+- `decision`: `FillWorker` atomically authors each archive-refresh plan as a copied published-state snapshot plus the unattempted per-drive generation tokens justified by that snapshot. A status request attempts at most one token selected by a running plan. It then returns a newly captured running snapshot, guaranteeing another browser poll, or follows a terminal plan and attempts every remaining token once before returning that exact terminal snapshot. No request may return a later terminal state after performing only work selected under an earlier running state.
+- `rationale`: Choosing retry breadth and response state in separate locked calls around database I/O allowed each operation to be internally correct while their combination contradicted the browser's polling contract. A response-consistent plan establishes one linearization point without holding the worker lock during database reads. Tracking attempted generation tokens bounds failure handling while allowing a concurrently superseding generation to receive its own terminal attempt.
+- `impact`: `modelark/web/fill_worker.py` owns the combined snapshot/target plan; `modelark/web/fill_api.py` follows running or terminal plans without independently recapturing an inconsistent response; regressions cover a running-to-terminal transition during the first read and bounded terminal recovery after that read fails.
+- `docs_updated`: docs/decision_log.md, modelark/web/fill_api.py, modelark/web/fill_worker.py, tests/test_inc054_fill_card_contract.py
+- `related`: DEC-087, DEC-088, DEC-089, INC-054, PR-060
+- `scope_boundary`: Process-local archive-display status and retry linearization only. No database schema, durable archive evidence, planner/capacity policy, drive lifecycle, proposal/approval, Fill execution authority, browser polling policy, or archive-byte operation changes.

@@ -134,12 +134,16 @@ class FillWorker:
 
     def status(self) -> dict:
         with self._lock:
-            snapshot = dict(self._state, running=self.running())
-            if isinstance(snapshot.get("archived_by_drive"), dict):
-                snapshot["archived_by_drive"] = dict(snapshot["archived_by_drive"])
-            if isinstance(snapshot.get("archived_stale_drives"), list):
-                snapshot["archived_stale_drives"] = list(snapshot["archived_stale_drives"])
-            return snapshot
+            return self._status_locked()
+
+    def _status_locked(self) -> dict:
+        """Copy the published state. Caller must hold ``_lock``."""
+        snapshot = dict(self._state, running=self.running())
+        if isinstance(snapshot.get("archived_by_drive"), dict):
+            snapshot["archived_by_drive"] = dict(snapshot["archived_by_drive"])
+        if isinstance(snapshot.get("archived_stale_drives"), list):
+            snapshot["archived_stale_drives"] = list(snapshot["archived_stale_drives"])
+        return snapshot
 
     def mark_archive_changed(self, drive: str) -> int:
         """Mark one drive's durable occupancy stale and return its new generation.
@@ -159,17 +163,28 @@ class FillWorker:
             self._state["archived_by_drive_current"] = False
             return generation
 
-    def stale_archive_targets(self) -> list[tuple[str, int]]:
-        """Return retry tokens for stale drives: one while running, all when terminal.
+    def archive_refresh_plan(
+        self,
+        attempted: set[tuple[str, int]] | None = None,
+    ) -> tuple[dict, list[tuple[str, int]]]:
+        """Atomically capture a response snapshot and the retries justified by it.
 
-        Running polls stay cheap.  A terminal status request drains every pending drive because the
-        browser stops periodic polling after Fill ends.
+        Running polls stay cheap by selecting at most one unattempted generation.  A terminal
+        snapshot selects every unattempted generation because the browser stops periodic polling
+        after Fill ends.  Returning both under one lock lets the API avoid claiming terminal after
+        performing only work selected by an earlier running state.
         """
+        attempted = attempted or set()
         with self._lock:
-            stale = sorted(self._state.get("archived_stale_drives") or ())
-            if self._state.get("status") == "running":
-                stale = stale[:1]
-            return [(label, self._archive_generations.get(label, 0)) for label in stale]
+            snapshot = self._status_locked()
+            targets = [
+                (label, self._archive_generations.get(label, 0))
+                for label in sorted(self._state.get("archived_stale_drives") or ())
+            ]
+            targets = [target for target in targets if target not in attempted]
+            if snapshot.get("status") == "running":
+                targets = targets[:1]
+            return snapshot, targets
 
     def confirm_archive_total(self, drive: str, generation: int, stored_bytes: int) -> bool:
         """Publish one drive's durable total iff no newer change superseded its read."""

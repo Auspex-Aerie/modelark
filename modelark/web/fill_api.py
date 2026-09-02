@@ -138,18 +138,29 @@ def _observe_archive_change(worker: fill_worker.FillWorker, ev: dict) -> None:
 
 
 def _refresh_worker_archived_totals(worker: fill_worker.FillWorker) -> dict:
-    """Retry stale drives through the same per-drive merge as Fill events.
+    """Retry stale drives through a response-consistent per-drive refresh plan.
 
-    A running Fill retries one drive per cheap poll.  Once terminal, the browser no longer polls, so
-    the first status request attempts every pending drive once and leaves only failed reads stale.
+    A running request attempts at most one drive.  After that database read, a fresh worker-authored
+    plan either returns a captured running snapshot (so the browser polls again) or observes terminal
+    and drains every still-unattempted generation before returning terminal.  Each generation is
+    attempted only once per request, so display-enrichment failures remain bounded and fail-open.
     """
-    for label, generation in worker.stale_archive_targets():
-        try:
-            total = _read_archived_total(label)
-        except Exception:
-            continue
-        worker.confirm_archive_total(label, generation, total)
-    return worker.status()
+    attempted: set[tuple[str, int]] = set()
+    snapshot, targets = worker.archive_refresh_plan()
+    while targets:
+        for label, generation in targets:
+            attempted.add((label, generation))
+            try:
+                total = _read_archived_total(label)
+            except Exception:
+                continue
+            worker.confirm_archive_total(label, generation, total)
+
+        snapshot, targets = worker.archive_refresh_plan(attempted)
+        if snapshot.get("status") == "running":
+            return snapshot
+
+    return snapshot
 
 
 def _rx_bytes() -> int | None:
