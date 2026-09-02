@@ -2178,3 +2178,15 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, modelark/web/fill_api.py, modelark/web/fill_worker.py, tests/test_inc054_fill_card_contract.py
 - `related`: DEC-087, DEC-088, DEC-089, INC-054, PR-060
 - `scope_boundary`: Process-local archive-display status and retry linearization only. No database schema, durable archive evidence, planner/capacity policy, drive lifecycle, proposal/approval, Fill execution authority, browser polling policy, or archive-byte operation changes.
+
+### BOT-005: Greptile trigger handle drifted to an app-account alias
+- `id`: BOT-005
+- `date`: 2026-09-02
+- `status`: logged
+- `triggered_by`: Operator correction after PR #60 iteration 10 was requested with `@greptile-app-bot` instead of the canonical `@greptileai review` mention.
+- `claim`: The agent derived a trigger mention from Greptile's GitHub app identity and treated the resulting successful review as evidence that the substituted handle was acceptable.
+- `correction`: Trigger Greptile only with the exact canonical mention `@greptileai review`. API identities such as `greptile-apps[bot]` describe review and reaction authors; they are observational data, not trigger aliases. An automatic review caused by a push must not be used to validate a different mention.
+- `verified`: DEC-085, DEC-086, and the existing placement review instructions already name `@greptileai review`; the drift contradicted durable project memory rather than revealing a missing protocol.
+- `lesson`: Read the retained review protocol before posting every iteration, and never synthesize a mention from `author.login`, historical comment text, or an app display name.
+- `docs_updated`: AGENTS.md, docs/decision_log.md
+- `related`: BOT-003, BOT-004, DEC-085, DEC-086, PR-060
