@@ -2040,7 +2040,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### INC-053: Fill drive cards hid lost and excluded lifecycle state
 - `id`: INC-053
 - `date`: 2026-08-30
-- `status`: open; remediation prepared on follow-up branch, not deployed
+- `status`: remediated; live application-only swap completed 2026-09-02
 - `triggered_by`: Live operator review immediately after approving the revision-9 proposal
 - `symptom`: The Fill chart continued to show lost/excluded `drive-02` after approval with the same dashed, faded empty-card treatment as active/enabled but unused `drive-07`. It displayed no unavailable icon, lifecycle label, or struck-through identity, so retaining historical plan membership could be misread as current execution eligibility.
 - `root_cause`: `librarian.plan_view` already publishes exact per-drive `lifecycle` and `eligibility`, but `modelark/web/static/fill.js::driveCard` consumed only tier, capacity, archived bytes, and planned work. Its generic `empty` class collapsed “lost and excluded” into “active but currently unused.”
@@ -2114,7 +2114,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### INC-054: Fill cards compared archived occupancy with the remaining writable budget
 - `id`: INC-054
 - `date`: 2026-09-01
-- `status`: remediated on follow-up branch; deployment pending
+- `status`: remediated; live application-only swap completed 2026-09-02
 - `triggered_by`: Operator review of the approved revision-10 Fill screen showed `drive-00` as `4.63TB/44GB` and `drive-01` as `7.77TB/398GB`, making coherent drive identities and capacity evidence look scrambled.
 - `symptom`: Established drives displayed archived terabytes plus newly planned bytes as the numerator, but displayed only the admission-safe budget for new writes as the denominator. The percentage consequently saturated at 100%, while the separate archived-progress row divided the same historical occupancy by that remaining budget again.
 - `root_cause`: `librarian.plan_view` already publishes distinct nominal `capacity`, current `usable` admission budget, `archived_bytes`, `planned_bytes`, and the correct `fill_pct = planned_bytes / usable`. `fill.js::driveCard` discarded that boundary by reconstructing `archived_bytes + planned_bytes` over `usable`; its archived segment and live archived row also treated `usable` as total device capacity.
@@ -2190,3 +2190,16 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `lesson`: Read the retained review protocol before posting every iteration, and never synthesize a mention from `author.login`, historical comment text, or an app display name.
 - `docs_updated`: AGENTS.md, docs/decision_log.md
 - `related`: BOT-003, BOT-004, DEC-085, DEC-086, PR-060
+
+### DEC-091: Cut over the live portal to the merged Fill evidence fixes without starting Fill
+- `id`: DEC-091
+- `date`: 2026-09-02
+- `status`: accepted; live application-only swap completed 2026-09-02
+- `triggered_by`: The operator merged PR #60, approved an attended application-only cutover, and directed ModelArk to be ready for the successor-plan discussion while Drive #7 remained physically disconnected.
+- `decision`: Replace the live `a574d6b` application candidate with immutable merged commit `086c321` and its installed `modelark 0.3.0` wheel, reusing the existing schema-v7 data, state, and configuration paths. Preserve the prior unit and a stopped, hash-verified catalog rollback snapshot before replacement. Keep the user service disabled for login startup, omit `--resume-fill`, and require the existing explicit Start Fill action. Treat Drive #7's retained active/enabled identity and capacity evidence as sufficient for this read-only application cutover and later successor-plan preview; do not claim physical presence or perform execution against it while its observation remains `not_attached`.
+- `rationale`: PR #60 fixes presentation and process-local evidence handling without changing the catalog schema or planner authority, so an application-only replacement is safer and more auditable than a migration. The successor relationship in DEF-042 is operator planning intent, not a reason to delay deploying the reviewed UI fixes or to infer that an absent drive is physically ready. Separating deployment, successor replanning, proposal approval, and Fill preserves each human gate.
+- `impact`: The retained wheel SHA-256 is `60f74fdfa1d948ea378ed5aed351721f13659ffa1e382ad007eb25f9005d6ce4`; the source archive SHA-256 is `8063ebb7ca07e4d2a37b52da73ee553afec2e62cec9caf2f6c9980ba5aed15d8`. The no-clobber evidence bundle is `/home/phaze/auspexlabs/.auspexinstall/test/ModelArk/candidates/086c321/evidence/cutover-20260902-086c321`; it retains the prior unit and catalog snapshot SHA-256 `854617c9e3362d42276237f88d603addfdf8e9e84c2eafafb2d69cc1f1ef49c8`. Pre/post metadata, proposal, Drives, plan, preview, and totals responses are byte-equivalent as parsed JSON; normalized Fill state remains `idle` with `running=false`. Proposal `8f41c6b6-211a-4f90-9d5f-54ffbc75da2a` remains `approved_current` at planner revision `10` with canonical hash `471b2ec32bda25a1eefb0b1773f1112e54d96d0a3b637854ffe1787bb6b91769`. Drive #2 remains `lost/excluded`; Drive #7 remains `active/enabled/not_attached` with capacity `8001561821184` bytes and unchanged identity fingerprint. The served `fill.js` matches candidate source SHA-256 `49d9b89b817b15f35f998eb60981d76b57b8f5f67ced322c59c6f3d0438f8ce2`; the startup journal reports `resume=False`; and the deployment health check passes on `127.0.0.1:8077`. The deploy helper wrote the inspected unit but could not reload the user bus from its elevated subprocess context; the service stayed stopped until the same unit was explicitly reloaded through the established user-session systemd path and then started successfully.
+- `resolves`: INC-053, INC-054
+- `docs_updated`: docs/decision_log.md
+- `related`: DEC-067, DEC-082, DEC-083, DEC-087, DEC-088, DEC-089, DEC-090, DEF-042, PR-060
+- `scope_boundary`: Immutable application candidate, user-service unit, rollback/evidence capture, health verification, and incident-status updates only. No schema migration, catalog semantics, selection, plan membership, assignment, planner revision, stored proposal, approval, Fill session, drive lifecycle/identity/capacity evidence, Drive #7 attachment or reconciliation, archive byte, tag, release publication, or merge is changed or authorized here.
