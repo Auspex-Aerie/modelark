@@ -21,6 +21,13 @@ import threading
 import time
 
 
+_ARCHIVE_STATE_FIELDS = {
+    "archived_by_drive",
+    "archived_by_drive_current",
+    "archived_stale_drives",
+}
+
+
 class FillWorker:
     def __init__(self):
         self._thread: threading.Thread | None = None
@@ -34,6 +41,7 @@ class FillWorker:
         self._decision_event = threading.Event()
         self._decision_id: str | None = None
         self._decision_response: str | None = None
+        self._archive_generations: dict[str, int] = {}
 
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -52,6 +60,7 @@ class FillWorker:
                 self._decision_event.clear()
                 self._decision_id = None
                 self._decision_response = None
+                self._archive_generations = {}
                 self._state = {"status": "running", "message": "starting…"}
                 self._thread = threading.Thread(target=self._run, args=(work,), name="modelark-fill", daemon=True)
                 self._thread.start()
@@ -126,23 +135,64 @@ class FillWorker:
 
     def status(self) -> dict:
         with self._lock:
-            return dict(self._state, running=self.running())
+            snapshot = dict(self._state, running=self.running())
+            if isinstance(snapshot.get("archived_by_drive"), dict):
+                snapshot["archived_by_drive"] = dict(snapshot["archived_by_drive"])
+            if isinstance(snapshot.get("archived_stale_drives"), list):
+                snapshot["archived_stale_drives"] = list(snapshot["archived_stale_drives"])
+            return snapshot
 
-    def compare_and_update(self, expected: dict, update: dict) -> bool:
-        """Merge ``update`` only while every expected status field still matches.
+    def mark_archive_changed(self, drive: str) -> int:
+        """Mark one drive's durable occupancy stale and return its new generation.
 
-        A status request may compute display evidence outside the worker lock.  This small CAS keeps
-        that refresh from overwriting a newer progress event when it publishes the recovered value.
+        The database read happens after this method releases the worker lock.  A later archive
+        change for the same drive advances the generation, so an older read cannot publish over it.
         """
+        label = str(drive or "")
+        if not label:
+            raise ValueError("archive occupancy updates require a drive label")
         with self._lock:
-            if any(self._state.get(key) != value for key, value in expected.items()):
+            generation = self._archive_generations.get(label, 0) + 1
+            self._archive_generations[label] = generation
+            stale = set(self._state.get("archived_stale_drives") or ())
+            stale.add(label)
+            self._state["archived_stale_drives"] = sorted(stale)
+            self._state["archived_by_drive_current"] = False
+            return generation
+
+    def stale_archive_target(self) -> tuple[str, int] | None:
+        """Return one stale drive and its current generation for a status-path retry."""
+        with self._lock:
+            stale = sorted(self._state.get("archived_stale_drives") or ())
+            if not stale:
+                return None
+            label = stale[0]
+            return label, self._archive_generations.get(label, 0)
+
+    def confirm_archive_total(self, drive: str, generation: int, stored_bytes: int) -> bool:
+        """Publish one drive's durable total iff no newer change superseded its read."""
+        label = str(drive or "")
+        with self._lock:
+            if self._archive_generations.get(label) != generation:
                 return False
-            self._state.update(update)
+            totals = dict(self._state.get("archived_by_drive") or {})
+            totals[label] = int(stored_bytes)
+            stale = set(self._state.get("archived_stale_drives") or ())
+            stale.discard(label)
+            self._state["archived_by_drive"] = totals
+            self._state["archived_stale_drives"] = sorted(stale)
+            self._state["archived_by_drive_current"] = not stale
             return True
 
     def _emit(self, ev: dict) -> None:
+        """Merge ordinary progress without allowing it to replace archive evidence.
+
+        Archive occupancy has a separate per-drive update protocol above.  Silently ignoring its
+        reserved fields keeps optional display telemetry fail-open instead of failing a Fill.
+        """
         with self._lock:
-            self._state.update(ev)
+            self._state.update({key: value for key, value in ev.items()
+                                if key not in _ARCHIVE_STATE_FIELDS})
 
     def _run(self, work) -> None:
         try:

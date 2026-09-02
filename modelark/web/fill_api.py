@@ -9,7 +9,6 @@ the worker so the FillWorker wrapper flips status to 'error' (the emitted 'say' 
 """
 from __future__ import annotations
 
-import itertools
 import json
 import os
 import threading
@@ -24,7 +23,6 @@ from modelark.web import data, fill_worker
 # overnight). A clean 'done' or a user 'stopped' clears it.
 _TERMINAL_PATH = db.CATALOG_DIR / "last_fill.json"
 _OOPSIE = {"error", "blocked", "plan-capacity-stop", "paused"}
-_ARCHIVE_SNAPSHOT_IDS = itertools.count(1)
 
 
 def _persist_terminal(term: dict) -> None:
@@ -98,94 +96,58 @@ def _log_event(log, ev: dict) -> None:
         log.info(ph, repo=ev.get("repo"))
 
 
-def _attach_archived_totals(
-        ev: dict, previous: dict | None = None,
-        stale_drives: list[str] | tuple[str, ...] | None = None) -> dict:
-    """Attach the affected drive's post-commit durable occupancy to an archive-change event.
-
-    ``done_by_drive`` is cumulative session telemetry, so a browser that reloads mid-session cannot
-    safely add it to a fresh ``/api/library/plan`` baseline: both may already contain the same write.
-    Only the final stored event (which carries ``done_by_drive``) and explicit replica completion
-    events occur after an archived-row commit. Query just that drive and merge it into the prior
-    snapshot; display telemetry must never turn a successful archive operation into a failed Fill.
-    """
+def _archive_change_drive(ev: dict) -> str | None:
+    """Return the affected drive only for an event emitted after an archive-row commit."""
     changed = (
         (ev.get("file_phase") == "stored" and "done_by_drive" in ev)
         or ev.get("archive_changed") is True
     )
-    if not changed:
-        return ev
     label = str(ev.get("drive") or "")
-    if not label:
-        return ev
-    totals = dict(previous or {})
-    stale = set(stale_drives or ())
-    snapshot_id = next(_ARCHIVE_SNAPSHOT_IDS)
+    return label if changed and label else None
+
+
+def _read_archived_total(label: str) -> int:
+    """Read one drive's current durable occupancy without holding the worker-state lock."""
+    with data._lock:
+        row = data.conn().execute(
+            "SELECT coalesce(sum(stored_bytes),0) FROM archived WHERE drive_label=?",
+            [label],
+        ).fetchone()
+    return int((row or [0])[0] or 0)
+
+
+def _observe_archive_change(worker: fill_worker.FillWorker, ev: dict) -> None:
+    """Refresh one changed drive without granting its event authority over other drives.
+
+    ``done_by_drive`` is cumulative session telemetry, so a browser that reloads mid-session cannot
+    safely add it to a fresh ``/api/library/plan`` baseline: both may already contain the same write.
+    Only the final stored event (which carries ``done_by_drive``) and explicit replica completion
+    events occur after an archived-row commit. Mark that drive stale, query just its durable total,
+    then publish through the worker's generation-guarded per-drive merge. Display telemetry must
+    never turn a successful archive operation into a failed Fill.
+    """
+    label = _archive_change_drive(ev)
+    if label is None:
+        return
+    generation = worker.mark_archive_changed(label)
     try:
-        with data._lock:
-            row = data.conn().execute(
-                "SELECT coalesce(sum(stored_bytes),0) FROM archived WHERE drive_label=?",
-                [label],
-            ).fetchone()
+        total = _read_archived_total(label)
     except Exception:
-        # FillWorker merges event fields into retained state. Mark the earlier snapshot non-current
-        # without erasing it: the UI can present it explicitly as last-confirmed evidence while the
-        # cheap status path retries only this affected drive.
-        return {
-            **ev,
-            "archived_by_drive": totals,
-            "archived_by_drive_current": False,
-            "archived_stale_drives": sorted(stale | {label}),
-            "archived_snapshot_id": snapshot_id,
-        }
-    totals[label] = int((row or [0])[0] or 0)
-    stale.discard(label)
-    return {
-        **ev,
-        "archived_by_drive": totals,
-        "archived_by_drive_current": not stale,
-        "archived_stale_drives": sorted(stale),
-        "archived_snapshot_id": snapshot_id,
-    }
-
-
-def _refresh_stale_archived_totals(status: dict) -> dict:
-    """Retry a failed occupancy snapshot without obscuring the last confirmed evidence."""
-    stale = list(status.get("archived_stale_drives") or ())
-    if not stale:
-        return status
-    refreshed = _attach_archived_totals(
-        {"archive_changed": True, "drive": stale[0]},
-        status.get("archived_by_drive"),
-        stale,
-    )
-    if stale[0] in set(refreshed.get("archived_stale_drives") or ()):
-        return status
-    return {
-        **status,
-        "archived_by_drive": refreshed["archived_by_drive"],
-        "archived_by_drive_current": refreshed["archived_by_drive_current"],
-        "archived_stale_drives": refreshed["archived_stale_drives"],
-        "archived_snapshot_id": refreshed["archived_snapshot_id"],
-    }
+        return
+    worker.confirm_archive_total(label, generation, total)
 
 
 def _refresh_worker_archived_totals(worker: fill_worker.FillWorker) -> dict:
-    """Retry and persist one stale snapshot without racing a newer worker event."""
-    before = worker.status()
-    refreshed = _refresh_stale_archived_totals(before)
-    if refreshed is before:
-        return before
-    update = {
-        "archived_by_drive": refreshed["archived_by_drive"],
-        "archived_by_drive_current": refreshed["archived_by_drive_current"],
-        "archived_stale_drives": refreshed["archived_stale_drives"],
-        "archived_snapshot_id": refreshed["archived_snapshot_id"],
-    }
-    worker.compare_and_update(
-        {"archived_snapshot_id": before.get("archived_snapshot_id")},
-        update,
-    )
+    """Retry and persist one stale drive through the same per-drive merge as Fill events."""
+    target = worker.stale_archive_target()
+    if target is None:
+        return worker.status()
+    label, generation = target
+    try:
+        total = _read_archived_total(label)
+    except Exception:
+        return worker.status()
+    worker.confirm_archive_total(label, generation, total)
     return worker.status()
 
 
@@ -242,12 +204,7 @@ def start(body: dict) -> dict:
         log = telemetry.get_logger("fill")
 
         def logged_emit(ev: dict) -> None:                  # tee every progress event into the log, then the UI
-            worker_status = fill_worker.WORKER.status()
-            ev = _attach_archived_totals(
-                ev,
-                worker_status.get("archived_by_drive"),
-                worker_status.get("archived_stale_drives"),
-            )
+            _observe_archive_change(fill_worker.WORKER, ev)
             _log_event(log, ev)
             emit(ev)
 
