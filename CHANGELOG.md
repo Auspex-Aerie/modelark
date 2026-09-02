@@ -4,6 +4,23 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## Unreleased
 
+## 0.3.1 - 2026-09-02
+
+ModelArk 0.3.1 is an application-only patch over the schema-v7 0.3.0 release. Existing 0.3.0
+catalogs need no migration. Redeploy normally, keep automatic Fill resume disabled, and confirm the
+current proposal and Fill state after restart.
+
+### Fixed
+
+- Fill drive cards now compare planned work with the remaining writable budget and report archived
+  occupancy separately against nominal device capacity.
+- Lost and excluded historical drives remain visible with an explicit unavailable state instead of
+  looking like active but unused media.
+- Live archive-occupancy refresh is now owned per drive, process-monotonic, race-safe, and drained
+  against the Fill state returned to the browser.
+- The post-v0.3.0 runtime fixes now have a distinct package/runtime identity, release note, and
+  deployment record so support and rollback checks can distinguish their artifacts.
+
 ## 0.3.0 - 2026-08-30
 
 ModelArk 0.3.0 is the first schema-v7 public-alpha release. It adds substantial backend disk-safety

@@ -1,7 +1,7 @@
 # Contributing to ModelArk
 
 ModelArk is built in public and pre-1.0 — bug reports, fixes, docs, and curation ideas are all
-welcome. Expect rough edges, and read the [0.3.0 status](../README.md#030-status) first.
+welcome. Expect rough edges, and read the [0.3.1 status](../README.md#what-changed-in-v031) first.
 
 By taking part you agree to the canonical [Code of Conduct](../CODE_OF_CONDUCT.md).
 

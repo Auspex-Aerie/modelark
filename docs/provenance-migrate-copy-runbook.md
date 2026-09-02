@@ -1,16 +1,14 @@
 # Provenance migration — repeatable copied-runtime runbook
 
-Status: **copied-runtime acceptance, Drive #2 loss rehearsal and live declaration,
-replacement-media read-only qualification, immutable candidate freeze, stopped side-by-side live
-cutover, attended diagnostic-only application swaps, and preview-bound replacement onboarding
-passed, including recovery from a cleanly refused archive-parent permission check and one successful
-new-identity registration plus its dedicated-local capacity bootstrap; stopped after separately
-bootstrapping the NAS and every active local archive drive, exposing bounded reconciliation inventory
-classification, and retaining a feasible central plan on 2026-08-29**. LocalModelArk now
-runs schema v7 from corrected candidate commit `1d420e0`; the service remains disabled for login
-startup and was started without Fill resume. The preserved schema-v2 runtime, cutover capsule, and
-earlier application candidates remain rollback/evidence points. The deferred operator-facing
-proposal approval surface (DEF-036), proposal approval, and Fill remain separate gates.
+Status: **copied-runtime acceptance, Drive #2 loss declaration, replacement-media qualification and
+registration, schema-v7 live cutover, exact placement approval, post-v0.3.0 Fill evidence fixes, and
+the distinct v0.3.1 application-only replacement all passed by 2026-09-02**. LocalModelArk now runs
+schema v7 from retained candidate commit `4a26d37` and reports `modelark 0.3.1`; the service is active
+but remains disabled for login startup, was started without Fill resume, and has idle Fill. Proposal
+`8f41c6b6-211a-4f90-9d5f-54ffbc75da2a` remains `approved_current` at planner revision `10`. The
+preserved schema-v2 runtime, cutover capsule, and earlier application candidates remain
+rollback/evidence points. Start Fill and operator-directed successor replanning remain separate
+gates.
 
 Use this runbook to exercise the provenance migration from the current development branch against a
 production-shaped, disposable copy of the existing LocalModelArk deployment. The process is designed
@@ -1100,3 +1098,46 @@ INC-053 records that the Fill chart retained Drive #2, correctly, but rendered n
 `lost/excluded` distinction even though the backend already supplied both fields. The UI remediation
 is prepared separately and changes presentation only; the approved proposal assigns Drive #2 zero
 requirements and receives no execution authority from the chart.
+
+## Post-v0.3.0 Fill evidence patch and replacement identity — 2026-09-02
+
+The operator merged PR #60 and approved an attended application-only replacement. Candidate
+`086c321` was initially installed against the same schema-v7 data/state/config paths with Fill idle,
+automatic resume absent, and the user service still disabled. The stopped rollback bundle retained
+the previous unit plus catalog, library-locator, and wishlist snapshots. Pre/post metadata, proposal,
+Drives, plan, preview, and totals responses matched; normalized Fill state remained `idle` with
+`running=false`. Proposal `8f41c6b6-211a-4f90-9d5f-54ffbc75da2a` remained `approved_current` at
+planner revision `10` and kept canonical seal
+`471b2ec32bda25a1eefb0b1773f1112e54d96d0a3b637854ffe1787bb6b91769`. Drive #2 remained
+`lost/excluded`; Drive #7 remained `active/enabled/not_attached`. No Fill session or archive-byte
+operation ran.
+
+PR #62 review then found that both the prior `a574d6b` candidate and post-tag `086c321` candidate
+reported `modelark 0.3.0`, despite distinct behavior and artifact hashes. INC-055 records that
+release-identity defect. DEC-091 assigns the post-v0.3.0 fixes package/runtime version `0.3.1` and
+requires a replacement candidate plus this runbook, changelog, README, upgrade guide, and patch
+release note to advance together.
+
+Exact candidate `4a26d37` passed 973 non-E2E tests with one skip and five known deprecation warnings,
+the standalone portal E2E, Ruff, the release-identity regression, package build, installed-wheel
+identity/asset checks, and an isolated non-resuming HTTP smoke test. Its retained wheel SHA-256 is
+`2c3bf9bc01b0d3ebc1d36379d4ee4c9f6e8c4fc92ba5199a2d74bdd68af81f3f`; its source archive SHA-256
+is `dcb58bd037a52074b1405737974176a5342e234f3987186bb3382f6beac28786`.
+
+The attended application-only replacement reused the exact schema-v7 data/state/config paths and
+retained the stopped `086c321` unit plus a stable copy of its data and config in the private
+`candidates/4a26d37/evidence/cutover-20260902-4a26d37` capsule. Pre/post metadata, proposal, Drives,
+preview, and totals responses are byte-identical. The Library plan is identical after removing only
+its fresh observation timestamp, and normalized Fill status remains `idle` with `running=false`.
+The catalog, library locator, and wishlist hashes are byte-identical across the swap. Proposal ID,
+revision, canonical seal, Drive #2's `lost/excluded` state, and Drive #7's
+`active/enabled/not_attached` state are unchanged. The service is healthy and disabled, its exact
+process uses the retained 0.3.1 venv, its journal reports `resume=False`, and its served `fill.js`
+matches candidate source SHA-256 `49d9b89b817b15f35f998eb60981d76b57b8f5f67ced322c59c6f3d0438f8ce2`.
+No Fill session, schema migration, drive mutation, or archive-byte operation ran. No tag, public
+package publication, or merge is implied.
+
+The helper's post-install check hint omitted the explicit sibling candidate venv and therefore made
+one default-path check fail before touching any state. Repeating `--check` with the same explicit
+`--source` and `--venv` used for deployment passed. INC-056 retains that contained usability defect
+for a later helper correction; it does not weaken the explicit-path cutover evidence.

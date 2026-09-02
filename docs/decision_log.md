@@ -2040,7 +2040,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### INC-053: Fill drive cards hid lost and excluded lifecycle state
 - `id`: INC-053
 - `date`: 2026-08-30
-- `status`: open; remediation prepared on follow-up branch, not deployed
+- `status`: remediated; live application-only swap completed 2026-09-02
 - `triggered_by`: Live operator review immediately after approving the revision-9 proposal
 - `symptom`: The Fill chart continued to show lost/excluded `drive-02` after approval with the same dashed, faded empty-card treatment as active/enabled but unused `drive-07`. It displayed no unavailable icon, lifecycle label, or struck-through identity, so retaining historical plan membership could be misread as current execution eligibility.
 - `root_cause`: `librarian.plan_view` already publishes exact per-drive `lifecycle` and `eligibility`, but `modelark/web/static/fill.js::driveCard` consumed only tier, capacity, archived bytes, and planned work. Its generic `empty` class collapsed “lost and excluded” into “active but currently unused.”
@@ -2114,7 +2114,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### INC-054: Fill cards compared archived occupancy with the remaining writable budget
 - `id`: INC-054
 - `date`: 2026-09-01
-- `status`: remediated on follow-up branch; deployment pending
+- `status`: remediated; live application-only swap completed 2026-09-02
 - `triggered_by`: Operator review of the approved revision-10 Fill screen showed `drive-00` as `4.63TB/44GB` and `drive-01` as `7.77TB/398GB`, making coherent drive identities and capacity evidence look scrambled.
 - `symptom`: Established drives displayed archived terabytes plus newly planned bytes as the numerator, but displayed only the admission-safe budget for new writes as the denominator. The percentage consequently saturated at 100%, while the separate archived-progress row divided the same historical occupancy by that remaining budget again.
 - `root_cause`: `librarian.plan_view` already publishes distinct nominal `capacity`, current `usable` admission budget, `archived_bytes`, `planned_bytes`, and the correct `fill_pct = planned_bytes / usable`. `fill.js::driveCard` discarded that boundary by reconstructing `archived_bytes + planned_bytes` over `usable`; its archived segment and live archived row also treated `usable` as total device capacity.
@@ -2190,3 +2190,43 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `lesson`: Read the retained review protocol before posting every iteration, and never synthesize a mention from `author.login`, historical comment text, or an app display name.
 - `docs_updated`: AGENTS.md, docs/decision_log.md
 - `related`: BOT-003, BOT-004, DEC-085, DEC-086, PR-060
+
+### INC-055: Post-tag Fill fixes reused the v0.3.0 package/runtime identity
+- `id`: INC-055
+- `date`: 2026-09-02
+- `status`: remediated by DEC-091; live application-only replacement completed 2026-09-02
+- `triggered_by`: Codex review of PR #62 at exact HEAD `43f0dd2`
+- `symptom`: The retained `a574d6b` proposal-gate candidate and materially different post-v0.3.0 `086c321` Fill-evidence candidate both report `modelark 0.3.0`. A support report or rollback check using the supported `modelark --version` surface therefore cannot distinguish them.
+- `root_cause`: PR #60 advanced runtime behavior after tag `v0.3.0`, but its release scope did not advance build metadata or runtime version output. The attended application-only cutover verified schema compatibility, exact commit and artifact hashes, but did not re-apply DEC-083's requirement that the version, changelog, release documentation, artifacts, and retained live candidate move together.
+- `blast_radius`: Package/runtime identification and operator support diagnostics for post-v0.3.0 candidates. Exact commit and artifact hashes still distinguish the retained candidates; catalog schema/data, proposal authority, Fill state, drive evidence, and archive bytes were not corrupted or changed by the collision.
+- `why_not_caught_earlier`: Qualification checked that package metadata and runtime output agreed with each other, not that a behavior-changing post-tag candidate differed from the deployed/tagged release identity. PR #60 had no release-surface synchronization contract.
+- `planned_remediation`: DEC-091 assigns patch version `0.3.1`, synchronizes every release surface, adds a regression contract, and requires a separately qualified application-only replacement before the incident is marked remediated.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, README.md, CHANGELOG.md, docs/upgrading.md, docs/releases/v0.3.1.md, pyproject.toml, modelark/__init__.py, tests/test_release_identity.py
+- `related`: DEC-083, PR-060, PR-062
+
+### DEC-091: Assign version 0.3.1 to the post-v0.3.0 Fill evidence patch
+- `id`: DEC-091
+- `date`: 2026-09-02
+- `status`: accepted; live application-only replacement completed 2026-09-02
+- `triggered_by`: INC-055 and the operator's direction to follow and iterate on the PR #62 P2 findings
+- `decision`: Identify the post-v0.3.0 Fill capacity/lifecycle presentation and per-drive occupancy fixes as patch release `0.3.1`. Advance build metadata, runtime `--version`, changelog, README, upgrade guidance, patch release notes, retained artifacts, live candidate, and provenance runbook together. Keep schema v7 unchanged; upgrade from 0.3.0 is an application-only replacement with the same explicit data/state/config paths, the service disabled for login startup, and automatic Fill resume absent.
+- `rationale`: Commit and artifact hashes remain the strongest exact identities, but the supported version surface must still distinguish behavior-changing retained candidates. A patch version accurately describes reviewed corrections on the existing public-alpha schema line; reusing 0.3.0 contradicts DEC-083, while a new minor version would overstate compatibility impact.
+- `impact`: `tests/test_release_identity.py` binds project metadata, runtime output, installed distribution metadata, changelog, README, and a same-version release note. Exact candidate `4a26d37` passed 973 non-E2E tests with one skip and five known deprecation warnings, the standalone portal E2E, Ruff, the focused release-identity regression, package build, installed-wheel identity/asset checks, and an isolated non-resuming HTTP smoke test. Retained wheel SHA-256 is `2c3bf9bc01b0d3ebc1d36379d4ee4c9f6e8c4fc92ba5199a2d74bdd68af81f3f`; source archive SHA-256 is `dcb58bd037a52074b1405737974176a5342e234f3987186bb3382f6beac28786`. The application-only live replacement retained the stopped `086c321` unit plus stable data/config rollback copies under private capsule `candidates/4a26d37/evidence/cutover-20260902-4a26d37`, reused the exact schema-v7 data/state/config paths, and left the user service disabled with `resume=False`. Metadata, proposal, Drives, preview, and totals responses are byte-identical; Library plan identity matches after removing only its observation timestamp; normalized Fill is idle; and catalog, library locator, and wishlist hashes remain byte-identical. Proposal `8f41c6b6-211a-4f90-9d5f-54ffbc75da2a`, planner revision `10`, canonical seal `471b2ec32bda25a1eefb0b1773f1112e54d96d0a3b637854ffe1787bb6b91769`, Drive #2 `lost/excluded`, and Drive #7 `active/enabled/not_attached` are unchanged. Served `fill.js` matches source SHA-256 `49d9b89b817b15f35f998eb60981d76b57b8f5f67ced322c59c6f3d0438f8ce2`. No schema migration, Fill session, drive mutation, archive-byte operation, tag, publication, or merge occurred.
+- `resolves`: INC-055
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md, README.md, CHANGELOG.md, docs/upgrading.md, docs/releases/v0.3.1.md, contributing/contributions.md, pyproject.toml, modelark/__init__.py, tests/test_release_identity.py
+- `related`: DEC-067, DEC-082, DEC-083, DEC-087, DEC-088, DEC-089, DEC-090, DEF-042, PR-060, PR-062
+- `scope_boundary`: Patch release identity, documentation, regression coverage, immutable application candidate, user-service unit, rollback/evidence capture, and health verification only. No schema migration, catalog semantics, selection, plan membership, assignment, planner revision, stored proposal, approval, Fill session, drive lifecycle/identity/capacity evidence, Drive #7 attachment or reconciliation, archive byte, tag, public package publication, or merge is changed or authorized here.
+
+### INC-056: Deployment check hint dropped an explicitly selected sibling venv
+- `id`: INC-056
+- `date`: 2026-09-02
+- `status`: contained; explicit-path check passed and helper correction remains open
+- `triggered_by`: DEC-091 live application-only replacement verification
+- `symptom`: After installing a service from retained source `candidates/4a26d37/source` with retained sibling environment `candidates/4a26d37/venv`, `modelark-deploy` printed a follow-up `--check` command containing only `--source`. Running that literal hint defaulted to `SOURCE/.venv` and reported the deployed executable missing even though the service was healthy and running from the explicitly selected sibling venv.
+- `root_cause`: The deployment helper renders the unit from its fully resolved source/venv paths but its success hint reconstructs an abbreviated check command that omits a non-default `--venv` selection.
+- `blast_radius`: Operator-facing post-deploy verification ergonomics only. The installed unit, running command, runtime package, HTTP portal, catalog, proposal, Fill state, and archive bytes are unaffected. Repeating `--check` with the exact explicit `--source` and `--venv` used for deployment passed.
+- `why_not_caught_earlier`: Existing deployment tests and prior cutovers use checkout-local `.venv` layouts, where the abbreviated hint resolves to the same executable and hides the omission.
+- `planned_remediation`: Make the emitted check command preserve every non-default identity needed to address the installed candidate, add a sibling-venv regression, and keep the check read-only. Until then, copied/retained candidate runbooks must repeat `--source` and `--venv` explicitly.
+- `docs_updated`: docs/decision_log.md, docs/provenance-migrate-copy-runbook.md
+- `related`: DEC-046, DEC-083, DEC-091, PR-062
+- `scope_boundary`: Incident record and verified explicit-path workaround only. No deploy-helper code, installed unit, service state, data/config/state path, schema, proposal, Fill authority, drive state, archive byte, tag, publication, or merge changes are authorized here.

@@ -2,13 +2,13 @@
 
 <p align="center">
   <a href="https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="CHANGELOG.md#030---2026-08-30"><img alt="Release: v0.3.0 Public Alpha" src="https://img.shields.io/badge/release-v0.3.0%20Public%20Alpha-orange"></a>
+  <a href="CHANGELOG.md#031---2026-09-02"><img alt="Release: v0.3.1 Public Alpha" src="https://img.shields.io/badge/release-v0.3.1%20Public%20Alpha-orange"></a>
   <a href="pyproject.toml"><img alt="Python 3.10–3.12" src="https://img.shields.io/badge/python-3.10%E2%80%933.12-3776AB?logo=python&amp;logoColor=white"></a>
   <a href="docs/deployment.md"><img alt="Linux" src="https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&amp;logoColor=black"></a>
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
 
-> **ModelArk 0.3.0 is a public alpha.** It is usable today as an operator-attended archive and
+> **ModelArk 0.3.1 is a public alpha.** It is usable today as an operator-attended archive and
 > disaster-recovery system for open model artifacts. Storage work remains explicit and reviewable,
 > and interfaces can still change before 1.0.
 
@@ -78,6 +78,16 @@ the detailed contracts.
 - **No automatic deletion of extras.** Reconciliation reports unclaimed content but does not adopt
   or remove it.
 
+## What changed in v0.3.1
+
+Version 0.3.1 is an application-only patch over the schema-v7 0.3.0 release. It separates planned
+work from archived occupancy in the Fill display, marks lost/excluded drives unambiguously, and
+hardens per-drive live occupancy refresh. Existing 0.3.0 catalogs need no migration, and updating
+still does not start or resume Fill automatically.
+
+Read the [v0.3.1 release notes](docs/releases/v0.3.1.md) or the
+[changelog](CHANGELOG.md) for the complete patch record.
+
 ## What changed in v0.3.0
 
 There are **a lot of backend disk-safety and workflow additions** in this release. If you run into an
@@ -111,7 +121,7 @@ That same boundary supports two future directions:
   treating successful transport as proof of usability.
 
 Usable Slice, local delivery adapters, scratch transfer, and P2P transport are future work—not
-shipped v0.3.0 features.
+shipped features.
 
 ## Project and support
 
