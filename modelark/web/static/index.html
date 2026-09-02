@@ -154,7 +154,10 @@
         <div class="proposal-state" id="proposalState" aria-live="polite">Checking approval…</div>
         <div class="proposal-note">No data moves until you select Start fill.</div>
       </div>
-      <button id="proposalReview" disabled>Review exact placement</button>
+      <div class="proposal-docket-actions">
+        <button id="proposalSuccessor" hidden disabled>Use a replacement drive</button>
+        <button id="proposalReview" disabled>Review exact placement</button>
+      </div>
     </div>
     <div class="fillrun" id="fillRun">
       <button class="primary" id="fillStart" disabled>&#9654; Start fill</button>
@@ -242,6 +245,34 @@
     <div class="oopsie-acts">
       <button id="proposalCancel">Close without approving</button>
       <button id="proposalApprove" class="primary" disabled>Approve exact placement</button>
+    </div>
+  </div>
+</div>
+
+<!-- DEF-042: explicit successor intent creates a new proposal; it never starts Fill. -->
+<div class="oopsie-overlay" id="successorModal" role="dialog" aria-modal="true"
+     aria-labelledby="successorHead" hidden>
+  <div class="oopsie-card successor-card">
+    <div class="proposal-kicker">Replacement planning</div>
+    <div class="oopsie-head" id="successorHead">Use a new drive in an old drive’s place</div>
+    <p class="oopsie-msg">Choose the unavailable drive whose planning place should be inherited.
+      ModelArk will build a new proposal and keep Fill stopped.</p>
+    <div class="successor-route" aria-label="Successor drive relationship">
+      <label for="successorPredecessor">
+        Unavailable drive
+        <select id="successorPredecessor"></select>
+      </label>
+      <span aria-hidden="true">becomes</span>
+      <label for="successorDrive">
+        Replacement drive
+        <select id="successorDrive"></select>
+      </label>
+    </div>
+    <div class="successor-note" id="successorNote" aria-live="polite"></div>
+    <div class="oopsie-failed proposal-refusal" id="successorRefusal"></div>
+    <div class="oopsie-acts">
+      <button id="successorCancel">Cancel</button>
+      <button id="successorCreate" class="primary">Build replacement proposal</button>
     </div>
   </div>
 </div>

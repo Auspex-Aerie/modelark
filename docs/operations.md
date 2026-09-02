@@ -73,6 +73,21 @@ Changing selection, plan membership, capacity policy, or relevant execution conf
 an approval stale. Return to **Review exact placement** and approve the newly authored proposal; do
 not reuse an earlier phrase or edit planner tables directly.
 
+When an unavailable drive has been replaced by an identity-proven drive in the same plan, use
+**Use a replacement drive** from the current approval docket. Choose the unavailable predecessor and
+its replacement. The backend binds that request to the active plan and exact approved proposal; the
+browser cannot supply a different baseline, lane size, or assignment.
+
+This is a bounded successor replan. The replacement inherits a writable lane equal to the old
+drive's policy-adjusted capacity, capped by the replacement's current admissible capacity evidence.
+Existing reusable content still wins. Work outside the inherited lane keeps its approved target when
+feasible, and the review table shows every changed target as `old → new`. Extra capacity on a larger
+replacement is not consumed silently by this action.
+
+Building the successor proposal does not invalidate or edit the current approval. Review the new
+immutable docket and approve it separately; only that approval supersedes the old proposal and bumps
+the planner revision. It still does not start Fill.
+
 The Fill chart retains every drive identity in the active plan so loss history is not erased. A
 `lost`, `retired`, or `excluded` drive remains visible with an unavailable marker and contributes no
 executable capacity or target work. An ordinary empty card instead means the drive is still eligible

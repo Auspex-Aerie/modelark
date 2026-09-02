@@ -44,6 +44,22 @@ class SolverBounds:
 
 
 @dataclass(frozen=True)
+class SuccessorPreference:
+    """Proposal-bound preference for one replacement drive.
+
+    ``lane_bytes`` is the predecessor's policy-adjusted capacity envelope.  The
+    shell caps the successor's executable budget to this value; the pure solver
+    then prefers filling that lane while retaining current approved targets for
+    work outside it whenever the higher-order movement objective permits.
+    """
+
+    predecessor_drive: str
+    successor_drive: str
+    lane_bytes: int
+    baseline_targets: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
 class SolverInput:
     graph: RequirementGraph
     candidates: CandidateSet
@@ -54,6 +70,7 @@ class SolverInput:
     capacity_mode: str
     policy_version: str
     bounds: SolverBounds
+    preference: SuccessorPreference | None = None
 
 
 @dataclass(frozen=True)
@@ -623,7 +640,8 @@ def _to_assignment(partial: _Partial, inp: SolverInput) -> CanonicalAssignment:
 
 
 def _score(assignment: CanonicalAssignment, free0: dict[str, int],
-           candidate_targets: frozenset[str]) -> tuple:
+           candidate_targets: frozenset[str],
+           preference: SuccessorPreference | None = None) -> tuple:
     """Lex score exposed as (movement, free_vec↓, idle, canon); lower movement/idle/canon wins,
     higher free_vec wins (compare via :func:`_score_key`)."""
     movement = sum(t.movement_cost for t in assignment.tasks)
@@ -645,18 +663,58 @@ def _score(assignment: CanonicalAssignment, free0: dict[str, int],
          _source_key(t.source), t.missing_files)
         for t in sorted(assignment.tasks, key=lambda x: x.requirement_id)
     )
-    return (movement, tuple(free_vec), idle, canon)
+    if preference is None:
+        return (movement, tuple(free_vec), idle, canon)
+    preferred_load = loads_d.get(preference.successor_drive, 0)
+    preference_gap = max(0, int(preference.lane_bytes) - preferred_load)
+    baseline = dict(preference.baseline_targets)
+    changed = [
+        t for t in assignment.tasks
+        if baseline.get(t.requirement_id) not in (None, t.target_drive)
+    ]
+    changed_bytes = sum(t.durable for t in changed)
+    return (
+        movement,
+        preference_gap,
+        len(changed),
+        changed_bytes,
+        tuple(free_vec),
+        idle,
+        canon,
+    )
 
 
 def _score_key(score: tuple) -> tuple:
     """Lexicographic minimization key: movement ≻ −free_vec ≻ idle ≻ canon."""
-    movement, free_vec, idle, canon = score
-    return (movement, tuple(-x for x in free_vec), idle, canon)
-
-
-def _candidate_sort_key(c: Candidate) -> tuple:
-    """Deterministic candidate order independent of CandidateSet input permutation."""
+    if len(score) == 4:
+        movement, free_vec, idle, canon = score
+        return (movement, tuple(-x for x in free_vec), idle, canon)
+    movement, preference_gap, changed, changed_bytes, free_vec, idle, canon = score
     return (
+        movement,
+        preference_gap,
+        changed,
+        changed_bytes,
+        tuple(-x for x in free_vec),
+        idle,
+        canon,
+    )
+
+
+def _candidate_sort_key(
+    c: Candidate,
+    preference: SuccessorPreference | None = None,
+) -> tuple:
+    """Deterministic candidate order independent of CandidateSet input permutation."""
+    baseline = dict(preference.baseline_targets) if preference is not None else {}
+    if preference is not None and c.target_drive == preference.successor_drive:
+        target_preference = 0
+    elif baseline.get(c.requirement_id) == c.target_drive:
+        target_preference = 1
+    else:
+        target_preference = 2
+    return (
+        target_preference,
         c.target_drive,
         c.movement_cost.transfer_bytes,
         _source_key(c.source),
@@ -693,7 +751,8 @@ def _search(
         empty = _Partial(free0)
         visited = 1
         asn = _to_assignment(empty, inp)
-        return "found", asn, visited, asn, _score(asn, free0, frozenset(free0))
+        return "found", asn, visited, asn, _score(
+            asn, free0, frozenset(free0), inp.preference)
 
     order_keys = _static_order_keys(inp, unsat, free0)
     cand_targets = frozenset(
@@ -701,7 +760,11 @@ def _search(
     )
     # Pre-sort candidate lists once (canonical order independent of input permutation).
     sorted_cands = {
-        rid: tuple(sorted(cands.get(rid, ()), key=_candidate_sort_key)) for rid in unsat
+        rid: tuple(sorted(
+            cands.get(rid, ()),
+            key=lambda candidate: _candidate_sort_key(candidate, inp.preference),
+        ))
+        for rid in unsat
     }
 
     visited = 0
@@ -787,7 +850,28 @@ def _search(
             )
             for rid, c in sorted(partial.assigned.items())
         )
-        return (partial.movement, free_vec, idle, canon_parts)
+        if inp.preference is None:
+            return (partial.movement, free_vec, idle, canon_parts)
+        preference_gap = max(
+            0,
+            int(inp.preference.lane_bytes)
+            - partial.durable_load.get(inp.preference.successor_drive, 0),
+        )
+        baseline = dict(inp.preference.baseline_targets)
+        changed = [
+            c for rid, c in partial.assigned.items()
+            if baseline.get(rid) not in (None, c.target_drive)
+        ]
+        changed_bytes = sum(_cand_durable(c, mode) for c in changed)
+        return (
+            partial.movement,
+            preference_gap,
+            len(changed),
+            changed_bytes,
+            free_vec,
+            idle,
+            canon_parts,
+        )
 
     # Snapshots of assigned maps — materialize CanonicalAssignment only once at the end.
     first_snap: dict[str, Candidate] | None = None
@@ -1026,7 +1110,7 @@ def improve(
         c.target_drive for rid in unsat for c in cands.get(rid, ())
     ) or frozenset(free_map)
 
-    first_score = _score(first_feasible, free_map, cand_targets)
+    first_score = _score(first_feasible, free_map, cand_targets, inp.preference)
 
     # Emergency is improvement-only and only EmergencyResourceLimit is a semantic fallback.
     # Other exceptions from a monitor must not be swallowed; non-firing monitors are ignored.

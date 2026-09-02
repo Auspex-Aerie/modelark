@@ -136,9 +136,12 @@ td.cb{width:34px;text-align:center}input[type=checkbox]{width:15px;height:15px;a
   letter-spacing:.1em;text-transform:uppercase}
 .proposal-docket-copy{flex:1;min-width:0}.proposal-state{font-weight:700;color:var(--ink)}
 .proposal-note{color:var(--mut);font-size:.76rem;margin-top:2px}
+.proposal-docket-actions{display:flex;align-items:center;gap:8px;flex:none}
 #proposalReview{flex:none;background:var(--panel2);border:1px solid var(--brass);color:var(--brass);
   border-radius:8px;padding:8px 13px;font-weight:700}
 #proposalReview:disabled{opacity:.45;cursor:not-allowed}
+#proposalSuccessor{background:transparent;border-color:var(--steel);color:var(--steel);font-weight:700}
+#proposalSuccessor:disabled{opacity:.45;cursor:not-allowed}
 .proposal-card{width:min(1120px,94vw);max-width:none;max-height:92vh;overflow-y:auto;border-top-color:var(--brass)}
 .proposal-card-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}
 .proposal-kicker{font:700 10px/1 ui-monospace,Menlo,monospace;letter-spacing:.11em;
@@ -168,9 +171,18 @@ td.cb{width:34px;text-align:center}input[type=checkbox]{width:15px;height:15px;a
   padding:9px 11px;font-family:ui-monospace,Menlo,monospace;margin-bottom:12px}
 #proposalConfirm:focus{outline:none;border-color:var(--brass)}
 .proposal-refusal{color:var(--crit)}
+.successor-card{max-width:680px;border-top-color:var(--steel)}
+.successor-route{display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:end;margin:18px 0 12px}
+.successor-route label{display:flex;flex-direction:column;gap:6px;color:var(--mut);font-size:.76rem}
+.successor-route select{width:100%;background:#0b0f14;border:1px solid var(--line2);border-radius:7px;
+  color:var(--ink);padding:9px 11px;font:inherit}.successor-route select:focus{outline:none;border-color:var(--steel)}
+.successor-route>span{color:var(--steel);font-weight:700;padding-bottom:9px}
+.successor-note{min-height:38px;color:var(--mut);font-size:.8rem;line-height:1.45;margin-bottom:8px}
 @media(max-width:760px){.proposal-docket{align-items:flex-start;flex-wrap:wrap}.proposal-docket-copy{flex-basis:70%}
+  .proposal-docket-actions{width:100%;flex-wrap:wrap}
   .proposal-meta,.proposal-totals{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .proposal-assignment-head{align-items:stretch;flex-direction:column}#proposalAssignmentFilter{width:100%}}
+  .proposal-assignment-head{align-items:stretch;flex-direction:column}#proposalAssignmentFilter{width:100%}
+  .successor-route{grid-template-columns:1fr}.successor-route>span{padding:0}}
 
 /* plans (#35) */
 .navbtn.gated{opacity:.4;cursor:not-allowed}

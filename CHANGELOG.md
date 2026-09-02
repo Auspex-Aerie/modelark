@@ -4,6 +4,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## Unreleased
 
+### Added
+
+- A current approved placement can now create a bounded successor proposal for an unavailable drive
+  and its identity-proven same-role replacement. The review shows every changed target before the
+  existing typed approval; creating or approving the proposal still never starts Fill.
+
 ## 0.3.1 - 2026-09-02
 
 ModelArk 0.3.1 is an application-only patch over the schema-v7 0.3.0 release. Existing 0.3.0

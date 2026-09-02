@@ -12,7 +12,14 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
-from modelark import archive_manifest, capacity, drive_fence, plan as plan_mod, planning
+from modelark import (
+    archive_manifest,
+    capacity,
+    drive_fence,
+    placement,
+    plan as plan_mod,
+    planning,
+)
 from modelark import proposal_canonical as canonical
 from modelark.core import db
 from modelark.web import fill_worker
@@ -192,6 +199,157 @@ def _manifest_hash(con, repo_id: str, planned=None) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _successor_args(mutation: tuple) -> tuple[str, str, str]:
+    args = tuple(mutation[1]) if len(mutation) > 1 else ()
+    if mutation[0] != "successor_replan" or len(args) != 3:
+        raise Refusal(
+            "SUCCESSOR_ARGUMENTS_INVALID",
+            {"mutation": mutation},
+            ("choose_predecessor_and_successor",),
+        )
+    predecessor, successor, baseline_id = (str(value).strip() for value in args)
+    if not predecessor or not successor or not baseline_id or predecessor == successor:
+        raise Refusal(
+            "SUCCESSOR_ARGUMENTS_INVALID",
+            {
+                "predecessor_drive": predecessor,
+                "successor_drive": successor,
+                "baseline_proposal_id": baseline_id,
+            },
+            ("choose_distinct_drives",),
+        )
+    return predecessor, successor, baseline_id
+
+
+def _canonical_requirement_id(con, task: Mapping) -> str:
+    """Restore canonical requirement vocabulary from the stable proposal wire names."""
+    requirement_id = str(task.get("requirement_id") or "")
+    repo_id = str(task.get("repo_id") or requirement_id.partition(":")[2])
+    if requirement_id.startswith("replica:"):
+        return f"protected_replica:{repo_id}"
+    if requirement_id.startswith("primary:"):
+        row = con.execute(
+            "SELECT numcopies FROM models WHERE repo_id=?", [repo_id]
+        ).fetchone()
+        if row is not None and int(row[0] or 1) >= 2:
+            return f"protected_home:{repo_id}"
+    return requirement_id
+
+
+def successor_preference(
+    con,
+    plan_id: str,
+    mutation: tuple,
+    *,
+    require_active_baseline: bool = True,
+) -> placement.SuccessorPreference:
+    """Validate and materialize one proposal-scoped successor planning lane."""
+    predecessor, successor, baseline_id = _successor_args(mutation)
+    state = con.execute(
+        "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
+    ).fetchone()
+    if require_active_baseline and (state is None or state[0] != baseline_id):
+        raise Refusal(
+            "SUCCESSOR_BASELINE_CHANGED",
+            {
+                "expected": baseline_id,
+                "current": None if state is None else state[0],
+            },
+            ("review_current_placement",),
+        )
+    try:
+        baseline = load_proposal(con, baseline_id)
+    except KeyError as exc:
+        raise Refusal(
+            "SUCCESSOR_BASELINE_MISSING",
+            {"baseline_proposal_id": baseline_id},
+            ("review_current_placement",),
+        ) from exc
+    if baseline.get("plan_id") != plan_id:
+        raise Refusal(
+            "SUCCESSOR_BASELINE_PLAN_MISMATCH",
+            {"baseline_plan": baseline.get("plan_id"), "requested_plan": plan_id},
+            ("select_matching_plan",),
+        )
+    if require_active_baseline and baseline.get("lifecycle") != "approved":
+        raise Refusal(
+            "SUCCESSOR_BASELINE_NOT_APPROVED",
+            {"lifecycle": baseline.get("lifecycle")},
+            ("review_current_placement",),
+        )
+
+    rows = con.execute(
+        "SELECT d.drive_label,coalesce(d.role,'primary'),coalesce(d.raid_backed,0),"
+        "coalesce(d.capacity_bytes,0),"
+        "coalesce(d.filesystem_capacity_bytes,d.capacity_bytes,0),"
+        "d.lifecycle,d.eligibility,d.identity_epoch,d.identity_fingerprint "
+        "FROM plan_drives pd JOIN drives d USING(drive_label) "
+        "WHERE pd.plan_id=? AND d.drive_label IN (?,?) ORDER BY d.drive_label",
+        [plan_id, predecessor, successor],
+    ).fetchall()
+    facts = {str(row[0]): row for row in rows}
+    missing = sorted({predecessor, successor} - set(facts))
+    if missing:
+        raise Refusal(
+            "SUCCESSOR_DRIVE_NOT_IN_PLAN",
+            {"plan_id": plan_id, "drives": missing},
+            ("add_drive_to_plan",),
+        )
+    old = facts[predecessor]
+    new = facts[successor]
+    if old[5] == "active" and old[6] == "enabled":
+        raise Refusal(
+            "SUCCESSOR_PREDECESSOR_STILL_PLACEABLE",
+            {"drive_label": predecessor, "lifecycle": old[5], "eligibility": old[6]},
+            ("choose_unavailable_predecessor",),
+        )
+    if new[5] != "active" or new[6] != "enabled":
+        raise Refusal(
+            "SUCCESSOR_NOT_PLACEABLE",
+            {"drive_label": successor, "lifecycle": new[5], "eligibility": new[6]},
+            ("reconcile_successor_drive",),
+        )
+    if new[8] in (None, "") or int(new[7] or 0) < 1:
+        raise Refusal(
+            "SUCCESSOR_IDENTITY_UNPROVEN",
+            {"drive_label": successor},
+            ("reconcile_successor_drive",),
+        )
+    if old[1] != new[1]:
+        raise Refusal(
+            "SUCCESSOR_ROLE_MISMATCH",
+            {"predecessor_role": old[1], "successor_role": new[1]},
+            ("choose_same_role_successor",),
+        )
+
+    predecessor_capacity = min(int(old[3] or 0), int(old[4] or old[3] or 0))
+    lane_bytes = max(
+        0,
+        predecessor_capacity - capacity.safety_floor(predecessor_capacity, bool(old[2])),
+    )
+    if lane_bytes <= 0:
+        raise Refusal(
+            "SUCCESSOR_PREDECESSOR_CAPACITY_UNKNOWN",
+            {"drive_label": predecessor},
+            ("repair_drive_capacity",),
+        )
+    baseline_targets = tuple(sorted(
+        (
+            _canonical_requirement_id(con, task),
+            str(task.get("target_drive") or task.get("satisfying_drive") or ""),
+        )
+        for task in baseline.get("tasks") or ()
+        if task.get("row_kind") == "executable"
+        and (task.get("target_drive") or task.get("satisfying_drive"))
+    ))
+    return placement.SuccessorPreference(
+        predecessor_drive=predecessor,
+        successor_drive=successor,
+        lane_bytes=lane_bytes,
+        baseline_targets=baseline_targets,
+    )
+
+
 def _semantic_input_hash(con, plan_id: str, mutation: tuple) -> str:
     sel = con.execute(
         "SELECT repo_id, finalized_at FROM selection ORDER BY repo_id").fetchall()
@@ -207,6 +365,19 @@ def _semantic_input_hash(con, plan_id: str, mutation: tuple) -> str:
         "drives": [list(r) for r in drives],
         "mutation": [mutation[0], list(mutation[1]) if len(mutation) > 1 else []],
     }
+    if mutation[0] == "successor_replan":
+        preference = successor_preference(
+            con,
+            plan_id,
+            mutation,
+            require_active_baseline=False,
+        )
+        payload["successor_preference"] = {
+            "predecessor_drive": preference.predecessor_drive,
+            "successor_drive": preference.successor_drive,
+            "lane_bytes": preference.lane_bytes,
+            "baseline_targets": [list(item) for item in preference.baseline_targets],
+        }
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()
     ).hexdigest()
@@ -397,8 +568,15 @@ def _build_assignment(
     repos = _selected_repos(con, mutation)
     plan_row = plan_mod.get(con, plan_id)
     capacity_mode = plan_row["capacity_mode"] if plan_row else "guaranteed"
+    preference = None
+    if mutation[0] == "successor_replan":
+        preference = successor_preference(con, plan_id, mutation)
     result = planning.preview(
-        con, plan_id, repos, capacity_mode=capacity_mode,
+        con,
+        plan_id,
+        repos,
+        capacity_mode=capacity_mode,
+        preference=preference,
     )
     graph = result.graph
     ledger = result.capacity
@@ -557,8 +735,8 @@ def _header_from_facts(
         "selection_before_hash": selection_before,
         "selection_after_hash": selection_after,
         "capacity_mode": capacity_mode,
-        "policy_version": "1",
-        "solver_version": "1",
+        "policy_version": "successor_v1" if mutation[0] == "successor_replan" else "1",
+        "solver_version": "successor_lane_v1" if mutation[0] == "successor_replan" else "1",
         "serializer_version": canonical.SERIALIZER_VERSION,
         "gate_b_code": gate_b_code,
         # Placement audit evidence only (optimized | state_truncated | canonical_fallback).
@@ -1171,6 +1349,10 @@ def _apply_mutation(con, mutation: tuple) -> None:
     kind = mutation[0]
     args = mutation[1] if len(mutation) > 1 else ()
     if kind == "adopt_current":
+        return
+    if kind == "successor_replan":
+        # The exact replacement intent is proposal-scoped authority. Approval installs the
+        # immutable assignment and bumps planner_revision; no mutable affinity row is needed.
         return
     if kind == "finalize":
         # Apply named repos first so EventCon injection can fire on selection mutate.

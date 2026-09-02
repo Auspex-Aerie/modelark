@@ -7,6 +7,7 @@
   let planFeasible = false;
   let fillRunning = false;
   let requestPending = false;
+  let successorOptions = null;
 
   function refusalText(result) {
     if (!result) return "The proposal request failed.";
@@ -29,7 +30,8 @@
     const seal = byId("proposalSeal");
     const state = byId("proposalState");
     const button = byId("proposalReview");
-    if (!seal || !state || !button) return;
+    const successor = byId("proposalSuccessor");
+    if (!seal || !state || !button || !successor) return;
 
     const kind = status && status.state;
     seal.textContent = kind === "approved_current" ? "Ready to fill" : "Placement approval";
@@ -61,6 +63,9 @@
       button.textContent = "Review exact placement";
       button.disabled = true;
     }
+    successor.hidden = kind !== "approved_current";
+    successor.disabled = requestPending || fillRunning || !planFeasible ||
+      kind !== "approved_current";
     setStartGate();
   }
 
@@ -136,11 +141,14 @@
       row.dataset.requirementId = String(assignment.requirement_id || "");
       row.dataset.filterText = [
         assignment.requirement_id, assignment.repo_id, assignment.target_drive,
-        assignment.source_drive, assignment.row_kind,
+        assignment.source_drive, assignment.previous_target, assignment.row_kind,
       ].filter(Boolean).join(" ").toLowerCase();
       assignmentCell(row, assignment.row_kind);
       assignmentCell(row, assignment.repo_id, "proposal-repo");
-      assignmentCell(row, assignment.target_drive);
+      const target = assignment.target_changed
+        ? `${assignment.previous_target} → ${assignment.target_drive}`
+        : assignment.target_drive;
+      assignmentCell(row, target);
       assignmentCell(row, assignment.source_drive);
       assignmentCell(row, window.MA.gb(assignment.guaranteed_durable || 0), "num");
       assignmentCell(row, assignment.identity_epoch, "num");
@@ -158,8 +166,17 @@
     byId("proposalDerivation").textContent = review.derivation_mode || "";
     byId("proposalCanonical").textContent = review.canonical_hash || "";
     byId("proposalPhrase").textContent = review.confirmation_phrase || "";
-    byId("proposalMessage").textContent =
-      "Review every assignment before approval. No archive bytes move in this dialog.";
+    if (review.successor) {
+      const value = review.successor;
+      byId("proposalMessage").textContent =
+        `${value.successor_drive} inherits ${window.MA.gb(value.lane_bytes)} of ` +
+        `${value.predecessor_drive}'s planning place. ${value.moved_to_successor} requirements ` +
+        `move to the replacement; ${value.unchanged_requirements} stay put. ` +
+        "No archive bytes move in this dialog.";
+    } else {
+      byId("proposalMessage").textContent =
+        "Review every assignment before approval. No archive bytes move in this dialog.";
+    }
     byId("proposalRefusal").textContent = "";
     byId("proposalConfirm").value = "";
     byId("proposalApprove").disabled = true;
@@ -204,6 +221,116 @@
     byId("proposalModal").hidden = true;
     byId("proposalConfirm").value = "";
     byId("proposalRefusal").textContent = "";
+  }
+
+  function clearSelect(select) {
+    while (select.firstChild) select.removeChild(select.firstChild);
+  }
+
+  function driveOption(item) {
+    const option = document.createElement("option");
+    option.value = item.drive_label;
+    option.textContent = `${item.drive_label} · ${window.MA.gb(item.capacity_bytes || 0)} · ` +
+      `${item.assigned_requirements || 0} current requirements`;
+    option.dataset.role = item.role || "";
+    option.dataset.capacity = String(item.capacity_bytes || 0);
+    option.dataset.assigned = String(item.assigned_requirements || 0);
+    return option;
+  }
+
+  function updateSuccessorChoices() {
+    if (!successorOptions) return;
+    const predecessor = byId("successorPredecessor");
+    const successor = byId("successorDrive");
+    const old = (successorOptions.predecessors || []).find(
+      item => item.drive_label === predecessor.value
+    );
+    const prior = successor.value;
+    clearSelect(successor);
+    const choices = (successorOptions.successors || [])
+      .filter(item => !old || item.role === old.role)
+      .sort((a, b) =>
+        (a.assigned_requirements - b.assigned_requirements) ||
+        (b.capacity_bytes - a.capacity_bytes) ||
+        a.drive_label.localeCompare(b.drive_label)
+      );
+    choices.forEach(item => successor.appendChild(driveOption(item)));
+    if (choices.some(item => item.drive_label === prior)) successor.value = prior;
+    const selected = choices.find(item => item.drive_label === successor.value);
+    byId("successorNote").textContent = old && selected
+      ? `${selected.drive_label} will inherit a lane bounded by ${old.drive_label}'s ` +
+        `safe capacity. Existing content reuse still wins; remaining assignments stay where ` +
+        "they are when feasible."
+      : "No identity-proven replacement with a matching role is available.";
+    byId("successorCreate").disabled = !old || !selected || requestPending;
+  }
+
+  function showSuccessorOptions(result) {
+    successorOptions = result;
+    const predecessor = byId("successorPredecessor");
+    clearSelect(predecessor);
+    const predecessors = result.predecessors || [];
+    predecessors.forEach(item => predecessor.appendChild(driveOption(item)));
+    const drive2 = predecessors.find(item => item.drive_label === "drive-02");
+    if (drive2) predecessor.value = drive2.drive_label;
+    byId("successorRefusal").textContent = "";
+    byId("successorModal").hidden = false;
+    updateSuccessorChoices();
+    predecessor.focus();
+  }
+
+  function openSuccessor() {
+    if (requestPending || fillRunning || !planFeasible ||
+        !status || status.state !== "approved_current") return;
+    requestPending = true;
+    renderDocket();
+    window.MA.api("/api/proposal/successor-options").then(result => {
+      if (!result || result.ok !== true) {
+        showRefusal(result);
+        return;
+      }
+      showSuccessorOptions(result);
+    }).catch(error => {
+      showRefusal({code: "SUCCESSOR_OPTIONS_UNAVAILABLE", error: String(error)});
+    }).finally(() => {
+      requestPending = false;
+      renderDocket();
+      updateSuccessorChoices();
+    });
+  }
+
+  function closeSuccessor() {
+    byId("successorModal").hidden = true;
+    byId("successorRefusal").textContent = "";
+  }
+
+  function createSuccessor() {
+    if (requestPending) return;
+    const predecessor_drive = byId("successorPredecessor").value;
+    const successor_drive = byId("successorDrive").value;
+    if (!predecessor_drive || !successor_drive) return;
+    requestPending = true;
+    byId("successorCreate").disabled = true;
+    byId("successorRefusal").textContent = "";
+    window.MA.post("/api/proposal/draft", {
+      mode: "successor",
+      predecessor_drive,
+      successor_drive,
+    }).then(result => {
+      if (!result || result.ok !== true || !result.review) {
+        byId("successorRefusal").textContent = refusalText(result);
+        return;
+      }
+      closeSuccessor();
+      showReview(result.review);
+    }).catch(error => {
+      byId("successorRefusal").textContent =
+        refusalText({code: "SUCCESSOR_DRAFT_UNAVAILABLE", error: String(error)});
+    }).finally(() => {
+      requestPending = false;
+      renderDocket();
+      updateSuccessorChoices();
+    });
   }
 
   function approve() {
@@ -262,6 +389,7 @@
     const button = byId("proposalReview");
     if (!button) return;
     button.onclick = openReview;
+    byId("proposalSuccessor").onclick = openSuccessor;
     byId("proposalCancel").onclick = closeReview;
     byId("proposalApprove").onclick = approve;
     byId("proposalConfirm").addEventListener("input", event => {
@@ -269,6 +397,10 @@
         event.target.value !== review.confirmation_phrase;
     });
     byId("proposalAssignmentFilter").addEventListener("input", filterAssignments);
+    byId("successorCancel").onclick = closeSuccessor;
+    byId("successorCreate").onclick = createSuccessor;
+    byId("successorPredecessor").addEventListener("change", updateSuccessorChoices);
+    byId("successorDrive").addEventListener("change", updateSuccessorChoices);
     window.MA.proposal = {refresh, resetPlan, setPlanState, setRunning};
     renderDocket();
   }
