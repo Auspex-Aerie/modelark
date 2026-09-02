@@ -6,7 +6,15 @@ import sqlite3
 from pathlib import Path
 from unittest import mock
 
-from modelark import archive_manifest, budgets, candidates, placement
+from modelark import (
+    archive_manifest,
+    budgets,
+    candidates,
+    execution_service,
+    placement,
+    proposal,
+)
+from modelark.execution_config import hash_config
 from modelark.web import proposal_api
 
 
@@ -135,6 +143,11 @@ def test_successor_draft_binds_backend_selected_plan_and_approved_baseline():
         "tasks": [],
         "files": [],
     }
+    baseline = {
+        "proposal_id": "approved-10",
+        "plan_id": "ark",
+        "lifecycle": "approved",
+    }
     body = {
         "mode": "successor",
         "predecessor_drive": "drive-02",
@@ -150,7 +163,10 @@ def test_successor_draft_binds_backend_selected_plan_and_approved_baseline():
          mock.patch("modelark.proposal.create_draft", return_value={
              "proposal_id": "successor-11"
          }) as create, \
-         mock.patch("modelark.proposal.load_proposal", return_value=stored), \
+         mock.patch("modelark.proposal.load_proposal", side_effect=[baseline, stored]), \
+         mock.patch("modelark.proposal.review_input_status", return_value={
+             "current": True,
+         }), \
          mock.patch.object(proposal_api, "_successor_review", return_value={
              "predecessor_drive": "drive-02",
              "successor_drive": "drive-07",
@@ -172,6 +188,140 @@ def test_successor_draft_binds_backend_selected_plan_and_approved_baseline():
             ("drive-02", "drive-07", "approved-10"),
         ),
     )
+
+
+def test_successor_draft_refuses_a_stale_active_baseline():
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    con.execute(
+        "CREATE TABLE planner_state(singleton_id INTEGER PRIMARY KEY, "
+        "planner_revision INTEGER NOT NULL, active_approved_proposal_id TEXT, "
+        "next_fencing_token INTEGER NOT NULL)"
+    )
+    con.execute("INSERT INTO planner_state VALUES(1,10,'approved-10',0)")
+    baseline = {"proposal_id": "approved-10", "lifecycle": "approved"}
+
+    with mock.patch.object(proposal_api.data, "conn", return_value=con), \
+         mock.patch("modelark.plan.active", return_value={"plan_id": "ark"}), \
+         mock.patch("modelark.proposal.load_proposal", return_value=baseline), \
+         mock.patch("modelark.proposal.review_input_status", return_value={
+             "current": False,
+             "semantic_input_matches": False,
+             "execution_config_matches": True,
+         }), \
+         mock.patch("modelark.proposal.create_draft") as create:
+        result = proposal_api.create_draft({
+            "mode": "successor",
+            "predecessor_drive": "drive-02",
+            "successor_drive": "drive-07",
+        })
+
+    assert result["ok"] is False
+    assert result["code"] == "SUCCESSOR_BASELINE_STALE"
+    create.assert_not_called()
+
+
+def _successor_fact_db() -> sqlite3.Connection:
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    con.executescript(
+        "CREATE TABLE planner_state(singleton_id INTEGER PRIMARY KEY, "
+        "planner_revision INTEGER NOT NULL, active_approved_proposal_id TEXT, "
+        "next_fencing_token INTEGER NOT NULL);"
+        "INSERT INTO planner_state VALUES(1,10,'approved-10',0);"
+        "CREATE TABLE plan_drives(plan_id TEXT, drive_label TEXT);"
+        "INSERT INTO plan_drives VALUES('ark','drive-02'),('ark','drive-07');"
+        "CREATE TABLE drives(drive_label TEXT PRIMARY KEY, role TEXT, raid_backed INTEGER, "
+        "capacity_bytes INTEGER, filesystem_capacity_bytes INTEGER, lifecycle TEXT, "
+        "eligibility TEXT, identity_epoch INTEGER, identity_fingerprint TEXT);"
+        "INSERT INTO drives VALUES"
+        "('drive-02','primary',0,4000,4000,'lost','excluded',1,'old'),"
+        "('drive-07','primary',0,8000,8000,'active','enabled',1,'new');"
+        "CREATE TABLE selection(repo_id TEXT, finalized_at TEXT);"
+        "CREATE TABLE models(repo_id TEXT, numcopies INTEGER);"
+        "INSERT INTO models VALUES('org/a',1);"
+    )
+    return con
+
+
+def test_invalidated_successor_facts_report_stale_instead_of_raising():
+    con = _successor_fact_db()
+    mutation = ("successor_replan", ("drive-02", "drive-07", "approved-10"))
+    baseline = {
+        "proposal_id": "approved-10",
+        "plan_id": "ark",
+        "lifecycle": "approved",
+        "tasks": [{
+            "requirement_id": "primary:org/a",
+            "repo_id": "org/a",
+            "row_kind": "executable",
+            "target_drive": "drive-03",
+        }],
+    }
+    successor = {
+        "proposal_id": "successor-11",
+        "plan_id": "ark",
+        "lifecycle": "approved",
+        "mutation_kind": mutation[0],
+        "mutation_args": mutation[1],
+        "tasks": [{
+            "requirement_id": "primary:org/a",
+            "repo_id": "org/a",
+            "row_kind": "executable",
+            "target_drive": "drive-07",
+        }],
+    }
+    with mock.patch("modelark.proposal.load_proposal", return_value=baseline):
+        successor["semantic_input_hash"] = proposal._semantic_input_hash(
+            con, "ark", mutation
+        )
+        con.execute(
+            "UPDATE drives SET lifecycle='lost',eligibility='excluded' "
+            "WHERE drive_label='drive-07'"
+        )
+        with mock.patch.object(
+            proposal, "_current_execution_config_hash", return_value="cfg"
+        ):
+            successor["execution_config_hash"] = "cfg"
+            status = proposal.review_input_status(con, successor)
+        review = proposal_api._successor_review(con, successor)
+
+    assert status["current"] is False
+    assert status["semantic_input_matches"] is False
+    assert review["successor_drive"] == "drive-07"
+    assert review["moved_to_successor"] == 1
+
+
+def test_successor_versions_are_bound_into_preview_and_fill_config():
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    con.executescript(
+        "CREATE TABLE planner_state(singleton_id INTEGER PRIMARY KEY, "
+        "planner_revision INTEGER NOT NULL, active_approved_proposal_id TEXT, "
+        "next_fencing_token INTEGER NOT NULL);"
+        "INSERT INTO planner_state VALUES(1,11,'successor-11',0);"
+        "CREATE TABLE placement_proposals(proposal_id TEXT PRIMARY KEY, "
+        "policy_version TEXT, solver_version TEXT);"
+        "INSERT INTO placement_proposals VALUES"
+        "('successor-11','successor_v1','successor_lane_v1');"
+    )
+    mutation = ("successor_replan", ("drive-02", "drive-07", "approved-10"))
+    compression = {"enabled": True, "codec": "streamznn", "level": 3}
+    expected = hash_config({
+        "capacity_mode": "guaranteed",
+        "policy_version": "successor_v1",
+        "solver_version": "successor_lane_v1",
+        "compression": compression,
+        "numcopies_default": 1,
+    })
+    with mock.patch("modelark.plan.get", return_value={
+        "capacity_mode": "guaranteed",
+    }), mock.patch("modelark.wishlist.compression", return_value=compression):
+        assert proposal._current_execution_config_hash(con, "ark", mutation) == expected
+    with mock.patch("modelark.plan.active", return_value={
+        "capacity_mode": "guaranteed",
+    }), mock.patch("modelark.wishlist.compression", return_value=compression):
+        live = execution_service.production_services(
+            con
+        ).config.read_graph_affecting_config()
+    assert hash_config(live) == expected
 
 
 def test_successor_workflow_is_a_named_review_action_not_a_fill_side_effect():

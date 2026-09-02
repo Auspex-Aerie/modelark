@@ -147,12 +147,6 @@ def _successor_review(con, stored: dict) -> dict:
         stored.get("mutation_kind") or "adopt_current",
         tuple(stored.get("mutation_args") or ()),
     )
-    preference = proposal.successor_preference(
-        con,
-        stored["plan_id"],
-        mutation,
-        require_active_baseline=False,
-    )
     baseline_id = mutation[1][2]
     baseline = proposal.load_proposal(con, baseline_id)
     before = {
@@ -169,12 +163,29 @@ def _successor_review(con, stored: dict) -> dict:
     }
     shared = sorted(set(before) & set(after))
     changed = [rid for rid in shared if before[rid] != after[rid]]
-    moved = [rid for rid in changed if after[rid] == preference.successor_drive]
+    predecessor_drive, successor_drive = mutation[1][:2]
+    context_refusal = None
+    try:
+        preference = proposal.successor_preference(
+            con,
+            stored["plan_id"],
+            mutation,
+            require_active_baseline=False,
+            validate_current_drives=False,
+        )
+        lane_bytes = preference.lane_bytes
+    except proposal.Refusal as exc:
+        # A historical approval must remain inspectable after its drive facts are
+        # invalidated or removed. review_input_status reports it stale separately.
+        lane_bytes = None
+        context_refusal = exc.code
+    moved = [rid for rid in changed if after[rid] == successor_drive]
     return {
-        "predecessor_drive": preference.predecessor_drive,
-        "successor_drive": preference.successor_drive,
+        "predecessor_drive": predecessor_drive,
+        "successor_drive": successor_drive,
         "baseline_proposal_id": baseline_id,
-        "lane_bytes": preference.lane_bytes,
+        "lane_bytes": lane_bytes,
+        "context_refusal": context_refusal,
         "changed_requirements": len(changed),
         "moved_to_successor": len(moved),
         "unchanged_requirements": len(shared) - len(changed),
@@ -263,6 +274,22 @@ def create_draft(_body: dict | None = None) -> dict:
                         "SUCCESSOR_BASELINE_REQUIRED",
                         None,
                         ("approve_current_placement",),
+                    )
+                try:
+                    baseline = proposal.load_proposal(con, baseline_id)
+                except KeyError:
+                    return _refused(
+                        "SUCCESSOR_BASELINE_MISSING",
+                        {"proposal_id": baseline_id},
+                        ("review_current_placement",),
+                    )
+                baseline_status = proposal.review_input_status(con, baseline)
+                if (baseline.get("lifecycle") != "approved"
+                        or not baseline_status.get("current")):
+                    return _refused(
+                        "SUCCESSOR_BASELINE_STALE",
+                        baseline_status,
+                        ("review_current_placement",),
                     )
                 mutation = (
                     "successor_replan",

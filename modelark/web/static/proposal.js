@@ -168,9 +168,10 @@
     byId("proposalPhrase").textContent = review.confirmation_phrase || "";
     if (review.successor) {
       const value = review.successor;
+      const lane = value.lane_bytes == null ? "its recorded" : window.MA.gb(value.lane_bytes);
       byId("proposalMessage").textContent =
-        `${value.successor_drive} inherits ${window.MA.gb(value.lane_bytes)} of ` +
-        `${value.predecessor_drive}'s planning place. ${value.moved_to_successor} requirements ` +
+        `${value.successor_drive} inherits ${lane} planning place from ` +
+        `${value.predecessor_drive}. ${value.moved_to_successor} requirements ` +
         `move to the replacement; ${value.unchanged_requirements} stay put. ` +
         "No archive bytes move in this dialog.";
     } else {

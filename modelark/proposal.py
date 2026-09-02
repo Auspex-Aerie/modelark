@@ -242,6 +242,7 @@ def successor_preference(
     mutation: tuple,
     *,
     require_active_baseline: bool = True,
+    validate_current_drives: bool = True,
 ) -> placement.SuccessorPreference:
     """Validate and materialize one proposal-scoped successor planning lane."""
     predecessor, successor, baseline_id = _successor_args(mutation)
@@ -277,6 +278,14 @@ def successor_preference(
             {"lifecycle": baseline.get("lifecycle")},
             ("review_current_placement",),
         )
+    if require_active_baseline:
+        baseline_status = review_input_status(con, baseline)
+        if not baseline_status.get("current"):
+            raise Refusal(
+                "SUCCESSOR_BASELINE_STALE",
+                baseline_status,
+                ("review_current_placement",),
+            )
 
     rows = con.execute(
         "SELECT d.drive_label,coalesce(d.role,'primary'),coalesce(d.raid_backed,0),"
@@ -297,25 +306,26 @@ def successor_preference(
         )
     old = facts[predecessor]
     new = facts[successor]
-    if old[5] == "active" and old[6] == "enabled":
+    if validate_current_drives and old[5] == "active" and old[6] == "enabled":
         raise Refusal(
             "SUCCESSOR_PREDECESSOR_STILL_PLACEABLE",
             {"drive_label": predecessor, "lifecycle": old[5], "eligibility": old[6]},
             ("choose_unavailable_predecessor",),
         )
-    if new[5] != "active" or new[6] != "enabled":
+    if validate_current_drives and (new[5] != "active" or new[6] != "enabled"):
         raise Refusal(
             "SUCCESSOR_NOT_PLACEABLE",
             {"drive_label": successor, "lifecycle": new[5], "eligibility": new[6]},
             ("reconcile_successor_drive",),
         )
-    if new[8] in (None, "") or int(new[7] or 0) < 1:
+    if (validate_current_drives
+            and (new[8] in (None, "") or int(new[7] or 0) < 1)):
         raise Refusal(
             "SUCCESSOR_IDENTITY_UNPROVEN",
             {"drive_label": successor},
             ("reconcile_successor_drive",),
         )
-    if old[1] != new[1]:
+    if validate_current_drives and old[1] != new[1]:
         raise Refusal(
             "SUCCESSOR_ROLE_MISMATCH",
             {"predecessor_role": old[1], "successor_role": new[1]},
@@ -371,6 +381,7 @@ def _semantic_input_hash(con, plan_id: str, mutation: tuple) -> str:
             plan_id,
             mutation,
             require_active_baseline=False,
+            validate_current_drives=False,
         )
         payload["successor_preference"] = {
             "predecessor_drive": preference.predecessor_drive,
@@ -383,7 +394,17 @@ def _semantic_input_hash(con, plan_id: str, mutation: tuple) -> str:
     ).hexdigest()
 
 
-def _current_execution_config_hash(con, plan_id: str) -> str:
+def _execution_versions(mutation: tuple) -> tuple[str, str]:
+    if mutation[0] == "successor_replan":
+        return "successor_v1", "successor_lane_v1"
+    return "1", "1"
+
+
+def _current_execution_config_hash(
+    con,
+    plan_id: str,
+    mutation: tuple = ("adopt_current", ()),
+) -> str:
     """Hash the same graph-affecting execution config used by pure preview."""
     from modelark import wishlist as _wl
     from modelark.execution_config import hash_config
@@ -394,10 +415,11 @@ def _current_execution_config_hash(con, plan_id: str) -> str:
         compression = dict(_wl.compression() or {})
     except Exception:
         compression = {"enabled": True, "codec": "streamznn", "level": 3}
+    policy_version, solver_version = _execution_versions(mutation)
     return hash_config({
         "capacity_mode": capacity_mode,
-        "policy_version": "1",
-        "solver_version": "1",
+        "policy_version": policy_version,
+        "solver_version": solver_version,
         "compression": compression,
         "numcopies_default": 1,
     })
@@ -725,6 +747,7 @@ def _header_from_facts(
     derivation_mode: str | None = None,
 ) -> dict:
     mode = derivation_mode or _derivation_mode_for_gate(gate_b_code)
+    policy_version, solver_version = _execution_versions(mutation)
     return {
         "plan_id": plan_id,
         "based_on_revision": based_on,
@@ -735,8 +758,8 @@ def _header_from_facts(
         "selection_before_hash": selection_before,
         "selection_after_hash": selection_after,
         "capacity_mode": capacity_mode,
-        "policy_version": "successor_v1" if mutation[0] == "successor_replan" else "1",
-        "solver_version": "successor_lane_v1" if mutation[0] == "successor_replan" else "1",
+        "policy_version": policy_version,
+        "solver_version": solver_version,
         "serializer_version": canonical.SERIALIZER_VERSION,
         "gate_b_code": gate_b_code,
         # Placement audit evidence only (optimized | state_truncated | canonical_fallback).
@@ -792,7 +815,7 @@ def preview_pure(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", 
     files_n = _normalize_files_for_hash(files)
     semantic = _semantic_input_hash(con, plan_id, mutation)
     # Bind complete graph-affecting config at draft time (B7 / finding 25/35).
-    cfg_hash = _current_execution_config_hash(con, plan_id)
+    cfg_hash = _current_execution_config_hash(con, plan_id, mutation)
     header = _header_from_facts(
         plan_id=plan_id, based_on=rev, mutation=mutation, tasks=tasks_n,
         capacity_mode=capacity_mode, gate_b_code=gate,
@@ -1061,12 +1084,17 @@ def review_input_status(con, stored: Mapping) -> dict:
         stored.get("mutation_kind") or "adopt_current",
         tuple(stored.get("mutation_args") or ()),
     )
-    semantic_matches = (
-        _semantic_input_hash(con, stored["plan_id"], mutation)
-        == stored.get("semantic_input_hash")
-    )
+    try:
+        semantic_matches = (
+            _semantic_input_hash(con, stored["plan_id"], mutation)
+            == stored.get("semantic_input_hash")
+        )
+    except Refusal:
+        # Historical successor facts may no longer be valid planning inputs. That is
+        # stale authority, not a status-endpoint failure.
+        semantic_matches = False
     execution_config_matches = (
-        _current_execution_config_hash(con, stored["plan_id"])
+        _current_execution_config_hash(con, stored["plan_id"], mutation)
         == stored.get("execution_config_hash")
     )
     return {
