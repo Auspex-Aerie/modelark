@@ -4,6 +4,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## Unreleased
 
+## 0.3.2 - 2026-09-02
+
+ModelArk 0.3.2 adds an operator-directed successor proposal for replacing an unavailable drive while
+retaining schema v7. It is an application-only update: deployment, proposal approval, and Fill start
+remain separate actions.
+
 ### Added
 
 - A current approved placement can now create a bounded successor proposal for an unavailable drive
@@ -14,6 +20,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 - Metadata and planning commands no longer initialize ZipNN and Torch just to read compression
   constants, preventing third-party codec warnings from polluting otherwise successful CLI output.
+- Successor proposal status, draft creation, execution-configuration identity, and Fill projection
+  now fail closed when their approved baseline or replacement context is stale or unavailable.
 
 ## 0.3.1 - 2026-09-02
 
