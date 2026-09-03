@@ -8,6 +8,7 @@
   let fillRunning = false;
   let requestPending = false;
   let successorOptions = null;
+  let autoOpenedProposalId = null;
 
   function refusalText(result) {
     if (!result) return "The proposal request failed.";
@@ -20,8 +21,11 @@
     const start = byId("fillStart");
     if (!start) return;
     const approved = !!(status && status.state === "approved_current");
+    const pending = !!(status && ["review_pending", "review_pending_stale",
+      "review_ambiguous"].includes(status.state));
     start.disabled = !planFeasible || !approved;
     if (!planFeasible) start.title = "Plan admission is not feasible; resolve the displayed blockers.";
+    else if (pending) start.title = "Review or discard the pending placement before starting Fill.";
     else if (!approved) start.title = "Review and approve the exact placement before starting Fill.";
     else start.title = "";
   }
@@ -34,10 +38,23 @@
     if (!seal || !state || !button || !successor) return;
 
     const kind = status && status.state;
-    seal.textContent = kind === "approved_current" ? "Ready to fill" : "Placement approval";
+    const pending = kind === "review_pending" || kind === "review_pending_stale";
+    seal.textContent = kind === "approved_current" ? "Ready to fill" :
+      (pending ? "Review pending" : "Placement approval");
     if (requestPending) {
       state.textContent = "Preparing exact placement…";
       button.textContent = "Preparing…";
+      button.disabled = true;
+    } else if (pending) {
+      const draft = status.pending_proposal || {};
+      state.textContent = kind === "review_pending_stale"
+        ? `Pending proposal is stale · discard and create a fresh review`
+        : `Proposal ready for review · ${draft.proposal_id || "current draft"}`;
+      button.textContent = "Review pending proposal";
+      button.disabled = fillRunning || !draft.proposal_id;
+    } else if (kind === "review_ambiguous") {
+      state.textContent = refusalText(status);
+      button.textContent = "Pending reviews need attention";
       button.disabled = true;
     } else if (kind === "approved_current") {
       const active = status.active_proposal || {};
@@ -72,6 +89,12 @@
   function applyStatus(next) {
     status = next || null;
     renderDocket();
+    const pending = status && status.pending_proposal;
+    if (pending && pending.proposal_id !== autoOpenedProposalId &&
+        byId("proposalModal") && byId("proposalModal").hidden) {
+      autoOpenedProposalId = pending.proposal_id;
+      showReview(pending);
+    }
     return status;
   }
 
@@ -178,16 +201,34 @@
       byId("proposalMessage").textContent =
         "Review every assignment before approval. No archive bytes move in this dialog.";
     }
-    byId("proposalRefusal").textContent = "";
+    const inputStatus = review.input_status;
+    byId("proposalRefusal").textContent = inputStatus && !inputStatus.current
+      ? "This pending proposal is stale. Discard it and create a fresh review."
+      : "";
     byId("proposalConfirm").value = "";
     byId("proposalApprove").disabled = true;
     byId("proposalConfirmation").hidden = !review.approvable;
+    byId("proposalDiscard").hidden = review.lifecycle !== "draft";
+    byId("proposalDiscard").disabled = requestPending || review.lifecycle !== "draft";
     renderTotals(review.totals);
     renderDrives(review.drives);
     renderAssignments(review.assignments);
     byId("proposalModal").hidden = false;
     byId("proposalAssignmentFilter").value = "";
     byId("proposalConfirm").focus();
+  }
+
+  function rememberPendingReview(nextReview) {
+    const approvalState = status && (status.approval_state || status.state) || "missing";
+    status = Object.assign({}, status || {}, {
+      ok: true,
+      state: "review_pending",
+      approval_state: approvalState,
+      pending_proposal: nextReview,
+    });
+    autoOpenedProposalId = nextReview.proposal_id;
+    renderDocket();
+    showReview(nextReview);
   }
 
   function showRefusal(result) {
@@ -198,7 +239,12 @@
   }
 
   function openReview() {
-    if (requestPending || fillRunning || !planFeasible) return;
+    if (requestPending || fillRunning) return;
+    if (status && status.pending_proposal) {
+      showReview(status.pending_proposal);
+      return;
+    }
+    if (!planFeasible) return;
     requestPending = true;
     renderDocket();
     window.MA.post("/api/proposal/draft", {}).then(result => {
@@ -207,7 +253,7 @@
         showRefusal(result);
         return;
       }
-      showReview(result.review);
+      rememberPendingReview(result.review);
     }).catch(error => {
       const result = {refused: true, code: "PROPOSAL_DRAFT_UNAVAILABLE", error: String(error)};
       applyStatus(result);
@@ -222,6 +268,33 @@
     byId("proposalModal").hidden = true;
     byId("proposalConfirm").value = "";
     byId("proposalRefusal").textContent = "";
+  }
+
+  function discardReview() {
+    if (requestPending || !review || review.lifecycle !== "draft") return;
+    requestPending = true;
+    byId("proposalDiscard").disabled = true;
+    byId("proposalRefusal").textContent = "";
+    window.MA.post("/api/proposal/discard", {
+      proposal_id: review.proposal_id,
+    }).then(result => {
+      if (!result || result.ok !== true) {
+        showRefusal(result);
+        return;
+      }
+      closeReview();
+      review = null;
+      applyStatus(result);
+      window.MA.toast("pending placement discarded — approved placement unchanged");
+    }).catch(error => {
+      showRefusal({code: "PROPOSAL_DISCARD_UNAVAILABLE", error: String(error)});
+    }).finally(() => {
+      requestPending = false;
+      renderDocket();
+      if (review && review.lifecycle === "draft") {
+        byId("proposalDiscard").disabled = false;
+      }
+    });
   }
 
   function clearSelect(select) {
@@ -323,7 +396,7 @@
         return;
       }
       closeSuccessor();
-      showReview(result.review);
+      rememberPendingReview(result.review);
     }).catch(error => {
       byId("successorRefusal").textContent =
         refusalText({code: "SUCCESSOR_DRAFT_UNAVAILABLE", error: String(error)});
@@ -392,6 +465,7 @@
     button.onclick = openReview;
     byId("proposalSuccessor").onclick = openSuccessor;
     byId("proposalCancel").onclick = closeReview;
+    byId("proposalDiscard").onclick = discardReview;
     byId("proposalApprove").onclick = approve;
     byId("proposalConfirm").addEventListener("input", event => {
       byId("proposalApprove").disabled = requestPending || !review ||

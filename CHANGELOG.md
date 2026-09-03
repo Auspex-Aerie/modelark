@@ -4,6 +4,25 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## Unreleased
 
+## 0.3.3 - 2026-09-03
+
+ModelArk 0.3.3 is an application-only safety patch over schema v7. It makes an interrupted exact
+placement review recoverable and prevents the previously approved placement from starting while
+new operator intent is still pending.
+
+### Added
+
+- The Fill page restores the one current immutable proposal draft after a reload or reconnect,
+  reopens its exact review once, and offers an explicit discard action that leaves the approved
+  proposal and planner revision unchanged.
+
+### Fixed
+
+- Start Fill now refuses at both browser and execution-service boundaries while a current proposal
+  review is pending.
+- Draft publication refuses duplicate current drafts and live Fill sessions; historical multiple
+  drafts surface as typed ambiguity instead of silently choosing the newest row.
+
 ## 0.3.2 - 2026-09-02
 
 ModelArk 0.3.2 adds an operator-directed successor proposal for replacing an unavailable drive while

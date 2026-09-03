@@ -314,6 +314,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._mutation_result(proposal_api.create_draft(body))
             elif u.path == "/api/proposal/approve":
                 self._mutation_result(proposal_api.approve(body))
+            elif u.path == "/api/proposal/discard":
+                self._mutation_result(proposal_api.discard(body))
             elif u.path == "/api/drive/declare-lost":
                 self._mutation_result(drive_api.declare_lost(body))
             elif u.path == "/api/drive/register-new":

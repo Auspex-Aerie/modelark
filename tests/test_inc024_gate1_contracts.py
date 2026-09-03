@@ -257,6 +257,7 @@ def test_c05_wide_hash_approval_refused_and_reapprove_is_narrow():
         code="PROPOSAL_HASH_MISMATCH",
         label="approve of draft with tampered full_manifest_hash (canonical left stale)",
     )
+    prop.discard_draft(con, pid1)
 
     # --- 2. Self-consistent historical-wide draft: rehash after task mutation ---
     draft2 = _draft(con)
@@ -275,6 +276,7 @@ def test_c05_wide_hash_approval_refused_and_reapprove_is_narrow():
         ev2 = {}
     assert ev2.get("reason") == "full_manifest_hash", (
         f"self-consistent wide draft must refuse full_manifest_hash, got {ev2!r}")
+    prop.discard_draft(con, pid2)
 
     # --- 3. Historical wide approved: approve first, seed wide, rehash, project ---
     draft3 = _draft(con)

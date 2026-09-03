@@ -1,4 +1,4 @@
-"""Release surfaces must identify one package/runtime artifact line (DEC-093)."""
+"""Release surfaces must identify one package/runtime artifact line (DEC-095)."""
 from __future__ import annotations
 
 import re
@@ -8,7 +8,7 @@ import modelark
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE = "0.3.2"
+CURRENT_RELEASE = "0.3.3"
 
 
 def _project_version() -> str:

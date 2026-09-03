@@ -1204,6 +1204,11 @@ def test_s08_preview_publish_three_modes_and_null_refused(tmp_path):
         _rehearse()(data, work, run_id="s08"), source_identity=ident)
     con = _open_rw(Path(report["clone_catalog_path"]))
     try:
+        # This frozen catalog intentionally carries historical revision-0 drafts. Resolve their
+        # operator-attention state explicitly before exercising independent publication modes.
+        for pending_id in proposal_mod.current_draft_ids(con):
+            proposal_mod.discard_draft(con, pending_id)
+
         # Capture the real assignment function BEFORE any patch — never call a
         # mocked function from its own side effect.
         real_build_assignment = proposal_mod._build_assignment
@@ -1245,6 +1250,16 @@ def test_s08_preview_publish_three_modes_and_null_refused(tmp_path):
                 [ppid],
             ).fetchone()[0]
             assert stored == mode
+            with pytest.raises(proposal_mod.Refusal) as pending:
+                proposal_mod.publish_draft(con, payload)
+            assert pending.value.code == "PROPOSAL_REVIEW_PENDING"
+            assert pending.value.evidence["proposal_ids"] == [ppid]
+            discarded = proposal_mod.discard_draft(con, ppid)
+            assert discarded["lifecycle"] == "superseded"
+            assert con.execute(
+                "SELECT lifecycle FROM placement_proposals WHERE proposal_id=?",
+                [ppid],
+            ).fetchone()[0] == "superseded"
 
         # NULL publication must raise identifying invalid/missing derivation mode
         payload_null = proposal_mod.preview_pure(con, "ark", ("adopt_current", ()))

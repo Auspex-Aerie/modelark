@@ -2311,3 +2311,43 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, README.md, CHANGELOG.md, docs/upgrading.md, docs/releases/v0.3.2.md, contributing/contributions.md, pyproject.toml, modelark/__init__.py, tests/test_release_identity.py
 - `related`: DEC-067, DEC-083, DEC-091, DEC-092, INC-055, INC-058, INC-059, PR-063
 - `scope_boundary`: Release identity and application-only upgrade guidance only. No schema migration, catalog/selection/plan/proposal mutation, drive state, Fill session, archive-byte operation, live service deployment, tag, publication, or merge is changed or authorized here.
+
+### INC-061: Pending proposal review vanished outside its creating browser response
+- `id`: INC-061
+- `date`: 2026-09-03
+- `status`: remediation qualified; deployment pending
+- `triggered_by`: Live v0.3.2 Drive #2→Drive #7 successor draft created outside the operator's browser
+- `symptom`: The successor draft was durably stored and approvable, but a Fill-page load still reported revision 10 as `approved_current`, displayed no review prompt, and could enable Start Fill for the older approval. Selecting **Use a replacement drive** again would create another draft instead of recovering the existing review.
+- `root_cause`: `planner_state` points only to the active approved proposal. `/api/proposal/status` projected only that pointer, while the newly created draft and its full review existed solely in the response to the initiating POST. The browser called `showReview()` synchronously from that response and retained no reload-recoverable pending-review state; Fill admission likewise ignored current draft rows.
+- `blast_radius`: Any current proposal draft whose response is lost through reload, disconnect, another client, or an out-of-band attended operation can become invisible to the Fill UI. The immutable draft remains intact and no archive bytes move, but operator intent is not presented, duplicate drafts can accumulate, and the prior approved assignment remains startable until separately superseded.
+- `why_not_caught_earlier`: The successor browser acceptance created and approved its draft in one uninterrupted page session. It proved that approval did not start Fill, but never reloaded between draft creation and review and never attempted Fill while a current draft existed.
+- `planned_remediation`: DEC-094 makes one current-revision draft an explicit recoverable review state, blocks Fill at UI and execution boundaries until approval or discard, refuses duplicate/ambiguous current drafts, and refuses draft publication while Fill is live.
+- `docs_updated`: docs/decision_log.md
+- `related`: DEC-067, DEC-092, DEC-093, PR-063
+- `scope_boundary`: Incident classification and the pending-review authority gap only. No proposal is approved or discarded, no planner revision changes, Fill remains stopped, and no archive bytes move.
+
+### DEC-094: Make current proposal drafts recoverable Fill-admission state
+- `id`: DEC-094
+- `date`: 2026-09-03
+- `status`: accepted; implementation qualified, deployment pending
+- `triggered_by`: INC-061 and the operator's direction to fix the live successor-review gap before Fill
+- `decision`: Treat exactly one immutable `draft` based on the current planner revision as `review_pending` operator-attention state. Return its backend-authored review from proposal status, restore its modal once when the Fill page loads, keep an explicit docket action available after the modal is closed, and disable Start Fill in both the browser and execution service until that exact draft is approved or discarded. Discard transitions only the named draft to `superseded` without changing the active approval or planner revision. Refuse a second current draft, refuse draft publication while Fill is live, and report multiple current drafts as typed ambiguity instead of selecting one by timestamp. Never infer or create this state merely from attached hardware or drive observations.
+- `rationale`: The existing schema-v7 proposal lifecycle already durably expresses unresolved operator intent; adding another pointer or schema migration would duplicate that authority. A current-revision query is unambiguous only when exactly one row exists, so publication enforces the singleton and status fails closed on historical ambiguity. Backend Fill admission must share the gate because a disabled button alone cannot prevent a direct or racing start request.
+- `impact`: Proposal status, draft publication/discard, execution-session admission, the Fill docket/modal, server routing, and focused browser/domain contracts change together. The live v0.3.2 successor draft remains immutable and becomes recoverable after deployment of this implementation; its approval phrase, canonical seal, active revision-10 baseline, drive identities, and assignment do not change.
+- `verification`: The full non-browser regression suite passes 985 tests with one intentional skip; the standalone browser acceptance passes, including reload recovery of the same pending successor draft and continued Fill exclusion. Focused proposal/execution contracts pass 66 tests. Ruff, JavaScript syntax validation, Python compilation, and `git diff --check` pass. No test approves the live successor proposal or starts live Fill.
+- `docs_updated`: docs/decision_log.md, docs/operations.md, modelark/proposal.py, modelark/execution_session.py, modelark/web/proposal_api.py, modelark/web/server.py, modelark/web/static/index.html, modelark/web/static/proposal.js, tests/test_dec053_054_gate1_contracts.py, tests/test_def036_proposal_surface.py, tests/test_def042_successor_plan.py, tests/test_execution_sessions.py, tests/test_inc024_gate1_contracts.py, tests/test_live_session_writer_matrix.py, tests/test_e2e_portal.py
+- `related`: INC-061, DEC-036, DEC-067, DEC-092, DEC-093, RFC-002
+- `scope_boundary`: Current-draft discovery, review recovery, explicit discard, duplicate/live-draft exclusion, Fill admission, and regression evidence only. No schema migration, proposal assignment or hash change, automatic replacement inference, drive lifecycle/identity/capacity mutation, selection/plan mutation, approval, Fill start, archive-byte operation, service deployment, merge, tag, or publication is authorized by this entry.
+
+### DEC-095: Assign version 0.3.3 to recoverable proposal review
+- `id`: DEC-095
+- `date`: 2026-09-03
+- `status`: accepted; qualification complete, deployment pending
+- `triggered_by`: INC-061, DEC-094, and the release-identity rule established by DEC-091 and DEC-093
+- `decision`: Identify recoverable pending proposal review and its Fill-admission enforcement as patch version `0.3.3`. Advance package metadata, runtime output, README, changelog, upgrade guidance, contributor pointer, release note, and release-identity regression together. Keep schema v7 unchanged and require an application-only replacement using the exact existing data/state/config paths, automatic Fill resume absent, and the deployed v0.3.2 candidate retained for rollback.
+- `rationale`: The fix changes runnable proposal and execution behavior and therefore cannot reuse the deployed v0.3.2 identity. A patch increment accurately describes a backward-compatible safety correction on the same schema-v7 public-alpha line.
+- `impact`: Operators and support can distinguish the pending-review fix through both version `0.3.3` and exact build/commit identity. An existing v0.3.2 current draft requires no migration or regeneration; after the application replacement, status recovers the same stored proposal for review.
+- `verification`: Isolated build produced wheel SHA-256 `a262dd1043eb29bc6cf935cde0d273f8a1d7522b5f1090526c12bed2c428793b` and source-archive SHA-256 `da40fcc40e0e43eaee4c361b43162027ffe2b9bd4d45c257a90ad6651016bcfd`. From an installation outside the checkout, package metadata, `modelark.__version__`, and the CLI entry point all report `0.3.3` under ModelArk's qualified dependency environment.
+- `docs_updated`: pyproject.toml, modelark/__init__.py, README.md, CHANGELOG.md, docs/upgrading.md, docs/releases/v0.3.3.md, contributing/contributions.md, tests/test_release_identity.py, docs/decision_log.md
+- `related`: DEC-083, DEC-091, DEC-093, DEC-094, INC-061
+- `scope_boundary`: Patch release identity, application-only upgrade guidance, and release regression only. No schema migration, catalog/selection/plan/proposal mutation, approval, drive state, Fill session, archive-byte operation, live service deployment, merge, tag, or publication is authorized here.

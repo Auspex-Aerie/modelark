@@ -390,4 +390,8 @@ def test_successor_workflow_is_a_named_review_action_not_a_fill_side_effect():
     assert "/api/proposal/successor-options" in js
     assert 'mode: "successor"' in js
     assert "/api/proposal/successor-options" in server
+    assert 'id="proposalDiscard"' in html
+    assert 'state: "review_pending"' in js
+    assert "/api/proposal/discard" in js
+    assert "/api/proposal/discard" in server
     assert "fillStart" not in js[js.index('mode: "successor"'):][:400]

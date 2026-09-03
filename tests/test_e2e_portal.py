@@ -596,6 +596,20 @@ def _proposal_approval_flow(pg) -> None:
     successor_row = pg.locator("#proposalAssignments [data-requirement-id]").first
     assert f"{current_target} → {replacement}" in successor_row.inner_text()
     successor_phrase = pg.inner_text("#proposalPhrase").strip()
+    assert pg.is_disabled("#fillStart"), "pending successor review must gate old approval"
+    assert pg.locator("#proposalDiscard").is_visible()
+    pg.click("#proposalCancel")
+    pg.wait_for_selector("#proposalModal", state="hidden")
+    assert "ready for review" in pg.inner_text("#proposalState")
+    assert pg.is_disabled("#fillStart"), "closing review must not forget pending intent"
+
+    # INC-061: the durable draft must recover after a full browser reload, not only from the
+    # response chain that created it. Reloading auto-opens the exact same immutable review once.
+    pg.reload()
+    pg.evaluate("window.loadFill()")
+    pg.wait_for_selector("#proposalModal", state="visible")
+    assert pg.inner_text("#proposalPhrase").strip() == successor_phrase
+    assert pg.is_disabled("#fillStart")
     pg.fill("#proposalConfirm", successor_phrase)
     pg.click("#proposalApprove")
     pg.wait_for_selector("#proposalModal", state="hidden")

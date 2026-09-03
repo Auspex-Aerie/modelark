@@ -146,9 +146,10 @@ def test_complete_a3_writer_matrix_while_live(tmp_path):
 
         _refuse_live("fetch.RunCtx.write", lambda: ctx.write(write_archived))
 
-        draft = prop.create_draft(con, plan_id="ark", mutation=("adopt_current", ()))
-        dpid = draft["proposal_id"] if isinstance(draft, dict) else draft
-        _refuse_live("proposal.approve", lambda: prop.approve(con, dpid))
+        _refuse_live(
+            "proposal.create_draft",
+            lambda: prop.create_draft(con, plan_id="ark", mutation=("adopt_current", ())),
+        )
 
         con.close()
     finally:
