@@ -853,6 +853,7 @@ def _build_solver_input(
     mode: CapacityMode,
     evidence_by_drive: Mapping[str, capacity_evidence.Evidence] | None,
     bounds: placement.SolverBounds,
+    preference: placement.SuccessorPreference | None = None,
 ) -> tuple[placement.SolverInput, tuple[CapacityDrive, ...], frozenset[str]]:
     """Shell: admission evidence → pure SolverInput (no floor recomputation).
 
@@ -877,6 +878,8 @@ def _build_solver_input(
     for drive in capacity_drives:
         ev = drive.evidence
         free = int(ev.admissible_free) if ev.executable else 0
+        if preference is not None and drive.drive_label == preference.successor_drive:
+            free = min(free, int(preference.lane_bytes))
         executable.append((drive.drive_label, free))
         # Prefer admission-supplied optimistic max; for executable live/anchor evidence with a
         # missing max, fall back to capacity − safety floor so known free shortfalls still
@@ -884,6 +887,10 @@ def _build_solver_input(
         mx = ev.optimistic_usable_max
         if mx is None and ev.executable:
             mx = max(0, int(drive.capacity_bytes) - int(drive.safety_floor))
+        if (preference is not None
+                and drive.drive_label == preference.successor_drive
+                and mx is not None):
+            mx = min(int(mx), int(preference.lane_bytes))
         maxima.append((drive.drive_label, mx))
         evidence_pairs.append((
             drive.drive_label,
@@ -907,6 +914,7 @@ def _build_solver_input(
         capacity_mode=mode.value,
         policy_version=placement.POLICY_VERSION,
         bounds=bounds,
+        preference=preference,
     )
     return inp, capacity_drives, placeable
 
@@ -1141,6 +1149,7 @@ def plan_capacity(
     *,
     capacity_mode: str | CapacityMode | None = None,
     evidence_by_drive: Mapping[str, capacity_evidence.Evidence] | None = None,
+    preference: placement.SuccessorPreference | None = None,
     compression_cfg: Mapping[str, object] | None = None,
     provisioning: str | None = None,
 ) -> CapacityPlan:
@@ -1171,7 +1180,12 @@ def plan_capacity(
 
     bounds = _adapter_solver_bounds()
     solver_inp, capacity_drives, placeable_labels = _build_solver_input(
-        con, result, mode=mode, evidence_by_drive=evidence_by_drive, bounds=bounds,
+        con,
+        result,
+        mode=mode,
+        evidence_by_drive=evidence_by_drive,
+        bounds=bounds,
+        preference=preference,
     )
 
     blocking = tuple(sorted({

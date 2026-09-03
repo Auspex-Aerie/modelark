@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Mapping, Sequence
 
-from modelark import admission, archive_manifest, capacity, capacity_evidence, reconcile
+from modelark import admission, archive_manifest, capacity, capacity_evidence, placement, reconcile
 
 
 @dataclass(frozen=True)
@@ -123,6 +123,7 @@ def preview(
     compression_cfg: Mapping[str, object] | None = None,
     observe: Callable[[str], object | None] | None = None,
     now: str | None = None,
+    preference: placement.SuccessorPreference | None = None,
 ) -> PlanningResult:
     """Build the canonical read-only plan from one consistent catalog/evidence snapshot."""
     if observe is None:
@@ -163,6 +164,7 @@ def preview(
             graph,
             capacity_mode=policy.capacity_mode,
             evidence_by_drive=evidence,
+            preference=preference,
         )
 
     return PlanningResult(

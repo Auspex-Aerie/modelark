@@ -62,8 +62,6 @@ import tempfile
 from pathlib import Path
 from typing import BinaryIO, Callable, Final, Union
 
-from zipnn import ZipNN
-
 StrPath = Union[str, "os.PathLike[str]"]
 Sink = Callable[[bytes], object]
 
@@ -81,6 +79,17 @@ class StreamZnnError(Exception):
 
 class OutputCapExceeded(StreamZnnError):
     """Compression would exceed the caller's guaranteed on-disk output ceiling."""
+
+
+def _zipnn(*, dtype: str | None = None, threads: int = 0):
+    # Import only on an actual codec operation. Planning imports this module for
+    # constants and must not initialize Torch or surface its dependency warnings.
+    from zipnn import ZipNN
+
+    kwargs = {"input_format": "byte"}
+    if dtype is not None:
+        kwargs.update(bytearray_dtype=dtype, threads=threads)
+    return ZipNN(**kwargs)
 
 
 def _read_exact(fh: BinaryIO, n: int) -> bytes:
@@ -140,7 +149,7 @@ def compress_file(
                 # through even a `bytes` object). Safe here only because `chunk` is a fresh, single-use
                 # read we never touch again, and the source file was opened read-only — so the file on
                 # disk is untouched. Never hand ZipNN.compress a buffer the caller still needs.
-                blob: bytes = bytes(ZipNN(input_format="byte", bytearray_dtype=dtype, threads=threads).compress(chunk))
+                blob: bytes = bytes(_zipnn(dtype=dtype, threads=threads).compress(chunk))
                 if len(blob) > _MAX_BLOB:
                     raise StreamZnnError(f"compressed slice {len(blob)} exceeds {_MAX_BLOB}-byte frame ceiling")
                 # Check expansion while the blob is still in memory. A post-write check could
@@ -187,7 +196,7 @@ def decompress_to(src: StrPath, sink: Sink) -> None:
             if blob_len == 0 or blob_len > _MAX_BLOB:
                 raise StreamZnnError(f"implausible frame length {blob_len}")
             blob = _read_exact(fi, blob_len)
-            restored: bytes = bytes(ZipNN(input_format="byte").decompress(blob))
+            restored: bytes = bytes(_zipnn().decompress(blob))
             sink(restored)
 
 

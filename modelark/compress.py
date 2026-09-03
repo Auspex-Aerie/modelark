@@ -24,8 +24,6 @@ import tempfile
 from pathlib import Path
 from typing import Final, Union
 
-from zipnn import ZipNN
-
 from modelark import streamznn
 
 StrPath = Union[str, os.PathLike[str]]
@@ -114,7 +112,11 @@ def codec_output_cap(
     raise ValueError(f"unsupported codec {codec!r}")
 
 
-def _zipnn(dtype: str = "bfloat16", threads: int = 0) -> ZipNN:
+def _zipnn(dtype: str = "bfloat16", threads: int = 0):
+    # ZipNN imports Torch. Keep that heavy, warning-producing dependency outside
+    # metadata/planning CLI startup; compression paths load it only when needed.
+    from zipnn import ZipNN
+
     return ZipNN(input_format="byte", bytearray_dtype=dtype, threads=threads)
 
 

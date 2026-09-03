@@ -30,11 +30,26 @@ def production_services(con=None, *, catalog_path=None, state_dir=None) -> Simpl
                 compression = dict(_wl.compression() or {})
             except Exception:
                 compression = {"enabled": True, "codec": "streamznn", "level": 3}
+            policy_version = "1"
+            solver_version = "1"
+            if con is not None:
+                try:
+                    versions = con.execute(
+                        "SELECT pp.policy_version,pp.solver_version "
+                        "FROM planner_state ps LEFT JOIN placement_proposals pp "
+                        "ON pp.proposal_id=ps.active_approved_proposal_id "
+                        "WHERE ps.singleton_id=1"
+                    ).fetchone()
+                    if versions and versions[0] and versions[1]:
+                        policy_version = str(versions[0])
+                        solver_version = str(versions[1])
+                except Exception:
+                    pass
             if con is None:
                 return {
                     "capacity_mode": "guaranteed",
-                    "policy_version": "1",
-                    "solver_version": "1",
+                    "policy_version": policy_version,
+                    "solver_version": solver_version,
                     "compression": compression,
                     "numcopies_default": 1,
                 }
@@ -42,8 +57,8 @@ def production_services(con=None, *, catalog_path=None, state_dir=None) -> Simpl
             mode = (prow or {}).get("capacity_mode") or "guaranteed"
             return {
                 "capacity_mode": mode,
-                "policy_version": "1",
-                "solver_version": "1",
+                "policy_version": policy_version,
+                "solver_version": solver_version,
                 "compression": compression,
                 "numcopies_default": 1,
             }

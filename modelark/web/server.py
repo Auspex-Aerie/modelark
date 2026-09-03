@@ -223,6 +223,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(plan_api.preview())
             elif u.path == "/api/proposal/status":
                 self._json(proposal_api.status())
+            elif u.path == "/api/proposal/successor-options":
+                self._json(proposal_api.successor_options())
             elif u.path == "/api/verify/suspects":
                 self._json(verify_api.suspects())
             elif u.path == "/api/fill/status":

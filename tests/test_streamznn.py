@@ -227,7 +227,7 @@ def test_stream_output_cap_rejects_expansion_before_frame_write() -> None:
         src.write_bytes(b"1234")
         compressor = mock.Mock()
         compressor.compress.return_value = b"12345"
-        with mock.patch("modelark.streamznn.ZipNN", return_value=compressor):
+        with mock.patch("modelark.streamznn._zipnn", return_value=compressor):
             try:
                 streamznn.compress_file(
                     src, dst, chunk_bytes=4,

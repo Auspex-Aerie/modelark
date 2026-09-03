@@ -87,6 +87,10 @@ def _seed(con) -> None:
         "VALUES('drive-02','primary',0,4000000000000,0)"
     )
     con.execute(
+        "INSERT INTO drives(drive_label,role,raid_backed,capacity_bytes,free_bytes) "
+        "VALUES('drive-07','primary',0,8000000000000,8000000000000)"
+    )
+    con.execute(
         "INSERT INTO archived(repo_id,rfilename,stored_name,stored_relpath,drive_label,"
         "orig_bytes,stored_bytes,compressed,annex_key) VALUES("
         "'demo/small-llm','model.safetensors','model.safetensors','model.safetensors',"
@@ -98,10 +102,14 @@ def _seed(con) -> None:
         "'demo/embed','model.safetensors','model.safetensors','model.safetensors',"
         "'drive-replica',1000000000,600000000,1,'KEY-embed')"
     )
-    # Reconcile both drives (proven identity + a matching clean anchor) so admission evidence is
+    # Reconcile the placeable drives (proven identity + a matching clean anchor) so admission evidence is
     # available offline (#35-C). A migrated drive would be `unknown` and capacity-block everything —
     # the fail-closed migration default — masking the intended policy/replica-capacity blockers.
-    for label, cap, fp in (("drive-00", 10000000000000, "a" * 64), ("drive-replica", 1000000000, "b" * 64)):
+    for label, cap, fp in (
+        ("drive-00", 10000000000000, "a" * 64),
+        ("drive-replica", 1000000000, "b" * 64),
+        ("drive-07", 8000000000000, "c" * 64),
+    ):
         con.execute("UPDATE drives SET identity_epoch=1, write_generation=1, filesystem_capacity_bytes=?, "
                     "identity_fingerprint=?, write_authority='dedicated_local' WHERE drive_label=?",
                     (cap, fp, label))
@@ -542,7 +550,10 @@ def _proposal_approval_flow(pg) -> None:
     rows = pg.locator("#proposalAssignments [data-requirement-id]")
     assert rows.count() == 1, f"expected one exact assignment, got {rows.count()}"
     assert "demo/tiny-llm" in rows.first.inner_text()
-    assert "drive-00" in rows.first.inner_text()
+    current_target = pg.evaluate(
+        "document.querySelector('#proposalAssignments tr td:nth-child(3)').textContent.trim()"
+    )
+    assert current_target in {"drive-00", "drive-07"}
     assert pg.locator("#proposalAssignments script").count() == 0
     assert pg.is_disabled("#proposalApprove")
 
@@ -562,9 +573,44 @@ def _proposal_approval_flow(pg) -> None:
     live = pg.evaluate("async () => await window.MA.api('/api/proposal/status')")
     assert live["state"] == "approved_current"
     assert live["active_proposal"]["canonical_hash"] == canonical
+
+    # DEF-042: a current approval exposes an explicit replacement action. The backend authors
+    # the active plan/baseline/lane; building and approving the successor proposal still never
+    # reaches Fill start.
+    assert pg.locator("#proposalSuccessor").is_visible()
+    assert pg.is_enabled("#proposalSuccessor")
+    pg.click("#proposalSuccessor")
+    pg.wait_for_selector("#successorModal", state="visible")
+    assert pg.input_value("#successorPredecessor") == "drive-02"
+    replacement = pg.input_value("#successorDrive")
+    assert replacement in {"drive-00", "drive-07"}
+    assert replacement != current_target
+    note = pg.inner_text("#successorNote")
+    assert replacement in note and "drive-02" in note and "safe capacity" in note
+    pg.click("#successorCreate")
+    pg.wait_for_selector("#successorModal", state="hidden")
+    pg.wait_for_selector("#proposalModal", state="visible")
+    successor_message = pg.inner_text("#proposalMessage")
+    assert f"{replacement} inherits" in successor_message
+    assert "1 requirements move" in successor_message
+    successor_row = pg.locator("#proposalAssignments [data-requirement-id]").first
+    assert f"{current_target} → {replacement}" in successor_row.inner_text()
+    successor_phrase = pg.inner_text("#proposalPhrase").strip()
+    pg.fill("#proposalConfirm", successor_phrase)
+    pg.click("#proposalApprove")
+    pg.wait_for_selector("#proposalModal", state="hidden")
+    successor_live = pg.evaluate(
+        "async () => await window.MA.api('/api/proposal/status')"
+    )
+    assert successor_live["state"] == "approved_current"
+    assert successor_live["active_proposal"]["mutation_kind"] == "successor_replan"
+    successor = successor_live["active_proposal"]["successor"]
+    assert successor["predecessor_drive"] == "drive-02"
+    assert successor["successor_drive"] == replacement
+    assert successor["moved_to_successor"] == 1
     assert starts == [], f"approval must not start Fill: {starts!r}"
     pg.unroute("**/api/fill/start")
-    print("  proposal draft reviewed + explicitly approved; Fill remained stopped")
+    print("  current + successor proposals reviewed and approved; Fill remained stopped")
 
 
 def _drive_loss_flow(pg) -> None:

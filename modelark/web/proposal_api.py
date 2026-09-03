@@ -139,6 +139,77 @@ def _review(stored: dict, *, include_assignments: bool) -> dict:
     return out
 
 
+def _successor_review(con, stored: dict) -> dict:
+    """Explain a successor proposal against its exact approved baseline."""
+    from modelark import proposal
+
+    mutation = (
+        stored.get("mutation_kind") or "adopt_current",
+        tuple(stored.get("mutation_args") or ()),
+    )
+    baseline_id = mutation[1][2]
+    baseline = proposal.load_proposal(con, baseline_id)
+    before = {
+        str(task.get("requirement_id")): str(
+            task.get("target_drive") or task.get("satisfying_drive") or ""
+        )
+        for task in baseline.get("tasks") or ()
+    }
+    after = {
+        str(task.get("requirement_id")): str(
+            task.get("target_drive") or task.get("satisfying_drive") or ""
+        )
+        for task in stored.get("tasks") or ()
+    }
+    shared = sorted(set(before) & set(after))
+    changed = [rid for rid in shared if before[rid] != after[rid]]
+    predecessor_drive, successor_drive = mutation[1][:2]
+    context_refusal = None
+    try:
+        preference = proposal.successor_preference(
+            con,
+            stored["plan_id"],
+            mutation,
+            require_active_baseline=False,
+            validate_current_drives=False,
+        )
+        lane_bytes = preference.lane_bytes
+    except proposal.Refusal as exc:
+        # A historical approval must remain inspectable after its drive facts are
+        # invalidated or removed. review_input_status reports it stale separately.
+        lane_bytes = None
+        context_refusal = exc.code
+    moved = [rid for rid in changed if after[rid] == successor_drive]
+    return {
+        "predecessor_drive": predecessor_drive,
+        "successor_drive": successor_drive,
+        "baseline_proposal_id": baseline_id,
+        "lane_bytes": lane_bytes,
+        "context_refusal": context_refusal,
+        "changed_requirements": len(changed),
+        "moved_to_successor": len(moved),
+        "unchanged_requirements": len(shared) - len(changed),
+        "previous_targets": before,
+    }
+
+
+def _review_with_context(con, stored: dict, *, include_assignments: bool) -> dict:
+    out = _review(stored, include_assignments=include_assignments)
+    if stored.get("mutation_kind") != "successor_replan":
+        return out
+    successor = _successor_review(con, stored)
+    previous = successor.pop("previous_targets", {})
+    out["successor"] = successor
+    if include_assignments:
+        for assignment in out.get("assignments") or ():
+            prior = previous.get(str(assignment.get("requirement_id") or ""))
+            assignment["previous_target"] = prior
+            assignment["target_changed"] = bool(
+                prior is not None and prior != assignment.get("target_drive")
+            )
+    return out
+
+
 def _status_on(con) -> dict:
     from modelark import proposal
 
@@ -165,7 +236,7 @@ def _status_on(con) -> dict:
         "ok": True,
         "state": "approved_current" if current else "approved_stale",
         "planner_revision": state["planner_revision"],
-        "active_proposal": _review(stored, include_assignments=False),
+        "active_proposal": _review_with_context(con, stored, include_assignments=False),
         "input_status": input_status,
     }
 
@@ -176,28 +247,140 @@ def status() -> dict:
 
 
 def create_draft(_body: dict | None = None) -> dict:
-    """Create one fresh ``adopt_current`` draft for the server-selected active plan."""
+    """Create a backend-bound current or operator-directed successor draft."""
     from modelark import plan, proposal
 
+    body = _body or {}
     try:
         with data._lock:
             con = data.conn()
             active = plan.active(con)
             if active is None:
                 return _refused("NO_ACTIVE_PLAN", None, ("select_plan",))
+            mutation = ("adopt_current", ())
+            if body.get("mode") == "successor":
+                predecessor = str(body.get("predecessor_drive") or "").strip()
+                successor = str(body.get("successor_drive") or "").strip()
+                if not predecessor or not successor:
+                    return _refused(
+                        "SUCCESSOR_DRIVES_REQUIRED",
+                        None,
+                        ("choose_predecessor_and_successor",),
+                    )
+                state = _planner_state(con)
+                baseline_id = state["active_approved_proposal_id"]
+                if not baseline_id:
+                    return _refused(
+                        "SUCCESSOR_BASELINE_REQUIRED",
+                        None,
+                        ("approve_current_placement",),
+                    )
+                try:
+                    baseline = proposal.load_proposal(con, baseline_id)
+                except KeyError:
+                    return _refused(
+                        "SUCCESSOR_BASELINE_MISSING",
+                        {"proposal_id": baseline_id},
+                        ("review_current_placement",),
+                    )
+                baseline_status = proposal.review_input_status(con, baseline)
+                if (baseline.get("lifecycle") != "approved"
+                        or not baseline_status.get("current")):
+                    return _refused(
+                        "SUCCESSOR_BASELINE_STALE",
+                        baseline_status,
+                        ("review_current_placement",),
+                    )
+                mutation = (
+                    "successor_replan",
+                    (predecessor, successor, str(baseline_id)),
+                )
             created = proposal.create_draft(
                 con,
                 plan_id=active["plan_id"],
-                mutation=("adopt_current", ()),
+                mutation=mutation,
             )
             stored = proposal.load_proposal(con, created["proposal_id"])
             return {
                 "ok": True,
                 "state": "draft",
-                "review": _review(stored, include_assignments=True),
+                "review": _review_with_context(con, stored, include_assignments=True),
             }
     except proposal.Refusal as exc:
         return _domain_refusal(exc)
+
+
+def successor_options() -> dict:
+    """Backend-authored predecessor/successor choices for the active approved plan."""
+    from modelark import plan, proposal
+
+    baseline_id = None
+    try:
+        with data._lock:
+            con = data.conn()
+            active = plan.active(con)
+            if active is None:
+                return _refused("NO_ACTIVE_PLAN", None, ("select_plan",))
+            state = _planner_state(con)
+            baseline_id = state["active_approved_proposal_id"]
+            if not baseline_id:
+                return _refused(
+                    "SUCCESSOR_BASELINE_REQUIRED",
+                    None,
+                    ("approve_current_placement",),
+                )
+            baseline = proposal.load_proposal(con, baseline_id)
+            status = proposal.review_input_status(con, baseline)
+            if not status.get("current"):
+                return _refused(
+                    "SUCCESSOR_BASELINE_STALE",
+                    status,
+                    ("review_current_placement",),
+                )
+            assigned = defaultdict(int)
+            for task in baseline.get("tasks") or ():
+                target = task.get("target_drive") or task.get("satisfying_drive")
+                if target:
+                    assigned[str(target)] += 1
+            rows = con.execute(
+                "SELECT d.drive_label,coalesce(d.role,'primary'),d.lifecycle,d.eligibility,"
+                "coalesce(d.capacity_bytes,0),d.identity_epoch,d.identity_fingerprint "
+                "FROM plan_drives pd JOIN drives d USING(drive_label) "
+                "WHERE pd.plan_id=? ORDER BY d.drive_label",
+                [active["plan_id"]],
+            ).fetchall()
+            predecessors = []
+            successors = []
+            for label, role, lifecycle, eligibility, capacity_bytes, epoch, fingerprint in rows:
+                item = {
+                    "drive_label": str(label),
+                    "role": str(role),
+                    "lifecycle": str(lifecycle),
+                    "eligibility": str(eligibility),
+                    "capacity_bytes": int(capacity_bytes or 0),
+                    "identity_epoch": int(epoch or 0),
+                    "identity_proven": bool(fingerprint),
+                    "assigned_requirements": int(assigned[str(label)]),
+                }
+                if lifecycle != "active" or eligibility != "enabled":
+                    predecessors.append(item)
+                elif fingerprint and int(epoch or 0) >= 1:
+                    successors.append(item)
+            return {
+                "ok": True,
+                "plan_id": active["plan_id"],
+                "baseline_proposal_id": baseline_id,
+                "predecessors": predecessors,
+                "successors": successors,
+            }
+    except (proposal.Refusal, KeyError) as exc:
+        if isinstance(exc, proposal.Refusal):
+            return _domain_refusal(exc)
+        return _refused(
+            "SUCCESSOR_BASELINE_MISSING",
+            {"proposal_id": baseline_id},
+            ("review_current_placement",),
+        )
 
 
 def approve(body: dict) -> dict:

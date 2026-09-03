@@ -408,7 +408,25 @@ def _catalog_projection_bundle(con, proposal, relevant, services, current_config
            tuple(proposal.get("mutation_args") or ()))
     try:
         current_semantic = _semantic_input_hash(con, plan_id, mut)
+    except Refusal as exc:
+        # A typed domain refusal means the approved semantic context can no longer
+        # be reconstructed (for example, a successor predecessor was removed from
+        # its plan).  Never turn that authority loss into a self-confirming copy of
+        # the proposal's old hash at the Fill boundary.
+        raise Refusal(
+            "APPROVED_INPUT_CHANGED",
+            {
+                "reason": "semantic_input_unavailable",
+                "proposal_id": proposal.get("proposal_id"),
+                "cause_code": exc.code,
+                "cause_evidence": exc.evidence,
+            },
+            ("preview_again",),
+        ) from exc
     except Exception:
+        # Retain legacy compatibility for partial pre-v7 catalog fixtures whose
+        # schemas cannot express current semantic authority.  Domain refusals are
+        # handled fail-closed above and must never reach this fallback.
         current_semantic = proposal.get("semantic_input_hash")
 
     # INC-027: recompute each baseline certificate from catalog authority.
