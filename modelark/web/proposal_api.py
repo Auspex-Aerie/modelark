@@ -445,7 +445,7 @@ def successor_options() -> dict:
 
 
 def discard(body: dict) -> dict:
-    """Discard one exact draft while preserving the active approval and revision."""
+    """Discard one exact draft and report its post-mutation proposal status separately."""
     from modelark import proposal
 
     proposal_id = str(body.get("proposal_id") or "").strip()
@@ -459,9 +459,11 @@ def discard(body: dict) -> dict:
         with data._lock:
             con = data.conn()
             proposal.discard_draft(con, proposal_id)
-            out = _status_on(con)
-            out["discarded_proposal_id"] = proposal_id
-            return out
+            return {
+                "ok": True,
+                "discarded_proposal_id": proposal_id,
+                "proposal_status": _status_on(con),
+            }
     except proposal.Refusal as exc:
         return _domain_refusal(exc)
 

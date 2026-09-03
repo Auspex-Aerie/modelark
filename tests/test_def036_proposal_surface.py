@@ -362,14 +362,42 @@ def test_discard_supersedes_exact_draft_without_bumping_revision():
         result = proposal_api.discard({"proposal_id": "pending-10"})
 
     assert result["ok"] is True
-    assert result["state"] == "missing"
     assert result["discarded_proposal_id"] == "pending-10"
+    assert result["proposal_status"]["state"] == "missing"
     assert con.execute(
         "SELECT lifecycle FROM placement_proposals WHERE proposal_id='pending-10'"
     ).fetchone()[0] == "superseded"
     assert con.execute(
         "SELECT planner_revision FROM planner_state WHERE singleton_id=1"
     ).fetchone()[0] == 10
+
+
+def test_discard_reports_success_while_remaining_drafts_stay_ambiguous():
+    con = _connection(revision=10)
+    con.executemany(
+        "INSERT INTO placement_proposals("
+        "proposal_id,plan_id,based_on_revision,lifecycle,created_at) "
+        "VALUES(?,'ark',10,'draft',?)",
+        [
+            ("pending-a", "2026-09-03 00:00:00"),
+            ("pending-b", "2026-09-03 00:00:01"),
+            ("pending-c", "2026-09-03 00:00:02"),
+        ],
+    )
+
+    with mock.patch.object(proposal_api.data, "conn", return_value=con):
+        result = proposal_api.discard({"proposal_id": "pending-b"})
+
+    assert result["ok"] is True
+    assert result["discarded_proposal_id"] == "pending-b"
+    remaining = result["proposal_status"]
+    assert remaining["ok"] is False
+    assert remaining["state"] == "review_ambiguous"
+    assert remaining["code"] == "MULTIPLE_CURRENT_DRAFTS"
+    assert remaining["evidence"]["proposal_ids"] == ["pending-a", "pending-c"]
+    assert con.execute(
+        "SELECT lifecycle FROM placement_proposals WHERE proposal_id='pending-b'"
+    ).fetchone()[0] == "superseded"
 
 
 def test_domain_refusal_is_preserved_as_typed_operator_result():

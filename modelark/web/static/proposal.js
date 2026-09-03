@@ -71,7 +71,7 @@
         ? `Pending proposal is stale · discard and create a fresh review`
         : kind === "review_pending_inactive"
           ? `Pending proposal is for ${draft.plan_id || "another plan"} · ` +
-            `select that plan or discard it`
+            `discard and create a fresh review for the active plan`
           : `Proposal ready for review · ${draft.proposal_id || "current draft"}`;
       button.textContent = "Review pending proposal";
       button.disabled = fillRunning || !draft.proposal_id;
@@ -229,7 +229,8 @@
     if (review.plan_active === false) {
       byId("proposalRefusal").textContent =
         `This proposal is for ${review.plan_id || "another plan"}, but ` +
-        `${review.active_plan_id || "no plan"} is active. Select its plan or discard it.`;
+        `${review.active_plan_id || "no plan"} is active. ` +
+        "Discard it and create a fresh review for the active plan.";
     } else {
       byId("proposalRefusal").textContent = inputStatus && !inputStatus.current
         ? "This pending proposal is stale. Discard it and create a fresh review."
@@ -336,7 +337,7 @@
         closeReview();
         review = null;
       }
-      applyStatus(result);
+      applyStatus(result.proposal_status);
       window.MA.toast("pending placement discarded — approved placement unchanged");
     }).catch(error => {
       showRefusal({code: "PROPOSAL_DISCARD_UNAVAILABLE", error: String(error)});

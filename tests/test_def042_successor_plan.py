@@ -395,6 +395,8 @@ def test_successor_workflow_is_a_named_review_action_not_a_fill_side_effect():
     assert 'id="proposalAmbiguityDiscard"' in html
     assert 'state: "review_pending"' in js
     assert '"review_pending_inactive"' in js
+    assert "select that plan" not in js
+    assert "Discard it and create a fresh review for the active plan." in js
     assert "/api/proposal/discard" in js
     assert "discardAmbiguousReview" in js
     assert "recoverPendingReview(result)" in js

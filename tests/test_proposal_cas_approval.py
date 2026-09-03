@@ -327,10 +327,14 @@ def test_approve_refuses_draft_for_inactive_plan():
         [pid],
     )
 
-    _assert_refuses(
+    refusal = _assert_refuses(
         lambda: _approve(prop, con, pid),
         code="PROPOSAL_PLAN_INACTIVE",
         label="approval for inactive plan",
+    )
+    assert refusal.actions == (
+        "discard_pending_proposal",
+        "create_fresh_review",
     )
     assert con.execute(
         "SELECT planner_revision,active_approved_proposal_id FROM planner_state "

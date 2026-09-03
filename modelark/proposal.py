@@ -901,7 +901,7 @@ def require_active_proposal_plan(con, proposal: Mapping) -> None:
                 "proposal_plan_id": proposal_plan_id,
                 "active_plan_id": active_id,
             },
-            ("select_proposal_plan", "discard_pending_proposal"),
+            ("discard_pending_proposal", "create_fresh_review"),
         )
 
 

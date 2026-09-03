@@ -664,7 +664,7 @@ def _proposal_approval_flow(pg) -> None:
         "refused": True,
         "state": "review_ambiguous",
         "code": "MULTIPLE_CURRENT_DRAFTS",
-        "evidence": {"proposal_ids": ["pending-a", "pending-b"]},
+        "evidence": {"proposal_ids": ["pending-a", "pending-b", "pending-c"]},
         "approval_state": "approved_current",
         "active_proposal": approved_after_discard["active_proposal"],
     }
@@ -677,25 +677,36 @@ def _proposal_approval_flow(pg) -> None:
     )
 
     def discard_ambiguity(route):
-        ambiguity_discards.append(route.request.post_data_json)
+        request = route.request.post_data_json
+        ambiguity_discards.append(request)
+        post_status = dict(ambiguous)
+        post_status["evidence"] = {"proposal_ids": ["pending-a", "pending-c"]}
         route.fulfill(
-            status=200, content_type="application/json", body=json.dumps(approved_after_discard)
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "ok": True,
+                "discarded_proposal_id": request["proposal_id"],
+                "proposal_status": post_status,
+            }),
         )
 
     pg.route("**/api/proposal/discard", discard_ambiguity)
     pg.evaluate("window.MA.proposal.refresh()")
     pg.wait_for_selector("#proposalAmbiguitySelect", state="visible")
     assert pg.locator("#proposalAmbiguitySelect option").all_text_contents() == [
-        "pending-a", "pending-b"
+        "pending-a", "pending-b", "pending-c"
     ]
     pg.select_option("#proposalAmbiguitySelect", "pending-b")
     pg.click("#proposalAmbiguityDiscard")
-    for _ in range(40):
-        if ambiguity_discards:
-            break
-        time.sleep(0.05)
+    pg.wait_for_function(
+        "() => document.querySelectorAll('#proposalAmbiguitySelect option').length === 2"
+    )
     assert ambiguity_discards == [{"proposal_id": "pending-b"}]
-    pg.wait_for_selector("#proposalAmbiguitySelect", state="hidden")
+    assert pg.locator("#proposalAmbiguitySelect option").all_text_contents() == [
+        "pending-a", "pending-c"
+    ]
+    assert pg.is_enabled("#proposalAmbiguityDiscard")
     pg.unroute("**/api/proposal/discard")
     pg.unroute("**/api/proposal/status")
     pg.unroute("**/api/fill/start")
