@@ -142,6 +142,9 @@ td.cb{width:34px;text-align:center}input[type=checkbox]{width:15px;height:15px;a
 #proposalReview:disabled{opacity:.45;cursor:not-allowed}
 #proposalSuccessor{background:transparent;border-color:var(--steel);color:var(--steel);font-weight:700}
 #proposalSuccessor:disabled{opacity:.45;cursor:not-allowed}
+#proposalAmbiguitySelect{max-width:250px;background:var(--panel2);border:1px solid var(--crit);
+  border-radius:7px;color:var(--ink);padding:7px 9px;font:11px ui-monospace,Menlo,monospace}
+#proposalAmbiguityDiscard{border-color:var(--crit);color:var(--crit);font-weight:700}
 .proposal-card{width:min(1120px,94vw);max-width:none;max-height:92vh;overflow-y:auto;border-top-color:var(--brass)}
 .proposal-card-head{display:flex;justify-content:space-between;gap:18px;align-items:flex-start}
 .proposal-kicker{font:700 10px/1 ui-monospace,Menlo,monospace;letter-spacing:.11em;

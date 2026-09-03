@@ -22,7 +22,7 @@
     if (!start) return;
     const approved = !!(status && status.state === "approved_current");
     const pending = !!(status && ["review_pending", "review_pending_stale",
-      "review_ambiguous"].includes(status.state));
+      "review_pending_inactive", "review_ambiguous"].includes(status.state));
     start.disabled = !planFeasible || !approved;
     if (!planFeasible) start.title = "Plan admission is not feasible; resolve the displayed blockers.";
     else if (pending) start.title = "Review or discard the pending placement before starting Fill.";
@@ -35,10 +35,30 @@
     const state = byId("proposalState");
     const button = byId("proposalReview");
     const successor = byId("proposalSuccessor");
-    if (!seal || !state || !button || !successor) return;
+    const ambiguitySelect = byId("proposalAmbiguitySelect");
+    const ambiguityDiscard = byId("proposalAmbiguityDiscard");
+    if (!seal || !state || !button || !successor ||
+        !ambiguitySelect || !ambiguityDiscard) return;
 
     const kind = status && status.state;
-    const pending = kind === "review_pending" || kind === "review_pending_stale";
+    const pending = ["review_pending", "review_pending_stale",
+      "review_pending_inactive"].includes(kind);
+    const ambiguousIds = kind === "review_ambiguous" && status.evidence
+      ? status.evidence.proposal_ids || [] : [];
+    const ambiguitySignature = ambiguousIds.join("\n");
+    if (ambiguitySelect.dataset.proposals !== ambiguitySignature) {
+      ambiguitySelect.replaceChildren();
+      ambiguousIds.forEach(proposalId => {
+        const option = document.createElement("option");
+        option.value = proposalId;
+        option.textContent = proposalId;
+        ambiguitySelect.appendChild(option);
+      });
+      ambiguitySelect.dataset.proposals = ambiguitySignature;
+    }
+    ambiguitySelect.hidden = kind !== "review_ambiguous";
+    ambiguityDiscard.hidden = kind !== "review_ambiguous";
+    ambiguityDiscard.disabled = requestPending || !ambiguousIds.length;
     seal.textContent = kind === "approved_current" ? "Ready to fill" :
       (pending ? "Review pending" : "Placement approval");
     if (requestPending) {
@@ -49,12 +69,16 @@
       const draft = status.pending_proposal || {};
       state.textContent = kind === "review_pending_stale"
         ? `Pending proposal is stale · discard and create a fresh review`
-        : `Proposal ready for review · ${draft.proposal_id || "current draft"}`;
+        : kind === "review_pending_inactive"
+          ? `Pending proposal is for ${draft.plan_id || "another plan"} · ` +
+            `select that plan or discard it`
+          : `Proposal ready for review · ${draft.proposal_id || "current draft"}`;
       button.textContent = "Review pending proposal";
       button.disabled = fillRunning || !draft.proposal_id;
     } else if (kind === "review_ambiguous") {
-      state.textContent = refusalText(status);
-      button.textContent = "Pending reviews need attention";
+      state.textContent = `${ambiguousIds.length} pending proposals need resolution · ` +
+        "discard them one at a time";
+      button.textContent = "Resolve pending proposals";
       button.disabled = true;
     } else if (kind === "approved_current") {
       const active = status.active_proposal || {};
@@ -202,9 +226,15 @@
         "Review every assignment before approval. No archive bytes move in this dialog.";
     }
     const inputStatus = review.input_status;
-    byId("proposalRefusal").textContent = inputStatus && !inputStatus.current
-      ? "This pending proposal is stale. Discard it and create a fresh review."
-      : "";
+    if (review.plan_active === false) {
+      byId("proposalRefusal").textContent =
+        `This proposal is for ${review.plan_id || "another plan"}, but ` +
+        `${review.active_plan_id || "no plan"} is active. Select its plan or discard it.`;
+    } else {
+      byId("proposalRefusal").textContent = inputStatus && !inputStatus.current
+        ? "This pending proposal is stale. Discard it and create a fresh review."
+        : "";
+    }
     byId("proposalConfirm").value = "";
     byId("proposalApprove").disabled = true;
     byId("proposalConfirmation").hidden = !review.approvable;
@@ -289,20 +319,23 @@
     byId("proposalRefusal").textContent = "";
   }
 
-  function discardReview() {
-    if (requestPending || !review || review.lifecycle !== "draft") return;
+  function discardProposalId(proposalId) {
+    if (requestPending || !proposalId) return;
     requestPending = true;
     byId("proposalDiscard").disabled = true;
+    byId("proposalAmbiguityDiscard").disabled = true;
     byId("proposalRefusal").textContent = "";
     window.MA.post("/api/proposal/discard", {
-      proposal_id: review.proposal_id,
+      proposal_id: proposalId,
     }).then(result => {
       if (!result || result.ok !== true) {
         showRefusal(result);
         return;
       }
-      closeReview();
-      review = null;
+      if (review && review.proposal_id === proposalId) {
+        closeReview();
+        review = null;
+      }
       applyStatus(result);
       window.MA.toast("pending placement discarded — approved placement unchanged");
     }).catch(error => {
@@ -310,6 +343,15 @@
     }).finally(() => {
       settleReviewRequest();
     });
+  }
+
+  function discardReview() {
+    if (!review || review.lifecycle !== "draft") return;
+    discardProposalId(review.proposal_id);
+  }
+
+  function discardAmbiguousReview() {
+    discardProposalId(byId("proposalAmbiguitySelect").value);
   }
 
   function clearSelect(select) {
@@ -406,6 +448,12 @@
       successor_drive,
     }).then(result => {
       if (!result || result.ok !== true || !result.review) {
+        if (result && result.code === "PROPOSAL_REVIEW_PENDING") {
+          closeSuccessor();
+          return recoverPendingReview(result).then(recovered => {
+            if (!recovered) showRefusal(result);
+          });
+        }
         byId("successorRefusal").textContent = refusalText(result);
         return;
       }
@@ -479,6 +527,7 @@
     byId("proposalSuccessor").onclick = openSuccessor;
     byId("proposalCancel").onclick = closeReview;
     byId("proposalDiscard").onclick = discardReview;
+    byId("proposalAmbiguityDiscard").onclick = discardAmbiguousReview;
     byId("proposalApprove").onclick = approve;
     byId("proposalConfirm").addEventListener("input", event => {
       byId("proposalApprove").disabled = requestPending || !review ||

@@ -21,7 +21,8 @@ new operator intent is still pending.
 - Start Fill now refuses at both browser and execution-service boundaries while a current proposal
   review is pending.
 - Draft publication refuses duplicate current drafts and live Fill sessions; historical multiple
-  drafts surface as typed ambiguity instead of silently choosing the newest row.
+  drafts surface as typed ambiguity and can be discarded individually instead of silently choosing
+  the newest row. A draft for an inactive plan remains visible but cannot be approved.
 
 ## 0.3.2 - 2026-09-02
 

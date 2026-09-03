@@ -21,6 +21,21 @@ def _connection(*, revision: int = 9, active: str | None = None):
         [revision, active],
     )
     con.execute(
+        "CREATE TABLE plans("
+        "plan_id TEXT PRIMARY KEY, name TEXT, annex_root TEXT, "
+        "capacity_mode TEXT NOT NULL, status TEXT NOT NULL, is_active INTEGER NOT NULL, "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, notes TEXT)"
+    )
+    con.execute(
+        "INSERT INTO plans(plan_id,name,annex_root,capacity_mode,status,is_active) "
+        "VALUES('ark','Ark','/tmp/modelark','guaranteed','active',1)"
+    )
+    con.execute(
+        "CREATE TABLE plan_drives("
+        "plan_id TEXT NOT NULL, drive_label TEXT NOT NULL, position INTEGER, "
+        "PRIMARY KEY(plan_id,drive_label))"
+    )
+    con.execute(
         "CREATE TABLE placement_proposals("
         "proposal_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, "
         "based_on_revision INTEGER NOT NULL, lifecycle TEXT NOT NULL, "
@@ -280,6 +295,38 @@ def test_status_recovers_one_current_draft_and_preserves_active_approval_context
     assert status["pending_proposal"]["proposal_id"] == "pending-10"
     assert status["pending_proposal"]["confirmation_phrase"] == "APPROVE pending-10"
     assert len(status["pending_proposal"]["assignments"]) == 3
+
+
+def test_status_keeps_inactive_plan_draft_visible_but_not_approvable():
+    con = _connection(revision=10, active="approved-10")
+    con.execute(
+        "INSERT INTO placement_proposals("
+        "proposal_id,plan_id,based_on_revision,lifecycle) "
+        "VALUES('pending-other','other-plan',10,'draft')"
+    )
+    active = _stored(proposal_id="approved-10", lifecycle="approved")
+    pending = _stored(proposal_id="pending-other", lifecycle="draft")
+    pending["plan_id"] = "other-plan"
+    pending["based_on_revision"] = 10
+    current = {
+        "current": True,
+        "semantic_input_matches": True,
+        "execution_config_matches": True,
+    }
+
+    with mock.patch.object(proposal_api.data, "conn", return_value=con), \
+         mock.patch("modelark.proposal.load_proposal", side_effect=lambda _con, pid: {
+             "approved-10": active,
+             "pending-other": pending,
+         }[pid]), \
+         mock.patch("modelark.proposal.review_input_status", return_value=current):
+        status = proposal_api.status()
+
+    assert status["state"] == "review_pending_inactive"
+    assert status["pending_proposal"]["plan_active"] is False
+    assert status["pending_proposal"]["active_plan_id"] == "ark"
+    assert status["pending_proposal"]["approvable"] is False
+    assert "confirmation_phrase" not in status["pending_proposal"]
 
 
 def test_status_refuses_multiple_current_drafts_without_choosing_by_timestamp():

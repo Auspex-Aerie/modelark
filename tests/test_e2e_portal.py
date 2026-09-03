@@ -633,6 +633,71 @@ def _proposal_approval_flow(pg) -> None:
     assert successor["successor_drive"] == replacement
     assert successor["moved_to_successor"] == 1
     assert starts == [], f"approval must not start Fill: {starts!r}"
+
+    # A draft can appear after replacement options load. The resulting duplicate refusal must
+    # close the successor dialog and recover that exact review without a manual reload.
+    pg.click("button[data-view='fill']")
+    pg.wait_for_selector("#proposalSuccessor", state="visible")
+    pg.click("#proposalSuccessor")
+    pg.wait_for_selector("#successorModal", state="visible")
+    concurrent = pg.evaluate(
+        "async () => await window.MA.post('/api/proposal/draft', {})"
+    )
+    concurrent_phrase = concurrent["review"]["confirmation_phrase"]
+    pg.click("#successorCreate")
+    pg.wait_for_selector("#successorModal", state="hidden")
+    pg.wait_for_selector("#proposalModal", state="visible")
+    assert pg.inner_text("#proposalPhrase").strip() == concurrent_phrase
+    assert pg.is_enabled("#proposalDiscard")
+    assert pg.is_disabled("#fillStart")
+    pg.click("#proposalDiscard")
+    pg.wait_for_selector("#proposalModal", state="hidden")
+    assert pg.text_content("#proposalSeal") == "Ready to fill"
+
+    # Historical pre-0.3.3 ambiguity is resolvable from the docket. IDs are backend evidence,
+    # and the discard request names exactly the selected draft rather than choosing by timestamp.
+    approved_after_discard = pg.evaluate(
+        "async () => await window.MA.api('/api/proposal/status')"
+    )
+    ambiguous = {
+        "ok": False,
+        "refused": True,
+        "state": "review_ambiguous",
+        "code": "MULTIPLE_CURRENT_DRAFTS",
+        "evidence": {"proposal_ids": ["pending-a", "pending-b"]},
+        "approval_state": "approved_current",
+        "active_proposal": approved_after_discard["active_proposal"],
+    }
+    ambiguity_discards = []
+    pg.route(
+        "**/api/proposal/status",
+        lambda route: route.fulfill(
+            status=409, content_type="application/json", body=json.dumps(ambiguous)
+        ),
+    )
+
+    def discard_ambiguity(route):
+        ambiguity_discards.append(route.request.post_data_json)
+        route.fulfill(
+            status=200, content_type="application/json", body=json.dumps(approved_after_discard)
+        )
+
+    pg.route("**/api/proposal/discard", discard_ambiguity)
+    pg.evaluate("window.MA.proposal.refresh()")
+    pg.wait_for_selector("#proposalAmbiguitySelect", state="visible")
+    assert pg.locator("#proposalAmbiguitySelect option").all_text_contents() == [
+        "pending-a", "pending-b"
+    ]
+    pg.select_option("#proposalAmbiguitySelect", "pending-b")
+    pg.click("#proposalAmbiguityDiscard")
+    for _ in range(40):
+        if ambiguity_discards:
+            break
+        time.sleep(0.05)
+    assert ambiguity_discards == [{"proposal_id": "pending-b"}]
+    pg.wait_for_selector("#proposalAmbiguitySelect", state="hidden")
+    pg.unroute("**/api/proposal/discard")
+    pg.unroute("**/api/proposal/status")
     pg.unroute("**/api/fill/start")
     print("  current + successor proposals reviewed and approved; Fill remained stopped")
 

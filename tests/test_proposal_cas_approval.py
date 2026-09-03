@@ -316,6 +316,29 @@ def test_approve_refuses_ambiguous_current_drafts_without_orphaning_intent():
     } == {"ambiguous-sibling", pid}
 
 
+def test_approve_refuses_draft_for_inactive_plan():
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    con.execute(
+        "UPDATE placement_proposals SET plan_id='inactive-plan' WHERE proposal_id=?",
+        [pid],
+    )
+
+    _assert_refuses(
+        lambda: _approve(prop, con, pid),
+        code="PROPOSAL_PLAN_INACTIVE",
+        label="approval for inactive plan",
+    )
+    assert con.execute(
+        "SELECT planner_revision,active_approved_proposal_id FROM planner_state "
+        "WHERE singleton_id=1"
+    ).fetchone() == (0, None)
+    assert _lifecycle(con, pid) == "draft"
+
+
 def test_cas_stale_revision_refuses_without_partial_apply():
     prop = _proposal()
     con = _mem()

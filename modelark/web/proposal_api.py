@@ -211,9 +211,11 @@ def _review_with_context(con, stored: dict, *, include_assignments: bool) -> dic
 
 
 def _status_on(con) -> dict:
-    from modelark import proposal
+    from modelark import plan, proposal
 
     state = _planner_state(con)
+    active_plan = plan.active(con)
+    active_plan_id = str(active_plan["plan_id"]) if active_plan else None
     active_id = state["active_approved_proposal_id"]
     if not active_id:
         out = {
@@ -283,12 +285,18 @@ def _status_on(con) -> dict:
     pending_input_status = proposal.review_input_status(con, pending)
     pending_review = _review_with_context(con, pending, include_assignments=True)
     pending_review["input_status"] = pending_input_status
-    pending_current = bool(pending_input_status.get("current"))
+    pending_plan_active = str(pending.get("plan_id") or "") == active_plan_id
+    pending_review["plan_active"] = pending_plan_active
+    pending_review["active_plan_id"] = active_plan_id
+    pending_current = bool(pending_input_status.get("current")) and pending_plan_active
     if not pending_current:
         pending_review["approvable"] = False
         pending_review.pop("confirmation_phrase", None)
     out["approval_state"] = out["state"]
-    out["state"] = "review_pending" if pending_current else "review_pending_stale"
+    if not pending_plan_active:
+        out["state"] = "review_pending_inactive"
+    else:
+        out["state"] = "review_pending" if pending_current else "review_pending_stale"
     out["pending_proposal"] = pending_review
     out["pending_input_status"] = pending_input_status
     return out

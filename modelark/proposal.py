@@ -888,6 +888,23 @@ def require_unambiguous_current_draft(con) -> tuple[str, ...]:
     return pending
 
 
+def require_active_proposal_plan(con, proposal: Mapping) -> None:
+    """Refuse approval when the draft does not belong to the active plan."""
+    active = plan_mod.active(con)
+    active_id = str(active.get("plan_id")) if active else None
+    proposal_plan_id = str(proposal.get("plan_id") or "")
+    if active_id != proposal_plan_id:
+        raise Refusal(
+            "PROPOSAL_PLAN_INACTIVE",
+            {
+                "proposal_id": proposal.get("proposal_id"),
+                "proposal_plan_id": proposal_plan_id,
+                "active_plan_id": active_id,
+            },
+            ("select_proposal_plan", "discard_pending_proposal"),
+        )
+
+
 def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = None,
                   **_kw) -> dict:
     """Persist an immutable draft under BEGIN IMMEDIATE; no selection/revision mutation."""
@@ -1489,6 +1506,7 @@ def approve(con, proposal_id: str, *, mutation=None, services=None, **_extra):
 
     # Load read-only before fences (RFC).
     proposal = load_proposal(con, proposal_id)
+    require_active_proposal_plan(con, proposal)
     require_unambiguous_current_draft(con)
     labels = proposal_drive_ids(proposal)
     keys = _fence_keys(con, labels)
@@ -1559,8 +1577,9 @@ def _approve_tx(con, proposal_id: str, *, mutation, evidence_by_drive) -> dict:
             raise Refusal("PREVIEW_STALE", {"current": rev, "based_on": proposal["based_on_revision"]},
                           ("preview_again",))
 
-        # Fail closed inside the approval transaction as well: publication can race
-        # the pre-fence read, and approving one of several drafts would orphan intent.
+        # Fail closed inside the approval transaction as well: an active-plan switch
+        # or direct historical draft race must not install mismatched/orphaned intent.
+        require_active_proposal_plan(con, proposal)
         require_unambiguous_current_draft(con)
 
         # Semantic recompute independent of revision integer (missed-bump protection).
