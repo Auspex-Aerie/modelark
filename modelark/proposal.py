@@ -876,6 +876,18 @@ def current_draft_ids(con, *, plan_id: str | None = None) -> tuple[str, ...]:
     return tuple(str(item[0]) for item in con.execute(sql, params).fetchall())
 
 
+def require_unambiguous_current_draft(con) -> tuple[str, ...]:
+    """Return current drafts or refuse when unresolved intent is not singular."""
+    pending = current_draft_ids(con)
+    if len(pending) > 1:
+        raise Refusal(
+            "MULTIPLE_CURRENT_DRAFTS",
+            {"proposal_ids": list(pending)},
+            ("inspect_pending_proposals",),
+        )
+    return pending
+
+
 def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = None,
                   **_kw) -> dict:
     """Persist an immutable draft under BEGIN IMMEDIATE; no selection/revision mutation."""
@@ -916,7 +928,7 @@ def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = Non
         if cur != int(header["based_on_revision"]):
             raise Refusal("PREVIEW_STALE", {"current": cur, "based_on": header["based_on_revision"]},
                           ("preview_again",))
-        pending = current_draft_ids(con)
+        pending = require_unambiguous_current_draft(con)
         if pending:
             raise Refusal(
                 "PROPOSAL_REVIEW_PENDING",
@@ -1477,6 +1489,7 @@ def approve(con, proposal_id: str, *, mutation=None, services=None, **_extra):
 
     # Load read-only before fences (RFC).
     proposal = load_proposal(con, proposal_id)
+    require_unambiguous_current_draft(con)
     labels = proposal_drive_ids(proposal)
     keys = _fence_keys(con, labels)
     catalog_path = getattr(db, "DB_PATH", None) or ":memory:"
@@ -1545,6 +1558,10 @@ def _approve_tx(con, proposal_id: str, *, mutation, evidence_by_drive) -> dict:
         if rev != int(proposal["based_on_revision"]):
             raise Refusal("PREVIEW_STALE", {"current": rev, "based_on": proposal["based_on_revision"]},
                           ("preview_again",))
+
+        # Fail closed inside the approval transaction as well: publication can race
+        # the pre-fence read, and approving one of several drafts would orphan intent.
+        require_unambiguous_current_draft(con)
 
         # Semantic recompute independent of revision integer (missed-bump protection).
         current_semantic = _semantic_input_hash(

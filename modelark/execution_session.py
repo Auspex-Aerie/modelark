@@ -159,7 +159,7 @@ def start_session(con, proposal_id, predecessor_id, services):
         if not proposal or proposal.get("lifecycle") != "approved":
             return Refusal("APPROVAL_MISSING", {"proposal_id": proposal_id}, ("preview_again",))
 
-    pending = current_draft_ids(con, plan_id=proposal.get("plan_id") or "ark")
+    pending = current_draft_ids(con)
     if pending:
         return Refusal(
             "PROPOSAL_REVIEW_PENDING",
@@ -267,7 +267,7 @@ def start_session(con, proposal_id, predecessor_id, services):
             # Re-check live session inside TX.
             if live_session_exists(con):
                 raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
-            pending = current_draft_ids(con, plan_id=proposal.get("plan_id") or "ark")
+            pending = current_draft_ids(con)
             if pending:
                 raise Refusal(
                     "PROPOSAL_REVIEW_PENDING",

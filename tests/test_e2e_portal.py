@@ -541,6 +541,13 @@ def _proposal_approval_flow(pg) -> None:
         "No data moves until you select Start fill."
     )
 
+    # Another client can publish between this page's last status read and the click. A duplicate
+    # refusal must refresh and recover that exact draft instead of trapping the page in retries.
+    out_of_band = pg.evaluate(
+        "async () => await window.MA.post('/api/proposal/draft', {})"
+    )
+    assert out_of_band["ok"] is True
+    out_of_band_phrase = out_of_band["review"]["confirmation_phrase"]
     pg.click("#proposalReview")
     pg.wait_for_selector("#proposalModal", state="visible")
     canonical = pg.inner_text("#proposalCanonical").strip()
@@ -559,6 +566,8 @@ def _proposal_approval_flow(pg) -> None:
 
     phrase = pg.inner_text("#proposalPhrase").strip()
     assert phrase.startswith("APPROVE ") and len(phrase) > len("APPROVE ")
+    assert phrase == out_of_band_phrase
+    assert pg.is_enabled("#proposalDiscard")
     pg.fill("#proposalConfirm", phrase)
     assert pg.is_enabled("#proposalApprove")
     pg.click("#proposalApprove")
@@ -598,6 +607,7 @@ def _proposal_approval_flow(pg) -> None:
     successor_phrase = pg.inner_text("#proposalPhrase").strip()
     assert pg.is_disabled("#fillStart"), "pending successor review must gate old approval"
     assert pg.locator("#proposalDiscard").is_visible()
+    assert pg.is_enabled("#proposalDiscard")
     pg.click("#proposalCancel")
     pg.wait_for_selector("#proposalModal", state="hidden")
     assert "ready for review" in pg.inner_text("#proposalState")

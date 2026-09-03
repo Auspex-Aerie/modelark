@@ -231,6 +231,21 @@
     showReview(nextReview);
   }
 
+  function settleReviewRequest() {
+    requestPending = false;
+    renderDocket();
+    if (review && review.lifecycle === "draft" && !byId("proposalModal").hidden) {
+      byId("proposalDiscard").disabled = false;
+    }
+  }
+
+  function recoverPendingReview(result) {
+    if (!result || result.code !== "PROPOSAL_REVIEW_PENDING") {
+      return Promise.resolve(false);
+    }
+    return refresh().then(next => !!(next && next.pending_proposal));
+  }
+
   function showRefusal(result) {
     const text = refusalText(result);
     const refusal = byId("proposalRefusal");
@@ -249,6 +264,11 @@
     renderDocket();
     window.MA.post("/api/proposal/draft", {}).then(result => {
       if (!result || result.ok !== true || !result.review) {
+        if (result && result.code === "PROPOSAL_REVIEW_PENDING") {
+          return recoverPendingReview(result).then(recovered => {
+            if (!recovered) showRefusal(result);
+          });
+        }
         applyStatus(result || {refused: true, code: "PROPOSAL_DRAFT_FAILED"});
         showRefusal(result);
         return;
@@ -259,8 +279,7 @@
       applyStatus(result);
       showRefusal(result);
     }).finally(() => {
-      requestPending = false;
-      renderDocket();
+      settleReviewRequest();
     });
   }
 
@@ -289,11 +308,7 @@
     }).catch(error => {
       showRefusal({code: "PROPOSAL_DISCARD_UNAVAILABLE", error: String(error)});
     }).finally(() => {
-      requestPending = false;
-      renderDocket();
-      if (review && review.lifecycle === "draft") {
-        byId("proposalDiscard").disabled = false;
-      }
+      settleReviewRequest();
     });
   }
 
@@ -367,8 +382,7 @@
     }).catch(error => {
       showRefusal({code: "SUCCESSOR_OPTIONS_UNAVAILABLE", error: String(error)});
     }).finally(() => {
-      requestPending = false;
-      renderDocket();
+      settleReviewRequest();
       updateSuccessorChoices();
     });
   }
@@ -401,8 +415,7 @@
       byId("successorRefusal").textContent =
         refusalText({code: "SUCCESSOR_DRAFT_UNAVAILABLE", error: String(error)});
     }).finally(() => {
-      requestPending = false;
-      renderDocket();
+      settleReviewRequest();
       updateSuccessorChoices();
     });
   }

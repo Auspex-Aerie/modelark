@@ -283,6 +283,39 @@ def test_approve_adopt_current_sets_pointer_bumps_revision_selection_unchanged()
     assert before_sel == after_sel, "adopt_current must leave selection unchanged"
 
 
+def test_approve_refuses_ambiguous_current_drafts_without_orphaning_intent():
+    prop = _proposal()
+    con = _mem()
+    _seed_selection(con)
+    draft = _create(prop, con)
+    pid = _pid(draft)
+    columns = [
+        row[1] for row in con.execute("PRAGMA table_info(placement_proposals)").fetchall()
+        if row[1] != "proposal_id"
+    ]
+    names = ",".join(columns)
+    con.execute(
+        f"INSERT INTO placement_proposals(proposal_id,{names}) "
+        f"SELECT ?,{names} FROM placement_proposals WHERE proposal_id=?",
+        ["ambiguous-sibling", pid],
+    )
+
+    _assert_refuses(
+        lambda: _approve(prop, con, pid),
+        code="MULTIPLE_CURRENT_DRAFTS",
+        label="approval with ambiguous current drafts",
+    )
+    assert con.execute(
+        "SELECT planner_revision,active_approved_proposal_id FROM planner_state "
+        "WHERE singleton_id=1"
+    ).fetchone() == (0, None)
+    assert {
+        row[0] for row in con.execute(
+            "SELECT proposal_id FROM placement_proposals WHERE lifecycle='draft'"
+        ).fetchall()
+    } == {"ambiguous-sibling", pid}
+
+
 def test_cas_stale_revision_refuses_without_partial_apply():
     prop = _proposal()
     con = _mem()
