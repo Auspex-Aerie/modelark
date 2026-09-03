@@ -2364,3 +2364,30 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, modelark/proposal.py, modelark/web/proposal_api.py, modelark/web/static/proposal.js, tests/test_def036_proposal_surface.py, tests/test_def042_successor_plan.py, tests/test_e2e_portal.py, tests/test_proposal_cas_approval.py
 - `related`: INC-061, DEC-094, DEC-095, PR-065
 - `scope_boundary`: Recovery action semantics, discard response shape, UI refresh, regressions, and refreshed release-candidate evidence only. No schema migration, proposal assignment/hash/approval/discard in a live catalog, plan selection, drive state, Fill session, archive-byte operation, service deployment, merge, tag, or publication is authorized here.
+
+### INC-062: Exact draft discard bypassed live Fill ownership
+- `id`: INC-062
+- `date`: 2026-09-03
+- `status`: remediated by DEC-097; deployment pending
+- `triggered_by`: Greptile iteration 1 on PR #65 at `4a63fff`
+- `symptom`: An exact proposal-draft discard could commit its lifecycle transition while an execution session was `starting`, `running`, or `stopping`, instead of returning the same typed `FILL_SESSION_ACTIVE` refusal as other proposal/control-plane writes.
+- `root_cause`: `modelark.proposal.discard_draft` opened its write transaction without calling the shared `_require_fill_idle` guard before entry and again inside `BEGIN IMMEDIATE`; draft publication already used that double-check pattern.
+- `blast_radius`: Normal current-draft Fill admission and live-Fill publication gates make the overlap unusual, but a race, historical catalog, or direct caller could supersede unresolved operator intent while Fill owned the catalog. No such mutation was observed in the live service.
+- `why_not_caught_earlier`: Exact-discard tests covered identity, lifecycle, planner-revision preservation, and ambiguous cleanup only. The PR-09 writer matrix predated this newly introduced lifecycle mutation, and no test injected a Fill start between discard's preflight and transactional checks.
+- `planned_remediation`: DEC-097 applies the shared double Fill-idle check to discard and pins the preflight-to-transaction race with an exact typed-refusal regression.
+- `docs_updated`: docs/decision_log.md
+- `related`: INC-061, DEC-094, DEC-096, PR-065
+
+### DEC-097: Close proposal recovery under one Fill-ownership boundary
+- `id`: DEC-097
+- `date`: 2026-09-03
+- `status`: accepted; implementation qualified, deployment pending
+- `triggered_by`: INC-062, Greptile iteration 1, and Codex cloud review of `4a63fff`
+- `decision`: Apply the shared Fill-idle guard before exact draft discard and recheck it inside the discard write transaction, matching draft publication and serializing against execution-session entry. When Start Fill refuses because another client published a current draft after the page's last status read, refresh proposal status immediately and recover the backend-authored review. Operator and release documentation direct inactive-plan recovery through discard followed by a fresh active-plan review; plan activation is never described as reviving the old draft.
+- `rationale`: Draft publication, discard, approval, and Fill entry are one ownership boundary even though they expose different operator actions. A backend refusal is safe but insufficient if the page keeps advertising stale authority; the UI must consume the resulting durable state, and documentation must describe a transition the revision model can actually execute.
+- `impact`: Exact discard now returns `FILL_SESSION_ACTIVE` without changing draft lifecycle when Fill enters `starting`, `running`, or `stopping`. A late-draft Start attempt remains refused and the Fill page immediately opens that stored review. Schema v7, proposal contents, planner revisions, assignment logic, and archive bytes are unchanged.
+- `verification`: The full regression suite passes 991 tests with one intentional skip; 61 focused proposal/session contracts and the standalone browser acceptance pass, including an injected Fill start between discard checks and a current draft appearing immediately before Start. Ruff, JavaScript syntax validation, and `git diff --check` pass. The rebuilt v0.3.3 wheel SHA-256 is `3654e6799684749e40ef7940b675099a964c3d60951a94144366b8dec944b05d`; the source-archive SHA-256 is `83f34b45730468d8df8d222f5421bb22c5133d9bd7f4da55697d88ee41a90288`. Installed metadata, module, and CLI report `0.3.3` outside the checkout.
+- `resolves`: INC-062
+- `docs_updated`: docs/decision_log.md, docs/operations.md, docs/releases/v0.3.3.md, modelark/proposal.py, modelark/web/static/fill.js, tests/test_def036_proposal_surface.py, tests/test_e2e_portal.py
+- `related`: INC-061, DEC-094, DEC-096, PR-065
+- `scope_boundary`: Proposal lifecycle ownership, late-refusal UI recovery, matching operator documentation, regressions, and refreshed release-candidate evidence only. No schema migration, live proposal mutation, approval, plan selection, drive state, Fill start/stop, archive-byte operation, service deployment, merge, tag, or publication is authorized here.

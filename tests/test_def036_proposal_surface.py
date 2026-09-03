@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from unittest import mock
 
+import pytest
+
 from modelark import proposal
 from modelark.web import proposal_api
 
@@ -398,6 +400,32 @@ def test_discard_reports_success_while_remaining_drafts_stay_ambiguous():
     assert con.execute(
         "SELECT lifecycle FROM placement_proposals WHERE proposal_id='pending-b'"
     ).fetchone()[0] == "superseded"
+
+
+def test_discard_rechecks_fill_ownership_inside_its_write_transaction():
+    con = _connection(revision=10)
+    con.execute(
+        "INSERT INTO placement_proposals("
+        "proposal_id,plan_id,based_on_revision,lifecycle) "
+        "VALUES('pending-race','ark',10,'draft')"
+    )
+
+    with mock.patch(
+        "modelark.execution_session.live_session_exists",
+        side_effect=[False, True],
+    ) as live, mock.patch(
+        "modelark.execution_session.live_owner",
+        return_value={"session_id": "fill-race", "state": "starting"},
+    ):
+        with pytest.raises(proposal.Refusal) as caught:
+            proposal.discard_draft(con, "pending-race")
+
+    assert caught.value.code == "FILL_SESSION_ACTIVE"
+    assert caught.value.evidence == {"session_id": "fill-race", "state": "starting"}
+    assert live.call_count == 2
+    assert con.execute(
+        "SELECT lifecycle FROM placement_proposals WHERE proposal_id='pending-race'"
+    ).fetchone()[0] == "draft"
 
 
 def test_domain_refusal_is_preserved_as_typed_operator_result():

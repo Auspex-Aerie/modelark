@@ -516,9 +516,23 @@ def _proposal_approval_flow(pg) -> None:
         f"only demo/tiny-llm should remain selected, got {removed!r}")
 
     starts = []
+    start_mode = {"value": "forbid"}
 
     def forbid_start(route):
         starts.append(route.request.post_data_json)
+        if start_mode["value"] == "pending":
+            route.fulfill(
+                status=409,
+                content_type="application/json",
+                body=json.dumps({
+                    "ok": False,
+                    "error": "PROPOSAL_REVIEW_PENDING",
+                    "code": "PROPOSAL_REVIEW_PENDING",
+                    "evidence": {"proposal_ids": ["late-start-draft"]},
+                    "actions": ["review_or_discard_pending"],
+                }),
+            )
+            return
         route.fulfill(
             status=500,
             content_type="application/json",
@@ -583,6 +597,26 @@ def _proposal_approval_flow(pg) -> None:
     assert live["state"] == "approved_current"
     assert live["active_proposal"]["canonical_hash"] == canonical
 
+    # A draft can appear after the last status read but before Start. The typed backend refusal
+    # must refresh proposal status and recover the exact review instead of leaving a stale,
+    # repeatedly enabled Start button.
+    late_start = pg.evaluate(
+        "async () => await window.MA.post('/api/proposal/draft', {})"
+    )
+    late_start_phrase = late_start["review"]["confirmation_phrase"]
+    assert pg.is_enabled("#fillStart"), "the stale page has not observed the new draft yet"
+    start_mode["value"] = "pending"
+    pg.click("#fillStart")
+    pg.wait_for_selector("#proposalModal", state="visible")
+    assert pg.inner_text("#proposalPhrase").strip() == late_start_phrase
+    assert pg.is_disabled("#fillStart")
+    assert starts == [{}]
+    pg.click("#proposalDiscard")
+    pg.wait_for_selector("#proposalModal", state="hidden")
+    assert pg.text_content("#proposalSeal") == "Ready to fill"
+    assert pg.is_enabled("#fillStart")
+    start_mode["value"] = "forbid"
+
     # DEF-042: a current approval exposes an explicit replacement action. The backend authors
     # the active plan/baseline/lane; building and approving the successor proposal still never
     # reaches Fill start.
@@ -632,7 +666,7 @@ def _proposal_approval_flow(pg) -> None:
     assert successor["predecessor_drive"] == "drive-02"
     assert successor["successor_drive"] == replacement
     assert successor["moved_to_successor"] == 1
-    assert starts == [], f"approval must not start Fill: {starts!r}"
+    assert starts == [{}], f"only the deliberately refused Start may be observed: {starts!r}"
 
     # A draft can appear after replacement options load. The resulting duplicate refusal must
     # close the successor dialog and recover that exact review without a manual reload.

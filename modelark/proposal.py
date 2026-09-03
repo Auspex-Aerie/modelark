@@ -1061,8 +1061,12 @@ persist_draft = publish_draft
 
 def discard_draft(con, proposal_id: str) -> dict:
     """Supersede one exact unapproved draft without changing planner revision."""
+    _require_fill_idle(con)
     con.execute("BEGIN IMMEDIATE")
     try:
+        # Match publication's double check: the write transaction serializes this
+        # recheck against a Fill session entering its persistent starting state.
+        _require_fill_idle(con)
         row = con.execute(
             "SELECT lifecycle,based_on_revision FROM placement_proposals WHERE proposal_id=?",
             [proposal_id],
