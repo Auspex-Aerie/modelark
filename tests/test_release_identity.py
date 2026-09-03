@@ -1,4 +1,4 @@
-"""Release surfaces must identify one package/runtime artifact line (INC-055 / DEC-091)."""
+"""Release surfaces must identify one package/runtime artifact line (DEC-093)."""
 from __future__ import annotations
 
 import re
@@ -8,6 +8,7 @@ import modelark
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CURRENT_RELEASE = "0.3.2"
 
 
 def _project_version() -> str:
@@ -20,6 +21,7 @@ def _project_version() -> str:
 
 def test_release_identity_surfaces_agree():
     expected = _project_version()
+    assert expected == CURRENT_RELEASE
     assert modelark.__version__ == expected
     assert f"## {expected} - " in (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert f"ModelArk {expected}" in (ROOT / "README.md").read_text(encoding="utf-8")

@@ -2284,3 +2284,30 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, modelark/execution_session.py, tests/test_def042_successor_plan.py
 - `related`: DEC-067, DEC-092, INC-058, PR-063
 - `scope_boundary`: Fill-time semantic revalidation and regression evidence only. No planner assignment, proposal content, schema, live proposal, planner revision, drive state, Fill session, archive bytes, service deployment, merge, tag, or publication is changed or authorized here.
+
+### INC-060: Merged successor behavior reused the deployed 0.3.1 identity
+- `id`: INC-060
+- `date`: 2026-09-02
+- `status`: remediated by DEC-093 before deployment
+- `triggered_by`: Pre-Fill deployment check after PR #63 merged as `dda3cbf`
+- `symptom`: Merged main contained the new successor planning workflow but still reported `modelark 0.3.1`, the same package/runtime version as the live retained `4a26d37` candidate.
+- `root_cause`: PR #63 advanced runtime behavior without advancing release surfaces. The existing release-identity regression proves that surfaces agree within one checkout, but cannot prove that a behavior-changing checkout differs from the currently deployed release.
+- `blast_radius`: Support and rollback identification only; the successor build was not deployed. The live 0.3.1 service remained healthy with revision 10 approved, Fill idle, and Drive #7 attached under exact identity.
+- `why_not_caught_earlier`: Successor qualification bound commit, proposal, planner, and execution identities but treated package versioning as separate release work, despite DEC-091 requiring behavior-changing retained candidates to advance their supported version surface.
+- `planned_remediation`: DEC-093 assigns version 0.3.2 and advances package metadata, runtime output, README, changelog, upgrade guidance, contributor pointer, release note, and retained candidate identity before service replacement.
+- `docs_updated`: docs/decision_log.md, README.md, CHANGELOG.md, docs/upgrading.md, docs/releases/v0.3.2.md, contributing/contributions.md, pyproject.toml, modelark/__init__.py, tests/test_release_identity.py
+- `related`: DEC-083, DEC-091, DEC-092, INC-055, PR-063
+
+### DEC-093: Assign version 0.3.2 to bounded successor planning
+- `id`: DEC-093
+- `date`: 2026-09-02
+- `status`: accepted; deployment pending
+- `triggered_by`: INC-060 and the operator's explicit selection of version 0.3.2
+- `decision`: Identify the reviewed successor-drive workflow and its stale-authority enforcement as patch version `0.3.2`. Advance build metadata, runtime output, README, changelog, upgrade guidance, contributor pointer, and a dedicated release note together. Keep schema v7 unchanged and require an application-only replacement using the exact existing data/state/config paths, automatic Fill resume absent, and the prior 0.3.1 candidate retained for rollback.
+- `rationale`: The successor workflow materially changes the runnable service and therefore must not reuse 0.3.1. The operator selected a patch increment to keep this attended recovery workflow on the existing 0.3 public-alpha line.
+- `impact`: A 0.3.2 candidate can be distinguished through the supported CLI/package version as well as its exact commit and artifact digests. Existing schema-v7 catalogs require no migration. Deployment, successor-draft creation, exact approval, and Start Fill remain separate operator boundaries.
+- `verification`: Release-identity, CLI-version, and successor focused tests pass nine tests; Ruff and `git diff --check` pass. The isolated package build produced wheel SHA-256 `caabbf8658f0c69d77d3528d652c33971953f0430a287460f4fd97da3b64ef89` and source-archive SHA-256 `60cbe8ca72798085a6271620f9a2369b54ce25b09f098c8a73066e88366a43b2`; installed metadata, `modelark.__version__`, and the CLI entry point all report `0.3.2`.
+- `resolves`: INC-060
+- `docs_updated`: docs/decision_log.md, README.md, CHANGELOG.md, docs/upgrading.md, docs/releases/v0.3.2.md, contributing/contributions.md, pyproject.toml, modelark/__init__.py, tests/test_release_identity.py
+- `related`: DEC-067, DEC-083, DEC-091, DEC-092, INC-055, INC-058, INC-059, PR-063
+- `scope_boundary`: Release identity and application-only upgrade guidance only. No schema migration, catalog/selection/plan/proposal mutation, drive state, Fill session, archive-byte operation, live service deployment, tag, publication, or merge is changed or authorized here.
