@@ -211,34 +211,95 @@ def _review_with_context(con, stored: dict, *, include_assignments: bool) -> dic
 
 
 def _status_on(con) -> dict:
-    from modelark import proposal
+    from modelark import plan, proposal
 
     state = _planner_state(con)
+    active_plan = plan.active(con)
+    active_plan_id = str(active_plan["plan_id"]) if active_plan else None
     active_id = state["active_approved_proposal_id"]
     if not active_id:
-        return {
+        out = {
             "ok": True,
             "state": "missing",
             "planner_revision": state["planner_revision"],
             "active_proposal": None,
         }
-    try:
-        stored = proposal.load_proposal(con, active_id)
-    except KeyError:
-        return _refused(
-            "ACTIVE_PROPOSAL_MISSING",
-            {"proposal_id": active_id},
-            ("inspect_catalog", "review_again"),
+    else:
+        try:
+            stored = proposal.load_proposal(con, active_id)
+        except KeyError:
+            return _refused(
+                "ACTIVE_PROPOSAL_MISSING",
+                {"proposal_id": active_id},
+                ("inspect_catalog", "review_again"),
+            )
+        input_status = proposal.review_input_status(con, stored)
+        current = bool(input_status.get("current"))
+        out = {
+            "ok": True,
+            "state": "approved_current" if current else "approved_stale",
+            "planner_revision": state["planner_revision"],
+            "active_proposal": _review_with_context(
+                con, stored, include_assignments=False
+            ),
+            "input_status": input_status,
+        }
+
+    pending_ids = proposal.current_draft_ids(con)
+    if not pending_ids:
+        return out
+    if len(pending_ids) > 1:
+        refused = _refused(
+            "MULTIPLE_CURRENT_DRAFTS",
+            {
+                "proposal_ids": list(pending_ids),
+                "planner_revision": state["planner_revision"],
+            },
+            ("inspect_pending_proposals",),
         )
-    input_status = proposal.review_input_status(con, stored)
-    current = bool(input_status.get("current"))
-    return {
-        "ok": True,
-        "state": "approved_current" if current else "approved_stale",
-        "planner_revision": state["planner_revision"],
-        "active_proposal": _review_with_context(con, stored, include_assignments=False),
-        "input_status": input_status,
-    }
+        refused.update({
+            "state": "review_ambiguous",
+            "planner_revision": state["planner_revision"],
+            "approval_state": out["state"],
+            "active_proposal": out.get("active_proposal"),
+        })
+        return refused
+
+    pending_id = pending_ids[0]
+    try:
+        pending = proposal.load_proposal(con, pending_id)
+    except KeyError:
+        refused = _refused(
+            "PENDING_PROPOSAL_MISSING",
+            {"proposal_id": pending_id},
+            ("inspect_catalog",),
+        )
+        refused.update({
+            "state": "review_ambiguous",
+            "planner_revision": state["planner_revision"],
+            "approval_state": out["state"],
+            "active_proposal": out.get("active_proposal"),
+        })
+        return refused
+
+    pending_input_status = proposal.review_input_status(con, pending)
+    pending_review = _review_with_context(con, pending, include_assignments=True)
+    pending_review["input_status"] = pending_input_status
+    pending_plan_active = str(pending.get("plan_id") or "") == active_plan_id
+    pending_review["plan_active"] = pending_plan_active
+    pending_review["active_plan_id"] = active_plan_id
+    pending_current = bool(pending_input_status.get("current")) and pending_plan_active
+    if not pending_current:
+        pending_review["approvable"] = False
+        pending_review.pop("confirmation_phrase", None)
+    out["approval_state"] = out["state"]
+    if not pending_plan_active:
+        out["state"] = "review_pending_inactive"
+    else:
+        out["state"] = "review_pending" if pending_current else "review_pending_stale"
+    out["pending_proposal"] = pending_review
+    out["pending_input_status"] = pending_input_status
+    return out
 
 
 def status() -> dict:
@@ -381,6 +442,30 @@ def successor_options() -> dict:
             {"proposal_id": baseline_id},
             ("review_current_placement",),
         )
+
+
+def discard(body: dict) -> dict:
+    """Discard one exact draft and report its post-mutation proposal status separately."""
+    from modelark import proposal
+
+    proposal_id = str(body.get("proposal_id") or "").strip()
+    if not proposal_id:
+        return _refused(
+            "PROPOSAL_ID_REQUIRED",
+            None,
+            ("review_pending_proposal",),
+        )
+    try:
+        with data._lock:
+            con = data.conn()
+            proposal.discard_draft(con, proposal_id)
+            return {
+                "ok": True,
+                "discarded_proposal_id": proposal_id,
+                "proposal_status": _status_on(con),
+            }
+    except proposal.Refusal as exc:
+        return _domain_refusal(exc)
 
 
 def approve(body: dict) -> dict:

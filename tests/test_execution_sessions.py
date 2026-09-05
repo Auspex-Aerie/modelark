@@ -49,6 +49,52 @@ def test_start_binds_exact_planner_revision_and_token():
     assert f.default_services().worker.identity
 
 
+def test_start_refuses_while_current_proposal_review_is_pending():
+    mod = _mod()
+    con = f.mem_con()
+    pid, _ = _approve_ready(con)
+    pending = f.proposal_mod().create_draft(
+        con, plan_id="ark", mutation=("adopt_current", ())
+    )
+
+    f.assert_refuses(
+        lambda: _start(mod, con, pid, None),
+        code="PROPOSAL_REVIEW_PENDING",
+        label="start while exact review is pending",
+    )
+    assert con.execute(
+        "SELECT count(*) FROM execution_sessions "
+        "WHERE state IN ('starting','running','stopping')"
+    ).fetchone()[0] == 0
+    assert con.execute(
+        "SELECT lifecycle FROM placement_proposals WHERE proposal_id=?",
+        [pending["proposal_id"]],
+    ).fetchone()[0] == "draft"
+
+
+def test_start_refuses_current_draft_from_another_plan():
+    mod = _mod()
+    con = f.mem_con()
+    pid, _ = _approve_ready(con)
+    pending = f.proposal_mod().create_draft(
+        con, plan_id="ark", mutation=("adopt_current", ())
+    )
+    con.execute(
+        "UPDATE placement_proposals SET plan_id='other-plan' WHERE proposal_id=?",
+        [pending["proposal_id"]],
+    )
+
+    f.assert_refuses(
+        lambda: _start(mod, con, pid, None),
+        code="PROPOSAL_REVIEW_PENDING",
+        label="start while another plan has unresolved current-revision intent",
+    )
+    assert con.execute(
+        "SELECT count(*) FROM execution_sessions "
+        "WHERE state IN ('starting','running','stopping')"
+    ).fetchone()[0] == 0
+
+
 def test_second_live_start_refuses_fill_session_active():
     mod = _mod()
     con = f.mem_con()

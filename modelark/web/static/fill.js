@@ -572,7 +572,14 @@
   function startFill() {
     MA.post("/api/fill/start", {}).then(r => {
       if (r && r.ok) { MA.toast("fill started"); if (!statusTimer) poll(); }
-      else MA.toast((r && r.error) || "could not start the fill");
+      else {
+        MA.toast((r && r.error) || "could not start the fill");
+        // Another client may have published intent after our last docket read.
+        // Recover the exact stored review instead of leaving Start enabled in a retry loop.
+        if (r && r.code === "PROPOSAL_REVIEW_PENDING" && window.MA.proposal) {
+          window.MA.proposal.refresh();
+        }
+      }
     });
   }
   function stopFill() { MA.post("/api/fill/stop", {}).then(() => MA.toast("stopping after the current file…")); }

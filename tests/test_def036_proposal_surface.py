@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from unittest import mock
 
+import pytest
+
 from modelark import proposal
 from modelark.web import proposal_api
 
@@ -19,6 +21,27 @@ def _connection(*, revision: int = 9, active: str | None = None):
     con.execute(
         "INSERT INTO planner_state VALUES(1,?,?,0)",
         [revision, active],
+    )
+    con.execute(
+        "CREATE TABLE plans("
+        "plan_id TEXT PRIMARY KEY, name TEXT, annex_root TEXT, "
+        "capacity_mode TEXT NOT NULL, status TEXT NOT NULL, is_active INTEGER NOT NULL, "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, notes TEXT)"
+    )
+    con.execute(
+        "INSERT INTO plans(plan_id,name,annex_root,capacity_mode,status,is_active) "
+        "VALUES('ark','Ark','/tmp/modelark','guaranteed','active',1)"
+    )
+    con.execute(
+        "CREATE TABLE plan_drives("
+        "plan_id TEXT NOT NULL, drive_label TEXT NOT NULL, position INTEGER, "
+        "PRIMARY KEY(plan_id,drive_label))"
+    )
+    con.execute(
+        "CREATE TABLE placement_proposals("
+        "proposal_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, "
+        "based_on_revision INTEGER NOT NULL, lifecycle TEXT NOT NULL, "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, superseded_at TEXT)"
     )
     return con
 
@@ -241,6 +264,168 @@ def test_status_distinguishes_missing_current_and_stale_approval():
     assert stale["state"] == "approved_stale"
     assert stale["active_proposal"]["proposal_id"] == "proposal-123"
     assert stale["input_status"]["semantic_input_matches"] is False
+
+
+def test_status_recovers_one_current_draft_and_preserves_active_approval_context():
+    con = _connection(revision=10, active="approved-10")
+    con.execute(
+        "INSERT INTO placement_proposals("
+        "proposal_id,plan_id,based_on_revision,lifecycle) "
+        "VALUES('pending-10','ark',10,'draft')"
+    )
+    active = _stored(proposal_id="approved-10", lifecycle="approved")
+    pending = _stored(proposal_id="pending-10", lifecycle="draft")
+    pending["based_on_revision"] = 10
+    current = {
+        "current": True,
+        "semantic_input_matches": True,
+        "execution_config_matches": True,
+    }
+
+    with mock.patch.object(proposal_api.data, "conn", return_value=con), \
+         mock.patch("modelark.proposal.load_proposal", side_effect=lambda _con, pid: {
+             "approved-10": active,
+             "pending-10": pending,
+         }[pid]), \
+         mock.patch("modelark.proposal.review_input_status", return_value=current):
+        status = proposal_api.status()
+
+    assert status["ok"] is True
+    assert status["state"] == "review_pending"
+    assert status["approval_state"] == "approved_current"
+    assert status["active_proposal"]["proposal_id"] == "approved-10"
+    assert status["pending_proposal"]["proposal_id"] == "pending-10"
+    assert status["pending_proposal"]["confirmation_phrase"] == "APPROVE pending-10"
+    assert len(status["pending_proposal"]["assignments"]) == 3
+
+
+def test_status_keeps_inactive_plan_draft_visible_but_not_approvable():
+    con = _connection(revision=10, active="approved-10")
+    con.execute(
+        "INSERT INTO placement_proposals("
+        "proposal_id,plan_id,based_on_revision,lifecycle) "
+        "VALUES('pending-other','other-plan',10,'draft')"
+    )
+    active = _stored(proposal_id="approved-10", lifecycle="approved")
+    pending = _stored(proposal_id="pending-other", lifecycle="draft")
+    pending["plan_id"] = "other-plan"
+    pending["based_on_revision"] = 10
+    current = {
+        "current": True,
+        "semantic_input_matches": True,
+        "execution_config_matches": True,
+    }
+
+    with mock.patch.object(proposal_api.data, "conn", return_value=con), \
+         mock.patch("modelark.proposal.load_proposal", side_effect=lambda _con, pid: {
+             "approved-10": active,
+             "pending-other": pending,
+         }[pid]), \
+         mock.patch("modelark.proposal.review_input_status", return_value=current):
+        status = proposal_api.status()
+
+    assert status["state"] == "review_pending_inactive"
+    assert status["pending_proposal"]["plan_active"] is False
+    assert status["pending_proposal"]["active_plan_id"] == "ark"
+    assert status["pending_proposal"]["approvable"] is False
+    assert "confirmation_phrase" not in status["pending_proposal"]
+
+
+def test_status_refuses_multiple_current_drafts_without_choosing_by_timestamp():
+    con = _connection(revision=10)
+    con.executemany(
+        "INSERT INTO placement_proposals("
+        "proposal_id,plan_id,based_on_revision,lifecycle,created_at) "
+        "VALUES(?,'ark',10,'draft',?)",
+        [
+            ("pending-a", "2026-09-03 00:00:00"),
+            ("pending-b", "2026-09-03 00:00:01"),
+        ],
+    )
+
+    with mock.patch.object(proposal_api.data, "conn", return_value=con):
+        status = proposal_api.status()
+
+    assert status["ok"] is False
+    assert status["state"] == "review_ambiguous"
+    assert status["code"] == "MULTIPLE_CURRENT_DRAFTS"
+    assert status["evidence"]["proposal_ids"] == ["pending-a", "pending-b"]
+
+
+def test_discard_supersedes_exact_draft_without_bumping_revision():
+    con = _connection(revision=10)
+    con.execute(
+        "INSERT INTO placement_proposals("
+        "proposal_id,plan_id,based_on_revision,lifecycle) "
+        "VALUES('pending-10','ark',10,'draft')"
+    )
+
+    with mock.patch.object(proposal_api.data, "conn", return_value=con):
+        result = proposal_api.discard({"proposal_id": "pending-10"})
+
+    assert result["ok"] is True
+    assert result["discarded_proposal_id"] == "pending-10"
+    assert result["proposal_status"]["state"] == "missing"
+    assert con.execute(
+        "SELECT lifecycle FROM placement_proposals WHERE proposal_id='pending-10'"
+    ).fetchone()[0] == "superseded"
+    assert con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1"
+    ).fetchone()[0] == 10
+
+
+def test_discard_reports_success_while_remaining_drafts_stay_ambiguous():
+    con = _connection(revision=10)
+    con.executemany(
+        "INSERT INTO placement_proposals("
+        "proposal_id,plan_id,based_on_revision,lifecycle,created_at) "
+        "VALUES(?,'ark',10,'draft',?)",
+        [
+            ("pending-a", "2026-09-03 00:00:00"),
+            ("pending-b", "2026-09-03 00:00:01"),
+            ("pending-c", "2026-09-03 00:00:02"),
+        ],
+    )
+
+    with mock.patch.object(proposal_api.data, "conn", return_value=con):
+        result = proposal_api.discard({"proposal_id": "pending-b"})
+
+    assert result["ok"] is True
+    assert result["discarded_proposal_id"] == "pending-b"
+    remaining = result["proposal_status"]
+    assert remaining["ok"] is False
+    assert remaining["state"] == "review_ambiguous"
+    assert remaining["code"] == "MULTIPLE_CURRENT_DRAFTS"
+    assert remaining["evidence"]["proposal_ids"] == ["pending-a", "pending-c"]
+    assert con.execute(
+        "SELECT lifecycle FROM placement_proposals WHERE proposal_id='pending-b'"
+    ).fetchone()[0] == "superseded"
+
+
+def test_discard_rechecks_fill_ownership_inside_its_write_transaction():
+    con = _connection(revision=10)
+    con.execute(
+        "INSERT INTO placement_proposals("
+        "proposal_id,plan_id,based_on_revision,lifecycle) "
+        "VALUES('pending-race','ark',10,'draft')"
+    )
+
+    with mock.patch(
+        "modelark.execution_session.live_session_exists",
+        side_effect=[False, True],
+    ) as live, mock.patch(
+        "modelark.execution_session.live_owner",
+        return_value={"session_id": "fill-race", "state": "starting"},
+    ):
+        with pytest.raises(proposal.Refusal) as caught:
+            proposal.discard_draft(con, "pending-race")
+
+    assert caught.value.code == "FILL_SESSION_ACTIVE"
+    assert caught.value.evidence == {"session_id": "fill-race", "state": "starting"}
+    assert live.call_count == 2
+    assert con.execute(
+        "SELECT lifecycle FROM placement_proposals WHERE proposal_id='pending-race'"
+    ).fetchone()[0] == "draft"
 
 
 def test_domain_refusal_is_preserved_as_typed_operator_result():

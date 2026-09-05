@@ -88,6 +88,19 @@ Building the successor proposal does not invalidate or edit the current approval
 immutable docket and approve it separately; only that approval supersedes the old proposal and bumps
 the planner revision. It still does not start Fill.
 
+A current draft is unresolved operator intent. If the browser reloads or disconnects, return to the
+Fill page: ModelArk restores the same proposal ID, canonical seal, assignments, and approval phrase.
+Start Fill remains unavailable until that draft is approved or **Discard pending proposal** is
+selected. Discarding marks only the draft superseded; the active approval and planner revision stay
+unchanged. Do not create another replacement proposal to recover an interrupted review.
+
+Pending intent blocks Fill across the catalog, including a draft for a plan that is no longer active.
+That draft remains reviewable but cannot be approved. Discard it, then create a fresh review for the
+active plan; selecting another plan advances the planner revision and cannot revive the old draft. If
+an older release left multiple drafts on the current revision, the Fill docket lists their exact
+proposal IDs and lets the operator discard them one at a time. ModelArk never picks a newest draft on
+the operator's behalf.
+
 The Fill chart retains every drive identity in the active plan so loss history is not erased. A
 `lost`, `retired`, or `excluded` drive remains visible with an unavailable marker and contributes no
 executable capacity or target work. An ordinary empty card instead means the drive is still eligible

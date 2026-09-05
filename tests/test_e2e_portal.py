@@ -516,9 +516,23 @@ def _proposal_approval_flow(pg) -> None:
         f"only demo/tiny-llm should remain selected, got {removed!r}")
 
     starts = []
+    start_mode = {"value": "forbid"}
 
     def forbid_start(route):
         starts.append(route.request.post_data_json)
+        if start_mode["value"] == "pending":
+            route.fulfill(
+                status=409,
+                content_type="application/json",
+                body=json.dumps({
+                    "ok": False,
+                    "error": "PROPOSAL_REVIEW_PENDING",
+                    "code": "PROPOSAL_REVIEW_PENDING",
+                    "evidence": {"proposal_ids": ["late-start-draft"]},
+                    "actions": ["review_or_discard_pending"],
+                }),
+            )
+            return
         route.fulfill(
             status=500,
             content_type="application/json",
@@ -541,6 +555,13 @@ def _proposal_approval_flow(pg) -> None:
         "No data moves until you select Start fill."
     )
 
+    # Another client can publish between this page's last status read and the click. A duplicate
+    # refusal must refresh and recover that exact draft instead of trapping the page in retries.
+    out_of_band = pg.evaluate(
+        "async () => await window.MA.post('/api/proposal/draft', {})"
+    )
+    assert out_of_band["ok"] is True
+    out_of_band_phrase = out_of_band["review"]["confirmation_phrase"]
     pg.click("#proposalReview")
     pg.wait_for_selector("#proposalModal", state="visible")
     canonical = pg.inner_text("#proposalCanonical").strip()
@@ -559,6 +580,8 @@ def _proposal_approval_flow(pg) -> None:
 
     phrase = pg.inner_text("#proposalPhrase").strip()
     assert phrase.startswith("APPROVE ") and len(phrase) > len("APPROVE ")
+    assert phrase == out_of_band_phrase
+    assert pg.is_enabled("#proposalDiscard")
     pg.fill("#proposalConfirm", phrase)
     assert pg.is_enabled("#proposalApprove")
     pg.click("#proposalApprove")
@@ -573,6 +596,26 @@ def _proposal_approval_flow(pg) -> None:
     live = pg.evaluate("async () => await window.MA.api('/api/proposal/status')")
     assert live["state"] == "approved_current"
     assert live["active_proposal"]["canonical_hash"] == canonical
+
+    # A draft can appear after the last status read but before Start. The typed backend refusal
+    # must refresh proposal status and recover the exact review instead of leaving a stale,
+    # repeatedly enabled Start button.
+    late_start = pg.evaluate(
+        "async () => await window.MA.post('/api/proposal/draft', {})"
+    )
+    late_start_phrase = late_start["review"]["confirmation_phrase"]
+    assert pg.is_enabled("#fillStart"), "the stale page has not observed the new draft yet"
+    start_mode["value"] = "pending"
+    pg.click("#fillStart")
+    pg.wait_for_selector("#proposalModal", state="visible")
+    assert pg.inner_text("#proposalPhrase").strip() == late_start_phrase
+    assert pg.is_disabled("#fillStart")
+    assert starts == [{}]
+    pg.click("#proposalDiscard")
+    pg.wait_for_selector("#proposalModal", state="hidden")
+    assert pg.text_content("#proposalSeal") == "Ready to fill"
+    assert pg.is_enabled("#fillStart")
+    start_mode["value"] = "forbid"
 
     # DEF-042: a current approval exposes an explicit replacement action. The backend authors
     # the active plan/baseline/lane; building and approving the successor proposal still never
@@ -596,6 +639,21 @@ def _proposal_approval_flow(pg) -> None:
     successor_row = pg.locator("#proposalAssignments [data-requirement-id]").first
     assert f"{current_target} → {replacement}" in successor_row.inner_text()
     successor_phrase = pg.inner_text("#proposalPhrase").strip()
+    assert pg.is_disabled("#fillStart"), "pending successor review must gate old approval"
+    assert pg.locator("#proposalDiscard").is_visible()
+    assert pg.is_enabled("#proposalDiscard")
+    pg.click("#proposalCancel")
+    pg.wait_for_selector("#proposalModal", state="hidden")
+    assert "ready for review" in pg.inner_text("#proposalState")
+    assert pg.is_disabled("#fillStart"), "closing review must not forget pending intent"
+
+    # INC-061: the durable draft must recover after a full browser reload, not only from the
+    # response chain that created it. Reloading auto-opens the exact same immutable review once.
+    pg.reload()
+    pg.evaluate("window.loadFill()")
+    pg.wait_for_selector("#proposalModal", state="visible")
+    assert pg.inner_text("#proposalPhrase").strip() == successor_phrase
+    assert pg.is_disabled("#fillStart")
     pg.fill("#proposalConfirm", successor_phrase)
     pg.click("#proposalApprove")
     pg.wait_for_selector("#proposalModal", state="hidden")
@@ -608,7 +666,83 @@ def _proposal_approval_flow(pg) -> None:
     assert successor["predecessor_drive"] == "drive-02"
     assert successor["successor_drive"] == replacement
     assert successor["moved_to_successor"] == 1
-    assert starts == [], f"approval must not start Fill: {starts!r}"
+    assert starts == [{}], f"only the deliberately refused Start may be observed: {starts!r}"
+
+    # A draft can appear after replacement options load. The resulting duplicate refusal must
+    # close the successor dialog and recover that exact review without a manual reload.
+    pg.click("button[data-view='fill']")
+    pg.wait_for_selector("#proposalSuccessor", state="visible")
+    pg.click("#proposalSuccessor")
+    pg.wait_for_selector("#successorModal", state="visible")
+    concurrent = pg.evaluate(
+        "async () => await window.MA.post('/api/proposal/draft', {})"
+    )
+    concurrent_phrase = concurrent["review"]["confirmation_phrase"]
+    pg.click("#successorCreate")
+    pg.wait_for_selector("#successorModal", state="hidden")
+    pg.wait_for_selector("#proposalModal", state="visible")
+    assert pg.inner_text("#proposalPhrase").strip() == concurrent_phrase
+    assert pg.is_enabled("#proposalDiscard")
+    assert pg.is_disabled("#fillStart")
+    pg.click("#proposalDiscard")
+    pg.wait_for_selector("#proposalModal", state="hidden")
+    assert pg.text_content("#proposalSeal") == "Ready to fill"
+
+    # Historical pre-0.3.3 ambiguity is resolvable from the docket. IDs are backend evidence,
+    # and the discard request names exactly the selected draft rather than choosing by timestamp.
+    approved_after_discard = pg.evaluate(
+        "async () => await window.MA.api('/api/proposal/status')"
+    )
+    ambiguous = {
+        "ok": False,
+        "refused": True,
+        "state": "review_ambiguous",
+        "code": "MULTIPLE_CURRENT_DRAFTS",
+        "evidence": {"proposal_ids": ["pending-a", "pending-b", "pending-c"]},
+        "approval_state": "approved_current",
+        "active_proposal": approved_after_discard["active_proposal"],
+    }
+    ambiguity_discards = []
+    pg.route(
+        "**/api/proposal/status",
+        lambda route: route.fulfill(
+            status=409, content_type="application/json", body=json.dumps(ambiguous)
+        ),
+    )
+
+    def discard_ambiguity(route):
+        request = route.request.post_data_json
+        ambiguity_discards.append(request)
+        post_status = dict(ambiguous)
+        post_status["evidence"] = {"proposal_ids": ["pending-a", "pending-c"]}
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "ok": True,
+                "discarded_proposal_id": request["proposal_id"],
+                "proposal_status": post_status,
+            }),
+        )
+
+    pg.route("**/api/proposal/discard", discard_ambiguity)
+    pg.evaluate("window.MA.proposal.refresh()")
+    pg.wait_for_selector("#proposalAmbiguitySelect", state="visible")
+    assert pg.locator("#proposalAmbiguitySelect option").all_text_contents() == [
+        "pending-a", "pending-b", "pending-c"
+    ]
+    pg.select_option("#proposalAmbiguitySelect", "pending-b")
+    pg.click("#proposalAmbiguityDiscard")
+    pg.wait_for_function(
+        "() => document.querySelectorAll('#proposalAmbiguitySelect option').length === 2"
+    )
+    assert ambiguity_discards == [{"proposal_id": "pending-b"}]
+    assert pg.locator("#proposalAmbiguitySelect option").all_text_contents() == [
+        "pending-a", "pending-c"
+    ]
+    assert pg.is_enabled("#proposalAmbiguityDiscard")
+    pg.unroute("**/api/proposal/discard")
+    pg.unroute("**/api/proposal/status")
     pg.unroute("**/api/fill/start")
     print("  current + successor proposals reviewed and approved; Fill remained stopped")
 

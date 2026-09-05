@@ -9,7 +9,7 @@ from typing import Any, Callable, Mapping
 
 from modelark import execution_config as ecfg
 from modelark import execution_projection as eproj
-from modelark.proposal import Refusal, load_proposal, bump_revision
+from modelark.proposal import Refusal, bump_revision, current_draft_ids, load_proposal
 
 # Re-export config helpers for session_api discovery in Gate-1 fixtures.
 strip_execution_config_binding_for_test = ecfg.strip_execution_config_binding_for_test
@@ -159,6 +159,14 @@ def start_session(con, proposal_id, predecessor_id, services):
         if not proposal or proposal.get("lifecycle") != "approved":
             return Refusal("APPROVAL_MISSING", {"proposal_id": proposal_id}, ("preview_again",))
 
+    pending = current_draft_ids(con)
+    if pending:
+        return Refusal(
+            "PROPOSAL_REVIEW_PENDING",
+            {"proposal_ids": list(pending), "proposal_id": proposal_id},
+            ("review_or_discard_pending",),
+        )
+
     relevant = _proposal_drive_ids(proposal)
     ctrl = services.controller_flock
     fences = services.drive_fences
@@ -259,6 +267,13 @@ def start_session(con, proposal_id, predecessor_id, services):
             # Re-check live session inside TX.
             if live_session_exists(con):
                 raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
+            pending = current_draft_ids(con)
+            if pending:
+                raise Refusal(
+                    "PROPOSAL_REVIEW_PENDING",
+                    {"proposal_ids": list(pending), "proposal_id": proposal_id},
+                    ("review_or_discard_pending",),
+                )
             con.execute(
                 "UPDATE planner_state SET next_fencing_token = next_fencing_token + 1 "
                 "WHERE singleton_id=1")

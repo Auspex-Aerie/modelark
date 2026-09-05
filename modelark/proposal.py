@@ -90,6 +90,16 @@ def _session_write_authorized(con) -> bool:
         return False
 
 
+def _require_fill_idle(con) -> None:
+    """Refuse a proposal/control-plane write while a live Fill owns the catalog."""
+    try:
+        from modelark.execution_session import live_owner, live_session_exists
+        if not _session_write_authorized(con) and live_session_exists(con):
+            raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
+    except ImportError:
+        pass
+
+
 def bump_revision(con) -> int:
     """Increment planner_revision inside the caller's open transaction.
 
@@ -124,21 +134,11 @@ def graph_write(con, op: Callable[[Any], Any]) -> Any:
     unless the caller is inside ``session_write`` on this same connection.
     """
     # Live-session exclusion before opening the write transaction (B3 / B13).
-    try:
-        from modelark.execution_session import live_session_exists, live_owner
-        if not _session_write_authorized(con) and live_session_exists(con):
-            raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
-    except ImportError:
-        pass
+    _require_fill_idle(con)
     con.execute("BEGIN IMMEDIATE")
     try:
         # Re-check inside TX for races (still allow authorized session_write on this con).
-        try:
-            from modelark.execution_session import live_session_exists, live_owner
-            if not _session_write_authorized(con) and live_session_exists(con):
-                raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))
-        except ImportError:
-            pass
+        _require_fill_idle(con)
         result = op(con)
         if result is None:
             result = GraphResult(proven_noop=False)
@@ -857,6 +857,54 @@ def require_execution_config_hash_column(con) -> None:
 ensure_execution_config_hash_column = require_execution_config_hash_column
 
 
+def current_draft_ids(con, *, plan_id: str | None = None) -> tuple[str, ...]:
+    """Return immutable drafts based on the catalog's exact current planner revision."""
+    row = con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1"
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("planner_state singleton is missing")
+    sql = (
+        "SELECT proposal_id FROM placement_proposals "
+        "WHERE lifecycle='draft' AND based_on_revision=?"
+    )
+    params: list[Any] = [int(row[0])]
+    if plan_id is not None:
+        sql += " AND plan_id=?"
+        params.append(str(plan_id))
+    sql += " ORDER BY created_at,proposal_id"
+    return tuple(str(item[0]) for item in con.execute(sql, params).fetchall())
+
+
+def require_unambiguous_current_draft(con) -> tuple[str, ...]:
+    """Return current drafts or refuse when unresolved intent is not singular."""
+    pending = current_draft_ids(con)
+    if len(pending) > 1:
+        raise Refusal(
+            "MULTIPLE_CURRENT_DRAFTS",
+            {"proposal_ids": list(pending)},
+            ("inspect_pending_proposals",),
+        )
+    return pending
+
+
+def require_active_proposal_plan(con, proposal: Mapping) -> None:
+    """Refuse approval when the draft does not belong to the active plan."""
+    active = plan_mod.active(con)
+    active_id = str(active.get("plan_id")) if active else None
+    proposal_plan_id = str(proposal.get("plan_id") or "")
+    if active_id != proposal_plan_id:
+        raise Refusal(
+            "PROPOSAL_PLAN_INACTIVE",
+            {
+                "proposal_id": proposal.get("proposal_id"),
+                "proposal_plan_id": proposal_plan_id,
+                "active_plan_id": active_id,
+            },
+            ("discard_pending_proposal", "create_fresh_review"),
+        )
+
+
 def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = None,
                   **_kw) -> dict:
     """Persist an immutable draft under BEGIN IMMEDIATE; no selection/revision mutation."""
@@ -897,6 +945,13 @@ def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = Non
         if cur != int(header["based_on_revision"]):
             raise Refusal("PREVIEW_STALE", {"current": cur, "based_on": header["based_on_revision"]},
                           ("preview_again",))
+        pending = require_unambiguous_current_draft(con)
+        if pending:
+            raise Refusal(
+                "PROPOSAL_REVIEW_PENDING",
+                {"proposal_ids": list(pending), "planner_revision": cur},
+                ("review_or_discard_pending",),
+            )
         proposal_id = str(uuid.uuid4())
         mut_args = header.get("mutation_args") or ()
         cols = {r[1] for r in con.execute("PRAGMA table_info(placement_proposals)").fetchall()}
@@ -986,8 +1041,10 @@ def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = Non
             "plan_id": header["plan_id"],
         }
 
+    _require_fill_idle(con)
     con.execute("BEGIN IMMEDIATE")
     try:
+        _require_fill_idle(con)
         out = _persist()
         con.execute("COMMIT")
         return out
@@ -1000,6 +1057,49 @@ def publish_draft(con, payload: dict | None = None, *, plan_id: str | None = Non
 
 
 persist_draft = publish_draft
+
+
+def discard_draft(con, proposal_id: str) -> dict:
+    """Supersede one exact unapproved draft without changing planner revision."""
+    _require_fill_idle(con)
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        # Match publication's double check: the write transaction serializes this
+        # recheck against a Fill session entering its persistent starting state.
+        _require_fill_idle(con)
+        row = con.execute(
+            "SELECT lifecycle,based_on_revision FROM placement_proposals WHERE proposal_id=?",
+            [proposal_id],
+        ).fetchone()
+        if row is None:
+            raise Refusal(
+                "PROPOSAL_NOT_FOUND",
+                {"proposal_id": proposal_id},
+                ("review_again",),
+            )
+        if row[0] != "draft":
+            raise Refusal(
+                "PROPOSAL_NOT_DRAFT",
+                {"proposal_id": proposal_id, "lifecycle": row[0]},
+                ("review_again",),
+            )
+        con.execute(
+            "UPDATE placement_proposals SET lifecycle='superseded', "
+            "superseded_at=CURRENT_TIMESTAMP WHERE proposal_id=? AND lifecycle='draft'",
+            [proposal_id],
+        )
+        con.execute("COMMIT")
+        return {
+            "proposal_id": proposal_id,
+            "lifecycle": "superseded",
+            "based_on_revision": int(row[1]),
+        }
+    except BaseException:
+        try:
+            con.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
 
 
 def create_draft(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", ()),
@@ -1410,6 +1510,8 @@ def approve(con, proposal_id: str, *, mutation=None, services=None, **_extra):
 
     # Load read-only before fences (RFC).
     proposal = load_proposal(con, proposal_id)
+    require_active_proposal_plan(con, proposal)
+    require_unambiguous_current_draft(con)
     labels = proposal_drive_ids(proposal)
     keys = _fence_keys(con, labels)
     catalog_path = getattr(db, "DB_PATH", None) or ":memory:"
@@ -1478,6 +1580,11 @@ def _approve_tx(con, proposal_id: str, *, mutation, evidence_by_drive) -> dict:
         if rev != int(proposal["based_on_revision"]):
             raise Refusal("PREVIEW_STALE", {"current": rev, "based_on": proposal["based_on_revision"]},
                           ("preview_again",))
+
+        # Fail closed inside the approval transaction as well: an active-plan switch
+        # or direct historical draft race must not install mismatched/orphaned intent.
+        require_active_proposal_plan(con, proposal)
+        require_unambiguous_current_draft(con)
 
         # Semantic recompute independent of revision integer (missed-bump protection).
         current_semantic = _semantic_input_hash(
