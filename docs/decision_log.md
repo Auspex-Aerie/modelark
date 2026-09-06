@@ -1952,7 +1952,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEF-041: Defer Usable Slice implementation for subsection delivery
 - `id`: DEF-041
 - `date`: 2026-08-30
-- `status`: revisit triggered 2026-09-05; architecture review active, implementation pending
+- `status`: revisit triggered 2026-09-05; architecture accepted by DEC-101 on 2026-09-06, implementation pending
 - `triggered_by`: DEC-081 defines the needed DR delivery boundary while DEF-036's operator-facing proposal approval surface is still the current pre-Fill gate.
 - `decision`: Do not build the Usable Slice CLI/portal workflow in the current service-recovery and proposal-approval slice. Defer the subsection selector and dependency closure, consumer/layout profiles, destination-disk wizard, guided source-drive schedule, direct executor, scratch executor, local-USB scratch registry, R2 credential/cost/lifecycle policy, resumable delivery journal, final verifier, and receipt schema. Existing verified restore remains the available lower-level recovery mechanism in the meantime.
 - `rationale`: The live catalog is ready for canonical planning but still has no approved proposal, and the proposal-approval implementation is unfinished. Mixing a new multi-drive/object-store writer into that gate would widen the current trust boundary before the existing archive workflow is usable again. The DEC fixes the destination architecture now so the feature is not lost and ScintiLab does not grow an incompatible transfer path meanwhile.
@@ -2473,3 +2473,71 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `review_update_2026_09_05_iteration_3`: Greptile accepted exact HEAD `29c10bbc52d2b190785763a2a8f7f99287d7b918` at `5/5` with a completion thumbs-up, successful review check, and no actionable finding. The automatic Codex review completed afterward with one valid P2: `fill_api` preserved typed evidence for unsuccessful terminal results but discarded it when an executor successfully returned `PLAN_COMPLETE_WITH_FOLLOWUPS`, preventing content and dependency follow-ups from reaching the exact drive-state adapter. The operator explicitly authorized one bounded Greptile iteration-four exception for this new item. The adapter now preserves optional evidence, actions, failure detail, and gate metadata on successful terminals; regression coverage drives a successful content-plus-dependency follow-up result through `fill_api` and verifies the affected exact cards.
 - `review_update_2026_09_05_iteration_4`: Greptile accepted exact HEAD `613580759ba52119e1f893a92cfd3da756683734` at `5/5` with a completion thumbs-up and successful review check. The later automatic Codex review found three related fallback-boundary gaps: physical RAID identity was inferred from task kind, the combined replica write probe blamed the target when only its source failed, and exact-only cards had no retained render envelope for stack toggles or late category data. The operator authorized an architectural correction followed by up to three further Greptile iterations. The correction binds one coherent drive-registry and archived-occupancy snapshot to the admitted execution, records unavailable replica source and target endpoints independently before/under/during the mutation fence, and makes the browser's current display envelope first-class whether or not advisory reconciliation succeeds.
 - `review_update_2026_09_05_architecture_followup_1`: Greptile accepted exact HEAD `9e4eb3f51a2ebb4d83bd53e314b3810795a33cf6` at `5/5`, with a successful check, completion thumbs-up, and no actionable finding. The automatic Codex review then found one current-head P2 in the same execution-publication boundary: a transport batch could durably complete an earlier requirement and return a typed stop on a later item before publishing the completed requirement IDs. The shared post-runner path now re-derives exact durable work and publishes monotonic completion before interpreting any Fetch or replica early-terminal summary; focused regressions cover both a typed Fetch terminal after committed progress and a replica defer after an earlier committed copy.
+
+### BOT-006: Spark discovery was conflated with Usable Slice eligibility
+- `id`: BOT-006
+- `date`: 2026-09-06
+- `status`: logged
+- `triggered_by`: The proposed follow-up to use DGXSpark's missing model set as the first Usable Slice test after DEC-098 and DIS-005.
+- `claim`: The first slice could be defined from the Spark recipe/catalog gap and materialize models that ModelArk had not archived yet, making catalog expansion and delivery one workflow.
+- `correction`: The operator separated the concerns. Spark discovery may add desired models through normal catalog selection and Fill, while Usable Slice may materialize only artifacts that already have sufficient ModelArk archive evidence. An offline archive drive is a valid source that the operator can be asked to load; an unarchived artifact is an explicit preview gap and must not be downloaded by the slice transaction.
+- `verified`: DEC-081 already makes delivery depend on a frozen, verified artifact closure, DEC-098 gives catalog change and archive mutation separate authority, and DIS-005 says Spark cache residency is not archive proof. The missing distinction was between an archived-but-offline source, which is schedulable, and no archived source, which is ineligible.
+- `lesson`: Never collapse catalog membership, machine-cache residency, archived evidence, and delivery eligibility into one state. A delivery transaction may schedule access to existing archive bytes but may not acquire absent bytes implicitly.
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
+- `related`: DEC-081, DEF-041, DEC-098, DEF-CATALOG-005, DIS-005
+
+### DEC-101: Keep Usable Slice archive-only and fail closed on missing sources
+- `id`: DEC-101
+- `date`: 2026-09-06
+- `status`: accepted
+- `triggered_by`: BOT-006, DEC-081, and DEC-098
+- `decision`:
+  1. Usable Slice is an outward delivery transaction over an exact artifact closure already preserved by ModelArk. Every required artifact must resolve to at least one archive source with sufficient identity, content, and provenance evidence before the preview is executable.
+  2. An archived source that is not currently attached remains eligible. The sealed transfer schedule names its known source drive and pauses with an attended request to load that drive. A required artifact with no qualifying archived source makes the preview non-executable and produces an explicit gap report; Usable Slice does not fetch it from a remote service.
+  3. Direct drive-to-destination, local USB scratch, and Cloudflare R2 scratch are transport topologies for the same already-archived bytes. Scratch can separate attended source and destination phases, but it does not create archive evidence, satisfy copy policy, or expand the slice closure.
+  4. DGXSpark recipe discovery and ModelArk catalog expansion remain a separate curation and Fill lane. Spark models become valid slice candidates only after that lane archives them with sufficient evidence. Initial slice qualification uses a small set of already-archived models.
+  5. Archive Reshape may later share the sealed materialization engine, but it retains the separate desired-set, placement, retention, and reclamation authority established by DEC-098.
+- `rationale`: Delivery must be predictable and fail closed: the operator can approve a complete source schedule without accidentally authorizing network acquisition or mutation of the disaster-recovery plan. Keeping offline availability distinct from archive absence preserves useful multi-drive operation while maintaining ModelArk's evidence boundaries.
+- `impact`: The implementation charter now defines archive-source eligibility, gap reporting, attended drive scheduling, transport-neutral execution, and a direct-mode first vertical slice. Spark catalog work, implicit hydration, Archive Reshape, scratch backends, and live-service changes remain outside the first implementation slice.
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
+- `related`: DEC-045, DEC-049, DEC-081, DEC-084, DEF-018, DEF-041, DEF-CATALOG-005, DIS-005, DEC-098, BOT-006
+- `scope_boundary`: Architecture and implementation charter only. No catalog discovery or selection, remote fetch, plan/proposal/Fill mutation, archive-byte transfer, destination write, R2 allocation, service restart, deployment, merge, tag, or release is authorized or performed.
+
+### DEF-043: Defer hydrate-then-materialize composition
+- `id`: DEF-043
+- `date`: 2026-09-06
+- `status`: active
+- `triggered_by`: BOT-006 and DEC-101's archive-only Usable Slice boundary
+- `decision`: Do not add implicit remote acquisition, catalog discovery, selection mutation, or Fill execution to Usable Slice. Report every artifact without a qualifying archived source as an exact blocking gap. A future workflow may explicitly compose an independently previewed and approved archive-acquisition transaction with a later Usable Slice transaction, but the two receipts and authorities must remain distinct.
+- `rationale`: Hydration is technically solvable but would make a delivery approval authorize new remote bytes, archive placement, and possibly changed durability obligations. That is unnecessary for the first operator need and would obscure whether a slice is recoverable from the existing ark.
+- `revisit_when`: The operator explicitly requests a hydrate-then-materialize workflow, or repeated real slice requests show that the archive-only contract is insufficient and the prerequisite catalog/Fill transaction boundaries can be specified without implicit authority.
+- `impact`: The first implementation stops at a non-executable gap report when archive evidence is absent. Spark catalog expansion proceeds separately, and a later composition can reuse its normal acquisition results without changing Usable Slice semantics.
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
+- `related`: DEC-081, DEF-041, DEF-CATALOG-005, DIS-005, DEC-098, BOT-006, DEC-101
+
+### DEC-102: Preserve slice progress with source-use gates and owned crash recovery
+- `id`: DEC-102
+- `date`: 2026-09-06
+- `status`: accepted
+- `triggered_by`: PR #67 lifecycle/checkpoint finding and completed Codex review of `1e09833`; operator agreement to resolve all five contracts and prepare development.
+- `decision`:
+  1. Check source lifecycle and exact clean generation/file evidence at each use under the archive mutation fence. A changed candidate becomes unavailable; use only a still-qualifying sealed alternative or retain the same transaction in a typed source block. Preserve completed digest-verified checkpoints and their provenance. Offline clean sources remain schedulable; dirty or unproven residency requires separate reconciliation.
+  2. Start combines an idempotent transaction CAS with exclusive local destination-device ownership. Persist unfinished-output ownership across stops and crashes, include surviving writer children in the fence, and prohibit takeover by another seal. The first implementation is single-host direct USB.
+  3. Persist transaction-bound creation intents before writes, verify and flush owned temporary files, publish without replacement, flush directory metadata, and record completion. Recovery authenticates ownership and operation records, reconciles interrupted publication, and revalidates bytes; matching names or digests cannot adopt unrelated output. Journal in-flight allocation for capacity recovery.
+  4. Keep destination operations rooted in a verified filesystem descriptor, revalidate identity at publication and resume boundaries, and refuse mount/symlink substitutions. Detachment must never redirect writes into the host filesystem.
+  5. Prepare development as domain contracts, transaction/recovery, then direct-USB integration with disposable fixtures. Finish the renewed bounded PR #67 review before operator merge and implementation. Real destination writes remain a separate attended gate.
+- `rationale`: Whole-seal invalidation for a source lifecycle change stranded verified output behind successor collision rules. Per-use eligibility preserves immutable approval and useful progress without silently approving new sources. Durable intents, exclusive ownership, and device-bound writes make resume safe across crashes, retries, and unplug events. Cross-successor checkpoint adoption is unnecessary for the first slice and remains unsupported.
+- `impact`: Resolves the five current architecture findings in the Usable Slice charter and defines testable development boundaries. No production implementation or live runtime action is included; the existing revision-11 Fill remains independent.
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
+- `related`: DEC-045, DEC-049, DEC-081, DEC-098, DEC-101, DEF-041, DEF-043
+
+### DEC-103: Separate offline source validation and placement exclusion from slice reads
+- `id`: DEC-103
+- `date`: 2026-09-06
+- `status`: accepted
+- `triggered_by`: Completed Codex review of PR #67 head `0e0001f` and verification against the existing lifecycle/eligibility matrix in `tests/test_lifecycle_eligibility.py`.
+- `decision`: Refine DEC-102's implementation contract: seal lexically safe offline source paths and prove descriptor confinement after attachment before each read; permit otherwise qualifying lifecycle-active sources whose placement eligibility is excluded; durably flush and checkpoint every created directory's parent entry before creating children or publishing completion; persist the actual source candidate and its epoch/generation, anchor, and file provenance with each prepared/completed file and receipt.
+- `rationale`: Offline scheduling cannot require an absent filesystem to resolve during preview. Placement exclusion does not revoke existing readable copies. File flushes alone do not make ancestor directory entries durable, and an approved list of alternatives does not identify which source supplied a delivered file.
+- `impact`: Corrects the charter's excluded-source and offline-resolution wording and completes its directory-durability and per-file provenance contracts. Adds acceptance cases within the existing three development slices; no production or runtime change.
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
+- `related`: DEC-081, DEC-101, DEC-102, DEF-041, tests/test_lifecycle_eligibility.py
