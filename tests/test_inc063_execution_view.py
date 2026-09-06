@@ -23,7 +23,11 @@ def _task(requirement_id, repo, target, *, kind="executable", source=None, size=
 
 def _session_start():
     baseline = _task(
-        "protected_home:old", "org/old", "drive-00",
+        "primary:old", "org/old", "drive-00",
+        kind="baseline_satisfied", size=100,
+    )
+    baseline_replica = _task(
+        "replica:old", "org/old", "drive-04",
         kind="baseline_satisfied", size=100,
     )
     drive_zero = _task("primary:new", "org/new", "drive-00", size=20)
@@ -41,7 +45,7 @@ def _session_start():
     )
     start._proposal = {
         "proposal_id": "proposal-11",
-        "tasks": [baseline, drive_zero, drive_seven, landed],
+        "tasks": [baseline, baseline_replica, drive_zero, drive_seven, landed],
     }
     return start
 
@@ -60,20 +64,43 @@ def test_build_preserves_approved_baseline_and_admitted_projection_counts():
     assert view["bound_revision"] == 11
     assert view["batch_order"] == ["drive-00", "drive-07"]
     assert view["totals"] == {
-        "approved_requirements": 4,
-        "baseline_satisfied": 1,
+        "approved_requirements": 5,
+        "baseline_satisfied": 2,
         "approved_executable": 3,
         "remaining_at_start": 2,
         "satisfied_since_approval": 1,
     }
     assert drives["drive-00"]["baseline_satisfied"] == 1
     assert drives["drive-00"]["tier"] == "raid"
+    assert drives["drive-04"]["tier"] == "replica"
     assert drives["drive-07"]["tier"] == "primary"
     assert drives["drive-00"]["approved_requirements"] == 2
     assert drives["drive-00"]["remaining_at_start"] == 1
     assert drives["drive-00"]["remaining_guaranteed_bytes"] == 20
     assert drives["drive-07"]["satisfied_since_approval"] == 1
     assert [model["repo"] for model in drives["drive-07"]["models"]] == ["org/large"]
+
+
+def test_build_decodes_stored_primary_replica_vocabulary_for_card_grouping():
+    home = _task("primary:protected", "org/protected", "drive-00")
+    replica = _task("replica:protected", "org/protected", "drive-04")
+    projection = ExecutionProjection(
+        proposal_id="proposal-protected",
+        tasks=(home, replica),
+        projection_hash=canonical_projection_hash((home, replica)),
+    )
+    start = SimpleNamespace(
+        session=SimpleNamespace(session_id="session-protected", bound_planner_revision=12),
+        projection=projection,
+        _proposal={"proposal_id": "proposal-protected", "tasks": [home, replica]},
+    )
+
+    drives = {row["label"]: row for row in execution_view.build(start)["drives"]}
+
+    assert drives["drive-00"]["tier"] == "raid"
+    assert drives["drive-00"]["models"][0]["copy"] == "1"
+    assert drives["drive-04"]["tier"] == "replica"
+    assert drives["drive-04"]["models"][0]["copy"] == "2"
 
 
 def test_runtime_labels_every_drive_and_keeps_skipped_access_visible():
@@ -130,6 +157,24 @@ def test_runtime_maps_typed_drive_stops_without_reassigning_other_drives():
     assert drives["drive-07"]["state"] == "capacity_stop"
     assert drives["drive-00"]["models"][0]["repo"] == "org/new"
     assert drives["drive-07"]["models"][0]["repo"] == "org/large"
+
+    failed = execution_view.with_runtime_state({
+        "status": "failed", "drive": "drive-07",
+        "code": "PROJECTION_REFRESH_FAILED", "execution_plan": plan,
+    })
+    assert _drives(failed)["drive-07"]["state"] == "error"
+
+    source_offline = execution_view.with_runtime_state({
+        "status": "paused", "drive": "drive-04", "awaiting_drive": "drive-00",
+        "code": "SOURCE_UNAVAILABLE",
+        "evidence": {
+            "source_offline": True, "deferred_sources": ["drive-00"],
+            "deferred_targets": ["drive-04"],
+        },
+        "execution_plan": plan,
+    })
+    assert _drives(source_offline)["drive-00"]["state"] == "waiting_for_drive"
+    assert _drives(source_offline)["drive-04"]["state"] == "satisfied"
 
 
 def test_runtime_maps_dependency_evidence_and_ignores_stale_drive_while_awaiting():
@@ -215,13 +260,19 @@ def test_fill_start_binds_the_execution_view_before_worker_launch(monkeypatch):
 
     monkeypatch.setattr(execution_service, "start_fill", lambda **_kwargs: start)
     monkeypatch.setattr(fill_api.fill_worker, "WORKER", Worker())
+    monkeypatch.setattr(fill_api, "_read_archived_total", lambda label: {"drive-00": 90}[label])
     monkeypatch.setattr(fill_api.wishlist, "download", lambda: {"max_24h_gb": 0})
     monkeypatch.setattr(fill_api.data, "conn", lambda: object())
 
     assert fill_api.start({}) == {"ok": True}
     assert callable(captured["work"])
     assert captured["initial_state"]["execution_plan"]["session_id"] == "session-11"
-    assert captured["initial_state"]["execution_plan"]["totals"]["baseline_satisfied"] == 1
+    assert captured["initial_state"]["execution_plan"]["totals"]["baseline_satisfied"] == 2
+    bound_drives = {
+        row["label"]: row for row in captured["initial_state"]["execution_plan"]["drives"]
+    }
+    assert bound_drives["drive-00"]["archived_bytes_at_start"] == 90
+    assert bound_drives["drive-07"]["archived_bytes_at_start"] is None
 
 
 def test_fill_status_publishes_runtime_view_without_internal_worker_key(monkeypatch):

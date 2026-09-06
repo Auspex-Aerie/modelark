@@ -116,6 +116,17 @@ def _read_archived_total(label: str) -> int:
     return int((row or [0])[0] or 0)
 
 
+def _bind_execution_occupancy(execution: dict) -> dict:
+    """Capture durable pre-run occupancy for every exact drive, including advisory omissions."""
+    for row in execution.get("drives", ()):
+        try:
+            row["archived_bytes_at_start"] = _read_archived_total(str(row["label"]))
+        except Exception:
+            # Display enrichment is fail-open and must never refuse an admitted Fill.
+            row["archived_bytes_at_start"] = None
+    return execution
+
+
 def _observe_archive_change(worker: fill_worker.FillWorker, ev: dict) -> None:
     """Refresh one changed drive without granting its event authority over other drives.
 
@@ -211,7 +222,7 @@ def start(body: dict) -> dict:
 
     max_24h_gb = float(body["max_24h_gb"]) if "max_24h_gb" in body else wishlist.download()["max_24h_gb"]
     session_start = svc
-    exact_execution = execution_view.build(session_start)
+    exact_execution = _bind_execution_occupancy(execution_view.build(session_start))
 
     def work(should_stop, emit):
         log = telemetry.get_logger("fill")

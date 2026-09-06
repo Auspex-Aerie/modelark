@@ -1203,7 +1203,7 @@ def _browser_flow() -> None:
                         "approved_executable": 3, "remaining_at_start": 3,
                         "satisfied_since_approval": 0,
                     },
-                    "links": [],
+                    "links": [{"from": "drive-00", "to": "drive-07"}],
                     "drives": [
                         {
                             "label": "drive-00", "approved_requirements": 120,
@@ -1223,6 +1223,7 @@ def _browser_flow() -> None:
                         {
                             "label": "drive-07", "approved_requirements": 2,
                             "tier": "primary",
+                            "archived_bytes_at_start": 7_000_000_000,
                             "baseline_satisfied": 0, "satisfied_since_approval": 0,
                             "approved_executable": 2, "remaining_at_start": 2,
                             "approved_guaranteed_bytes": 5_000_000_000,
@@ -1259,6 +1260,7 @@ def _browser_flow() -> None:
             pg.evaluate("window.loadFill()")
             pg.wait_for_selector("#dc-drive-07.execution-writing")
             assert pg.inner_text("#dc-drive-07 .execution-state") == "Writing now"
+            assert "7GB archived" in pg.inner_text("#dc-drive-07 .dcdone")
             assert pg.inner_text("#dc-drive-00 .execution-state") == "Approved for later"
             drive_zero_card = pg.inner_text("#dc-drive-00")
             assert "119 already satisfied" in drive_zero_card
@@ -1270,6 +1272,25 @@ def _browser_flow() -> None:
                     break
                 time.sleep(0.1)
             assert "planning view" in pg.inner_text("#planBars").lower()
+            assert pg.locator("#fillGraph svg .linkpath").count() == 1
+            pg.set_viewport_size({"width": 1180, "height": 760})
+            pg.wait_for_timeout(100)
+            assert pg.locator("#fillGraph svg .linkpath").count() == 1
+
+            # A live exact Fill remains renderable even when advisory reconciliation fails on a
+            # fresh page load; status is execution authority and the plan request is enrichment.
+            pg.unroute("**/api/library/plan")
+            pg.route(
+                "**/api/library/plan",
+                lambda route: route.fulfill(
+                    status=500, content_type="application/json",
+                    body=json.dumps({"error": "advisory unavailable"}),
+                ),
+            )
+            pg.reload()
+            pg.click("button[data-view='fill']")
+            pg.wait_for_selector("#dc-drive-07.execution-writing")
+            assert "7GB archived" in pg.inner_text("#dc-drive-07 .dcdone")
             pg.unroute("**/api/fill/status")
             pg.unroute("**/api/library/plan")
             print("  exact execution assignments + semantic drive states replaced advisory cards")

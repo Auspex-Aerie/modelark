@@ -46,18 +46,29 @@ def _target(task: Mapping) -> str:
     return str(task.get("target_drive") or task.get("satisfying_drive") or "")
 
 
-def _copy_kind(task: Mapping) -> str:
-    if task.get("source_drive"):
+def _is_replica(task: Mapping) -> bool:
+    requirement = str(task.get("requirement_id") or "")
+    return requirement.startswith(("replica:", "protected_replica:"))
+
+
+def _is_protected_home(task: Mapping, protected_repos: set[str]) -> bool:
+    requirement = str(task.get("requirement_id") or "")
+    repo = str(task.get("repo_id") or "")
+    return requirement.startswith("protected_home:") or (
+        requirement.startswith("primary:") and repo in protected_repos
+    )
+
+
+def _copy_kind(task: Mapping, protected_repos: set[str]) -> str:
+    if _is_replica(task) or task.get("source_drive"):
         return "2"
-    requirement = str(task.get("requirement_id") or "")
-    return "1" if requirement.startswith("protected_home:") else "bulk"
+    return "1" if _is_protected_home(task, protected_repos) else "bulk"
 
 
-def _tier(task: Mapping) -> str:
-    requirement = str(task.get("requirement_id") or "")
-    if requirement.startswith("protected_home:"):
+def _tier(task: Mapping, protected_repos: set[str]) -> str:
+    if _is_protected_home(task, protected_repos):
         return "raid"
-    if requirement.startswith("protected_replica:") or task.get("source_drive"):
+    if _is_replica(task) or task.get("source_drive"):
         return "replica"
     return "primary"
 
@@ -76,6 +87,11 @@ def build(session_start: Any) -> dict:
     approved = [_task_dict(task) for task in (_get(proposal, "tasks", ()) or ())]
     if not approved:
         approved = list(projected)
+    protected_repos = {
+        str(task.get("repo_id") or "")
+        for task in (*approved, *projected)
+        if _is_replica(task) and task.get("repo_id")
+    }
 
     remaining_ids = {
         str(task.get("requirement_id")) for task in projected if task.get("requirement_id") is not None
@@ -101,7 +117,7 @@ def build(session_start: Any) -> dict:
         if not label:
             continue
         row = drive_row(label)
-        task_tier = _tier(task)
+        task_tier = _tier(task, protected_repos)
         if _TIER_PRIORITY[task_tier] > _TIER_PRIORITY[row["tier"]]:
             row["tier"] = task_tier
         row["approved_requirements"] += 1
@@ -127,7 +143,7 @@ def build(session_start: Any) -> dict:
             "requirement_id": task.get("requirement_id"),
             "repo": task.get("repo_id"),
             "size": size,
-            "copy": _copy_kind(task),
+            "copy": _copy_kind(task, protected_repos),
             "schedule_state": task.get("schedule_state") or "ready",
         })
         source = str(task.get("source_drive") or "")
@@ -227,8 +243,10 @@ def with_runtime_state(status: Mapping) -> dict:
     unavailable_source_drives = set()
     if code == "SOURCE_UNAVAILABLE" and isinstance(evidence, Mapping):
         unavailable_source_drives.update(
-            str(label) for label in (evidence.get("deferred_targets") or ())
+            str(label) for label in (evidence.get("deferred_sources") or ())
         )
+        if awaiting:
+            unavailable_source_drives.add(awaiting)
     typed_drive = str(evidence.get("drive") or "") if isinstance(evidence, Mapping) else ""
     completed_total = 0
 
@@ -279,7 +297,7 @@ def with_runtime_state(status: Mapping) -> dict:
             state = "stopped"
         elif (
             label == current
-            and terminal in {"error", "blocked", "paused"}
+            and terminal in {"error", "failed", "blocked", "paused"}
             and code not in {
                 "DRIVE_UNAVAILABLE", "DRIVE_UNWRITABLE", "PLAN_CAPACITY_STOP",
                 "SOURCE_UNAVAILABLE", "WAITING_DEPENDENCY",

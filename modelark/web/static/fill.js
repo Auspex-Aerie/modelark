@@ -16,7 +16,7 @@
     ["primary", "Primary · bulk (re-fetchable, 1 copy)"],
     ["replica", "Replication · must-have copy #2"],
   ];
-  let mode = "type", last = null, statusTimer = null, lastStatus = null, archivedBy = {}, capacityBy = {}, pollFails = 0, queueSig = null, queueCentered = false, renderedExecutionSig = null;
+  let mode = "type", last = null, displayed = null, statusTimer = null, lastStatus = null, archivedBy = {}, capacityBy = {}, pollFails = 0, queueSig = null, queueCentered = false, renderedExecutionSig = null;
   let queueModels = null, queueDrives = null, placedMap = {}, lastQueueRepo = null, placedLoaded = false;   // one-row-per-model queue state
 
   const hashColor = s => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${h % 360} 42% 50%)`; };
@@ -230,13 +230,17 @@
     (queueModels || []).forEach(m => { if (m.repo) categories[m.repo] = m.category; });
     const drives = view.drives.map(exact => {
       const advisory = advisoryByDrive[exact.label];
+      const liveArchived = (s && s.archived_by_drive) || {};
+      const archived = Object.prototype.hasOwnProperty.call(liveArchived, exact.label)
+        ? liveArchived[exact.label]
+        : (advisory ? advisory.archived_bytes : exact.archived_bytes_at_start);
       const d = advisory || {
         label: exact.label, tier: exact.tier || "primary", lifecycle: "active",
         eligibility: "enabled", capacity: null, usable: 0,
-        archived_bytes: ((s && s.archived_by_drive) || {})[exact.label] || 0,
       };
       const models = exact.models.map(m => ({...m, category: categories[m.repo] || "?"}));
       return {...d, execution: exact, execution_metadata_current: !!advisory,
+              archived_bytes: Number.isFinite(archived) ? archived : 0,
               models, n_models: exact.remaining_at_start,
               planned_bytes: exact.remaining_guaranteed_bytes};
     });
@@ -289,10 +293,11 @@
     if (drew) graph.appendChild(svg);
   }
 
-  function render(data) {
-    last = data;
+  function render(data, advisoryAvailable = true) {
+    if (advisoryAvailable) last = data;
     ensureStyle();
     const shown = displayData(data, lastStatus);
+    displayed = shown;
     renderedExecutionSig = executionSignature(lastStatus);
     archivedBy = {}; capacityBy = {};
     shown.drives.forEach(d => {
@@ -308,8 +313,10 @@
     }
     graph.innerHTML = html + legend(shown);
     requestAnimationFrame(() => drawLinks(shown));
-    document.getElementById("fillAdvisories").innerHTML =
-      (data.advisories || []).map(a => `<div class="fadv ${esc(a.level)}">${esc(a.msg)}</div>`).join("");
+    if (advisoryAvailable) {
+      document.getElementById("fillAdvisories").innerHTML =
+        (data.advisories || []).map(a => `<div class="fadv ${esc(a.level)}">${esc(a.msg)}</div>`).join("");
+    }
     const exactTotals = lastStatus && lastStatus.execution && lastStatus.execution.totals;
     const t = data.totals || {};
     document.getElementById("fillNote").textContent = exactTotals
@@ -317,9 +324,9 @@
       : `${t.n_planned} to place · ${t.n_must} must-have · ${t.n_bulk} bulk` +
         (t.n_blocked ? ` · ${t.n_blocked} blocked` : "") + (t.n_done ? ` · ${t.n_done} done` : "");
     const start = document.getElementById("fillStart");
-    if (window.MA.proposal) {
+    if (advisoryAvailable && window.MA.proposal) {
       window.MA.proposal.setPlanState(data);
-    } else if (start) {
+    } else if (advisoryAvailable && start) {
       start.disabled = data.feasible === false;
       start.title = data.feasible === false
         ? `Plan admission blocked: ${(data.blocking_diagnostics || []).join(", ")}` : "";
@@ -580,8 +587,8 @@
 
   function renderCards(s) {
     const nextExecutionSig = executionSignature(s);
-    if (last && nextExecutionSig !== renderedExecutionSig) {
-      render(last);
+    if (nextExecutionSig !== renderedExecutionSig && (last || (s && s.execution))) {
+      render(last || {drives: [], links: [], advisories: [], totals: {}}, !!last);
       return;
     }
     // A stored event carries post-commit durable totals. Use those as replacement values: cumulative
@@ -842,10 +849,17 @@
     const graph = document.getElementById("fillGraph");
     graph.innerHTML = '<div class="fillloading">planning…</div>';
     document.getElementById("fillAdvisories").innerHTML = "";
+    const showPlanError = message => {
+      if (lastStatus && lastStatus.execution) {
+        render({drives: [], links: [], advisories: [], totals: {}}, false);
+      } else {
+        graph.innerHTML = '<div class="fillloading">error: ' + esc(message) + '</div>';
+      }
+    };
     MA.api("/api/library/plan").then(d => {
-      if (!d || d.error) { graph.innerHTML = '<div class="fillloading">error: ' + esc((d && d.error) || "no data") + '</div>'; return; }
+      if (!d || d.error) { showPlanError((d && d.error) || "no data"); return; }
       render(d);
-    }).catch(e => { graph.innerHTML = '<div class="fillloading">error: ' + esc((e && e.message) || e) + '</div>'; });
+    }).catch(e => { showPlanError((e && e.message) || e); });
     // one-row-per-model queue: pull the heavy structure once, then the cheap live per-model state
     MA.api("/api/library/queue").then(d => {
       if (d && !d.error) { queueModels = d.models; queueDrives = d.drives; }
@@ -869,7 +883,7 @@
     const bd = document.getElementById("blockedDismiss"), br = document.getElementById("blockedReplan");
     if (bd) bd.onclick = dismissBlocked;
     if (br) br.onclick = replanBlocked;
-    window.addEventListener("resize", () => { if (last) drawLinks(last); });
+    window.addEventListener("resize", () => { if (displayed) drawLinks(displayed); });
   }
   if (document.readyState !== "loading") wire(); else document.addEventListener("DOMContentLoaded", wire);
 })();

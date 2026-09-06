@@ -1348,6 +1348,8 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
     The task graph may choose a different source for each repository.  A stale target row is checked
     before every key, copy publication is verified through ``annex whereis --key`` against the
     registered target UUID, and only that verified file is then mirrored into ``archived``.
+    Deferred source and target labels are reported separately so an operator prompt can identify
+    the physical drive that is actually unavailable.
     """
     own = ctx is None
     con = db.connect() if own else ctx.con
@@ -1356,6 +1358,7 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
     result = {
         "deferred": False,
         "source_offline": False,
+        "deferred_sources": [],
         "deferred_targets": [],
         "copied_targets": [],
         "copied_files": 0,
@@ -1393,6 +1396,7 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
             # writability probe runs after dirtying, inside the envelope.
             if source_path is None or not Path(source_path).exists():
                 result.update(deferred=True, source_offline=True)
+                result["deferred_sources"].append(source)
                 result["deferred_targets"].append(target)
                 ctx.on_progress({
                     "phase": "awaiting-drive", "awaiting_drive": source,
@@ -1634,6 +1638,7 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                     "requirements": [task.requirement_id for task in group],
                 })
         result["deferred_targets"] = sorted(set(result["deferred_targets"]))
+        result["deferred_sources"] = sorted(set(result["deferred_sources"]))
         result["copied_targets"] = sorted(set(result["copied_targets"]))
         result["completed_requirements"] = sorted(set(result["completed_requirements"]))
         result["progressed_requirements"] = sorted(set(result["progressed_requirements"]))

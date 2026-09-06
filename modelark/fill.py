@@ -1203,6 +1203,7 @@ def _drain_projection(
                     "copy #1 is safe; copy #2 is deferred until its drive is available",
                     code="SOURCE_UNAVAILABLE", gate="C",
                     evidence={"source_offline": outcome["source_offline"],
+                              "deferred_sources": outcome.get("deferred_sources", []),
                               "deferred_targets": outcome["deferred_targets"]},
                     actions=["mount_or_reseat_drive", "start_fill"],
                 )

@@ -807,11 +807,35 @@ def test_run_replica_defers_on_offline_source(tmp_path):
     assert any(e.get("awaiting_drive") == "drive-00" for e in events), "should prompt to re-seat the source"
 
 
+def test_exact_replica_reports_the_unavailable_source_drive(tmp_path):
+    events = []
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    con.execute("CREATE TABLE drives(drive_label TEXT PRIMARY KEY, annex_uuid TEXT)")
+    con.execute("INSERT INTO drives VALUES('drive-04', 'target-uuid')")
+    task = types.SimpleNamespace(
+        source_drive="drive-00", target_drive="drive-04",
+        requirement_id="replica:org/model",
+    )
+
+    with mock.patch.object(
+        fetch.register, "archive_path",
+        side_effect=lambda _con, label: None if label == "drive-00" else tmp_path,
+    ):
+        result = fetch.run_replica_tasks(
+            [task], ctx=fetch.RunCtx(con=con, on_progress=events.append),
+        )
+
+    assert result["deferred_sources"] == ["drive-00"]
+    assert result["deferred_targets"] == ["drive-04"]
+    assert any(event.get("awaiting_drive") == "drive-00" for event in events)
+
+
 def test_gatec_pauses_on_deferred_copy2(tmp_path):
     con, calls, fake_run, _ = _executor_harness()
 
     def deferring_replica(tasks, ctx=None):
         return {"deferred": True, "source_offline": True,
+                "deferred_sources": [tasks[0].source_drive],
                 "deferred_targets": [tasks[0].target_drive], "copied_targets": [],
                 "copied_files": 0, "failed": []}
 
@@ -820,6 +844,7 @@ def test_gatec_pauses_on_deferred_copy2(tmp_path):
          mock.patch.object(fill, "_await_drive", return_value=True):
         res = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
     assert res["state"] == "paused" and res["code"] == "SOURCE_UNAVAILABLE", res
+    assert res["evidence"]["deferred_sources"] == ["drive-00"]
     assert res["ok"] is False and res["stopped"] is False
     assert con.execute(
         "SELECT count(DISTINCT drive_label) FROM archived WHERE repo_id='must'"
