@@ -2,7 +2,7 @@
 
 Status: architecture locked; implementation has not started  
 Updated: 2026-09-06  
-Decision anchors: DEC-081, DEC-098, BOT-006, DEC-101, DEC-102, DEF-041, DEF-043
+Decision anchors: DEC-081, DEC-098, BOT-006, DEC-101, DEC-102, DEC-103, DEF-041, DEF-043
 
 ## Outcome
 
@@ -42,9 +42,10 @@ Eligibility is evaluated for every file in the frozen closure, not merely for ev
 
 A file is **source-ready** when ModelArk can resolve at least one archive copy with the required
 artifact identity, content digest, provenance evidence, stable physical drive identity, and an
-active lifecycle state. Lost, excluded, retired, or otherwise inactive drives retain historical
-evidence but cannot satisfy slice recoverability. The eligible drive does not need to be attached
-during preview.
+active lifecycle state. Lost, retired, or otherwise inactive drives retain historical evidence but
+cannot satisfy slice recoverability. Placement eligibility is separate: an `active + excluded`
+drive remains a valid read source if its other evidence qualifies; exclusion only forbids new
+archive placement. The eligible drive does not need to be attached during preview.
 
 Qualifying residency requires both the per-file archive/provenance record and a clean anchor for
 the drive's exact current identity epoch and write generation, with matching identity fingerprint
@@ -76,14 +77,19 @@ Never add a newly discovered source to an approved seal. Source changes do not r
 digest-verified checkpoints or retrospectively invalidate their recorded provenance; final
 destination verification remains mandatory. Before the first write, unexplained capacity drift
 invalidates the seal. After execution starts, remaining-capacity checks account for the
-transaction's own journaled writes and
-invalidate only unexplained external consumption or mutation.
+transaction's own journaled writes and invalidate only unexplained external consumption or mutation.
 
 ## Filesystem and device safety
 
-Every source and output path must pass lexical and resolved confinement before it enters a sealed
-closure or transfer plan. Reject absolute paths, parent traversal, platform-separator ambiguity,
-NULs, and any destination ancestor or symlink that escapes the approved root. Source reads use the
+Every source and output path must pass lexical confinement before it enters a sealed closure or
+transfer plan. Reject absolute paths, parent traversal, platform-separator ambiguity, and NULs.
+For offline sources, seal the safe relative catalog path and proven archive identity without
+resolving an unavailable filesystem. On attachment, under the source fence and before each read,
+prove device identity and descriptor-relative confinement, including annex link targets; reject
+escaping symlinks and mount substitutions without a check/open race. Attached source observations
+at preview do not replace this execution check. Destination paths additionally require resolved
+confinement of their existing ancestors at preview/Start and bound descriptor access during writes;
+reject any ancestor or symlink that escapes the approved root. Source reads use the
 archive's local annex evidence but require a retrieval-disabled reader: it may resolve and read
 locally present annex content but must never run `git annex get`, contact a configured remote, or
 mutate the source archive. Missing local content makes that candidate unavailable; execution uses
@@ -144,11 +150,23 @@ Start. Journal records bind the seal, destination identity, relative path, opera
 expected digest/size, and transaction-owned temporary name. Names or matching hashes alone never
 establish ownership of unrelated existing content.
 
+Each file's prepared/completed record also binds the actual sealed source candidate read: archive
+drive identity, identity epoch, write generation, clean-anchor reference, annex/artifact identity,
+and per-file provenance/digest evidence observed under the source fence. A fallback records the
+chosen alternative, not merely the candidate list. Completion references the durable prepared
+record, and the final receipt carries these actual per-file sources alongside the approved source
+set. Later lifecycle changes cannot rewrite that history. Incomplete data with no authenticated
+source record cannot become completion merely by matching a digest; restart that file from a
+currently qualifying sealed source or block.
+
 Each directory creation, file publication, and receipt publication follows a recoverable protocol:
 
 1. Durably append an intent before creating a transaction-owned path. Create directories and
    temporary files exclusively through the bound destination descriptor; record parent/child
-   ownership, including creation of the consumer root. Unexpected content is a collision.
+   ownership, including creation of the consumer root. For every new directory, flush its metadata
+   and its entry in the parent directory, then durably append directory completion before creating
+   children. Apply this to the private state/control directories as well as the consumer layout;
+   the pre-existing destination root is the durability boundary. Unexpected content is a collision.
 2. Stream into the owned temporary file, verify the required original-byte digest and size, flush
    the file, and durably record its prepared state. Journal in-flight allocation as well as completed
    files so crash recovery can reconcile the transaction's own capacity consumption.
@@ -273,6 +291,8 @@ Archive Reshape follows as a separate transaction after the materialization core
 - Catalog-only and cache-only fixtures produce exact blocking gaps and zero remote fetch attempts.
 - A fixture whose only historical archive row belongs to a lost or inactive drive produces a
   blocking gap rather than an impossible drive request.
+- An otherwise qualifying `active + excluded` drive remains an executable read source, mounted or
+  offline. Toggling placement eligibility alone neither invalidates the slice nor blocks reads.
 - Dirty, missing-anchor, old-epoch, old-generation, and mismatched-fingerprint sources cannot
   establish readiness from retained archive rows; a clean alternate may qualify. A capacity anchor
   without qualifying per-file provenance is insufficient. No source check repairs the archive.
@@ -281,7 +301,8 @@ Archive Reshape follows as a separate transaction after the materialization core
   with no new source approval, implicit fetch, or successor adoption. Source-fence contention waits
   without interrupting Fill. Source digest mismatch never produces a completed checkpoint.
 - Offline qualifying sources produce attended drive requests and resume without replanning completed
-  work.
+  work. Preview never resolves paths on an offline source; attachment performs confined descriptor
+  resolution before reads and rejects escaping annex links or replaced mounts.
 - Closure identity is the immutable per-file manifest and digests; absent historical commit SHAs are
   never synthesized from a current remote lookup.
 - Approval and Start are separate; drift cannot silently substitute a source or destination.
@@ -298,7 +319,11 @@ Archive Reshape follows as a separate transaction after the materialization core
 - Fault injection covers intent persistence, directory/root creation, partial temporary writes,
   file flush, prepared record, no-replace publication, directory flush, completion append, and
   receipt publication. Recovery recognizes only owned intents, revalidates bytes, accounts for
-  temporary allocations, and rejects unknown content even when its digest matches.
+  temporary allocations, and rejects unknown content even when its digest matches. Inject failure
+  before/after each new directory's parent flush and completion append, including consumer-root
+  and state/control-directory creation; no durable receipt may depend on uncommitted directory entries.
+- Sealed-alternative fallback followed by stop/resume and a source lifecycle change retains the
+  actual per-file source identity, epoch/generation, anchor, and provenance in checkpoints and receipt.
 - Concurrent/retried Start, different roots or aliases on one device, a crashed owner, and a
   surviving child prove at most one writer. Stopped ownership cannot be stolen by another seal;
   failed partial acquisition is recoverable and a duplicate Start is idempotent.

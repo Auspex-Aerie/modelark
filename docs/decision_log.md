@@ -2530,3 +2530,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Resolves the five current architecture findings in the Usable Slice charter and defines testable development boundaries. No production implementation or live runtime action is included; the existing revision-11 Fill remains independent.
 - `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
 - `related`: DEC-045, DEC-049, DEC-081, DEC-098, DEC-101, DEF-041, DEF-043
+
+### DEC-103: Separate offline source validation and placement exclusion from slice reads
+- `id`: DEC-103
+- `date`: 2026-09-06
+- `status`: accepted
+- `triggered_by`: Completed Codex review of PR #67 head `0e0001f` and verification against the existing lifecycle/eligibility matrix in `tests/test_lifecycle_eligibility.py`.
+- `decision`: Refine DEC-102's implementation contract: seal lexically safe offline source paths and prove descriptor confinement after attachment before each read; permit otherwise qualifying lifecycle-active sources whose placement eligibility is excluded; durably flush and checkpoint every created directory's parent entry before creating children or publishing completion; persist the actual source candidate and its epoch/generation, anchor, and file provenance with each prepared/completed file and receipt.
+- `rationale`: Offline scheduling cannot require an absent filesystem to resolve during preview. Placement exclusion does not revoke existing readable copies. File flushes alone do not make ancestor directory entries durable, and an approved list of alternatives does not identify which source supplied a delivered file.
+- `impact`: Corrects the charter's excluded-source and offline-resolution wording and completes its directory-durability and per-file provenance contracts. Adds acceptance cases within the existing three development slices; no production or runtime change.
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
+- `related`: DEC-081, DEC-101, DEC-102, DEF-041, tests/test_lifecycle_eligibility.py
