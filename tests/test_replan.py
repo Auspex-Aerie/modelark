@@ -533,6 +533,8 @@ def test_executor_blocks_before_reconciliation_when_configured_hf_token_is_inval
 
 def test_executor_stops_batch_on_typed_fetch_terminal_after_durable_progress():
     con, calls, fake_run, fake_replica = _executor_harness()
+    progress = []
+    stored_requirements = []
     terminal = {
         "code": "TARGET_PATH_CONFLICT",
         "message": "archive target is not safely replaceable",
@@ -543,6 +545,7 @@ def test_executor_stops_batch_on_typed_fetch_terminal_after_durable_progress():
 
     def terminal_run(**kwargs):
         outcome = fake_run(**kwargs)
+        stored_requirements.extend(f"primary:{repo}" for repo in outcome["stored_repos"])
         outcome["terminal_failure"] = terminal
         outcome["terminal_repo"] = kwargs["repos"][-1]
         return outcome
@@ -550,10 +553,18 @@ def test_executor_stops_batch_on_typed_fetch_terminal_after_durable_progress():
     with mock.patch.object(fill.fetch, "run", side_effect=terminal_run), \
          mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=fake_replica), \
          mock.patch.object(fill, "_await_drive", return_value=True):
-        result = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
+        result = fill.execute(
+            fetch.RunCtx(con=con, on_progress=progress.append), guided=True, max_24h_gb=0,
+        )
     assert result["state"] == "paused" and result["code"] == "TARGET_PATH_CONFLICT", result
     assert result["failed"] and result["failed"][0]["repo"]
     assert len(calls) == 1, "a typed terminal must stop the batch without cycling repositories"
+    completions = [
+        event["execution_completed_requirements"] for event in progress
+        if "execution_completed_requirements" in event
+    ]
+    assert stored_requirements
+    assert set(stored_requirements) <= set(completions[-1])
 
 
 def test_dead_drive_parks_without_running_task():
@@ -895,6 +906,56 @@ def test_gatec_pauses_on_deferred_copy2(tmp_path):
     assert con.execute(
         "SELECT count(DISTINCT drive_label) FROM archived WHERE repo_id='must'"
     ).fetchone()[0] == 1
+
+
+def test_replica_defer_publishes_an_earlier_durable_completion():
+    con, _calls, fake_run, _ = _executor_harness()
+    con.execute("INSERT INTO models(repo_id,numcopies) VALUES('must2',2)")
+    con.execute(
+        "INSERT INTO selection(repo_id,finalized_at) VALUES('must2','2026-01-01')"
+    )
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+        "VALUES('must2','model.gguf',150,'gguf',NULL)"
+    )
+    progress = []
+    copied_requirement = []
+
+    def partial_replica(tasks, ctx=None):
+        assert len(tasks) == 2
+        task = tasks[0]
+        copied_requirement.append(task.requirement_id)
+        name = task.budget.missing_files[0]
+        row = con.execute(
+            "SELECT orig_sha256,orig_bytes,stored_bytes,compressed,annex_key FROM archived "
+            "WHERE repo_id=? AND rfilename=? AND drive_label=?",
+            [task.repo_id, name, task.source_drive],
+        ).fetchone()
+        con.execute(
+            "INSERT INTO archived"
+            "(repo_id,rfilename,drive_label,orig_sha256,orig_bytes,stored_bytes,compressed,annex_key) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            [task.repo_id, name, task.target_drive, *row],
+        )
+        return {
+            "deferred": True, "source_offline": False, "deferred_sources": [],
+            "deferred_targets": [tasks[1].target_drive], "copied_targets": [],
+            "copied_files": 1, "failed": [],
+        }
+
+    with mock.patch.object(fill.fetch, "run", side_effect=fake_run), \
+         mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=partial_replica), \
+         mock.patch.object(fill, "_await_drive", return_value=True):
+        result = fill.execute(
+            fetch.RunCtx(con=con, on_progress=progress.append), guided=True, max_24h_gb=0,
+        )
+
+    assert result["state"] == "paused" and result["code"] == "SOURCE_UNAVAILABLE"
+    completions = [
+        event["execution_completed_requirements"] for event in progress
+        if "execution_completed_requirements" in event
+    ]
+    assert copied_requirement[0] in completions[-1]
 
 
 def test_replica_records_only_after_target_uuid_proof(tmp_path):
