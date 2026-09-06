@@ -16,7 +16,7 @@ import time
 from datetime import datetime
 from modelark.core import db, telemetry
 from modelark import fetch, fill, register, wishlist
-from modelark.web import data, fill_worker
+from modelark.web import data, execution_view, fill_worker
 
 # DEF-023: persist a NON-DONE terminal fill outcome so the portal can surface it LOUDLY on open — it
 # survives a page reload AND a portal restart until the operator acknowledges it (INC-009 sat silent
@@ -211,6 +211,7 @@ def start(body: dict) -> dict:
 
     max_24h_gb = float(body["max_24h_gb"]) if "max_24h_gb" in body else wishlist.download()["max_24h_gb"]
     session_start = svc
+    exact_execution = execution_view.build(session_start)
 
     def work(should_stop, emit):
         log = telemetry.get_logger("fill")
@@ -260,7 +261,7 @@ def start(body: dict) -> dict:
             log.exception("fill worker error", error=str(e)[:200])
             raise
 
-    return fill_worker.WORKER.start(work)
+    return fill_worker.WORKER.start(work, initial_state={"execution_plan": exact_execution})
 
 
 def stop(body: dict | None = None) -> dict:
@@ -288,7 +289,7 @@ def status() -> dict:
             if _net["rx"] is not None and now > _net["t"]:
                 s = dict(s, net_rx_bps=max(0.0, (rx - _net["rx"]) / (now - _net["t"])))
             _net["rx"], _net["t"] = rx, now
-    return s
+    return execution_view.with_runtime_state(s)
 
 
 def confirm_drive(body: dict) -> dict:

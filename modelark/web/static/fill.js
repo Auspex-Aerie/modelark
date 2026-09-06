@@ -1,6 +1,5 @@
-// Fill view — the librarian's placement plan: drives grouped by tier, stacked fill bars,
-// a type/category toggle, and dotted copy#1→copy#2 links. Consumes /api/library/plan
-// (the same librarian.plan_view the CLI's `library plan --json` emits).
+// Fill view — the planning endpoint supplies the idle/advisory view. Once Fill starts, the drive
+// cards switch to the exact proposal + projection carried by /api/fill/status (INC-063).
 (function () {
   const {esc} = window.MA;
   const CAT = {
@@ -17,7 +16,7 @@
     ["primary", "Primary · bulk (re-fetchable, 1 copy)"],
     ["replica", "Replication · must-have copy #2"],
   ];
-  let mode = "type", last = null, statusTimer = null, plannedBy = {}, lastStatus = null, archivedBy = {}, capacityBy = {}, pollFails = 0, queueSig = null, queueCentered = false;
+  let mode = "type", last = null, statusTimer = null, plannedBy = {}, lastStatus = null, archivedBy = {}, capacityBy = {}, pollFails = 0, queueSig = null, queueCentered = false, renderedExecutionSig = null;
   let queueModels = null, queueDrives = null, placedMap = {}, lastQueueRepo = null, placedLoaded = false;   // one-row-per-model queue state
 
   const hashColor = s => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${h % 360} 42% 50%)`; };
@@ -39,16 +38,31 @@
       .drivecard.empty{opacity:.55;border-style:dashed}
       .drivecard.unavailable{opacity:1;border-color:#d9a5a1;background:#fff7f6}
       .drivecard.unavailable .dclabel{color:#8f2d27;text-decoration:line-through;text-decoration-thickness:2px}
+      .drivecard.execution-card{position:relative;overflow:hidden}
+      .drivecard.execution-card:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:#aeb7c2}
+      .drivecard.execution-writing{background:#f4f8fd;border-color:#2c5f8f;box-shadow:0 0 0 2px #2c5f8f33}
+      .drivecard.execution-writing:before{background:#2c5f8f}
+      .drivecard.execution-waiting_for_drive{background:#fffaf0;border-color:#c99738}.drivecard.execution-waiting_for_drive:before{background:#c99738}
+      .drivecard.execution-access_followup,.drivecard.execution-paused_unwritable,.drivecard.execution-capacity_stop,.drivecard.execution-error{background:#fff7f6;border-color:#b95b51}
+      .drivecard.execution-access_followup:before,.drivecard.execution-paused_unwritable:before,.drivecard.execution-capacity_stop:before,.drivecard.execution-error:before{background:#b14a40}
+      .drivecard.execution-complete,.drivecard.execution-satisfied{background:#f3faf8;border-color:#55a096}
+      .drivecard.execution-complete:before,.drivecard.execution-satisfied:before{background:#0f766e}
       .dchead{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}
       .dclabel{font:600 14px ui-monospace,Menlo,monospace}
       .dcstatus{display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap}
       .dcbadge{font:600 10px/1 ui-monospace,monospace;letter-spacing:.06em;padding:3px 7px;border-radius:3px;color:#fff}
       .dcbadge.raid{background:#0f766e}.dcbadge.primary{background:#2c5f8f}.dcbadge.replica{background:#a8620a}
       .dcstate{font:700 10px/1 ui-monospace,monospace;letter-spacing:.04em;padding:4px 7px;border-radius:3px;color:#fff;background:#a4342c}
+      .dcstate.execution-state{letter-spacing:0;text-transform:none;background:#687485}
+      .execution-writing .execution-state{background:#2c5f8f}.execution-waiting_for_drive .execution-state{background:#a96d08}
+      .execution-access_followup .execution-state,.execution-paused_unwritable .execution-state,.execution-capacity_stop .execution-state,.execution-error .execution-state{background:#a4342c}
+      .execution-complete .execution-state,.execution-satisfied .execution-state{background:#0f766e}
       .dcbar{height:22px;background:#eef1f6;border-radius:4px;overflow:hidden;border:1px solid #e0e5ec}
       .dcbarfill{display:flex;height:100%}
       .seg{height:100%;min-width:1px;flex:0 0 auto}
       .dcfoot{display:flex;justify-content:space-between;margin-top:8px;font:500 12px ui-monospace,monospace;color:#5c6675;font-variant-numeric:tabular-nums}
+      .dcevidence{margin-top:7px;font:500 11px/1.4 ui-monospace,monospace;color:#697586;font-variant-numeric:tabular-nums}
+      .dcattention{margin-top:7px;padding:6px 8px;border-radius:4px;background:#f7deda;color:#8f2d27;font:600 11px/1.35 ui-monospace,monospace;word-break:break-word}
       .filllegend{display:flex;flex-wrap:wrap;gap:12px;margin:22px 0 4px;font-size:12px;color:#333}
       .lgi{display:flex;align-items:center;gap:6px}
       .lgsw{width:12px;height:12px;border-radius:3px;flex:none}
@@ -155,14 +169,16 @@
   function driveCard(d) {
     const groups = {};
     for (const m of d.models) { const k = keyOf(m); groups[k] = (groups[k] || 0) + m.size; }
+    const exact = d.execution || null;
     const usable = d.usable || 0;
     const capacity = Number.isFinite(d.capacity) ? d.capacity : null;
     const archived = d.archived_bytes || 0;
     const planned = d.planned_bytes || 0;
     // The main bar is only new planned work against the current safe writable budget. Archived
     // occupancy is rendered separately against nominal device capacity below the card.
+    const segmentScale = exact ? (exact.remaining_guaranteed_bytes || 0) : usable;
     const segs = Object.entries(groups).sort((a, b) => b[1] - a[1]).map(([k, b]) =>
-      `<div class="seg" style="width:${(usable ? 100 * b / usable : 0).toFixed(2)}%;background:${color(k)}" title="${esc(keyLabel(k))} (planned): ${esc(MA.gb(b))}"></div>`).join("");
+      `<div class="seg" style="width:${(segmentScale ? 100 * b / segmentScale : 0).toFixed(2)}%;background:${color(k)}" title="${esc(keyLabel(k))}: ${esc(MA.gb(b))}"></div>`).join("");
     const badge = { raid: "RAID", primary: "PRIMARY", replica: "REPLICA" }[d.tier] || d.tier;
     const lifecycle = d.lifecycle || "unknown";
     const eligibility = d.eligibility || "unknown";
@@ -171,12 +187,47 @@
       .filter(Boolean).join(" · ").toUpperCase();
     const plannedRatio = Number.isFinite(d.fill_pct) ? d.fill_pct : (usable ? planned / usable : 0);
     const plannedPct = Math.max(0, Math.min(100, Math.round(100 * plannedRatio)));
-    return `<div class="drivecard${(d.n_models || archived) ? "" : " empty"}${unavailable ? " unavailable" : ""}" id="dc-${esc(d.label)}" data-lifecycle="${esc(lifecycle)}" data-eligibility="${esc(eligibility)}">
-      <div class="dchead"><span class="dclabel">${esc(d.label)}</span><span class="dcstatus"><span class="dcbadge ${esc(d.tier)}">${esc(badge)}</span>${unavailable ? `<span class="dcstate">⛔ ${esc(state)}</span>` : ""}</span></div>
-      <div class="dcbar" title="planned work against the safe writable budget"><div class="dcbarfill">${segs}</div></div>
-      <div class="dcfoot"><span>${plannedPct}% · ${MA.gb(planned)} / ${MA.gb(usable)} writable budget</span><span>${d.n_models} planned</span></div>
+    const exactClass = exact ? ` execution-card execution-${esc(exact.state)}` : "";
+    const exactState = exact ? `<span class="dcstate execution-state">${esc(exact.state_label)}</span>` : "";
+    const workItems = exact ? exact.remaining_at_start : 0;
+    const workWord = workItems === 1 ? "item" : "items";
+    const satisfied = exact ? exact.baseline_satisfied + exact.satisfied_since_approval : 0;
+    const exactFoot = exact
+      ? `<div class="dcfoot"><span>${esc(satisfied)} already satisfied</span><span>${esc(workItems)} ${workWord} at start</span></div>`
+        + `<div class="dcevidence">${esc(exact.approved_requirements)} approved requirements · ${esc(MA.gb(exact.remaining_guaranteed_bytes))} admitted charge at start</div>`
+        + ((exact.access_followups || []).length ? `<div class="dcattention">Access follow-up: ${exact.access_followups.map(esc).join(", ")}</div>` : "")
+      : `<div class="dcfoot"><span>${plannedPct}% · ${MA.gb(planned)} / ${MA.gb(usable)} writable budget</span><span>${d.n_models} planned</span></div>`;
+    const barTitle = exact ? "approved execution workload at Fill start" : "planned work against the safe writable budget";
+    return `<div class="drivecard${(d.n_models || archived || exact) ? "" : " empty"}${unavailable ? " unavailable" : ""}${exactClass}" id="dc-${esc(d.label)}" data-lifecycle="${esc(lifecycle)}" data-eligibility="${esc(eligibility)}">
+      <div class="dchead"><span class="dclabel">${esc(d.label)}</span><span class="dcstatus"><span class="dcbadge ${esc(d.tier)}">${esc(badge)}</span>${exactState}${unavailable ? `<span class="dcstate">⛔ ${esc(state)}</span>` : ""}</span></div>
+      <div class="dcbar" title="${barTitle}"><div class="dcbarfill">${segs}</div></div>
+      ${exactFoot}
       <div class="dcdone" id="done-${esc(d.label)}"${archived ? "" : " hidden"}>${archived ? doneRowHTML(archived, capacity) : ""}</div>
     </div>`;
+  }
+
+  function executionSignature(s) {
+    const view = s && s.execution;
+    if (!view || !Array.isArray(view.drives)) return "advisory";
+    return `${view.session_id}|${view.projection_hash}|` + view.drives
+      .map(d => `${d.label}:${d.state}:${(d.access_followups || []).join(",")}`).join("|");
+  }
+
+  function displayData(data, s) {
+    const view = s && s.execution;
+    if (!view || !Array.isArray(view.drives)) return data;
+    const exactByDrive = Object.fromEntries(view.drives.map(d => [d.label, d]));
+    const categories = {};
+    data.drives.forEach(d => d.models.forEach(m => { if (m.repo) categories[m.repo] = m.category; }));
+    (queueModels || []).forEach(m => { if (m.repo) categories[m.repo] = m.category; });
+    const drives = data.drives.map(d => {
+      const exact = exactByDrive[d.label];
+      if (!exact) return d;
+      const models = exact.models.map(m => ({...m, category: categories[m.repo] || "?"}));
+      return {...d, execution: exact, models, n_models: exact.remaining_at_start,
+              planned_bytes: exact.remaining_guaranteed_bytes};
+    });
+    return {...data, drives, links: view.links || []};
   }
 
   function legend(data) {
@@ -220,6 +271,8 @@
   function render(data) {
     last = data;
     ensureStyle();
+    const shown = displayData(data, lastStatus);
+    renderedExecutionSig = executionSignature(lastStatus);
     plannedBy = {}; archivedBy = {}; capacityBy = {};
     data.drives.forEach(d => {
       plannedBy[d.label] = d.planned_bytes;
@@ -229,18 +282,20 @@
     const graph = document.getElementById("fillGraph");
     let html = "";
     for (const [tier, label] of TIERS) {
-      const ds = data.drives.filter(d => d.tier === tier);
+      const ds = shown.drives.filter(d => d.tier === tier);
       if (!ds.length) continue;
       html += `<div class="tiergroup"><div class="tierhead">${label}</div><div class="tierrow">${ds.map(driveCard).join("")}</div></div>`;
     }
-    graph.innerHTML = html + legend(data);
-    requestAnimationFrame(() => drawLinks(data));
+    graph.innerHTML = html + legend(shown);
+    requestAnimationFrame(() => drawLinks(shown));
     document.getElementById("fillAdvisories").innerHTML =
       (data.advisories || []).map(a => `<div class="fadv ${esc(a.level)}">${esc(a.msg)}</div>`).join("");
+    const exactTotals = lastStatus && lastStatus.execution && lastStatus.execution.totals;
     const t = data.totals || {};
-    document.getElementById("fillNote").textContent =
-      `${t.n_planned} to place · ${t.n_must} must-have · ${t.n_bulk} bulk` +
-      (t.n_blocked ? ` · ${t.n_blocked} blocked` : "") + (t.n_done ? ` · ${t.n_done} done` : "");
+    document.getElementById("fillNote").textContent = exactTotals
+      ? `Approved revision ${lastStatus.execution.bound_revision} · ${exactTotals.approved_requirements} requirements · ${exactTotals.remaining_at_start} work items at start · ${exactTotals.baseline_satisfied + exactTotals.satisfied_since_approval} already satisfied`
+      : `${t.n_planned} to place · ${t.n_must} must-have · ${t.n_bulk} bulk` +
+        (t.n_blocked ? ` · ${t.n_blocked} blocked` : "") + (t.n_done ? ` · ${t.n_done} done` : "");
     const start = document.getElementById("fillStart");
     if (window.MA.proposal) {
       window.MA.proposal.setPlanState(data);
@@ -500,6 +555,11 @@
   }
 
   function renderCards(s) {
+    const nextExecutionSig = executionSignature(s);
+    if (last && nextExecutionSig !== renderedExecutionSig) {
+      render(last);
+      return;
+    }
     // A stored event carries post-commit durable totals. Use those as replacement values: cumulative
     // session `done_by_drive` overlaps a freshly loaded plan and would double-count after a reload.
     const liveArchived = (s && s.archived_by_drive) || {};
@@ -518,7 +578,9 @@
       row.innerHTML = doneRowHTML(total, capacityBy[label], archivedCurrent);
     });
     document.querySelectorAll(".drivecard").forEach(c => c.classList.remove("active"));
-    if (s && s.drive) { const c = document.getElementById("dc-" + s.drive); if (c) c.classList.add("active"); }
+    if (s && s.drive && !s.execution) {
+      const c = document.getElementById("dc-" + s.drive); if (c) c.classList.add("active");
+    }
   }
 
   function renderPrompt(s) {
@@ -600,11 +662,11 @@
     };
     const dividend = Math.max(0, t.uncompressed - t.compressed);
     el.innerHTML =
-      `<div class="pbhead"><span class="pbtitle">Plan '${esc(t.plan_id)}' · ${esc(t.capacity_mode)} capacity</span>` +
+      `<div class="pbhead"><span class="pbtitle">Planning view · current fleet forecast</span>` +
       `<span class="pbcap">${esc(t.n_selection)} finalized · capacity ${esc(MA.gb(cap))} · ${esc(t.n_drives)} drive${t.n_drives === 1 ? "" : "s"}</span></div>` +
       bar("Raw forecast (conservative)", t.uncompressed, "unc") +
       bar("Expected stored forecast", t.compressed, "comp") +
-      `<div class="pbnote">compression dividend ≈ ${MA.gb(dividend)} — the drive space compression is expected to reclaim` +
+      `<div class="pbnote">Plan '${esc(t.plan_id)}' · ${esc(t.capacity_mode)} capacity · Fill drive cards use the approved execution when a run is bound.<br>compression dividend ≈ ${MA.gb(dividend)} — the drive space compression is expected to reclaim` +
       (t.over_uncompressed
         ? `</div><div class="fadv warn" style="margin-top:9px">⚠ Raw forecast exceeds capacity — this plan depends on compression savings. Add a drive, trim the set, or explicitly choose compression_aware capacity.</div>`
         : "</div>");

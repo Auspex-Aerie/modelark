@@ -1188,6 +1188,77 @@ def _browser_flow() -> None:
             pg.unroute("**/api/fill/status")
             print("  failed live occupancy refresh stayed visibly last-confirmed")
 
+            # INC-063: a running Fill replaces advisory card assignments with the exact admitted
+            # proposal/projection view. A mostly-satisfied earlier drive must not regrow work from a
+            # fresh replan, and the active successor drive must say what it is doing.
+            exact_status = {
+                "status": "running", "running": True, "phase": "primary",
+                "drive": "drive-07", "repo": "demo/tiny-llm",
+                "execution": {
+                    "authority": "approved_execution", "proposal_id": "proposal-11",
+                    "session_id": "session-11", "bound_revision": 11,
+                    "projection_hash": "f" * 64,
+                    "totals": {
+                        "approved_requirements": 122, "baseline_satisfied": 119,
+                        "approved_executable": 3, "remaining_at_start": 3,
+                        "satisfied_since_approval": 0,
+                    },
+                    "links": [],
+                    "drives": [
+                        {
+                            "label": "drive-00", "approved_requirements": 120,
+                            "baseline_satisfied": 119, "satisfied_since_approval": 0,
+                            "approved_executable": 1, "remaining_at_start": 1,
+                            "approved_guaranteed_bytes": 120_000_000_000,
+                            "remaining_guaranteed_bytes": 2_000_000_000,
+                            "state": "approved_remaining", "state_label": "Approved for later",
+                            "access_followups": [],
+                            "models": [{
+                                "requirement_id": "primary:demo/tiny-llm",
+                                "repo": "demo/tiny-llm", "size": 2_000_000_000,
+                                "copy": "bulk", "schedule_state": "ready",
+                            }],
+                        },
+                        {
+                            "label": "drive-07", "approved_requirements": 2,
+                            "baseline_satisfied": 0, "satisfied_since_approval": 0,
+                            "approved_executable": 2, "remaining_at_start": 2,
+                            "approved_guaranteed_bytes": 5_000_000_000,
+                            "remaining_guaranteed_bytes": 5_000_000_000,
+                            "state": "writing", "state_label": "Writing now",
+                            "access_followups": [],
+                            "models": [{
+                                "requirement_id": "primary:demo/small-llm",
+                                "repo": "demo/small-llm", "size": 3_000_000_000,
+                                "copy": "bulk", "schedule_state": "ready",
+                            }],
+                        },
+                    ],
+                },
+            }
+            pg.route(
+                "**/api/fill/status",
+                lambda route: route.fulfill(
+                    status=200, content_type="application/json", body=json.dumps(exact_status)
+                ),
+            )
+            pg.evaluate("window.loadFill()")
+            pg.wait_for_selector("#dc-drive-07.execution-writing")
+            assert pg.inner_text("#dc-drive-07 .execution-state") == "Writing now"
+            assert pg.inner_text("#dc-drive-00 .execution-state") == "Approved for later"
+            drive_zero_card = pg.inner_text("#dc-drive-00")
+            assert "119 already satisfied" in drive_zero_card
+            assert "1 item at start" in drive_zero_card
+            assert "planned" not in drive_zero_card.lower()
+            assert "Approved revision 11" in pg.inner_text("#fillNote")
+            for _ in range(40):
+                if "planning view" in pg.inner_text("#planBars").lower():
+                    break
+                time.sleep(0.1)
+            assert "planning view" in pg.inner_text("#planBars").lower()
+            pg.unroute("**/api/fill/status")
+            print("  exact execution assignments + semantic drive states replaced advisory cards")
+
             # 2b. Once blockers are explicitly removed, the same disposable catalog must support
             # the complete DEF-036 proposal review/approval flow without starting Fill.
             _proposal_approval_flow(pg)

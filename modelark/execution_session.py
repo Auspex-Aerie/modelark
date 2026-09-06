@@ -324,6 +324,11 @@ def start_session(con, proposal_id, predecessor_id, services):
                 controller_identity=str(controller))
             session = load_session(con, sid) or session
         start = SessionStart(session=session, projection=projected, execution_config=frozen)
+        # Keep the exact immutable proposal beside its admitted projection.  Fill already caches
+        # this value on its first projection refresh; publishing it at the admission boundary lets
+        # other execution-owned views use baseline + executable rows without rereading advisory
+        # planner state (INC-063).
+        start._proposal = proposal
         # Projection-boundary refresh authority (finding 35/37): current global reader
         # and capacity observer are carried separately from the frozen config values.
         start._config_reader = getattr(services, "config", None)

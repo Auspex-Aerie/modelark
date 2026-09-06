@@ -17,6 +17,7 @@ and can be tested with a mock. The portal supplies a fill runner that uses the s
 """
 from __future__ import annotations
 
+import copy
 import threading
 import time
 
@@ -26,6 +27,7 @@ _ARCHIVE_STATE_FIELDS = {
     "archived_by_drive_current",
     "archived_stale_drives",
 }
+_BOUND_STATE_FIELDS = {"execution_plan"}
 
 
 class FillWorker:
@@ -46,12 +48,13 @@ class FillWorker:
     def running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self, work) -> dict:
+    def start(self, work, *, initial_state: dict | None = None) -> dict:
         """work(should_stop, emit): the fill body. should_stop() -> bool (check at boundaries);
         emit(dict) merges fields into the live status. work MAY return a terminal status dict
         (e.g. {"status": "paused"|"blocked", ...}) to classify a clean, non-completion end — the
         worker emits it verbatim instead of the default "done"/"fill complete". Refuses a second
-        concurrent fill."""
+        concurrent fill. ``initial_state`` accepts only worker-owned bound fields; caller-supplied
+        lifecycle/progress keys cannot forge the worker state."""
         with self._gate:                             # claim the lifecycle gate before going live
             with self._lock:
                 if self.running():
@@ -61,6 +64,11 @@ class FillWorker:
                 self._decision_id = None
                 self._decision_response = None
                 self._state = {"status": "running", "message": "starting…"}
+                self._state.update({
+                    key: copy.deepcopy(value)
+                    for key, value in (initial_state or {}).items()
+                    if key in _BOUND_STATE_FIELDS
+                })
                 self._thread = threading.Thread(target=self._run, args=(work,), name="modelark-fill", daemon=True)
                 self._thread.start()
         return {"ok": True}
@@ -143,6 +151,8 @@ class FillWorker:
             snapshot["archived_by_drive"] = dict(snapshot["archived_by_drive"])
         if isinstance(snapshot.get("archived_stale_drives"), list):
             snapshot["archived_stale_drives"] = list(snapshot["archived_stale_drives"])
+        if isinstance(snapshot.get("execution_plan"), dict):
+            snapshot["execution_plan"] = copy.deepcopy(snapshot["execution_plan"])
         return snapshot
 
     def mark_archive_changed(self, drive: str) -> int:
@@ -205,11 +215,12 @@ class FillWorker:
         """Merge ordinary progress without allowing it to replace archive evidence.
 
         Archive occupancy has a separate per-drive update protocol above.  Silently ignoring its
-        reserved fields keeps optional display telemetry fail-open instead of failing a Fill.
+        reserved fields keeps optional display telemetry fail-open instead of failing a Fill.  The
+        admitted execution-plan view is likewise immutable for the lifetime of this worker run.
         """
         with self._lock:
-            self._state.update({key: value for key, value in ev.items()
-                                if key not in _ARCHIVE_STATE_FIELDS})
+            reserved = _ARCHIVE_STATE_FIELDS | _BOUND_STATE_FIELDS
+            self._state.update({key: value for key, value in ev.items() if key not in reserved})
 
     def _run(self, work) -> None:
         try:

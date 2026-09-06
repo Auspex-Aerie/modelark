@@ -1,0 +1,186 @@
+"""INC-063: Fill cards follow the admitted execution, not a fresh advisory replan."""
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+
+from modelark.execution_projection import ExecutionProjection, canonical_projection_hash
+from modelark.web import execution_view, fill_api, fill_worker
+
+
+def _task(requirement_id, repo, target, *, kind="executable", source=None, size=10):
+    return {
+        "requirement_id": requirement_id,
+        "row_kind": kind,
+        "repo_id": repo,
+        "target_drive": target,
+        "satisfying_drive": target if kind == "baseline_satisfied" else None,
+        "source_drive": source,
+        "guaranteed_durable": size,
+    }
+
+
+def _session_start():
+    baseline = _task(
+        "protected_home:old", "org/old", "drive-00",
+        kind="baseline_satisfied", size=100,
+    )
+    drive_zero = _task("primary:new", "org/new", "drive-00", size=20)
+    drive_seven = _task("primary:large", "org/large", "drive-07", size=30)
+    landed = _task("primary:landed", "org/landed", "drive-07", size=40)
+    projected = (drive_zero, drive_seven)
+    projection = ExecutionProjection(
+        proposal_id="proposal-11",
+        tasks=projected,
+        projection_hash=canonical_projection_hash(projected),
+    )
+    start = SimpleNamespace(
+        session=SimpleNamespace(session_id="session-11", bound_planner_revision=11),
+        projection=projection,
+    )
+    start._proposal = {
+        "proposal_id": "proposal-11",
+        "tasks": [baseline, drive_zero, drive_seven, landed],
+    }
+    return start
+
+
+def _drives(status):
+    return {row["label"]: row for row in status["execution"]["drives"]}
+
+
+def test_build_preserves_approved_baseline_and_admitted_projection_counts():
+    view = execution_view.build(_session_start())
+    drives = {row["label"]: row for row in view["drives"]}
+
+    assert view["authority"] == "approved_execution"
+    assert view["proposal_id"] == "proposal-11"
+    assert view["session_id"] == "session-11"
+    assert view["bound_revision"] == 11
+    assert view["batch_order"] == ["drive-00", "drive-07"]
+    assert view["totals"] == {
+        "approved_requirements": 4,
+        "baseline_satisfied": 1,
+        "approved_executable": 3,
+        "remaining_at_start": 2,
+        "satisfied_since_approval": 1,
+    }
+    assert drives["drive-00"]["baseline_satisfied"] == 1
+    assert drives["drive-00"]["approved_requirements"] == 2
+    assert drives["drive-00"]["remaining_at_start"] == 1
+    assert drives["drive-00"]["remaining_guaranteed_bytes"] == 20
+    assert drives["drive-07"]["satisfied_since_approval"] == 1
+    assert [model["repo"] for model in drives["drive-07"]["models"]] == ["org/large"]
+
+
+def test_runtime_labels_every_drive_and_keeps_skipped_access_visible():
+    plan = execution_view.build(_session_start())
+
+    running = execution_view.with_runtime_state({
+        "status": "running", "drive": "drive-07", "execution_plan": plan,
+        "notice": {
+            "id": "access-gated:org/large:skip", "type": "access-gated",
+            "repo": "org/large",
+        },
+    })
+    running_drives = _drives(running)
+    assert "execution_plan" not in running
+    assert running_drives["drive-00"]["state"] == "approved_remaining"
+    assert running_drives["drive-07"]["state"] == "writing"
+    assert running_drives["drive-07"]["access_followups"] == ["org/large"]
+
+    waiting = execution_view.with_runtime_state({
+        "status": "running", "drive": "drive-07", "awaiting_drive": "drive-00",
+        "execution_plan": plan,
+    })
+    assert _drives(waiting)["drive-00"]["state"] == "waiting_for_drive"
+
+    terminal = execution_view.with_runtime_state({
+        "status": "done", "code": "PLAN_COMPLETE_WITH_FOLLOWUPS",
+        "evidence": {"access_gated": ["org/large"]}, "execution_plan": plan,
+    })
+    assert _drives(terminal)["drive-00"]["state"] == "complete"
+    assert _drives(terminal)["drive-07"]["state"] == "access_followup"
+
+
+def test_runtime_maps_typed_drive_stops_without_reassigning_other_drives():
+    plan = execution_view.build(_session_start())
+    stopped = execution_view.with_runtime_state({
+        "status": "plan-capacity-stop", "drive": "drive-07",
+        "code": "PLAN_CAPACITY_STOP", "execution_plan": plan,
+    })
+
+    drives = _drives(stopped)
+    assert drives["drive-00"]["state"] == "approved_remaining"
+    assert drives["drive-07"]["state"] == "capacity_stop"
+    assert drives["drive-00"]["models"][0]["repo"] == "org/new"
+    assert drives["drive-07"]["models"][0]["repo"] == "org/large"
+
+
+def test_worker_owns_bound_execution_plan_for_one_run():
+    worker = fill_worker.FillWorker()
+    supplied = {"session_id": "s", "drives": [{"label": "drive-07"}]}
+    release = threading.Event()
+
+    assert worker.start(
+        lambda _should_stop, _emit: release.wait(),
+        initial_state={"execution_plan": supplied, "status": "forged"},
+    ) == {"ok": True}
+    supplied["drives"][0]["label"] = "mutated-outside"
+    worker._emit({"execution_plan": {"session_id": "forged"}})
+    snapshot = worker.status()
+    snapshot["execution_plan"]["drives"][0]["label"] = "mutated-snapshot"
+
+    assert worker.status()["status"] == "running"
+    assert worker.status()["execution_plan"]["session_id"] == "s"
+    assert worker.status()["execution_plan"]["drives"][0]["label"] == "drive-07"
+    release.set()
+    worker._thread.join()
+
+
+def test_fill_start_binds_the_execution_view_before_worker_launch(monkeypatch):
+    start = _session_start()
+    captured = {}
+
+    class Worker:
+        def start(self, work, *, initial_state=None):
+            captured["work"] = work
+            captured["initial_state"] = initial_state
+            return {"ok": True}
+
+    from modelark import execution_service
+
+    monkeypatch.setattr(execution_service, "start_fill", lambda **_kwargs: start)
+    monkeypatch.setattr(fill_api.fill_worker, "WORKER", Worker())
+    monkeypatch.setattr(fill_api.wishlist, "download", lambda: {"max_24h_gb": 0})
+    monkeypatch.setattr(fill_api.data, "conn", lambda: object())
+
+    assert fill_api.start({}) == {"ok": True}
+    assert callable(captured["work"])
+    assert captured["initial_state"]["execution_plan"]["session_id"] == "session-11"
+    assert captured["initial_state"]["execution_plan"]["totals"]["baseline_satisfied"] == 1
+
+
+def test_fill_status_publishes_runtime_view_without_internal_worker_key(monkeypatch):
+    plan = execution_view.build(_session_start())
+    monkeypatch.setattr(
+        fill_api, "_refresh_worker_archived_totals",
+        lambda _worker: {"status": "running", "drive": "drive-07", "execution_plan": plan},
+    )
+    monkeypatch.setattr(fill_api, "_rx_bytes", lambda: None)
+
+    status = fill_api.status()
+    assert "execution_plan" not in status
+    assert _drives(status)["drive-07"]["state_label"] == "Writing now"
+
+
+def test_fill_javascript_switches_cards_to_exact_execution_evidence():
+    source = Path("modelark/web/static/fill.js").read_text()
+
+    assert "displayData(data, lastStatus)" in source
+    assert "exact.remaining_at_start" in source
+    assert "exact.baseline_satisfied" in source
+    assert "approved execution workload at Fill start" in source
+    assert "Planning view · current fleet forecast" in source
+    assert "if (s && s.drive && !s.execution)" in source

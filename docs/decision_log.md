@@ -2405,7 +2405,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### INC-063: Fill drive cards mix advisory replanning with frozen execution state
 - `id`: INC-063
 - `date`: 2026-09-05
-- `status`: open
+- `status`: remediated by DEC-100
 - `triggered_by`: Operator observation during the approved revision-11 Fill that inactive Drive #0 still said `planned` while actively written Drive #7 remained visually grey.
 - `symptom`: The live executor was writing the exact approved Drive #7 successor lane, but the cards did not say `writing now`, distinguish queued/awaiting/follow-up work, or explain already-satisfied requirements. The approved proposal assigns Drive #0 120 requirements—119 baseline-satisfied and one executable—while the contemporaneous card projection recalculated five models as planned there.
 - `root_cause`: The Fill executor drains the session-bound immutable `session_start.projection`, while `modelark/web/library_api.py::plan` feeds the cards from a fresh `librarian.plan_view` advisory reconciliation. `modelark/web/static/fill.js::renderCards` overlays live archive occupancy and adds only an `active` border; it has no backend-authored per-drive execution-state contract. Two legitimate authorities are therefore presented as if they describe the same queue.
@@ -2449,3 +2449,21 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md
 - `related`: DEC-007, DEC-072, DEC-098, DEF-002, DEF-003, DEF-009, DEF-010, DEF-014, DEF-018, DEF-025, DEF-029, DEF-031, DEF-032, DEF-035, DEF-041, DEF-CATALOG-001, DEF-CATALOG-002, DEF-CATALOG-005
 - `scope_boundary`: Deferral governance, status-only corrections, and review classification. No deferred implementation, catalog/selection/plan/proposal mutation, live Fill action, archive-byte operation, history rewrite, release, deployment, or external project change is authorized.
+
+### DEC-100: Bind Fill drive cards to one worker-owned execution view
+- `id`: DEC-100
+- `date`: 2026-09-05
+- `status`: accepted
+- `triggered_by`: INC-063 and the operator's approval to fix the mixed-authority Fill cards architecturally before continuing Usable Slice and Archive Reshape design.
+- `decision`:
+  1. A successful execution-session admission carries the exact stored proposal beside its immutable projection. At Fill start, a pure presentation adapter summarizes approved requirements, baseline-satisfied rows, executable rows still present at admission, fixed targets, guaranteed charges, batch order, and source-to-target links.
+  2. `FillWorker` owns a deep-copied version of that summary for the run. Generic progress events cannot replace it, and status callers cannot mutate it through a returned snapshot. The public status adapter adds semantic per-drive runtime states without changing scheduler or placement input.
+  3. While an execution view exists, drive cards render its exact assignments and evidence, including `writing`, `waiting_for_drive`, `approved_remaining`, `access_followup`, typed stop states, `complete`, and `satisfied`. A skipped or timed-out gated repository remains named on its approved drive. The active card receives the primary visual emphasis; approval counts and admitted charges are never presented as current device capacity.
+  4. `/api/library/plan` and `/api/plan/totals` remain useful advisory reconciliation. The UI labels their capacity summary as a planning view and uses it only for proposal controls, current fleet forecasting, drive metadata, categories, and idle presentation. It does not overwrite a bound execution assignment.
+- `rationale`: The planner and executor legitimately answer different questions after approval. Combining their fields made a correct fixed-target Fill look scrambled and encouraged unsafe operator inference. Binding presentation to the same admitted artifact as execution removes that ambiguity, while retaining planning data under an explicit label preserves useful forward-looking information.
+- `impact`: Drive #0 can now report 119 already-satisfied requirements and one admitted work item rather than regrowing five advisory placements; actively written Drive #7 is visibly marked `Writing now`; lost/excluded Drive #2 remains visibly unavailable. Access follow-ups and typed drive stops have durable meaning within the worker run. No archive bytes, placement targets, capacity admission, proposal lifecycle, or running revision-11 Fill are changed.
+- `verification`: The full non-browser regression suite passes 998 tests with one intentional skip. The standalone isolated-browser acceptance passes, including the reproduced advisory-versus-approved divergence, exact counts, semantic Drive #7 emphasis, Drive #2 lifecycle treatment, and separately labeled planning view. Twenty-four focused incident/oopsie/occupancy tests pass after hardening projection-only adapter starts. Ruff, JavaScript syntax validation, and `git diff --check` pass.
+- `resolves`: INC-063
+- `docs_updated`: docs/decision_log.md, modelark/execution_session.py, modelark/web/execution_view.py, modelark/web/fill_worker.py, modelark/web/fill_api.py, modelark/web/static/fill.js, tests/test_inc063_execution_view.py, tests/test_e2e_portal.py
+- `related`: DEC-087, DEC-088, DEC-089, DEC-090, DEC-092, DEC-098, DEC-099, INC-054, INC-063
+- `scope_boundary`: Exact execution-card presentation, worker-owned view state, tests, and ledger only. No scheduler order, target reassignment, proposal/approval mutation, catalog selection, plan mutation, drive lifecycle action, live service deployment/restart, Fill start/stop, archive-byte operation, merge, tag, or release is authorized or performed.
