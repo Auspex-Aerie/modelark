@@ -52,8 +52,27 @@ reports the exact repository, path, required evidence, and reason. The transacti
 fetch action. Catalog-only rows and machine-cache residency are insufficient.
 
 Source choice must be deterministic under the evidence snapshot. Any source identity, closure,
-capacity, destination, or digest drift after approval invalidates the execution seal and requires a
-new preview.
+destination identity, or digest drift after approval invalidates the execution seal and requires a
+new preview. Before the first write, unexplained capacity drift does the same. After execution
+starts, remaining-capacity checks account for the transaction's own journaled writes and invalidate
+only unexplained external consumption or mutation.
+
+## Filesystem and device safety
+
+Every source and output path must pass lexical and resolved confinement before it enters a sealed
+closure or transfer plan. Reject absolute paths, parent traversal, platform-separator ambiguity,
+NULs, and any destination ancestor or symlink that escapes the approved root. Source reads use the
+existing archive/annex adapter so legitimate annex indirection remains supported without allowing
+catalog or database text to select an arbitrary host path.
+
+Destination and scratch identities are writable roles and must not match any registered ModelArk
+archive identity, alias, or stable physical-device evidence. Source, destination, and scratch roles
+must remain disjoint at preview and Start; a changed or ambiguous identity blocks execution.
+
+The first implementation has no merge or overwrite mode. The approved consumer root is dedicated
+to the slice, every planned output path must be absent, and unexpected existing content or a path
+collision blocks preview or Start. Resume may recognize only exact paths and checkpoints written by
+the same sealed transaction; everything else remains a collision.
 
 ## Transaction and state model
 
@@ -84,8 +103,9 @@ an invalidation requires a successor preview.
   layout operations.
 - **SliceApproval** — operator approval bound to the exact preview seal.
 - **SliceJournal** — append-only phase and file progress suitable for safe resume.
-- **SliceReceipt** — closure, source evidence, topology, destination identity, verification results,
-  and terminal status. It is delivery evidence, never ModelArk replica evidence.
+- **SliceReceipt** — catalog snapshot, slice definition and consumer profile, closure, source
+  evidence, topology, destination identity, verification results, and terminal status. It is
+  delivery evidence, never ModelArk replica evidence.
 
 These records should be transport-neutral. USB direct, local scratch, and R2 scratch adapters must
 not reinterpret closure, evidence, approval, or receipt semantics.
@@ -150,6 +170,12 @@ Archive Reshape follows as a separate transaction after the materialization core
 - Offline qualifying sources produce attended drive requests and resume without replanning completed
   work.
 - Approval and Start are separate; drift cannot silently substitute a source or destination.
+- Destination and scratch identities cannot resolve to ModelArk archive drives, and their writable
+  roles remain disjoint from every source identity.
+- Unsafe or escaping paths, existing destination content, and unjournaled path collisions block
+  preview or Start; the first implementation never merges or overwrites.
+- Capacity revalidation subtracts sealed journaled writes, while unexplained external consumption
+  invalidates the transaction.
 - Interrupted transfers resume from durable checkpoints and never publish an unverified receipt.
 - Destination verification covers both content and the chosen consumer layout.
 - A completed receipt cannot satisfy ModelArk replica policy or mutate archive placement.

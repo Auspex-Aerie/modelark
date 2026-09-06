@@ -1952,7 +1952,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEF-041: Defer Usable Slice implementation for subsection delivery
 - `id`: DEF-041
 - `date`: 2026-08-30
-- `status`: revisit triggered 2026-09-05; architecture review active, implementation pending
+- `status`: revisit triggered 2026-09-05; architecture accepted by DEC-101 on 2026-09-06, implementation pending
 - `triggered_by`: DEC-081 defines the needed DR delivery boundary while DEF-036's operator-facing proposal approval surface is still the current pre-Fill gate.
 - `decision`: Do not build the Usable Slice CLI/portal workflow in the current service-recovery and proposal-approval slice. Defer the subsection selector and dependency closure, consumer/layout profiles, destination-disk wizard, guided source-drive schedule, direct executor, scratch executor, local-USB scratch registry, R2 credential/cost/lifecycle policy, resumable delivery journal, final verifier, and receipt schema. Existing verified restore remains the available lower-level recovery mechanism in the meantime.
 - `rationale`: The live catalog is ready for canonical planning but still has no approved proposal, and the proposal-approval implementation is unfinished. Mixing a new multi-drive/object-store writer into that gate would widen the current trust boundary before the existing archive workflow is usable again. The DEC fixes the destination architecture now so the feature is not lost and ScintiLab does not grow an incompatible transfer path meanwhile.
@@ -2483,7 +2483,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `correction`: The operator separated the concerns. Spark discovery may add desired models through normal catalog selection and Fill, while Usable Slice may materialize only artifacts that already have sufficient ModelArk archive evidence. An offline archive drive is a valid source that the operator can be asked to load; an unarchived artifact is an explicit preview gap and must not be downloaded by the slice transaction.
 - `verified`: DEC-081 already makes delivery depend on a frozen, verified artifact closure, DEC-098 gives catalog change and archive mutation separate authority, and DIS-005 says Spark cache residency is not archive proof. The missing distinction was between an archived-but-offline source, which is schedulable, and no archived source, which is ineligible.
 - `lesson`: Never collapse catalog membership, machine-cache residency, archived evidence, and delivery eligibility into one state. A delivery transaction may schedule access to existing archive bytes but may not acquire absent bytes implicitly.
-- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md, claudedocs/HANDOFF.md
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
 - `related`: DEC-081, DEF-041, DEC-098, DEF-CATALOG-005, DIS-005
 
 ### DEC-101: Keep Usable Slice archive-only and fail closed on missing sources
@@ -2499,9 +2499,9 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
   5. Archive Reshape may later share the sealed materialization engine, but it retains the separate desired-set, placement, retention, and reclamation authority established by DEC-098.
 - `rationale`: Delivery must be predictable and fail closed: the operator can approve a complete source schedule without accidentally authorizing network acquisition or mutation of the disaster-recovery plan. Keeping offline availability distinct from archive absence preserves useful multi-drive operation while maintaining ModelArk's evidence boundaries.
 - `impact`: The implementation charter now defines archive-source eligibility, gap reporting, attended drive scheduling, transport-neutral execution, and a direct-mode first vertical slice. Spark catalog work, implicit hydration, Archive Reshape, scratch backends, and live-service changes remain outside the first implementation slice.
-- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md, claudedocs/HANDOFF.md
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
 - `related`: DEC-045, DEC-049, DEC-081, DEC-084, DEF-018, DEF-041, DEF-CATALOG-005, DIS-005, DEC-098, BOT-006
-- `scope_boundary`: Architecture, implementation charter, and handoff only. No catalog discovery or selection, remote fetch, plan/proposal/Fill mutation, archive-byte transfer, destination write, R2 allocation, service restart, deployment, merge, tag, or release is authorized or performed.
+- `scope_boundary`: Architecture and implementation charter only. No catalog discovery or selection, remote fetch, plan/proposal/Fill mutation, archive-byte transfer, destination write, R2 allocation, service restart, deployment, merge, tag, or release is authorized or performed.
 
 ### DEF-043: Defer hydrate-then-materialize composition
 - `id`: DEF-043
@@ -2512,5 +2512,5 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `rationale`: Hydration is technically solvable but would make a delivery approval authorize new remote bytes, archive placement, and possibly changed durability obligations. That is unnecessary for the first operator need and would obscure whether a slice is recoverable from the existing ark.
 - `revisit_when`: The operator explicitly requests a hydrate-then-materialize workflow, or repeated real slice requests show that the archive-only contract is insufficient and the prerequisite catalog/Fill transaction boundaries can be specified without implicit authority.
 - `impact`: The first implementation stops at a non-executable gap report when archive evidence is absent. Spark catalog expansion proceeds separately, and a later composition can reuse its normal acquisition results without changing Usable Slice semantics.
-- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md, claudedocs/HANDOFF.md
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
 - `related`: DEC-081, DEF-041, DEF-CATALOG-005, DIS-005, DEC-098, BOT-006, DEC-101
