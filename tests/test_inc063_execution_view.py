@@ -1,6 +1,7 @@
 """INC-063: Fill cards follow the admitted execution, not a fresh advisory replan."""
 from __future__ import annotations
 
+import sqlite3
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -103,6 +104,40 @@ def test_build_decodes_stored_primary_replica_vocabulary_for_card_grouping():
     assert drives["drive-04"]["models"][0]["copy"] == "2"
 
 
+def test_execution_drive_facts_are_read_as_one_physical_snapshot(monkeypatch):
+    con = sqlite3.connect(":memory:")
+    con.execute(
+        "CREATE TABLE drives(drive_label TEXT PRIMARY KEY, role TEXT, raid_backed INTEGER, "
+        "capacity_bytes INTEGER, lifecycle TEXT, eligibility TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE archived(drive_label TEXT, stored_bytes INTEGER)"
+    )
+    con.executemany(
+        "INSERT INTO drives VALUES(?,?,?,?,?,?)",
+        [
+            ("drive-00", "primary", 1, 1_000, "active", "enabled"),
+            ("drive-04", "replica", 0, 2_000, "retired", "excluded"),
+            ("outside", "primary", 0, 3_000, "active", "enabled"),
+        ],
+    )
+    con.executemany(
+        "INSERT INTO archived VALUES(?,?)",
+        [("drive-00", 60), ("drive-00", 40), ("outside", 500)],
+    )
+    monkeypatch.setattr(fill_api.data, "conn", lambda: con)
+
+    facts = fill_api._read_execution_drive_facts(("drive-00", "drive-04"))
+
+    assert set(facts) == {"drive-00", "drive-04"}
+    assert facts["drive-00"] == {
+        "role": "primary", "raid_backed": True, "capacity_bytes_at_start": 1_000,
+        "lifecycle_at_start": "active", "eligibility_at_start": "enabled",
+        "archived_bytes_at_start": 100,
+    }
+    assert facts["drive-04"]["archived_bytes_at_start"] == 0
+
+
 def test_runtime_labels_every_drive_and_keeps_skipped_access_visible():
     plan = execution_view.build(_session_start())
 
@@ -169,12 +204,24 @@ def test_runtime_maps_typed_drive_stops_without_reassigning_other_drives():
         "code": "SOURCE_UNAVAILABLE",
         "evidence": {
             "source_offline": True, "deferred_sources": ["drive-00"],
-            "deferred_targets": ["drive-04"],
+            "deferred_targets": [],
         },
         "execution_plan": plan,
     })
     assert _drives(source_offline)["drive-00"]["state"] == "waiting_for_drive"
     assert _drives(source_offline)["drive-04"]["state"] == "satisfied"
+
+    both_endpoints = execution_view.with_runtime_state({
+        "status": "paused", "drive": "drive-04", "awaiting_drive": "drive-04",
+        "code": "SOURCE_UNAVAILABLE",
+        "evidence": {
+            "source_offline": True, "deferred_sources": ["drive-00"],
+            "deferred_targets": ["drive-04"],
+        },
+        "execution_plan": plan,
+    })
+    assert _drives(both_endpoints)["drive-00"]["state"] == "waiting_for_drive"
+    assert _drives(both_endpoints)["drive-04"]["state"] == "waiting_for_drive"
 
 
 def test_runtime_maps_dependency_evidence_and_ignores_stale_drive_while_awaiting():
@@ -260,7 +307,25 @@ def test_fill_start_binds_the_execution_view_before_worker_launch(monkeypatch):
 
     monkeypatch.setattr(execution_service, "start_fill", lambda **_kwargs: start)
     monkeypatch.setattr(fill_api.fill_worker, "WORKER", Worker())
-    monkeypatch.setattr(fill_api, "_read_archived_total", lambda label: {"drive-00": 90}[label])
+    monkeypatch.setattr(fill_api, "_read_execution_drive_facts", lambda _labels: {
+        "drive-00": {
+            "role": "primary", "raid_backed": False, "capacity_bytes_at_start": 1_000,
+            "lifecycle_at_start": "active", "eligibility_at_start": "enabled",
+            "archived_bytes_at_start": 90,
+        },
+        "drive-04": {
+            "role": "replica", "raid_backed": False, "capacity_bytes_at_start": 2_000,
+            "lifecycle_at_start": "active", "eligibility_at_start": "enabled",
+            "archived_bytes_at_start": 40,
+        },
+        # This target carries only an ordinary bulk requirement. Its physical RAID identity must
+        # win over the task kind when the advisory endpoint is unavailable.
+        "drive-07": {
+            "role": "primary", "raid_backed": True, "capacity_bytes_at_start": 8_000,
+            "lifecycle_at_start": "active", "eligibility_at_start": "enabled",
+            "archived_bytes_at_start": 70,
+        },
+    })
     monkeypatch.setattr(fill_api.wishlist, "download", lambda: {"max_24h_gb": 0})
     monkeypatch.setattr(fill_api.data, "conn", lambda: object())
 
@@ -272,7 +337,11 @@ def test_fill_start_binds_the_execution_view_before_worker_launch(monkeypatch):
         row["label"]: row for row in captured["initial_state"]["execution_plan"]["drives"]
     }
     assert bound_drives["drive-00"]["archived_bytes_at_start"] == 90
-    assert bound_drives["drive-07"]["archived_bytes_at_start"] is None
+    assert bound_drives["drive-07"]["archived_bytes_at_start"] == 70
+    assert bound_drives["drive-07"]["tier"] == "raid"
+    assert bound_drives["drive-07"]["raid_backed"] is True
+    assert bound_drives["drive-07"]["capacity_bytes_at_start"] == 8_000
+    assert all(row["drive_metadata_bound"] for row in bound_drives.values())
 
 
 def test_successful_followup_terminal_preserves_evidence_for_exact_drive_states(monkeypatch):
@@ -305,7 +374,14 @@ def test_successful_followup_terminal_preserves_evidence_for_exact_drive_states(
     }
     monkeypatch.setattr(execution_service, "start_fill", lambda **_kwargs: start)
     monkeypatch.setattr(fill_api.fill_worker, "WORKER", Worker())
-    monkeypatch.setattr(fill_api, "_read_archived_total", lambda _label: 0)
+    monkeypatch.setattr(fill_api, "_read_execution_drive_facts", lambda labels: {
+        label: {
+            "role": "primary", "raid_backed": False, "capacity_bytes_at_start": None,
+            "lifecycle_at_start": "active", "eligibility_at_start": "enabled",
+            "archived_bytes_at_start": 0,
+        }
+        for label in labels
+    })
     monkeypatch.setattr(fill_api.wishlist, "download", lambda: {"max_24h_gb": 0})
     monkeypatch.setattr(fill_api.data, "conn", lambda: object())
     monkeypatch.setattr(fill_api.fill, "execute", lambda *_args, **_kwargs: followup)
@@ -348,6 +424,8 @@ def test_fill_javascript_switches_cards_to_exact_execution_evidence():
     assert "exact.baseline_satisfied" in source
     assert "approved execution workload at Fill start" in source
     assert "Planning view · current fleet forecast" in source
+    assert "displayEnvelope" in source
+    assert "rerenderDisplayEnvelope()" in source
     assert "if (s && s.drive && !s.execution)" in source
     assert "view.drives.map(exact" in source
     assert "admitted work items completed this run" in source

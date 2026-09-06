@@ -16,7 +16,7 @@
     ["primary", "Primary · bulk (re-fetchable, 1 copy)"],
     ["replica", "Replication · must-have copy #2"],
   ];
-  let mode = "type", last = null, displayed = null, statusTimer = null, lastStatus = null, archivedBy = {}, capacityBy = {}, pollFails = 0, queueSig = null, queueCentered = false, renderedExecutionSig = null;
+  let mode = "type", last = null, displayEnvelope = null, displayed = null, statusTimer = null, lastStatus = null, archivedBy = {}, capacityBy = {}, pollFails = 0, queueSig = null, queueCentered = false, renderedExecutionSig = null;
   let queueModels = null, queueDrives = null, placedMap = {}, lastQueueRepo = null, placedLoaded = false;   // one-row-per-model queue state
 
   const hashColor = s => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${h % 360} 42% 50%)`; };
@@ -235,8 +235,13 @@
         ? liveArchived[exact.label]
         : (advisory ? advisory.archived_bytes : exact.archived_bytes_at_start);
       const d = advisory || {
-        label: exact.label, tier: exact.tier || "primary", lifecycle: "active",
-        eligibility: "enabled", capacity: null, usable: 0,
+        label: exact.label, tier: exact.tier || "primary", role: exact.role || "primary",
+        raid_backed: !!exact.raid_backed,
+        lifecycle: exact.lifecycle_at_start || "active",
+        eligibility: exact.eligibility_at_start || "enabled",
+        capacity: Number.isFinite(exact.capacity_bytes_at_start)
+          ? exact.capacity_bytes_at_start : null,
+        usable: 0,
       };
       const models = exact.models.map(m => ({...m, category: categories[m.repo] || "?"}));
       return {...d, execution: exact, execution_metadata_current: !!advisory,
@@ -295,6 +300,7 @@
 
   function render(data, advisoryAvailable = true) {
     if (advisoryAvailable) last = data;
+    displayEnvelope = {data, advisoryAvailable};
     ensureStyle();
     const shown = displayData(data, lastStatus);
     displayed = shown;
@@ -332,6 +338,11 @@
         ? `Plan admission blocked: ${(data.blocking_diagnostics || []).join(", ")}` : "";
     }
     if (lastStatus) renderRun(lastStatus);   // re-apply live overlays/telemetry after the cards are rebuilt
+  }
+
+  function rerenderDisplayEnvelope() {
+    if (!displayEnvelope) return;
+    render(displayEnvelope.data, displayEnvelope.advisoryAvailable);
   }
 
   // ---- run surface: start / stop / live status (task #22) ----
@@ -587,8 +598,9 @@
 
   function renderCards(s) {
     const nextExecutionSig = executionSignature(s);
-    if (nextExecutionSig !== renderedExecutionSig && (last || (s && s.execution))) {
-      render(last || {drives: [], links: [], advisories: [], totals: {}}, !!last);
+    if (nextExecutionSig !== renderedExecutionSig && (displayEnvelope || (s && s.execution))) {
+      if (displayEnvelope) rerenderDisplayEnvelope();
+      else render({drives: [], links: [], advisories: [], totals: {}}, false);
       return;
     }
     // A stored event carries post-commit durable totals. Use those as replacement values: cumulative
@@ -866,6 +878,7 @@
       return MA.api("/api/library/queue-state");
     }).then(st => {
       if (st && !st.error) { placedMap = st; placedLoaded = true; }
+      if (lastStatus && lastStatus.execution) rerenderDisplayEnvelope();
       renderQueue(lastStatus);
     }).catch(() => {});
     loadBlockedPreview();
@@ -875,8 +888,8 @@
   function wire() {
     const st = document.getElementById("stackType"), sc = document.getElementById("stackCat");
     if (!st || !sc) return;
-    st.onclick = () => { mode = "type"; st.classList.add("on"); sc.classList.remove("on"); if (last) render(last); };
-    sc.onclick = () => { mode = "category"; sc.classList.add("on"); st.classList.remove("on"); if (last) render(last); };
+    st.onclick = () => { mode = "type"; st.classList.add("on"); sc.classList.remove("on"); rerenderDisplayEnvelope(); };
+    sc.onclick = () => { mode = "category"; sc.classList.add("on"); st.classList.remove("on"); rerenderDisplayEnvelope(); };
     const fstart = document.getElementById("fillStart"), fstop = document.getElementById("fillStop");
     if (fstart) fstart.onclick = startFill;
     if (fstop) fstop.onclick = stopFill;

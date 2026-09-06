@@ -1208,6 +1208,9 @@ def _browser_flow() -> None:
                         {
                             "label": "drive-00", "approved_requirements": 120,
                             "tier": "primary",
+                            "role": "primary", "raid_backed": False,
+                            "capacity_bytes_at_start": 10_000_000_000_000,
+                            "lifecycle_at_start": "active", "eligibility_at_start": "enabled",
                             "baseline_satisfied": 119, "satisfied_since_approval": 0,
                             "approved_executable": 1, "remaining_at_start": 1,
                             "approved_guaranteed_bytes": 120_000_000_000,
@@ -1223,6 +1226,9 @@ def _browser_flow() -> None:
                         {
                             "label": "drive-07", "approved_requirements": 2,
                             "tier": "primary",
+                            "role": "primary", "raid_backed": False,
+                            "capacity_bytes_at_start": 8_000_000_000_000,
+                            "lifecycle_at_start": "active", "eligibility_at_start": "enabled",
                             "archived_bytes_at_start": 7_000_000_000,
                             "baseline_satisfied": 0, "satisfied_since_approval": 0,
                             "approved_executable": 2, "remaining_at_start": 2,
@@ -1291,6 +1297,16 @@ def _browser_flow() -> None:
             pg.click("button[data-view='fill']")
             pg.wait_for_selector("#dc-drive-07.execution-writing")
             assert "7GB archived" in pg.inner_text("#dc-drive-07 .dcdone")
+            assert "8.00TB device" in pg.inner_text("#dc-drive-07 .dcdone")
+            pg.click("#stackCat")
+            for _ in range(40):
+                if "generative-llm" in pg.inner_text("#fillGraph .filllegend"):
+                    break
+                time.sleep(0.1)
+            assert "generative-llm" in pg.inner_text("#fillGraph .filllegend")
+            assert "bulk" not in pg.inner_text("#fillGraph .filllegend")
+            pg.click("#stackType")
+            assert "bulk" in pg.inner_text("#fillGraph .filllegend")
             pg.unroute("**/api/fill/status")
             pg.unroute("**/api/library/plan")
             print("  exact execution assignments + semantic drive states replaced advisory cards")

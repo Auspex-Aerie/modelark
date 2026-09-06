@@ -826,8 +826,54 @@ def test_exact_replica_reports_the_unavailable_source_drive(tmp_path):
         )
 
     assert result["deferred_sources"] == ["drive-00"]
-    assert result["deferred_targets"] == ["drive-04"]
+    assert result["deferred_targets"] == []
     assert any(event.get("awaiting_drive") == "drive-00" for event in events)
+
+
+@pytest.mark.parametrize(
+    ("source_writable", "target_writable", "deferred_sources", "deferred_targets"),
+    [
+        (False, True, ["drive-00"], []),
+        (True, False, [], ["drive-04"]),
+        (False, False, ["drive-00"], ["drive-04"]),
+    ],
+)
+def test_exact_replica_reports_each_unwritable_endpoint_under_fence(
+        tmp_path, source_writable, target_writable, deferred_sources, deferred_targets):
+    events = []
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    con.execute("CREATE TABLE drives(drive_label TEXT PRIMARY KEY, annex_uuid TEXT)")
+    con.execute("INSERT INTO drives VALUES('drive-04', 'target-uuid')")
+    task = types.SimpleNamespace(
+        source_drive="drive-00", target_drive="drive-04",
+        requirement_id="replica:org/model",
+    )
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+
+    def archive_path(_con, label):
+        return source if label == "drive-00" else target
+
+    def writable(path):
+        return source_writable if path == source else target_writable
+
+    with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
+         mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
+         mock.patch.object(fetch.register, "library_root", return_value=tmp_path), \
+         mock.patch.object(fetch, "_dest_writable", side_effect=writable):
+        result = fetch.run_replica_tasks(
+            [task], ctx=fetch.RunCtx(con=con, on_progress=events.append),
+        )
+
+    assert result["deferred"] is True
+    assert result["source_offline"] is (not source_writable)
+    assert result["deferred_sources"] == deferred_sources
+    assert result["deferred_targets"] == deferred_targets
+    assert {event["awaiting_drive"] for event in events} == {
+        *deferred_sources, *deferred_targets,
+    }
 
 
 def test_gatec_pauses_on_deferred_copy2(tmp_path):

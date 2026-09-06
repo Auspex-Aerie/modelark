@@ -240,13 +240,16 @@ def with_runtime_state(status: Mapping) -> dict:
             for model in row.get("models", ())
         )
     }
-    unavailable_source_drives = set()
+    unavailable_replica_drives = set()
     if code == "SOURCE_UNAVAILABLE" and isinstance(evidence, Mapping):
-        unavailable_source_drives.update(
+        unavailable_replica_drives.update(
             str(label) for label in (evidence.get("deferred_sources") or ())
         )
+        unavailable_replica_drives.update(
+            str(label) for label in (evidence.get("deferred_targets") or ())
+        )
         if awaiting:
-            unavailable_source_drives.add(awaiting)
+            unavailable_replica_drives.add(awaiting)
     typed_drive = str(evidence.get("drive") or "") if isinstance(evidence, Mapping) else ""
     completed_total = 0
 
@@ -283,7 +286,7 @@ def with_runtime_state(status: Mapping) -> dict:
                 state = "complete"
         elif label in unavailable:
             state = "waiting_for_drive"
-        elif label in unavailable_source_drives:
+        elif label in unavailable_replica_drives:
             state = "waiting_for_drive"
         elif label in waiting_dependency_drives:
             state = "waiting_dependency"
