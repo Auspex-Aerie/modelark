@@ -275,6 +275,58 @@ def test_fill_start_binds_the_execution_view_before_worker_launch(monkeypatch):
     assert bound_drives["drive-07"]["archived_bytes_at_start"] is None
 
 
+def test_successful_followup_terminal_preserves_evidence_for_exact_drive_states(monkeypatch):
+    start = _session_start()
+    captured = {}
+
+    class Worker:
+        def start(self, work, *, initial_state=None):
+            captured["work"] = work
+            captured["initial_state"] = initial_state
+            return {"ok": True}
+
+        def await_action(self, _prompt, _timeout):
+            return "skip"
+
+    from modelark import execution_service
+
+    followup = {
+        "ok": True,
+        "stopped": False,
+        "state": "done",
+        "message": "fill complete with operator follow-ups",
+        "code": "PLAN_COMPLETE_WITH_FOLLOWUPS",
+        "gate": "C",
+        "evidence": {
+            "content_refusals": [{"repo_id": "org/new"}],
+            "waiting_requirements": ["primary:large"],
+        },
+        "actions": ["review_followups", "start_fill"],
+    }
+    monkeypatch.setattr(execution_service, "start_fill", lambda **_kwargs: start)
+    monkeypatch.setattr(fill_api.fill_worker, "WORKER", Worker())
+    monkeypatch.setattr(fill_api, "_read_archived_total", lambda _label: 0)
+    monkeypatch.setattr(fill_api.wishlist, "download", lambda: {"max_24h_gb": 0})
+    monkeypatch.setattr(fill_api.data, "conn", lambda: object())
+    monkeypatch.setattr(fill_api.fill, "execute", lambda *_args, **_kwargs: followup)
+    monkeypatch.setattr(fill_api, "_persist_terminal", lambda terminal: captured.setdefault(
+        "persisted", terminal,
+    ))
+
+    assert fill_api.start({}) == {"ok": True}
+    terminal = captured["work"](lambda: False, lambda _event: None)
+
+    assert terminal["evidence"] == followup["evidence"]
+    assert terminal["actions"] == followup["actions"]
+    assert terminal["gate"] == "C"
+    public = execution_view.with_runtime_state({
+        **terminal,
+        "execution_plan": captured["initial_state"]["execution_plan"],
+    })
+    assert _drives(public)["drive-00"]["state"] == "access_followup"
+    assert _drives(public)["drive-07"]["state"] == "waiting_dependency"
+
+
 def test_fill_status_publishes_runtime_view_without_internal_worker_key(monkeypatch):
     plan = execution_view.build(_session_start())
     monkeypatch.setattr(

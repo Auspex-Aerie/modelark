@@ -255,6 +255,9 @@ def start(body: dict) -> dict:
             # actions as UNHANDLED_FILL_ERROR.
             if res["ok"]:
                 terminal = {"status": "done", "message": res["message"], "code": res.get("code")}
+                for key in ("evidence", "actions", "failed", "gate"):
+                    if res.get(key) is not None:
+                        terminal[key] = res[key]
             elif res["stopped"] and should_stop():
                 terminal = {"status": "stopped", "message": "stopped by request",
                             "code": "OPERATOR_STOP"}
