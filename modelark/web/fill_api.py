@@ -16,7 +16,7 @@ import time
 from datetime import datetime
 from modelark.core import db, telemetry
 from modelark import fetch, fill, register, wishlist
-from modelark.web import data, fill_worker
+from modelark.web import data, execution_view, fill_worker
 
 # DEF-023: persist a NON-DONE terminal fill outcome so the portal can surface it LOUDLY on open — it
 # survives a page reload AND a portal restart until the operator acknowledges it (INC-009 sat silent
@@ -116,6 +116,59 @@ def _read_archived_total(label: str) -> int:
     return int((row or [0])[0] or 0)
 
 
+def _read_execution_drive_facts(labels: tuple[str, ...]) -> dict[str, dict]:
+    """Read one coherent physical-device snapshot for the admitted execution drives."""
+    if not labels:
+        return {}
+    placeholders = ",".join("?" for _ in labels)
+    with data._lock:
+        rows = data.conn().execute(
+            "SELECT d.drive_label,coalesce(d.role,'primary'),coalesce(d.raid_backed,0),"
+            "d.capacity_bytes,coalesce(d.lifecycle,'active'),coalesce(d.eligibility,'enabled'),"
+            "coalesce((SELECT sum(a.stored_bytes) FROM archived a "
+            "WHERE a.drive_label=d.drive_label),0) "
+            f"FROM drives d WHERE d.drive_label IN ({placeholders})",
+            list(labels),
+        ).fetchall()
+    return {
+        str(label): {
+            "role": str(role),
+            "raid_backed": bool(raid_backed),
+            "capacity_bytes_at_start": int(capacity) if capacity is not None else None,
+            "lifecycle_at_start": str(lifecycle),
+            "eligibility_at_start": str(eligibility),
+            "archived_bytes_at_start": int(archived or 0),
+        }
+        for label, role, raid_backed, capacity, lifecycle, eligibility, archived in rows
+    }
+
+
+def _bind_execution_drive_facts(execution: dict) -> dict:
+    """Bind physical identity and occupancy once, independently of the task's copy kind."""
+    drive_rows = execution.get("drives", ())
+    labels = tuple(sorted({str(row["label"]) for row in drive_rows}))
+    for row in drive_rows:
+        row["drive_metadata_bound"] = False
+        row["archived_bytes_at_start"] = None
+    try:
+        facts = _read_execution_drive_facts(labels)
+    except Exception:
+        # Presentation enrichment is fail-open and must never refuse an already-admitted Fill.
+        return execution
+    for row in drive_rows:
+        fact = facts.get(str(row["label"]))
+        if fact is None:
+            continue
+        row.update(fact)
+        row["tier"] = (
+            "raid" if fact["raid_backed"]
+            else "replica" if fact["role"] == "replica"
+            else "primary"
+        )
+        row["drive_metadata_bound"] = True
+    return execution
+
+
 def _observe_archive_change(worker: fill_worker.FillWorker, ev: dict) -> None:
     """Refresh one changed drive without granting its event authority over other drives.
 
@@ -211,6 +264,7 @@ def start(body: dict) -> dict:
 
     max_24h_gb = float(body["max_24h_gb"]) if "max_24h_gb" in body else wishlist.download()["max_24h_gb"]
     session_start = svc
+    exact_execution = _bind_execution_drive_facts(execution_view.build(session_start))
 
     def work(should_stop, emit):
         log = telemetry.get_logger("fill")
@@ -243,6 +297,9 @@ def start(body: dict) -> dict:
             # actions as UNHANDLED_FILL_ERROR.
             if res["ok"]:
                 terminal = {"status": "done", "message": res["message"], "code": res.get("code")}
+                for key in ("evidence", "actions", "failed", "gate"):
+                    if res.get(key) is not None:
+                        terminal[key] = res[key]
             elif res["stopped"] and should_stop():
                 terminal = {"status": "stopped", "message": "stopped by request",
                             "code": "OPERATOR_STOP"}
@@ -260,7 +317,7 @@ def start(body: dict) -> dict:
             log.exception("fill worker error", error=str(e)[:200])
             raise
 
-    return fill_worker.WORKER.start(work)
+    return fill_worker.WORKER.start(work, initial_state={"execution_plan": exact_execution})
 
 
 def stop(body: dict | None = None) -> dict:
@@ -288,7 +345,7 @@ def status() -> dict:
             if _net["rx"] is not None and now > _net["t"]:
                 s = dict(s, net_rx_bps=max(0.0, (rx - _net["rx"]) / (now - _net["t"])))
             _net["rx"], _net["t"] = rx, now
-    return s
+    return execution_view.with_runtime_state(s)
 
 
 def confirm_drive(body: dict) -> dict:

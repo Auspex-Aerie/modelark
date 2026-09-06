@@ -1348,6 +1348,8 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
     The task graph may choose a different source for each repository.  A stale target row is checked
     before every key, copy publication is verified through ``annex whereis --key`` against the
     registered target UUID, and only that verified file is then mirrored into ``archived``.
+    Deferred source and target labels are reported separately so an operator prompt can identify
+    the physical drive that is actually unavailable.
     """
     own = ctx is None
     con = db.connect() if own else ctx.con
@@ -1356,6 +1358,7 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
     result = {
         "deferred": False,
         "source_offline": False,
+        "deferred_sources": [],
         "deferred_targets": [],
         "copied_targets": [],
         "copied_files": 0,
@@ -1375,6 +1378,28 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
         def _reconcile(label, paths, keys):
             return _reconcile_touched(con, label, register.archive_path(con, label), True, paths, keys)
 
+        def _defer_unavailable_endpoints(
+                source: str, target: str, *, source_unavailable: bool,
+                target_unavailable: bool, when: str) -> None:
+            """Publish the physical endpoint(s) that actually failed one replica attempt."""
+            result["deferred"] = True
+            unavailable = []
+            if source_unavailable:
+                result["source_offline"] = True
+                result["deferred_sources"].append(source)
+                unavailable.append(("source", source))
+            if target_unavailable:
+                result["deferred_targets"].append(target)
+                unavailable.append(("target", target))
+            for endpoint, label in unavailable:
+                ctx.on_progress({
+                    "phase": "awaiting-drive", "awaiting_drive": label,
+                    "say": (
+                        f"⏳ replica {endpoint} {label} is unavailable {when} — "
+                        "copy #2 deferred; re-seat it."
+                    ),
+                })
+
         for (source, target), group in sorted(grouped.items(), key=lambda item: (item[0][1], item[0][0] or "")):
             if source is None:
                 result["failed"].append({
@@ -1391,21 +1416,15 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                 ).fetchone() or [None])[0]
             # non-mutating presence checks before the fence (DEF-022 resumable defer); the mutating
             # writability probe runs after dirtying, inside the envelope.
-            if source_path is None or not Path(source_path).exists():
-                result.update(deferred=True, source_offline=True)
-                result["deferred_targets"].append(target)
-                ctx.on_progress({
-                    "phase": "awaiting-drive", "awaiting_drive": source,
-                    "say": f"⏳ replica source {source} is offline/read-only — copy #2 deferred; re-seat it.",
-                })
-                continue
-            if target_path is None or not Path(target_path).exists():
-                result["deferred"] = True
-                result["deferred_targets"].append(target)
-                ctx.on_progress({
-                    "phase": "awaiting-drive", "awaiting_drive": target,
-                    "say": f"⏳ replica target {target} is offline/unwritable — copy #2 deferred; re-seat it.",
-                })
+            source_present = source_path is not None and Path(source_path).exists()
+            target_present = target_path is not None and Path(target_path).exists()
+            if not source_present or not target_present:
+                _defer_unavailable_endpoints(
+                    source, target,
+                    source_unavailable=not source_present,
+                    target_unavailable=not target_present,
+                    when="before the mutation fence",
+                )
                 continue
             if not target_uuid:
                 result["failed"].append({
@@ -1421,13 +1440,15 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                         con, [source, target], "replica", observe=_observe, reconcile=_reconcile,
                         now=datetime.now(timezone.utc).isoformat(sep=" ")) as _writer:
                     fds = tuple(_writer.child_fence_fds)
-                    if not _dest_writable(source_repo) or not _dest_writable(target_repo):
-                        result["deferred"] = True
-                        result["deferred_targets"].append(target)
-                        ctx.on_progress({
-                            "phase": "awaiting-drive", "awaiting_drive": target,
-                            "say": f"⏳ replica {source}→{target} unwritable under fence — deferred; re-seat it.",
-                        })
+                    source_writable = _dest_writable(source_repo)
+                    target_writable = _dest_writable(target_repo)
+                    if not source_writable or not target_writable:
+                        _defer_unavailable_endpoints(
+                            source, target,
+                            source_unavailable=not source_writable,
+                            target_unavailable=not target_writable,
+                            when="under the mutation fence",
+                        )
                         continue
                     remote = subprocess.run(
                         ["git", "-C", str(source_repo), "remote", "set-url", target, str(target_repo)],
@@ -1560,9 +1581,15 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                                 capture_output=True, text=True, pass_fds=fds,
                             )
                             if copied.returncode != 0:
-                                if not _dest_writable(target_repo):
-                                    result["deferred"] = True
-                                    result["deferred_targets"].append(target)
+                                source_writable = _dest_writable(source_repo)
+                                target_writable = _dest_writable(target_repo)
+                                if not source_writable or not target_writable:
+                                    _defer_unavailable_endpoints(
+                                        source, target,
+                                        source_unavailable=not source_writable,
+                                        target_unavailable=not target_writable,
+                                        when="during copy",
+                                    )
                                     group_deferred = True
                                     break
                                 result["failed"].append({
@@ -1621,12 +1648,7 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                         # remotes; the sync child inherits the held FDs.
                         subprocess.run(["git", "-C", str(lib), "annex", "sync", source, target],
                                        capture_output=True, text=True, pass_fds=fds)
-                    if group_deferred:
-                        ctx.on_progress({
-                            "phase": "awaiting-drive", "awaiting_drive": target,
-                            "say": f"⏳ replica target {target} went unwritable mid-copy — deferred; re-seat it.",
-                        })
-                    elif target not in result["deferred_targets"]:
+                    if not group_deferred and target not in result["deferred_targets"]:
                         result["copied_targets"].append(target)
             except drive_mutation.DriveMutationRefused as exc:
                 result["failed"].append({
@@ -1634,6 +1656,7 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                     "requirements": [task.requirement_id for task in group],
                 })
         result["deferred_targets"] = sorted(set(result["deferred_targets"]))
+        result["deferred_sources"] = sorted(set(result["deferred_sources"]))
         result["copied_targets"] = sorted(set(result["copied_targets"]))
         result["completed_requirements"] = sorted(set(result["completed_requirements"]))
         result["progressed_requirements"] = sorted(set(result["progressed_requirements"]))

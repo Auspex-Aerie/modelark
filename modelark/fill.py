@@ -880,6 +880,36 @@ def _drain_projection(
     deferred_content: dict[str, dict] = {}
     # Session-local completion cache by requirement_id, populated only after durable re-derivation.
     completed_reqs: set[str] = set()
+    execution_requirement_ids = {
+        str(_proj_field(task, "requirement_id"))
+        for task in (getattr(projection, "tasks", ()) or ())
+        if _proj_field(task, "requirement_id") is not None
+    }
+    published_completed: set[str] = set()
+
+    def publish_completed(units) -> None:
+        """Publish only completion re-derived from durable projection evidence (INC-063)."""
+        nonlocal published_completed
+        still_remaining = {str(unit.requirement_id) for unit in units}
+        durable_completed = execution_requirement_ids - still_remaining
+        if durable_completed == published_completed:
+            return
+        published_completed = durable_completed
+        ctx.on_progress({"execution_completed_requirements": sorted(durable_completed)})
+
+    def reconcile_batch_completion(tasks):
+        """Publish durable completions before any runner outcome can end the session."""
+        with ctx.lock:
+            post_batch = _projection_work_units(
+                ctx.con, projection, repo_scope, proposal_files=proposal_files,
+                require_proposal_files=require_proposal_files,
+            )
+        remaining_ids = {unit.requirement_id for unit in post_batch}
+        publish_completed(post_batch)
+        for task in tasks:
+            if task.requirement_id not in remaining_ids:
+                completed_reqs.add(task.requirement_id)
+
     made_progress = False
     first = True
     pinned_drive: str | None = None
@@ -893,6 +923,7 @@ def _drain_projection(
             remaining = _projection_work_units(
             ctx.con, projection, repo_scope, proposal_files=proposal_files,
             require_proposal_files=require_proposal_files)
+        publish_completed(remaining)
         # re-apply deferred + session-completed filters
         ready = [
             u for u in remaining
@@ -1047,6 +1078,9 @@ def _drain_projection(
             )
             if outcome["stored_repos"]:
                 made_progress = True
+            # A later item may stop this batch after earlier items committed. Publish those durable
+            # completions before inspecting any early terminal flag from the transport summary.
+            reconcile_batch_completion(fetch_tasks)
             if outcome["stopped"] or ctx.should_stop():
                 return _stop_terminal()
             if outcome.get("terminal_failure") is not None:
@@ -1088,17 +1122,6 @@ def _drain_projection(
                     evidence={"drive": pinned_drive},
                     actions=["mount_or_reseat_drive", "resume_same_approval"],
                 )
-
-            # Re-derive completion from durable facts after Fetch returns.  Transport summaries
-            # (`stored_repos`) are progress signals only and cannot satisfy a requirement.
-            with ctx.lock:
-                post_fetch = _projection_work_units(
-                    ctx.con, projection, repo_scope, proposal_files=proposal_files,
-                    require_proposal_files=require_proposal_files)
-            remaining_ids = {u.requirement_id for u in post_fetch}
-            for task in fetch_tasks:
-                if task.requirement_id not in remaining_ids:
-                    completed_reqs.add(task.requirement_id)
 
             attempted_repos = set(outcome["failed_repos"]) | set(outcome["stored_repos"])
             retry_fetch = False
@@ -1169,6 +1192,9 @@ def _drain_projection(
             outcome = fetch.run_replica_tasks(replica_assigned, ctx=ctx)
             if outcome["copied_files"]:
                 made_progress = True
+            # Replica summaries are progress only. Re-read exact durable evidence before a failed
+            # or deferred later copy can terminate the session and hide an earlier committed copy.
+            reconcile_batch_completion(replica_tasks)
             if outcome["failed"]:
                 return _terminal(
                     "error",
@@ -1184,20 +1210,11 @@ def _drain_projection(
                     "copy #1 is safe; copy #2 is deferred until its drive is available",
                     code="SOURCE_UNAVAILABLE", gate="C",
                     evidence={"source_offline": outcome["source_offline"],
+                              "deferred_sources": outcome.get("deferred_sources", []),
                               "deferred_targets": outcome["deferred_targets"]},
                     actions=["mount_or_reseat_drive", "start_fill"],
                 )
 
-            # Replica aggregates are also progress only.  Re-read exact durable evidence after
-            # the batch, then bound any requirement that remains unsatisfied despite an attempt.
-            with ctx.lock:
-                post_replica = _projection_work_units(
-                    ctx.con, projection, repo_scope, proposal_files=proposal_files,
-                    require_proposal_files=require_proposal_files)
-            remaining_ids = {u.requirement_id for u in post_replica}
-            for task in replica_tasks:
-                if task.requirement_id not in remaining_ids:
-                    completed_reqs.add(task.requirement_id)
             attempted_reqs = set(outcome.get("progressed_requirements", ()))
             if outcome["copied_files"]:
                 attempted_reqs.update(task.requirement_id for task in replica_tasks)
@@ -1286,6 +1303,7 @@ def _drain_projection(
                     ctx.con, projection, repo_scope,
                     proposal_files=proposal_files,
                     require_proposal_files=require_proposal_files)
+            publish_completed(remaining)
         except _Refusal as exc:
             return _terminal(
                 "failed", f"projection work units refused: {exc.code}",

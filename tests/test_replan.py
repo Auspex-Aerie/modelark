@@ -464,6 +464,9 @@ def test_gated_first_toasts_second_skip_becomes_followup_without_generic_failure
     notices = [e["notice"] for e in progress if e.get("notice")]
     assert notices[0]["type"] == "access-gated" and "continuing other work" in notices[0]["message"]
     assert any("added to Verify follow-ups" in n["message"] for n in notices)
+    completion = [e["execution_completed_requirements"] for e in progress
+                  if "execution_completed_requirements" in e]
+    assert completion and "primary:a" in completion[-1]
     assert sum("b" in repos for kind, _, repos in calls if kind == "fetch") == 2
 
 
@@ -530,6 +533,8 @@ def test_executor_blocks_before_reconciliation_when_configured_hf_token_is_inval
 
 def test_executor_stops_batch_on_typed_fetch_terminal_after_durable_progress():
     con, calls, fake_run, fake_replica = _executor_harness()
+    progress = []
+    stored_requirements = []
     terminal = {
         "code": "TARGET_PATH_CONFLICT",
         "message": "archive target is not safely replaceable",
@@ -540,6 +545,7 @@ def test_executor_stops_batch_on_typed_fetch_terminal_after_durable_progress():
 
     def terminal_run(**kwargs):
         outcome = fake_run(**kwargs)
+        stored_requirements.extend(f"primary:{repo}" for repo in outcome["stored_repos"])
         outcome["terminal_failure"] = terminal
         outcome["terminal_repo"] = kwargs["repos"][-1]
         return outcome
@@ -547,10 +553,18 @@ def test_executor_stops_batch_on_typed_fetch_terminal_after_durable_progress():
     with mock.patch.object(fill.fetch, "run", side_effect=terminal_run), \
          mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=fake_replica), \
          mock.patch.object(fill, "_await_drive", return_value=True):
-        result = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
+        result = fill.execute(
+            fetch.RunCtx(con=con, on_progress=progress.append), guided=True, max_24h_gb=0,
+        )
     assert result["state"] == "paused" and result["code"] == "TARGET_PATH_CONFLICT", result
     assert result["failed"] and result["failed"][0]["repo"]
     assert len(calls) == 1, "a typed terminal must stop the batch without cycling repositories"
+    completions = [
+        event["execution_completed_requirements"] for event in progress
+        if "execution_completed_requirements" in event
+    ]
+    assert stored_requirements
+    assert set(stored_requirements) <= set(completions[-1])
 
 
 def test_dead_drive_parks_without_running_task():
@@ -804,11 +818,81 @@ def test_run_replica_defers_on_offline_source(tmp_path):
     assert any(e.get("awaiting_drive") == "drive-00" for e in events), "should prompt to re-seat the source"
 
 
+def test_exact_replica_reports_the_unavailable_source_drive(tmp_path):
+    events = []
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    con.execute("CREATE TABLE drives(drive_label TEXT PRIMARY KEY, annex_uuid TEXT)")
+    con.execute("INSERT INTO drives VALUES('drive-04', 'target-uuid')")
+    task = types.SimpleNamespace(
+        source_drive="drive-00", target_drive="drive-04",
+        requirement_id="replica:org/model",
+    )
+
+    with mock.patch.object(
+        fetch.register, "archive_path",
+        side_effect=lambda _con, label: None if label == "drive-00" else tmp_path,
+    ):
+        result = fetch.run_replica_tasks(
+            [task], ctx=fetch.RunCtx(con=con, on_progress=events.append),
+        )
+
+    assert result["deferred_sources"] == ["drive-00"]
+    assert result["deferred_targets"] == []
+    assert any(event.get("awaiting_drive") == "drive-00" for event in events)
+
+
+@pytest.mark.parametrize(
+    ("source_writable", "target_writable", "deferred_sources", "deferred_targets"),
+    [
+        (False, True, ["drive-00"], []),
+        (True, False, [], ["drive-04"]),
+        (False, False, ["drive-00"], ["drive-04"]),
+    ],
+)
+def test_exact_replica_reports_each_unwritable_endpoint_under_fence(
+        tmp_path, source_writable, target_writable, deferred_sources, deferred_targets):
+    events = []
+    con = sqlite3.connect(":memory:", isolation_level=None)
+    con.execute("CREATE TABLE drives(drive_label TEXT PRIMARY KEY, annex_uuid TEXT)")
+    con.execute("INSERT INTO drives VALUES('drive-04', 'target-uuid')")
+    task = types.SimpleNamespace(
+        source_drive="drive-00", target_drive="drive-04",
+        requirement_id="replica:org/model",
+    )
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+
+    def archive_path(_con, label):
+        return source if label == "drive-00" else target
+
+    def writable(path):
+        return source_writable if path == source else target_writable
+
+    with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
+         mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
+         mock.patch.object(fetch.register, "library_root", return_value=tmp_path), \
+         mock.patch.object(fetch, "_dest_writable", side_effect=writable):
+        result = fetch.run_replica_tasks(
+            [task], ctx=fetch.RunCtx(con=con, on_progress=events.append),
+        )
+
+    assert result["deferred"] is True
+    assert result["source_offline"] is (not source_writable)
+    assert result["deferred_sources"] == deferred_sources
+    assert result["deferred_targets"] == deferred_targets
+    assert {event["awaiting_drive"] for event in events} == {
+        *deferred_sources, *deferred_targets,
+    }
+
+
 def test_gatec_pauses_on_deferred_copy2(tmp_path):
     con, calls, fake_run, _ = _executor_harness()
 
     def deferring_replica(tasks, ctx=None):
         return {"deferred": True, "source_offline": True,
+                "deferred_sources": [tasks[0].source_drive],
                 "deferred_targets": [tasks[0].target_drive], "copied_targets": [],
                 "copied_files": 0, "failed": []}
 
@@ -817,10 +901,61 @@ def test_gatec_pauses_on_deferred_copy2(tmp_path):
          mock.patch.object(fill, "_await_drive", return_value=True):
         res = fill.execute(fetch.RunCtx(con=con), guided=True, max_24h_gb=0)
     assert res["state"] == "paused" and res["code"] == "SOURCE_UNAVAILABLE", res
+    assert res["evidence"]["deferred_sources"] == ["drive-00"]
     assert res["ok"] is False and res["stopped"] is False
     assert con.execute(
         "SELECT count(DISTINCT drive_label) FROM archived WHERE repo_id='must'"
     ).fetchone()[0] == 1
+
+
+def test_replica_defer_publishes_an_earlier_durable_completion():
+    con, _calls, fake_run, _ = _executor_harness()
+    con.execute("INSERT INTO models(repo_id,numcopies) VALUES('must2',2)")
+    con.execute(
+        "INSERT INTO selection(repo_id,finalized_at) VALUES('must2','2026-01-01')"
+    )
+    con.execute(
+        "INSERT INTO files(repo_id,rfilename,size_bytes,format,quant) "
+        "VALUES('must2','model.gguf',150,'gguf',NULL)"
+    )
+    progress = []
+    copied_requirement = []
+
+    def partial_replica(tasks, ctx=None):
+        assert len(tasks) == 2
+        task = tasks[0]
+        copied_requirement.append(task.requirement_id)
+        name = task.budget.missing_files[0]
+        row = con.execute(
+            "SELECT orig_sha256,orig_bytes,stored_bytes,compressed,annex_key FROM archived "
+            "WHERE repo_id=? AND rfilename=? AND drive_label=?",
+            [task.repo_id, name, task.source_drive],
+        ).fetchone()
+        con.execute(
+            "INSERT INTO archived"
+            "(repo_id,rfilename,drive_label,orig_sha256,orig_bytes,stored_bytes,compressed,annex_key) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            [task.repo_id, name, task.target_drive, *row],
+        )
+        return {
+            "deferred": True, "source_offline": False, "deferred_sources": [],
+            "deferred_targets": [tasks[1].target_drive], "copied_targets": [],
+            "copied_files": 1, "failed": [],
+        }
+
+    with mock.patch.object(fill.fetch, "run", side_effect=fake_run), \
+         mock.patch.object(fill.fetch, "run_replica_tasks", side_effect=partial_replica), \
+         mock.patch.object(fill, "_await_drive", return_value=True):
+        result = fill.execute(
+            fetch.RunCtx(con=con, on_progress=progress.append), guided=True, max_24h_gb=0,
+        )
+
+    assert result["state"] == "paused" and result["code"] == "SOURCE_UNAVAILABLE"
+    completions = [
+        event["execution_completed_requirements"] for event in progress
+        if "execution_completed_requirements" in event
+    ]
+    assert copied_requirement[0] in completions[-1]
 
 
 def test_replica_records_only_after_target_uuid_proof(tmp_path):
