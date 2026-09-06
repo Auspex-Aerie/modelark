@@ -2514,3 +2514,19 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: The first implementation stops at a non-executable gap report when archive evidence is absent. Spark catalog expansion proceeds separately, and a later composition can reuse its normal acquisition results without changing Usable Slice semantics.
 - `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
 - `related`: DEC-081, DEF-041, DEF-CATALOG-005, DIS-005, DEC-098, BOT-006, DEC-101
+
+### DEC-102: Preserve slice progress with source-use gates and owned crash recovery
+- `id`: DEC-102
+- `date`: 2026-09-06
+- `status`: accepted
+- `triggered_by`: PR #67 lifecycle/checkpoint finding and completed Codex review of `1e09833`; operator agreement to resolve all five contracts and prepare development.
+- `decision`:
+  1. Check source lifecycle and exact clean generation/file evidence at each use under the archive mutation fence. A changed candidate becomes unavailable; use only a still-qualifying sealed alternative or retain the same transaction in a typed source block. Preserve completed digest-verified checkpoints and their provenance. Offline clean sources remain schedulable; dirty or unproven residency requires separate reconciliation.
+  2. Start combines an idempotent transaction CAS with exclusive local destination-device ownership. Persist unfinished-output ownership across stops and crashes, include surviving writer children in the fence, and prohibit takeover by another seal. The first implementation is single-host direct USB.
+  3. Persist transaction-bound creation intents before writes, verify and flush owned temporary files, publish without replacement, flush directory metadata, and record completion. Recovery authenticates ownership and operation records, reconciles interrupted publication, and revalidates bytes; matching names or digests cannot adopt unrelated output. Journal in-flight allocation for capacity recovery.
+  4. Keep destination operations rooted in a verified filesystem descriptor, revalidate identity at publication and resume boundaries, and refuse mount/symlink substitutions. Detachment must never redirect writes into the host filesystem.
+  5. Prepare development as domain contracts, transaction/recovery, then direct-USB integration with disposable fixtures. Finish the renewed bounded PR #67 review before operator merge and implementation. Real destination writes remain a separate attended gate.
+- `rationale`: Whole-seal invalidation for a source lifecycle change stranded verified output behind successor collision rules. Per-use eligibility preserves immutable approval and useful progress without silently approving new sources. Durable intents, exclusive ownership, and device-bound writes make resume safe across crashes, retries, and unplug events. Cross-successor checkpoint adoption is unnecessary for the first slice and remains unsupported.
+- `impact`: Resolves the five current architecture findings in the Usable Slice charter and defines testable development boundaries. No production implementation or live runtime action is included; the existing revision-11 Fill remains independent.
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
+- `related`: DEC-045, DEC-049, DEC-081, DEC-098, DEC-101, DEF-041, DEF-043

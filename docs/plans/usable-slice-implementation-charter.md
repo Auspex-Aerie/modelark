@@ -2,7 +2,7 @@
 
 Status: architecture locked; implementation has not started  
 Updated: 2026-09-06  
-Decision anchors: DEC-081, DEC-098, BOT-006, DEC-101, DEF-041, DEF-043
+Decision anchors: DEC-081, DEC-098, BOT-006, DEC-101, DEC-102, DEF-041, DEF-043
 
 ## Outcome
 
@@ -46,6 +46,15 @@ active lifecycle state. Lost, excluded, retired, or otherwise inactive drives re
 evidence but cannot satisfy slice recoverability. The eligible drive does not need to be attached
 during preview.
 
+Qualifying residency requires both the per-file archive/provenance record and a clean anchor for
+the drive's exact current identity epoch and write generation, with matching identity fingerprint
+and dedicated-local write authority. A clean capacity anchor alone is not proof of file contents;
+original-byte digest verification is still required during delivery. Historical rows on a dirty,
+unanchored, or identity-mismatched generation cannot establish source readiness, even if the drive
+is mounted. If no alternative qualifies, report `SOURCE_RECONCILIATION_REQUIRED` with the exact
+file and drive evidence. Reconciliation belongs to the separate archive workflow; preview never
+performs it or interrupts an active Fill to obtain a clean source.
+
 A source-ready file on an offline drive is **waiting for source**, not missing. Its source drive is
 included in the approved schedule, and execution pauses with a precise request to attach that drive.
 
@@ -55,10 +64,19 @@ fetch action. Catalog-only rows and machine-cache residency are insufficient. Hi
 inactive drives appear in the gap explanation but do not make it executable.
 
 Source choice must be deterministic under the evidence snapshot. The seal may bind an ordered set
-of qualifying alternatives, but execution can use only those pre-approved identities. Any closure,
-destination identity, lifecycle, or digest drift after approval invalidates the execution seal and
-requires a new preview. Before the first write, unexplained capacity drift does the same. After
-execution starts, remaining-capacity checks account for the transaction's own journaled writes and
+of qualifying alternatives, but execution can use only those pre-approved identities. Changed
+closure, destination identity, or required digest invalidates the execution seal and requires a
+new preview. Source lifecycle and residency validity are instead checked at each source use, under
+the existing archive-drive mutation fence through the read. Acquire that fence without blocking
+the live Fill; contention produces `SOURCE_BUSY`. Re-read the lifecycle, identity, generation,
+anchor, and file evidence under the fence. An inactive, changed, dirty, or locally missing candidate
+becomes unavailable; use the next qualifying sealed alternative or preserve the transaction in
+`blocked_source` with a typed reason. A qualifying but offline candidate produces `waiting_source`.
+Never add a newly discovered source to an approved seal. Source changes do not revoke completed
+digest-verified checkpoints or retrospectively invalidate their recorded provenance; final
+destination verification remains mandatory. Before the first write, unexplained capacity drift
+invalidates the seal. After execution starts, remaining-capacity checks account for the
+transaction's own journaled writes and
 invalidate only unexplained external consumption or mutation.
 
 ## Filesystem and device safety
@@ -83,10 +101,74 @@ chosen layout. Start revalidates them before writing. A read-only mount, unsuppo
 layout whose files or paths exceed those limits is non-executable even when aggregate free space is
 sufficient. Scratch adapters must provide the equivalent capability evidence for their backend.
 
+Execution holds descriptor-relative access rooted in the verified destination filesystem; later
+writes never reopen an absolute mountpoint path. Bind device, filesystem, and mount identity for
+the execution, revalidate before each file publication and resumed phase, and reject symlink or
+nested-mount substitutions. Descriptor confinement must close the check/open race rather than
+relying on a path check followed by an unrestricted open. Detachment stops in `waiting_destination`;
+a replacement identity blocks writes. The same device may resume only after identity, writable
+capabilities, ownership, journal, and capacity checks pass again. A vanished USB must never redirect
+output into the host filesystem below its uncovered mountpoint.
+
 The first implementation has no merge or overwrite mode. The approved consumer root is dedicated
 to the slice, every planned output path must be absent, and unexpected existing content or a path
 collision blocks preview or Start. Resume may recognize only exact paths and checkpoints written by
-the same sealed transaction; everything else remains a collision.
+the same sealed transaction, including recoverable in-flight intents defined below; everything else
+remains a collision. Recognizing transaction control files is a narrowly defined exception, not a
+general existing-content allowance.
+
+## Execution ownership and durable publication
+
+The first implementation is single-host and direct-USB. Start claims an approved transaction with
+an atomic compare-and-swap and takes a nonblocking exclusive destination-device lock shared by all
+local slice workers, independent of catalog path, transaction ID, mount alias, and consumer root.
+Both claims must succeed before any output mutation; a partial claim is recoverable without
+starting a writer. Repeated Start for the same active seal returns that execution idempotently;
+another owner receives `DESTINATION_BUSY`. The conservative whole-device lock also prevents
+overlapping roots and competing capacity consumption by local slices.
+
+A durable ownership record binds destination identity, root, transaction, and seal. It reserves
+unfinished output across stops or process death; another transaction cannot reclaim it by elapsed
+time or by replacing a lock file. Resume reacquires the process lock, proves prior workers and
+children are gone, and reconciles the durable record before writing. Any child capable of writing
+must retain the execution fence until it exits. Graceful stop quiesces writers before releasing the
+process lock. Completion releases ownership only after final verification and durable receipt
+publication; completed output still triggers the collision rule. Cross-host concurrent execution,
+ownership takeover, and automatic abandoned-output cleanup are outside this first slice.
+
+The journal and ownership metadata live in a private durable slice state store outside the catalog
+and archive, with a transaction-bound control record on the destination. Before creating that
+record, persist the host-side reservation and creation intent; exclusive creation under the device
+lock makes interrupted initialization recoverable. An unrelated existing control record blocks
+Start. Journal records bind the seal, destination identity, relative path, operation sequence,
+expected digest/size, and transaction-owned temporary name. Names or matching hashes alone never
+establish ownership of unrelated existing content.
+
+Each directory creation, file publication, and receipt publication follows a recoverable protocol:
+
+1. Durably append an intent before creating a transaction-owned path. Create directories and
+   temporary files exclusively through the bound destination descriptor; record parent/child
+   ownership, including creation of the consumer root. Unexpected content is a collision.
+2. Stream into the owned temporary file, verify the required original-byte digest and size, flush
+   the file, and durably record its prepared state. Journal in-flight allocation as well as completed
+   files so crash recovery can reconcile the transaction's own capacity consumption.
+3. Publish with an atomic **no-replace** operation on the same filesystem, flush the containing
+   directory, then durably append completion. A filesystem without the required durability and
+   no-replace semantics is rejected at preflight. The receipt uses the same publication protocol.
+4. On recovery, hold exclusive ownership and validate the seal, destination, and intent/prepared
+   records before inspecting exact owned paths. Reconcile an interrupted directory creation or
+   rename against those records; rehash a published file before completing a missing checkpoint.
+   Resume or recreate incomplete temporary data only within authenticated ownership. A checkpoint
+   without its expected output is not completion: restore that file from a still-valid sealed
+   source, or block. Contradictory records, digest mismatch, or unrelated content stop with a typed
+   recovery/collision error and never authorize overwrite or deletion of unknown bytes.
+
+Authentication here means provenance from the private state store plus matching destination
+ownership and sealed operation records, not a self-asserted filename or an imported journal. The
+first slice does not support checkpoint adoption across successor transactions. A source block
+retains its original seal and progress; changing the approved source set requires a separately
+approved transaction on an empty destination root, leaving earlier output intact. Other seal
+invalidations likewise preserve evidence without promising automatic successor resume.
 
 ## Transaction and state model
 
@@ -102,13 +184,14 @@ The workflow is one resumable transaction with an immutable approved core:
    makes the preview non-executable.
 5. **Approve** — bind the closure, evidence snapshot, source choices, transport, destination identity,
    capacity evidence, and layout to one seal. Approval does not begin transfer.
-6. **Execute** — copy checkpointed content; request only the source, scratch, or destination device
-   required for the next phase; preserve completed evidence across stops.
+6. **Execute** — claim exclusive ownership, recover the journal, and copy checkpointed content;
+   request only the source, scratch, or destination device required for the next phase; preserve
+   completed evidence across stops.
 7. **Verify and publish** — validate destination content and layout before publishing a receipt.
 
 Public transaction states should distinguish at least `draft`, `blocked_gaps`, `ready`, `approved`,
-`waiting_source`, `waiting_scratch`, `waiting_destination`, `transferring`, `verifying`, `complete`,
-`stopped`, `invalidated`, and `failed`. A wait is resumable and names the missing physical resource;
+`waiting_source`, `blocked_source`, `waiting_scratch`, `waiting_destination`, `transferring`,
+`verifying`, `complete`, `stopped`, `invalidated`, and `failed`. A wait is resumable and names the missing physical resource;
 an invalidation requires a successor preview.
 
 ## Core records
@@ -121,7 +204,8 @@ an invalidation requires a successor preview.
 - **TransferPlan** — deterministic source order, topology, capacity and filesystem-capability
   charges, checkpoints, and final layout operations.
 - **SliceApproval** — operator approval bound to the exact preview seal.
-- **SliceJournal** — append-only phase and file progress suitable for safe resume.
+- **SliceJournal** — durable ownership, creation intents, prepared publications, and append-only
+  phase/file progress bound to the transaction, suitable for crash reconciliation and safe resume.
 - **SliceReceipt** — catalog snapshot, slice definition and consumer profile, closure, source
   evidence, topology, destination identity, verification results, and terminal status. It is
   delivery evidence, never ModelArk replica evidence.
@@ -189,6 +273,13 @@ Archive Reshape follows as a separate transaction after the materialization core
 - Catalog-only and cache-only fixtures produce exact blocking gaps and zero remote fetch attempts.
 - A fixture whose only historical archive row belongs to a lost or inactive drive produces a
   blocking gap rather than an impossible drive request.
+- Dirty, missing-anchor, old-epoch, old-generation, and mismatched-fingerprint sources cannot
+  establish readiness from retained archive rows; a clean alternate may qualify. A capacity anchor
+  without qualifying per-file provenance is insufficient. No source check repairs the archive.
+- Lifecycle or residency changes before a source read preserve the seal and verified checkpoints;
+  only a still-qualifying sealed alternative may be used. Otherwise return a typed source block,
+  with no new source approval, implicit fetch, or successor adoption. Source-fence contention waits
+  without interrupting Fill. Source digest mismatch never produces a completed checkpoint.
 - Offline qualifying sources produce attended drive requests and resume without replanning completed
   work.
 - Closure identity is the immutable per-file manifest and digests; absent historical commit SHAs are
@@ -204,6 +295,16 @@ Archive Reshape follows as a separate transaction after the materialization core
 - Capacity revalidation subtracts sealed journaled writes, while unexplained external consumption
   invalidates the transaction.
 - Interrupted transfers resume from durable checkpoints and never publish an unverified receipt.
+- Fault injection covers intent persistence, directory/root creation, partial temporary writes,
+  file flush, prepared record, no-replace publication, directory flush, completion append, and
+  receipt publication. Recovery recognizes only owned intents, revalidates bytes, accounts for
+  temporary allocations, and rejects unknown content even when its digest matches.
+- Concurrent/retried Start, different roots or aliases on one device, a crashed owner, and a
+  surviving child prove at most one writer. Stopped ownership cannot be stolen by another seal;
+  failed partial acquisition is recoverable and a duplicate Start is idempotent.
+- Unplug, mount replacement, symlink/nested-mount substitution, and resume between write boundaries
+  produce no host-filesystem writes and no wrong-device receipt; the original device resumes only
+  after identity and ownership are reproved.
 - A locally absent annex object never invokes `git annex get` or any remote; execution uses only a
   sealed locally present alternative or stops.
 - Destination verification covers both content and the chosen consumer layout.
@@ -235,3 +336,29 @@ This charter and its ledger decisions are the stopping point. No implementation,
 service restart, Fill action, catalog expansion, or archive/destination byte movement is part of
 this change. The next implementation session starts with domain contracts and expected-red tests
 for eligibility, exact gap reporting, and the sealed direct-USB transaction.
+
+## Development entry and review slices
+
+Finish PR #67's renewed bounded review (up to three iterations) at its exact pushed head and let the
+operator merge it. Then branch from that merged charter for implementation. The first test commit
+defines expected-red domain contracts; failures must identify missing behavior rather than broken
+fixtures. Preserve separate test and implementation commits so the contracts remain reviewable.
+
+| Slice | Deliverable | Required evidence before advancing |
+|------|-------------|------------------------------------|
+| 1 — Domain | Immutable closure/source facts, exact gaps, deterministic alternatives, canonical preview seal and explicit approval; pure core with a read-only catalog adapter. | Synthetic clean/dirty/offline/inactive matrices, shuffled-order seal stability, tampered/stale approval refusal, no catalog writes or remote access. |
+| 2 — Transaction | Private state store, idempotent Start, device ownership, source-use gates, journal and recoverable publication. | Disposable filesystem and multi-process fixtures for every crash/concurrency boundary above; no real mounts, live state, or archive paths. |
+| 3 — Direct USB | Retrieval-disabled source reader, device-bound destination adapter, stop/resume, final verifier and receipt, minimal operator entry point. | Two or three tiny archived fixtures, exact gap and drive-wait demonstrations, isolated end-to-end and installed-wheel checks; full existing regression and static checks. |
+
+Candidate code seams are a new `modelark/slice/` package and `tests/test_slice_*.py`. Inspect
+`modelark/restore.py` for confined paths and original-byte verification, `modelark/drive_fence.py`
+for mutation exclusion, and catalog generation/anchor readers for evidence. Reuse only helpers
+whose contracts fit: the materializer must not inherit restore's optional annex retrieval or
+turn capacity evidence into file verification. Keep durable slice state out of catalog schema and
+keep production Fill wiring unchanged. Decide any API/CLI integration details against the proven
+domain core in slice 3, rather than coupling the first tests to a UI.
+
+An attended trial with real archived models and a real USB destination is a later operator gate,
+after these disposable-fixture checks. Return with the exact source schedule, destination identity,
+byte/capacity preview, and stop/recovery evidence before any real destination write. Formatting,
+erasure, archive mutation, deployment, and live Fill changes require their own explicit direction.
