@@ -19,11 +19,13 @@ _STATE_LABELS = {
     "paused_unwritable": "Drive needs attention",
     "capacity_stop": "Capacity stop",
     "waiting_dependency": "Waiting on dependency",
+    "download_throttled": "Download cap reached",
     "stopped": "Stopped",
     "error": "Fill error",
     "complete": "Complete",
     "satisfied": "Already satisfied",
 }
+_TIER_PRIORITY = {"primary": 0, "replica": 1, "raid": 2}
 
 
 def _get(value: Any, name: str, default=None):
@@ -51,6 +53,15 @@ def _copy_kind(task: Mapping) -> str:
     return "1" if requirement.startswith("protected_home:") else "bulk"
 
 
+def _tier(task: Mapping) -> str:
+    requirement = str(task.get("requirement_id") or "")
+    if requirement.startswith("protected_home:"):
+        return "raid"
+    if requirement.startswith("protected_replica:") or task.get("source_drive"):
+        return "replica"
+    return "primary"
+
+
 def build(session_start: Any) -> dict:
     """Build the immutable drive-card contract from one admitted ``SessionStart``.
 
@@ -74,6 +85,7 @@ def build(session_start: Any) -> dict:
     def drive_row(label: str) -> dict:
         return rows.setdefault(label, {
             "label": label,
+            "tier": "primary",
             "approved_requirements": 0,
             "baseline_satisfied": 0,
             "satisfied_since_approval": 0,
@@ -89,6 +101,9 @@ def build(session_start: Any) -> dict:
         if not label:
             continue
         row = drive_row(label)
+        task_tier = _tier(task)
+        if _TIER_PRIORITY[task_tier] > _TIER_PRIORITY[row["tier"]]:
+            row["tier"] = task_tier
         row["approved_requirements"] += 1
         row["approved_guaranteed_bytes"] += int(task.get("guaranteed_durable") or 0)
         if task.get("row_kind") == "baseline_satisfied":
@@ -158,6 +173,10 @@ def build(session_start: Any) -> dict:
 def _followup_repositories(status: Mapping) -> set[str]:
     evidence = status.get("evidence") or {}
     repos = set(evidence.get("access_gated") or ()) if isinstance(evidence, Mapping) else set()
+    if isinstance(evidence, Mapping):
+        for refusal in evidence.get("content_refusals") or ():
+            if isinstance(refusal, Mapping) and (refusal.get("repo_id") or refusal.get("repo")):
+                repos.add(str(refusal.get("repo_id") or refusal.get("repo")))
     notice = status.get("notice") or {}
     notice_id = str(notice.get("id") or "") if isinstance(notice, Mapping) else ""
     if notice_id.endswith(":skip") or notice_id.endswith(":timeout"):
@@ -175,7 +194,10 @@ def with_runtime_state(status: Mapping) -> dict:
     view = deepcopy(plan)
     result.pop("execution_plan", None)
 
-    current = str(status.get("awaiting_drive") or status.get("drive") or "")
+    awaiting = str(status.get("awaiting_drive") or "")
+    current = str(status.get("drive") or "")
+    completed = {str(item) for item in (status.get("execution_completed_requirements") or ())}
+    result.pop("execution_completed_requirements", None)
     followups = _followup_repositories(status)
     followup_drives = {
         row.get("label")
@@ -188,41 +210,94 @@ def with_runtime_state(status: Mapping) -> dict:
     evidence = status.get("evidence") or {}
     if code == "DRIVE_UNAVAILABLE" and isinstance(evidence, Mapping):
         unavailable.update(str(label) for label in (evidence.get("drives") or ()))
+    waiting_requirements = set()
+    if isinstance(evidence, Mapping):
+        waiting_requirements.update(str(item) for item in (evidence.get("requirements") or ()))
+        waiting_requirements.update(
+            str(item) for item in (evidence.get("waiting_requirements") or ())
+        )
+    waiting_dependency_drives = {
+        row.get("label")
+        for row in view.get("drives", ())
+        if any(
+            str(model.get("requirement_id")) in waiting_requirements
+            for model in row.get("models", ())
+        )
+    }
+    unavailable_source_drives = set()
+    if code == "SOURCE_UNAVAILABLE" and isinstance(evidence, Mapping):
+        unavailable_source_drives.update(
+            str(label) for label in (evidence.get("deferred_targets") or ())
+        )
+    typed_drive = str(evidence.get("drive") or "") if isinstance(evidence, Mapping) else ""
+    completed_total = 0
 
     for row in view.get("drives", ()):
         label = str(row.get("label") or "")
         remaining = int(row.get("remaining_at_start") or 0)
-        state = "satisfied" if remaining == 0 else "approved_remaining"
+        requirement_ids = {
+            str(model.get("requirement_id"))
+            for model in row.get("models", ())
+            if model.get("requirement_id") is not None
+        }
+        completed_here = len(requirement_ids & completed)
+        completed_total += completed_here
+        if remaining == 0:
+            state = "satisfied"
+        elif requirement_ids and requirement_ids <= completed:
+            state = "complete"
+        else:
+            state = "approved_remaining"
 
         if terminal == "running":
-            if label == str(status.get("awaiting_drive") or ""):
+            if label == awaiting:
                 state = "waiting_for_drive"
-            elif label == str(status.get("drive") or ""):
+            elif not awaiting and label == current:
                 state = "writing"
             elif label in followup_drives:
                 state = "access_followup"
         elif terminal == "done":
-            state = "access_followup" if label in followup_drives else (
-                "complete" if remaining else "satisfied")
+            if label in followup_drives:
+                state = "access_followup"
+            elif label in waiting_dependency_drives:
+                state = "waiting_dependency"
+            elif remaining and requirement_ids <= completed:
+                state = "complete"
         elif label in unavailable:
             state = "waiting_for_drive"
-        elif label == current and code == "DRIVE_UNWRITABLE":
-            state = "paused_unwritable"
-        elif label == current and code == "PLAN_CAPACITY_STOP":
-            state = "capacity_stop"
-        elif label == current and code == "WAITING_DEPENDENCY":
+        elif label in unavailable_source_drives:
+            state = "waiting_for_drive"
+        elif label in waiting_dependency_drives:
             state = "waiting_dependency"
+        elif label == (typed_drive or current) and code == "DRIVE_UNWRITABLE":
+            state = "paused_unwritable"
+        elif label == (typed_drive or current) and code == "PLAN_CAPACITY_STOP":
+            state = "capacity_stop"
+        elif label == current and code == "DOWNLOAD_THROTTLED":
+            state = "download_throttled"
         elif label == current and terminal == "stopped":
             state = "stopped"
-        elif label == current and terminal in {"error", "blocked", "paused"}:
+        elif (
+            label == current
+            and terminal in {"error", "blocked", "paused"}
+            and code not in {
+                "DRIVE_UNAVAILABLE", "DRIVE_UNWRITABLE", "PLAN_CAPACITY_STOP",
+                "SOURCE_UNAVAILABLE", "WAITING_DEPENDENCY",
+            }
+        ):
             state = "error"
 
         row["state"] = state
         row["state_label"] = _STATE_LABELS[state]
+        row["completed_in_run"] = completed_here
         row["access_followups"] = sorted({
             str(model.get("repo")) for model in row.get("models", ())
             if model.get("repo") in followups
         })
 
+    view["totals"]["completed_in_run"] = completed_total
+    view["totals"]["unresolved"] = max(
+        0, int(view["totals"].get("remaining_at_start") or 0) - completed_total,
+    )
     result["execution"] = view
     return result

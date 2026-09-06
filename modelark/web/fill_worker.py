@@ -28,6 +28,7 @@ _ARCHIVE_STATE_FIELDS = {
     "archived_stale_drives",
 }
 _BOUND_STATE_FIELDS = {"execution_plan"}
+_EXECUTION_COMPLETION_FIELD = "execution_completed_requirements"
 
 
 class FillWorker:
@@ -153,6 +154,8 @@ class FillWorker:
             snapshot["archived_stale_drives"] = list(snapshot["archived_stale_drives"])
         if isinstance(snapshot.get("execution_plan"), dict):
             snapshot["execution_plan"] = copy.deepcopy(snapshot["execution_plan"])
+        if isinstance(snapshot.get(_EXECUTION_COMPLETION_FIELD), list):
+            snapshot[_EXECUTION_COMPLETION_FIELD] = list(snapshot[_EXECUTION_COMPLETION_FIELD])
         return snapshot
 
     def mark_archive_changed(self, drive: str) -> int:
@@ -219,7 +222,19 @@ class FillWorker:
         admitted execution-plan view is likewise immutable for the lifetime of this worker run.
         """
         with self._lock:
+            if _EXECUTION_COMPLETION_FIELD in ev:
+                plan = self._state.get("execution_plan") or {}
+                allowed = {
+                    str(model.get("requirement_id"))
+                    for row in plan.get("drives", ())
+                    for model in row.get("models", ())
+                    if model.get("requirement_id") is not None
+                }
+                prior = set(self._state.get(_EXECUTION_COMPLETION_FIELD) or ())
+                incoming = {str(item) for item in (ev.get(_EXECUTION_COMPLETION_FIELD) or ())}
+                self._state[_EXECUTION_COMPLETION_FIELD] = sorted(prior | (incoming & allowed))
             reserved = _ARCHIVE_STATE_FIELDS | _BOUND_STATE_FIELDS
+            reserved.add(_EXECUTION_COMPLETION_FIELD)
             self._state.update({key: value for key, value in ev.items() if key not in reserved})
 
     def _run(self, work) -> None:

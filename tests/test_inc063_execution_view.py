@@ -67,6 +67,8 @@ def test_build_preserves_approved_baseline_and_admitted_projection_counts():
         "satisfied_since_approval": 1,
     }
     assert drives["drive-00"]["baseline_satisfied"] == 1
+    assert drives["drive-00"]["tier"] == "raid"
+    assert drives["drive-07"]["tier"] == "primary"
     assert drives["drive-00"]["approved_requirements"] == 2
     assert drives["drive-00"]["remaining_at_start"] == 1
     assert drives["drive-00"]["remaining_guaranteed_bytes"] == 20
@@ -98,10 +100,22 @@ def test_runtime_labels_every_drive_and_keeps_skipped_access_visible():
 
     terminal = execution_view.with_runtime_state({
         "status": "done", "code": "PLAN_COMPLETE_WITH_FOLLOWUPS",
-        "evidence": {"access_gated": ["org/large"]}, "execution_plan": plan,
+        "evidence": {"access_gated": ["org/large"]},
+        "execution_completed_requirements": ["primary:new"], "execution_plan": plan,
     })
     assert _drives(terminal)["drive-00"]["state"] == "complete"
     assert _drives(terminal)["drive-07"]["state"] == "access_followup"
+
+    mixed_followups = execution_view.with_runtime_state({
+        "status": "done", "code": "PLAN_COMPLETE_WITH_FOLLOWUPS",
+        "evidence": {
+            "content_refusals": [{"repo_id": "org/new"}],
+            "waiting_requirements": ["primary:large"],
+        },
+        "execution_plan": plan,
+    })
+    assert _drives(mixed_followups)["drive-00"]["state"] == "access_followup"
+    assert _drives(mixed_followups)["drive-07"]["state"] == "waiting_dependency"
 
 
 def test_runtime_maps_typed_drive_stops_without_reassigning_other_drives():
@@ -118,9 +132,53 @@ def test_runtime_maps_typed_drive_stops_without_reassigning_other_drives():
     assert drives["drive-07"]["models"][0]["repo"] == "org/large"
 
 
+def test_runtime_maps_dependency_evidence_and_ignores_stale_drive_while_awaiting():
+    plan = execution_view.build(_session_start())
+
+    waiting_drive = execution_view.with_runtime_state({
+        "status": "running", "drive": "drive-00", "awaiting_drive": "drive-07",
+        "execution_plan": plan,
+    })
+    assert _drives(waiting_drive)["drive-00"]["state"] == "approved_remaining"
+    assert _drives(waiting_drive)["drive-07"]["state"] == "waiting_for_drive"
+
+    dependency = execution_view.with_runtime_state({
+        "status": "paused", "drive": "drive-00", "code": "WAITING_DEPENDENCY",
+        "evidence": {"requirements": ["primary:large"]}, "execution_plan": plan,
+    })
+    assert _drives(dependency)["drive-00"]["state"] == "approved_remaining"
+    assert _drives(dependency)["drive-07"]["state"] == "waiting_dependency"
+
+
+def test_runtime_uses_durable_completion_progress_and_preserves_throttle_semantics():
+    plan = execution_view.build(_session_start())
+    advanced = execution_view.with_runtime_state({
+        "status": "running", "drive": "drive-07",
+        "execution_completed_requirements": ["primary:new"], "execution_plan": plan,
+    })
+    assert _drives(advanced)["drive-00"]["state"] == "complete"
+    assert "execution_completed_requirements" not in advanced
+    assert _drives(advanced)["drive-00"]["completed_in_run"] == 1
+    assert advanced["execution"]["totals"]["completed_in_run"] == 1
+    assert advanced["execution"]["totals"]["unresolved"] == 1
+
+    throttled = execution_view.with_runtime_state({
+        "status": "paused", "drive": "drive-07", "code": "DOWNLOAD_THROTTLED",
+        "execution_plan": plan,
+    })
+    assert _drives(throttled)["drive-07"]["state"] == "download_throttled"
+    assert _drives(throttled)["drive-07"]["state_label"] == "Download cap reached"
+
+
 def test_worker_owns_bound_execution_plan_for_one_run():
     worker = fill_worker.FillWorker()
-    supplied = {"session_id": "s", "drives": [{"label": "drive-07"}]}
+    supplied = {
+        "session_id": "s",
+        "drives": [{
+            "label": "drive-07",
+            "models": [{"requirement_id": "primary:large"}],
+        }],
+    }
     release = threading.Event()
 
     assert worker.start(
@@ -129,12 +187,16 @@ def test_worker_owns_bound_execution_plan_for_one_run():
     ) == {"ok": True}
     supplied["drives"][0]["label"] = "mutated-outside"
     worker._emit({"execution_plan": {"session_id": "forged"}})
+    worker._emit({"execution_completed_requirements": ["forged", "primary:large"]})
     snapshot = worker.status()
     snapshot["execution_plan"]["drives"][0]["label"] = "mutated-snapshot"
 
     assert worker.status()["status"] == "running"
     assert worker.status()["execution_plan"]["session_id"] == "s"
     assert worker.status()["execution_plan"]["drives"][0]["label"] == "drive-07"
+    assert worker.status()["execution_completed_requirements"] == ["primary:large"]
+    worker._emit({"execution_completed_requirements": []})
+    assert worker.status()["execution_completed_requirements"] == ["primary:large"]
     release.set()
     worker._thread.join()
 
@@ -184,3 +246,5 @@ def test_fill_javascript_switches_cards_to_exact_execution_evidence():
     assert "approved execution workload at Fill start" in source
     assert "Planning view · current fleet forecast" in source
     assert "if (s && s.drive && !s.execution)" in source
+    assert "view.drives.map(exact" in source
+    assert "admitted work items completed this run" in source

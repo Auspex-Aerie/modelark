@@ -880,6 +880,23 @@ def _drain_projection(
     deferred_content: dict[str, dict] = {}
     # Session-local completion cache by requirement_id, populated only after durable re-derivation.
     completed_reqs: set[str] = set()
+    execution_requirement_ids = {
+        str(_proj_field(task, "requirement_id"))
+        for task in (getattr(projection, "tasks", ()) or ())
+        if _proj_field(task, "requirement_id") is not None
+    }
+    published_completed: set[str] = set()
+
+    def publish_completed(units) -> None:
+        """Publish only completion re-derived from durable projection evidence (INC-063)."""
+        nonlocal published_completed
+        still_remaining = {str(unit.requirement_id) for unit in units}
+        durable_completed = execution_requirement_ids - still_remaining
+        if durable_completed == published_completed:
+            return
+        published_completed = durable_completed
+        ctx.on_progress({"execution_completed_requirements": sorted(durable_completed)})
+
     made_progress = False
     first = True
     pinned_drive: str | None = None
@@ -893,6 +910,7 @@ def _drain_projection(
             remaining = _projection_work_units(
             ctx.con, projection, repo_scope, proposal_files=proposal_files,
             require_proposal_files=require_proposal_files)
+        publish_completed(remaining)
         # re-apply deferred + session-completed filters
         ready = [
             u for u in remaining
@@ -1096,6 +1114,7 @@ def _drain_projection(
                     ctx.con, projection, repo_scope, proposal_files=proposal_files,
                     require_proposal_files=require_proposal_files)
             remaining_ids = {u.requirement_id for u in post_fetch}
+            publish_completed(post_fetch)
             for task in fetch_tasks:
                 if task.requirement_id not in remaining_ids:
                     completed_reqs.add(task.requirement_id)
@@ -1195,6 +1214,7 @@ def _drain_projection(
                     ctx.con, projection, repo_scope, proposal_files=proposal_files,
                     require_proposal_files=require_proposal_files)
             remaining_ids = {u.requirement_id for u in post_replica}
+            publish_completed(post_replica)
             for task in replica_tasks:
                 if task.requirement_id not in remaining_ids:
                     completed_reqs.add(task.requirement_id)
@@ -1286,6 +1306,7 @@ def _drain_projection(
                     ctx.con, projection, repo_scope,
                     proposal_files=proposal_files,
                     require_proposal_files=require_proposal_files)
+            publish_completed(remaining)
         except _Refusal as exc:
             return _terminal(
                 "failed", f"projection work units refused: {exc.code}",

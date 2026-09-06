@@ -1207,6 +1207,7 @@ def _browser_flow() -> None:
                     "drives": [
                         {
                             "label": "drive-00", "approved_requirements": 120,
+                            "tier": "primary",
                             "baseline_satisfied": 119, "satisfied_since_approval": 0,
                             "approved_executable": 1, "remaining_at_start": 1,
                             "approved_guaranteed_bytes": 120_000_000_000,
@@ -1221,6 +1222,7 @@ def _browser_flow() -> None:
                         },
                         {
                             "label": "drive-07", "approved_requirements": 2,
+                            "tier": "primary",
                             "baseline_satisfied": 0, "satisfied_since_approval": 0,
                             "approved_executable": 2, "remaining_at_start": 2,
                             "approved_guaranteed_bytes": 5_000_000_000,
@@ -1236,6 +1238,18 @@ def _browser_flow() -> None:
                     ],
                 },
             }
+            advisory_without_successor = _get("/api/library/plan")
+            advisory_without_successor["drives"] = [
+                drive for drive in advisory_without_successor["drives"]
+                if drive["label"] != "drive-07"
+            ]
+            pg.route(
+                "**/api/library/plan",
+                lambda route: route.fulfill(
+                    status=200, content_type="application/json",
+                    body=json.dumps(advisory_without_successor),
+                ),
+            )
             pg.route(
                 "**/api/fill/status",
                 lambda route: route.fulfill(
@@ -1257,6 +1271,7 @@ def _browser_flow() -> None:
                 time.sleep(0.1)
             assert "planning view" in pg.inner_text("#planBars").lower()
             pg.unroute("**/api/fill/status")
+            pg.unroute("**/api/library/plan")
             print("  exact execution assignments + semantic drive states replaced advisory cards")
 
             # 2b. Once blockers are explicitly removed, the same disposable catalog must support

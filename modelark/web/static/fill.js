@@ -16,7 +16,7 @@
     ["primary", "Primary · bulk (re-fetchable, 1 copy)"],
     ["replica", "Replication · must-have copy #2"],
   ];
-  let mode = "type", last = null, statusTimer = null, plannedBy = {}, lastStatus = null, archivedBy = {}, capacityBy = {}, pollFails = 0, queueSig = null, queueCentered = false, renderedExecutionSig = null;
+  let mode = "type", last = null, statusTimer = null, lastStatus = null, archivedBy = {}, capacityBy = {}, pollFails = 0, queueSig = null, queueCentered = false, renderedExecutionSig = null;
   let queueModels = null, queueDrives = null, placedMap = {}, lastQueueRepo = null, placedLoaded = false;   // one-row-per-model queue state
 
   const hashColor = s => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return `hsl(${h % 360} 42% 50%)`; };
@@ -42,7 +42,7 @@
       .drivecard.execution-card:before{content:"";position:absolute;left:0;top:0;bottom:0;width:5px;background:#aeb7c2}
       .drivecard.execution-writing{background:#f4f8fd;border-color:#2c5f8f;box-shadow:0 0 0 2px #2c5f8f33}
       .drivecard.execution-writing:before{background:#2c5f8f}
-      .drivecard.execution-waiting_for_drive{background:#fffaf0;border-color:#c99738}.drivecard.execution-waiting_for_drive:before{background:#c99738}
+      .drivecard.execution-waiting_for_drive,.drivecard.execution-download_throttled{background:#fffaf0;border-color:#c99738}.drivecard.execution-waiting_for_drive:before,.drivecard.execution-download_throttled:before{background:#c99738}
       .drivecard.execution-access_followup,.drivecard.execution-paused_unwritable,.drivecard.execution-capacity_stop,.drivecard.execution-error{background:#fff7f6;border-color:#b95b51}
       .drivecard.execution-access_followup:before,.drivecard.execution-paused_unwritable:before,.drivecard.execution-capacity_stop:before,.drivecard.execution-error:before{background:#b14a40}
       .drivecard.execution-complete,.drivecard.execution-satisfied{background:#f3faf8;border-color:#55a096}
@@ -57,6 +57,7 @@
       .execution-writing .execution-state{background:#2c5f8f}.execution-waiting_for_drive .execution-state{background:#a96d08}
       .execution-access_followup .execution-state,.execution-paused_unwritable .execution-state,.execution-capacity_stop .execution-state,.execution-error .execution-state{background:#a4342c}
       .execution-complete .execution-state,.execution-satisfied .execution-state{background:#0f766e}
+      .execution-download_throttled .execution-state{background:#a96d08}
       .dcbar{height:22px;background:#eef1f6;border-radius:4px;overflow:hidden;border:1px solid #e0e5ec}
       .dcbarfill{display:flex;height:100%}
       .seg{height:100%;min-width:1px;flex:0 0 auto}
@@ -192,9 +193,15 @@
     const workItems = exact ? exact.remaining_at_start : 0;
     const workWord = workItems === 1 ? "item" : "items";
     const satisfied = exact ? exact.baseline_satisfied + exact.satisfied_since_approval : 0;
-    const exactFoot = exact
-      ? `<div class="dcfoot"><span>${esc(satisfied)} already satisfied</span><span>${esc(workItems)} ${workWord} at start</span></div>`
+    const workProgress = exact && exact.completed_in_run
+      ? `${exact.completed_in_run} of ${workItems} completed this run`
+      : `${workItems} ${workWord} at start`;
+    const exactFoot = exact && exact.outside_execution
+      ? `<div class="dcevidence">Not assigned by this approved Fill.</div>`
+      : exact
+      ? `<div class="dcfoot"><span>${esc(satisfied)} already satisfied</span><span>${esc(workProgress)}</span></div>`
         + `<div class="dcevidence">${esc(exact.approved_requirements)} approved requirements · ${esc(MA.gb(exact.remaining_guaranteed_bytes))} admitted charge at start</div>`
+        + (d.execution_metadata_current === false ? `<div class="dcevidence">Current plan metadata is unavailable; showing the retained Fill record.</div>` : "")
         + ((exact.access_followups || []).length ? `<div class="dcattention">Access follow-up: ${exact.access_followups.map(esc).join(", ")}</div>` : "")
       : `<div class="dcfoot"><span>${plannedPct}% · ${MA.gb(planned)} / ${MA.gb(usable)} writable budget</span><span>${d.n_models} planned</span></div>`;
     const barTitle = exact ? "approved execution workload at Fill start" : "planned work against the safe writable budget";
@@ -210,23 +217,37 @@
     const view = s && s.execution;
     if (!view || !Array.isArray(view.drives)) return "advisory";
     return `${view.session_id}|${view.projection_hash}|` + view.drives
-      .map(d => `${d.label}:${d.state}:${(d.access_followups || []).join(",")}`).join("|");
+      .map(d => `${d.label}:${d.state}:${d.completed_in_run || 0}:${(d.access_followups || []).join(",")}`).join("|");
   }
 
   function displayData(data, s) {
     const view = s && s.execution;
     if (!view || !Array.isArray(view.drives)) return data;
-    const exactByDrive = Object.fromEntries(view.drives.map(d => [d.label, d]));
+    const advisoryByDrive = Object.fromEntries(data.drives.map(d => [d.label, d]));
+    const exactLabels = new Set(view.drives.map(d => d.label));
     const categories = {};
     data.drives.forEach(d => d.models.forEach(m => { if (m.repo) categories[m.repo] = m.category; }));
     (queueModels || []).forEach(m => { if (m.repo) categories[m.repo] = m.category; });
-    const drives = data.drives.map(d => {
-      const exact = exactByDrive[d.label];
-      if (!exact) return d;
+    const drives = view.drives.map(exact => {
+      const advisory = advisoryByDrive[exact.label];
+      const d = advisory || {
+        label: exact.label, tier: exact.tier || "primary", lifecycle: "active",
+        eligibility: "enabled", capacity: null, usable: 0,
+        archived_bytes: ((s && s.archived_by_drive) || {})[exact.label] || 0,
+      };
       const models = exact.models.map(m => ({...m, category: categories[m.repo] || "?"}));
-      return {...d, execution: exact, models, n_models: exact.remaining_at_start,
+      return {...d, execution: exact, execution_metadata_current: !!advisory,
+              models, n_models: exact.remaining_at_start,
               planned_bytes: exact.remaining_guaranteed_bytes};
     });
+    for (const d of data.drives.filter(item => !exactLabels.has(item.label))) {
+      drives.push({...d, models: [], n_models: 0, planned_bytes: 0, execution: {
+        state: "not_in_run", state_label: "Not in approved run", outside_execution: true,
+        approved_requirements: 0, baseline_satisfied: 0, satisfied_since_approval: 0,
+        remaining_at_start: 0, remaining_guaranteed_bytes: 0, completed_in_run: 0,
+        access_followups: [],
+      }});
+    }
     return {...data, drives, links: view.links || []};
   }
 
@@ -273,9 +294,8 @@
     ensureStyle();
     const shown = displayData(data, lastStatus);
     renderedExecutionSig = executionSignature(lastStatus);
-    plannedBy = {}; archivedBy = {}; capacityBy = {};
-    data.drives.forEach(d => {
-      plannedBy[d.label] = d.planned_bytes;
+    archivedBy = {}; capacityBy = {};
+    shown.drives.forEach(d => {
       archivedBy[d.label] = d.archived_bytes || 0;   // durable: what's actually on the drive (survives restarts)
       capacityBy[d.label] = Number.isFinite(d.capacity) ? d.capacity : null;
     });
@@ -441,9 +461,13 @@
     if (!el) return;
     if (!s || s.status === "idle" || (s.status !== "running" && !s.session_bytes)) {
       const t = (last && last.totals) || {};
+      const exact = s && s.execution && s.execution.totals;
+      const summary = exact
+        ? `${esc(exact.completed_in_run || 0)} of ${esc(exact.remaining_at_start)} admitted work items completed this run · ${esc(exact.unresolved)} unresolved`
+        : (t.n_planned != null ? `${esc(t.n_planned)} to place · ${esc(t.n_must)} must-have · ${esc(t.n_bulk)} bulk` : "");
       el.innerHTML = `<div class="telpanel idle"><div class="telhead" style="margin-bottom:9px">Run</div>` +
         (s && s.status in TERMINAL ? esc(statusLine(s)) : "Not running. Press <b>Start fill</b> to begin.") +
-        (t.n_planned != null ? `<div style="margin-top:11px;font:500 13px ui-monospace,monospace">${esc(t.n_planned)} to place · ${esc(t.n_must)} must-have · ${esc(t.n_bulk)} bulk</div>` : "") +
+        (summary ? `<div style="margin-top:11px;font:500 13px ui-monospace,monospace">${summary}</div>` : "") +
         `</div>`;
       return;
     }

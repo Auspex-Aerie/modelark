@@ -464,6 +464,9 @@ def test_gated_first_toasts_second_skip_becomes_followup_without_generic_failure
     notices = [e["notice"] for e in progress if e.get("notice")]
     assert notices[0]["type"] == "access-gated" and "continuing other work" in notices[0]["message"]
     assert any("added to Verify follow-ups" in n["message"] for n in notices)
+    completion = [e["execution_completed_requirements"] for e in progress
+                  if "execution_completed_requirements" in e]
+    assert completion and "primary:a" in completion[-1]
     assert sum("b" in repos for kind, _, repos in calls if kind == "fetch") == 2
 
 
