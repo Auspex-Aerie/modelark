@@ -2618,3 +2618,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Refines only the internal Slice 2 authority, publication and source interfaces, with concurrency/crash/stop and bounded-replay contracts. The historical-temporary reproduction was already refused by the later allocation scan; explicit final authentication preserves that refusal after removing per-chunk scans. No catalog, live Fill or real-device changes.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-102, DEC-103, DEC-108, DEC-109
+
+### DEC-111: Upgrade early private slice state without losing durable authority
+- `id`: DEC-111
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #69 second Greptile review at `c0a52d2` and a failing version-1 database regression reproducing missing `stop_serial` on Start.
+- `decision`: Advance private transaction state to schema version 2. In the existing initialization write transaction, add the stop serial only when an accepted version-1 database lacks it, then commit the version update with all existing plans, reservations, stop flags and journal heads preserved. Accept both development version-1 layouts and make reopening idempotent.
+- `rationale`: Even an internal API must not silently accept an earlier durable schema and fail later on reachable Start/Stop operations. An additive transactional migration preserves ownership rather than requiring state deletion or adoption.
+- `impact`: Private Slice 2 SQLite initialization and compatibility tests only; no catalog migration, live-state access or real-device execution.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110

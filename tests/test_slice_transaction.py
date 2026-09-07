@@ -166,6 +166,33 @@ def test_approval_is_durable_and_does_not_start_or_touch_destination(setup, api)
     assert not list(dest.root.iterdir()) and not sources.reads
 
 
+@pytest.mark.parametrize("missing_serial", [True, False])
+def test_private_v1_upgrade_preserves_transaction_authority(setup, api, missing_serial):
+    _, store, plan, tx, dest, _ = setup
+    store.approve(tx, expected_seal=plan.seal)
+    store.reserve(tx, plan.destination.device_id)
+    store.request_stop(tx)
+    store.append(tx, "test-marker", {"preserved": True})
+    before = store.events(tx)
+    with store._connection() as con:
+        if missing_serial:
+            con.execute("ALTER TABLE transactions DROP COLUMN stop_serial")
+        con.execute("PRAGMA user_version=1")
+    upgraded = api[1].Store()
+    assert upgraded.load(tx) == plan
+    assert upgraded.events(tx) == before
+    assert upgraded.owner(plan.destination.device_id) == tx
+    assert upgraded.stop_requested(tx)
+    serial = upgraded.reserve(tx, plan.destination.device_id)
+    upgraded.request_stop(tx)
+    upgraded.activate(tx, plan.destination.device_id, serial)
+    assert upgraded.stop_requested(tx)  # A newer stop still wins after migration.
+    with upgraded._connection(write=False) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert api[1].Store().events(tx) == before  # Reopening is idempotent.
+    assert not list(dest.root.iterdir())
+
+
 def test_run_records_actual_source_and_verified_receipt_without_catalog_mutation(setup):
     t, store, plan, tx, dest, sources = setup
     original = sources.snapshot

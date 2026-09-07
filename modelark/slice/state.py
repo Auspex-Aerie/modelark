@@ -79,19 +79,25 @@ class Store:
             raise ValueError("unsafe slice state database")
         with self._connection() as con:
             version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise ValueError("unsupported slice state version")
             con.execute("CREATE TABLE IF NOT EXISTS transactions ("
                         "id TEXT PRIMARY KEY, plan TEXT NOT NULL, seal TEXT NOT NULL,"
                         "state TEXT NOT NULL, stop INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '',"
                         "journal_seq INTEGER NOT NULL DEFAULT 0, journal_digest TEXT NOT NULL DEFAULT '',"
                         "stop_serial INTEGER NOT NULL DEFAULT 0)")
+            # Both pre-review v1 and the corrected v1 appeared during Slice 2 development.
+            # Preserve plans, reservations, stops and journal heads in the same durable commit.
+            if version == 1:
+                columns = {row[1] for row in con.execute("PRAGMA table_info(transactions)")}
+                if "stop_serial" not in columns:
+                    con.execute("ALTER TABLE transactions ADD COLUMN stop_serial INTEGER NOT NULL DEFAULT 0")
             con.execute("CREATE TABLE IF NOT EXISTS owners (device TEXT PRIMARY KEY,"
                         "tx TEXT UNIQUE NOT NULL REFERENCES transactions(id))")
             con.execute("CREATE TABLE IF NOT EXISTS journal (tx TEXT NOT NULL REFERENCES transactions(id),"
                         "seq INTEGER NOT NULL, event TEXT NOT NULL, payload TEXT NOT NULL, digest TEXT NOT NULL,"
                         "PRIMARY KEY(tx,seq))")
-            con.execute("PRAGMA user_version=1")
+            con.execute("PRAGMA user_version=2")
 
     @contextmanager
     def _connection(self, *, write=True):

@@ -28,6 +28,9 @@ Reader operations use deferred transactions rather than requesting the writer re
 writers have a bounded SQLite busy wait and return typed `STATE_BUSY` on exhaustion. The private
 database handle retains SQLite rollback-recovery capability even for reader operations, so a hot
 journal from a dead writer is recovered rather than exposed as a read-only-database error.
+Private schema version 2 transactionally upgrades development version-1 databases, adding the
+stop serial when absent while preserving plans, pending stops, reservations and journal heads.
+This migration never opens or changes a catalog database.
 
 A Linux abstract Unix socket bind provides process exclusion keyed only by the destination's
 canonical physical-device identity. No listener, remote connection, or replaceable lock file is
