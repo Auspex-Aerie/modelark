@@ -1,5 +1,5 @@
 """Read-only source-use gate sharing the archive writer's nonblocking drive fence."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 from modelark import drive_fence
 from .catalog import read_catalog
@@ -20,15 +20,17 @@ class FencedSources:
     @contextmanager
     def open(self, candidate):
         key = (candidate.drive.identity_fingerprint, candidate.drive.identity_epoch)
-        try:
-            with drive_fence.hold_drives_sorted([key], blocking=False):
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(drive_fence.hold_drives_sorted([key], blocking=False))
                 spec = SliceSpec((candidate.copy.repo_id,), "source-evidence", "unused")
                 snapshot = read_catalog(self.catalog_path, spec)
-                with self.reader.open(candidate) as stream:
-                    yield snapshot, stream
-        except drive_fence.FenceUnavailable as exc:
-            raise TransferRefusal("SOURCE_BUSY", candidate.drive.drive_label) from exc
-        except SliceRefusal as exc:
-            raise TransferRefusal("SOURCE_EVIDENCE_UNAVAILABLE", str(exc)) from exc
-        except FileNotFoundError as exc:
-            raise TransferRefusal("SOURCE_MISSING", candidate.drive.drive_label) from exc
+                stream = stack.enter_context(self.reader.open(candidate))
+            except drive_fence.FenceUnavailable as exc:
+                raise TransferRefusal("SOURCE_BUSY", candidate.drive.drive_label) from exc
+            except SliceRefusal as exc:
+                raise TransferRefusal("SOURCE_EVIDENCE_UNAVAILABLE", str(exc)) from exc
+            except FileNotFoundError as exc:
+                raise TransferRefusal("SOURCE_MISSING", candidate.drive.drive_label) from exc
+            # Do not translate exceptions thrown by the destination/consumer inside this yield.
+            yield snapshot, stream

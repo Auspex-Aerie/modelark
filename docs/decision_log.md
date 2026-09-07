@@ -2596,3 +2596,25 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Adds internal state, transaction and source-gate modules plus tests and API documentation. Slice 3 must prove confinement, system/archive exclusion, capability accounting and recoverable owned-object certificates inside actual adapter calls before exposing execution. Catalog schemas, archive evidence and live Fill remain unchanged.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md, docs/plans/usable-slice-implementation-charter.md
 - `related`: DEC-101, DEC-102, DEC-103, DEC-104, DEF-041
+
+### DEC-109: Admit only the slice source gate to the neutral drive-fence import boundary
+- `id`: DEC-109
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #69 CI at `7dbbe4e`: 1,152 tests passed and the reviewed-import guard rejected the new `slice/sources.py` fence import.
+- `decision`: Extend the neutral `drive_fence` import allowlist to the exact `slice/sources.py` path required by DEC-108. Match repo-relative paths rather than basenames; leave `drive_mutation` limited to its existing reviewed writer modules.
+- `rationale`: Slice reads must share the writer's exclusion primitive without gaining authority to dirty or anchor a drive. An explicit path exception preserves the architectural guard instead of bypassing it through dynamic imports or broadening mutation authority.
+- `impact`: Updates the import-policy contract and source-gate documentation; no production writer or catalog changes.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-103, DEC-108, tests/test_drive_mutation_envelope.py
+
+### DEC-110: Make initializing ownership observable and control publication restartable
+- `id`: DEC-110
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #69 reviews at `7dbbe4e` and reproductions of read contention, overlapping first Starts, missing/changed controls and incomplete control creation.
+- `decision`: Commit an initializing device reservation before acquiring process exclusion, then activate only the fenced owner without erasing a newer stop request. Use deferred private-state reader transactions and bounded writer contention, retaining SQLite crash rollback capability. Publish control records through the same restartable prepared/no-replace protocol as receipts. Verify control contents and extant temporary certificates at final verification; check stop/ownership during hashing. Cache validated operation/allocation state under a durable-head guard and append CAS rather than replaying the journal per chunk. Limit source error translation to source setup, preserving downstream destination failures.
+- `rationale`: Repeated Start must observe an initializing owner, not depend on timing. An interrupted control write cannot strand durable ownership. Prepared evidence and current object certificates, not historical names, establish recovery authority. Cached execution state must retain a checkable link to its durable journal while avoiding work proportional to journal size for every content chunk.
+- `impact`: Refines only the internal Slice 2 authority, publication and source interfaces, with concurrency/crash/stop and bounded-replay contracts. The historical-temporary reproduction was already refused by the later allocation scan; explicit final authentication preserves that refusal after removing per-chunk scans. No catalog, live Fill or real-device changes.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-102, DEC-103, DEC-108, DEC-109

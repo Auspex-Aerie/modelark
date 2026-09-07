@@ -530,6 +530,9 @@ def test_fenced_sources_use_real_archive_fence_and_read_only_snapshot(api, tmp_p
                 pass
     with sources.open(candidate) as (fresh, stream):
         assert fresh == snapshot and stream.read() == DATA
+    with pytest.raises(FileNotFoundError, match="destination disappeared"):
+        with sources.open(candidate):
+            raise FileNotFoundError("destination disappeared")
     with drive_fence.hold_drives_sorted([key], blocking=False):
         pass
     assert tuple(con.iterdump()) == before
@@ -629,17 +632,21 @@ def test_private_store_bootstrap_flush_failures_are_recoverable(api, monkeypatch
     assert store.root.is_dir() and store.path.is_file()
 
 
-def test_atomic_publication_race_never_overwrites_unknown_bytes(setup):
+@pytest.mark.parametrize("target", ["model.safetensors", ".modelark-slice-owner", ".modelark-slice-receipt.json"])
+def test_atomic_publication_race_never_overwrites_unknown_bytes(setup, target):
     t, store, plan, tx, dest, sources = setup
     publish = dest.publish
     def race(temp, path, token):
-        (dest.root / path).write_bytes(b"not ours")
+        if path.endswith(target):
+            (dest.root / path).write_bytes(b"not ours")
         publish(temp, path, token)
     dest.publish = race
     with pytest.raises(t.TransferRefusal, match="OUTPUT_COLLISION"):
         with start(setup) as session:
             session.run()
-    assert (dest.root / "models/org/model/model.safetensors").read_bytes() == b"not ours"
+    path = (target if target == ".modelark-slice-owner" else "models/" + target
+            if target == ".modelark-slice-receipt.json" else "models/org/model/" + target)
+    assert (dest.root / path).read_bytes() == b"not ours"
     assert store.receipt(tx) is None
 
 
@@ -656,3 +663,211 @@ def test_different_consumer_roots_share_device_exclusion_and_busy_preserves_appr
         t.start(store, second, dest, sources)
     assert store.status(second).state == "approved"
     assert not (dest.root / "another-root").exists()
+
+
+def test_status_reads_do_not_require_the_active_writers_sqlite_lock(setup):
+    t, store, plan, tx, dest, sources = setup
+    with start(setup):
+        with store._connection() as con:
+            con.execute("UPDATE transactions SET reason='pending' WHERE id=?", (tx,))
+            assert store.status(tx).state == "transferring"
+            assert store.owner(plan.destination.device_id) == tx
+            assert store.events(tx)
+            assert not t.start(store, tx, dest, sources).can_write
+
+
+def test_overlapping_first_start_observes_initializing_owner(setup):
+    t, store, plan, tx, dest, sources = setup
+    check = dest.check
+    observed = []
+    def overlap(binding, allocated):
+        if not observed:
+            observed.append(t.start(store, tx, dest, sources))
+        check(binding, allocated)
+    dest.check = overlap
+    with start(setup):
+        assert len(observed) == 1 and not observed[0].can_write
+        assert observed[0].transaction_id == tx
+
+
+@pytest.mark.parametrize("change", ["removed", "changed"])
+def test_final_verification_requires_the_owned_control_record(setup, change):
+    t, store, plan, tx, dest, sources = setup
+    with start(setup) as session:
+        session.step()
+        control = dest.root / ".modelark-slice-owner"
+        if change == "removed":
+            control.unlink()
+        else:
+            control.write_bytes(b"changed control record")
+        with pytest.raises(t.TransferRefusal, match="CONTROL_CORRUPT"):
+            session.run()
+    assert store.receipt(tx) is None
+
+
+def test_final_layout_authenticates_reappeared_historical_temporary(setup):
+    t, store, plan, tx, dest, sources = setup
+    with start(setup) as session:
+        session.step()
+        temporary = next(payload["temporary"] for event, payload in store.events(tx)
+                         if event == "operation" and payload["kind"] == "file")
+        assert not (dest.root / temporary).exists()
+        list_paths = dest.list_paths
+        def changed_layout(root):
+            (dest.root / temporary).mkdir()
+            return list_paths(root)
+        dest.list_paths = changed_layout
+        with pytest.raises(t.TransferRefusal, match="OUTPUT_COLLISION"):
+            session.run()
+    assert store.receipt(tx) is None
+
+
+def test_source_wait_identifies_exact_artifact_and_candidate(setup):
+    t, store, plan, tx, dest, sources = setup
+    sources.status["drive-a"] = "WAITING_SOURCE"
+    with start(setup) as session:
+        result = session.run()
+    assert all(value in result.reason for value in ("org/model", "model.safetensors", "drive-a"))
+
+
+def test_journal_rejects_nonhex_creation_tokens(setup):
+    t, store, plan, tx, dest, sources = setup
+    with start(setup):
+        pass
+    op = next(payload for event, payload in store.events(tx) if event == "operation")
+    # Rewrite both the test's journal rows/head to isolate structural validation from hash checking.
+    with store._connection() as con:
+        con.execute("DELETE FROM journal WHERE tx=?", (tx,))
+        con.execute("UPDATE transactions SET journal_seq=0,journal_digest='' WHERE id=?", (tx,))
+    store.append(tx, "operation", dict(op, token="x" * 32))
+    with pytest.raises(t.TransferRefusal, match="JOURNAL_CORRUPT"):
+        t.start(store, tx, dest, sources)
+
+
+@pytest.mark.parametrize("boundary", ["control_chunk_written", "control_prepared", "control_published",
+                                      "control_parent_flushed"])
+def test_control_publication_is_recoverable_at_each_new_boundary(setup, boundary):
+    t, store, plan, tx, dest, sources = setup
+    class Crash(BaseException):
+        pass
+    def fault(point):
+        if point == boundary:
+            raise Crash()
+    with pytest.raises(Crash):
+        with start(setup, fault) as session:
+            session.run()
+    with t.start(store, tx, dest, sources) as session:
+        assert session.run().state == "complete"
+
+
+def test_stop_requested_during_startup_is_not_lost(setup):
+    t, store, plan, tx, dest, sources = setup
+    check = dest.check
+    def stop_at_check(binding, allocated):
+        store.request_stop(tx)
+        check(binding, allocated)
+    dest.check = stop_at_check
+    with pytest.raises(t.TransferRefusal, match="STOPPED"):
+        start(setup)
+    assert not list(dest.root.iterdir())
+    assert store.status(tx).state == "stopped"
+
+
+def test_verification_checks_stop_between_read_chunks(setup):
+    t, store, plan, tx, dest, sources = setup
+    with start(setup) as session:
+        session.step()
+        read = dest.read
+        class StopOnRead(io.BytesIO):
+            def read(self, size=-1):
+                data = super().read(min(size, 1))
+                if data:
+                    store.request_stop(tx)
+                return data
+        def stopping_read(path):
+            if path.endswith("model.safetensors"):
+                return StopOnRead(DATA)
+            return read(path)
+        dest.read = stopping_read
+        assert session.run().state == "stopped"
+    assert store.receipt(tx) is None
+
+
+def test_streaming_does_not_replay_plan_and_journal_per_chunk(setup, monkeypatch):
+    t, store, plan, tx, dest, sources = setup
+    opening = sources.open
+    class OneByte(io.BytesIO):
+        def read(self, size=-1):
+            return super().read(min(size, 1))
+    @contextmanager
+    def chunked(source):
+        with opening(source) as (snapshot, _):
+            yield snapshot, OneByte(DATA)
+    sources.open = chunked
+    counts = {"events": 0, "load": 0}
+    for name in counts:
+        method = getattr(store, name)
+        def counted(*args, name=name, method=method, **kwargs):
+            counts[name] += 1
+            return method(*args, **kwargs)
+        monkeypatch.setattr(store, name, counted)
+    with start(setup) as session:
+        counts.update(events=0, load=0)
+        assert session.run().state == "complete"
+    assert counts["load"] == 0 and counts["events"] <= 2
+
+
+def test_cached_journal_requires_unchanged_durable_head(setup):
+    t, store, plan, tx, dest, sources = setup
+    with start(setup) as session:
+        op = next(payload for event, payload in store.events(tx) if event == "operation")
+        store.append(tx, "operation", op)
+        with pytest.raises(t.TransferRefusal, match="JOURNAL_CORRUPT"):
+            session.run()
+
+
+def _die_during_sqlite_write(store, tx):
+    with store._connection() as con:
+        con.execute("PRAGMA cache_size=1")
+        con.execute("UPDATE transactions SET reason=? WHERE id=?", ("uncommitted" * 100000, tx))
+        os._exit(73)
+
+
+def test_readers_recover_a_dead_sqlite_writer_without_committing_its_changes(setup):
+    t, store, plan, tx, dest, sources = setup
+    process = multiprocessing.get_context("fork").Process(target=_die_during_sqlite_write, args=(store, tx))
+    process.start()
+    process.join()
+    assert process.exitcode == 73
+    assert store.status(tx).reason == ""
+    with start(setup) as session:
+        assert session.run().state == "complete"
+
+
+def test_delayed_first_starter_cannot_downgrade_a_completed_winner(setup):
+    t, store, plan, tx, dest, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    finished = False
+    def fault(point):
+        nonlocal finished
+        if point == "reservation_committed":
+            with t.start(store, tx, dest, sources) as winner:
+                assert winner.run().state == "complete"
+            finished = True
+    result = t.start(store, tx, dest, sources, fault=fault)
+    assert finished and not result.can_write and result.state == "complete"
+    assert store.status(tx).state == "complete"
+
+
+def test_crash_between_reservation_and_process_bind_is_resumable(setup):
+    t, store, plan, tx, dest, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    process = multiprocessing.get_context("fork").Process(target=_die_at_boundary,
+                                                         args=(store, tx, dest, sources, "reservation_committed"))
+    process.start()
+    process.join()
+    assert process.exitcode == 73
+    assert store.owner(plan.destination.device_id) == tx
+    assert not list(dest.root.iterdir())
+    with t.start(store, tx, dest, sources) as session:
+        assert session.run().state == "complete"

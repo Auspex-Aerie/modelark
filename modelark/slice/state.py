@@ -84,7 +84,8 @@ class Store:
             con.execute("CREATE TABLE IF NOT EXISTS transactions ("
                         "id TEXT PRIMARY KEY, plan TEXT NOT NULL, seal TEXT NOT NULL,"
                         "state TEXT NOT NULL, stop INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '',"
-                        "journal_seq INTEGER NOT NULL DEFAULT 0, journal_digest TEXT NOT NULL DEFAULT '')")
+                        "journal_seq INTEGER NOT NULL DEFAULT 0, journal_digest TEXT NOT NULL DEFAULT '',"
+                        "stop_serial INTEGER NOT NULL DEFAULT 0)")
             con.execute("CREATE TABLE IF NOT EXISTS owners (device TEXT PRIMARY KEY,"
                         "tx TEXT UNIQUE NOT NULL REFERENCES transactions(id))")
             con.execute("CREATE TABLE IF NOT EXISTS journal (tx TEXT NOT NULL REFERENCES transactions(id),"
@@ -93,14 +94,23 @@ class Store:
             con.execute("PRAGMA user_version=1")
 
     @contextmanager
-    def _connection(self):
-        con = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=0, isolation_level=None)
+    def _connection(self, *, write=True):
+        # Reader operations use deferred read transactions, but the private DB handle retains
+        # SQLite's ability to recover a hot rollback journal left by a dead writer.
+        con = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, timeout=5, isolation_level=None)
         try:
             con.execute("PRAGMA foreign_keys=ON")
             con.execute("PRAGMA synchronous=FULL")
-            con.execute("BEGIN IMMEDIATE")
+            con.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             yield con
             con.execute("COMMIT")
+        except sqlite3.OperationalError as exc:
+            if con.in_transaction:
+                con.execute("ROLLBACK")
+            from .transaction import TransferRefusal
+            if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                raise TransferRefusal("STATE_BUSY", "private state writer did not finish") from exc
+            raise
         except BaseException:
             if con.in_transaction:
                 con.execute("ROLLBACK")
@@ -118,7 +128,7 @@ class Store:
 
     def load(self, tx):
         from .transaction import TransferPlan, TransferRefusal
-        with self._connection() as con:
+        with self._connection(write=False) as con:
             row = con.execute("SELECT plan,seal FROM transactions WHERE id=?", (tx,)).fetchone()
         if row is None:
             raise TransferRefusal("TRANSACTION_MISSING", tx)
@@ -140,29 +150,50 @@ class Store:
 
     def status(self, tx):
         from .transaction import Status, TransferRefusal
-        with self._connection() as con:
+        with self._connection(write=False) as con:
             row = con.execute("SELECT state,reason FROM transactions WHERE id=?", (tx,)).fetchone()
         if row is None:
             raise TransferRefusal("TRANSACTION_MISSING", tx)
         return Status(tx, *row)
 
     def owner(self, device):
-        with self._connection() as con:
+        with self._connection(write=False) as con:
             row = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
         return row[0] if row else None
 
-    def claim(self, tx, device):
+    def reserve(self, tx, device):
         from .transaction import TransferRefusal
-        with self._connection() as con:
+        def inspect(con):
             owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
             if owner and owner[0] != tx:
                 raise TransferRefusal("DESTINATION_BUSY", owner[0])
-            state = con.execute("SELECT state FROM transactions WHERE id=?", (tx,)).fetchone()[0]
-            if state not in {"approved", "transferring", "verifying", "stopped", "waiting_source",
+            state, serial = con.execute("SELECT state,stop_serial FROM transactions WHERE id=?", (tx,)).fetchone()
+            if state not in {"approved", "starting", "transferring", "verifying", "stopped", "waiting_source",
                              "blocked_source", "waiting_destination"}:
                 raise TransferRefusal("APPROVAL_MISSING" if state == "ready" else "NOT_RESUMABLE", state)
+            return owner, serial
+        # Repeated Start is a reader while an owner is actively journaling. Only the first
+        # reservation needs the writer transaction; recheck inside it to close the CAS race.
+        with self._connection(write=False) as con:
+            owner, serial = inspect(con)
+            if owner:
+                return serial
+        with self._connection() as con:
+            owner, serial = inspect(con)
             con.execute("INSERT OR IGNORE INTO owners(device,tx) VALUES(?,?)", (device, tx))
-            con.execute("UPDATE transactions SET state='transferring',stop=0,reason='' WHERE id=?", (tx,))
+            if not owner:
+                con.execute("UPDATE transactions SET state='starting',reason='' WHERE id=?", (tx,))
+            return serial
+
+    def activate(self, tx, device, stop_serial):
+        from .transaction import TransferRefusal
+        with self._connection() as con:
+            owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
+            if not owner or owner[0] != tx:
+                raise TransferRefusal("EXECUTION_FENCE_LOST")
+            # A stop arriving during initialization must not be erased by activation.
+            con.execute("UPDATE transactions SET state='transferring',reason='',"
+                        "stop=CASE WHEN stop_serial=? THEN 0 ELSE stop END WHERE id=?", (stop_serial, tx))
 
     def set_state(self, tx, state, reason=""):
         with self._connection() as con:
@@ -170,25 +201,39 @@ class Store:
 
     def request_stop(self, tx):
         with self._connection() as con:
-            con.execute("UPDATE transactions SET stop=1 WHERE id=?", (tx,))
+            con.execute("UPDATE transactions SET stop=1,stop_serial=stop_serial+1 WHERE id=?", (tx,))
 
     def stop_requested(self, tx):
-        with self._connection() as con:
+        with self._connection(write=False) as con:
             return bool(con.execute("SELECT stop FROM transactions WHERE id=?", (tx,)).fetchone()[0])
 
-    def append(self, tx, event, payload):
+    def guard(self, tx, device):
+        with self._connection(write=False) as con:
+            row = con.execute("SELECT t.stop,t.journal_seq,t.journal_digest,o.tx FROM transactions t "
+                              "LEFT JOIN owners o ON o.device=? WHERE t.id=?", (device, tx)).fetchone()
+        return bool(row[0]), (row[1], row[2]), row[3]
+
+    def head(self, tx):
+        with self._connection(write=False) as con:
+            return con.execute("SELECT journal_seq,journal_digest FROM transactions WHERE id=?", (tx,)).fetchone()
+
+    def append(self, tx, event, payload, *, expected_head=None):
         encoded = _json(payload).decode()
         with self._connection() as con:
             last = con.execute("SELECT journal_seq,journal_digest FROM transactions WHERE id=?", (tx,)).fetchone()
+            if expected_head is not None and last != expected_head:
+                from .transaction import TransferRefusal
+                raise TransferRefusal("JOURNAL_CORRUPT", "journal changed outside its fenced writer")
             seq, previous = last[0] + 1, last[1]
             digest = hashlib.sha256(_json([tx, seq, previous, event, encoded])).hexdigest()
             con.execute("INSERT INTO journal VALUES(?,?,?,?,?)", (tx, seq, event, encoded, digest))
             con.execute("UPDATE transactions SET journal_seq=?,journal_digest=? WHERE id=?", (seq, digest, tx))
+        return seq, digest
 
     def events(self, tx):
         import json
         from .transaction import TransferRefusal
-        with self._connection() as con:
+        with self._connection(write=False) as con:
             rows = con.execute("SELECT seq,event,payload,digest FROM journal WHERE tx=? ORDER BY seq", (tx,)).fetchall()
             head = con.execute("SELECT journal_seq,journal_digest FROM transactions WHERE id=?", (tx,)).fetchone()
         previous, events = "", []

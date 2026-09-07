@@ -183,15 +183,24 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
         raise TransferRefusal("APPROVAL_MISSING")
     if status.state == "complete":
         return status
+    serial = store.reserve(tx, plan.destination.device_id)
+    (fault or (lambda point: None))("reservation_committed")
     try:
         lease = _Lease(plan.destination.device_id)
     except TransferRefusal:
-        if store.owner(plan.destination.device_id) == tx:
-            return store.status(tx)  # Observation only; never hands out a writer capability.
+        current = store.status(tx)
+        if current.state == "complete" or store.owner(plan.destination.device_id) == tx:
+            return current  # Observation only; never hands out a writer capability.
         raise
     try:
+        # Another first starter may have won, completed, and released exclusion while this
+        # caller was between durable reservation and process bind. Never downgrade completion.
+        current = store.status(tx)
+        if current.state == "complete":
+            lease.close()
+            return current
         destination.check(plan.destination, 0 if not store.events(tx) else _allocated(store, tx, destination))
-        store.claim(tx, plan.destination.device_id)
+        store.activate(tx, plan.destination.device_id, serial)
         session = Session(store, tx, plan, destination, sources, lease, fault)
         session._fault("reserved")
         session._control()
@@ -221,7 +230,8 @@ def _operations(store, tx):
             kind = payload.get("kind")
             if (payload.get("seal") != plan.seal or payload.get("device") != plan.destination.device_id
                     or not d._path(path) or payload.get("state") not in {"intent", "prepared", "complete"}
-                    or not isinstance(payload.get("token"), str) or len(payload["token"]) != 32):
+                    or not isinstance(payload.get("token"), str) or len(payload["token"]) != 32
+                    or any(c not in "0123456789abcdef" for c in payload["token"])):
                 raise TransferRefusal("JOURNAL_CORRUPT")
             if kind == "file":
                 artifact = files.get(path)
@@ -248,7 +258,7 @@ def _operations(store, tx):
                 raise TransferRefusal("JOURNAL_CORRUPT", path)
             temporary = payload.get("temporary")
             expected = str(PurePosixPath(path).parent / (".slice-" + payload["token"]))
-            if temporary != (expected if kind in {"file", "receipt"} else None):
+            if temporary != (expected if kind in {"file", "receipt", "control"} else None):
                 raise TransferRefusal("JOURNAL_CORRUPT", "temporary identity differs")
             previous = result.get(path)
             if previous and any(previous.get(key) != payload.get(key) for key in
@@ -293,6 +303,16 @@ class Session:
         self.store, self.transaction_id, self.plan = store, tx, plan
         self.destination, self.sources, self.lease = destination, sources, lease
         self._fault = fault or (lambda point: None)
+        self.ops = _operations(store, tx)
+        self.head = store.head(tx)
+        self._paths = {}
+        self._usage = {}
+        self._allocated_bytes = 0
+        for op in self.ops.values():
+            for path in (op["path"], op.get("temporary")):
+                if path:
+                    self._paths[path] = op
+                    self._owned(path, op)
 
     def __enter__(self):
         return self
@@ -309,21 +329,41 @@ class Session:
         finally:
             self.lease.close()  # Never explicit unlock: inherited writer children retain exclusion.
 
-    def _check(self):
+    def _boundary(self):
         self.lease.check()
-        if self.store.owner(self.plan.destination.device_id) != self.transaction_id:
+        stopped, head, owner = self.store.guard(self.transaction_id, self.plan.destination.device_id)
+        if owner != self.transaction_id:
             raise TransferRefusal("EXECUTION_FENCE_LOST")
-        if self.store.stop_requested(self.transaction_id):
+        if head != self.head:
+            raise TransferRefusal("JOURNAL_CORRUPT", "journal changed outside its fenced writer")
+        if stopped:
             raise TransferRefusal("STOPPED")
-        self.destination.check(self.plan.destination, _allocated(self.store, self.transaction_id, self.destination))
+        self.destination.check(self.plan.destination, self._allocated_bytes)
+
+    def _check(self):
+        self._boundary()
+        self._verify_control()
+
+    def _verify_control(self, *, required=False):
+        op = self.ops.get(".modelark-slice-owner")
+        if op is None or op["state"] != "complete":
+            if required:
+                raise TransferRefusal("CONTROL_CORRUPT", "ownership record is not complete")
+            return  # Initial control creation still has only its durable intent.
+        if not self._owned(op["path"], op) or not self._matches(op["path"], op):
+            raise TransferRefusal("CONTROL_CORRUPT", "ownership record disappeared or changed")
 
     def _record(self, op, state):
         op = dict(op, state=state)
-        self.store.append(self.transaction_id, "operation", op)
+        self.head = self.store.append(self.transaction_id, "operation", op, expected_head=self.head)
+        self.ops[op["path"]] = op
+        for path in (op["path"], op.get("temporary")):
+            if path:
+                self._paths[path] = op
         return op
 
     def _op(self, path, kind, *, size=0, sha="", source=None):
-        previous = _operations(self.store, self.transaction_id).get(path)
+        previous = self.ops.get(path)
         if previous:
             if (previous["kind"], previous["size"], previous["sha"]) != (kind, size, sha):
                 raise TransferRefusal("JOURNAL_CORRUPT", path)
@@ -331,7 +371,7 @@ class Session:
         if self.destination.inspect(path) is not None:
             raise TransferRefusal("OUTPUT_COLLISION", path)
         token = uuid.uuid4().hex
-        temporary = str(PurePosixPath(path).parent / (".slice-" + token)) if kind in {"file", "receipt"} else None
+        temporary = str(PurePosixPath(path).parent / (".slice-" + token)) if kind in {"file", "receipt", "control"} else None
         op = dict(path=path, kind=kind, size=size, sha=sha, token=token, temporary=temporary,
                   source=source, seal=self.plan.seal, device=self.plan.destination.device_id)
         op = self._record(op, "intent")
@@ -342,32 +382,39 @@ class Session:
         info = self.destination.inspect(path)
         if info and (info.token != op["token"] or info.kind != ("directory" if op["kind"] == "directory" else "file")):
             raise TransferRefusal("OUTPUT_COLLISION", path)
+        usage = self._usage.setdefault(op["token"], {})
+        before = max(usage.values(), default=0)
+        if info is None:
+            usage.pop(path, None)
+        else:
+            if not d._integer(info.allocated_bytes):
+                raise TransferRefusal("DESTINATION_ALLOCATION_UNPROVEN", path)
+            usage[path] = info.allocated_bytes
+        self._allocated_bytes += max(usage.values(), default=0) - before
         return info
+
+    def _refresh_parent(self, path):
+        parent = str(PurePosixPath(path).parent)
+        if parent in self._paths:
+            self._owned(parent, self._paths[parent])
 
     def _control(self):
         path = ".modelark-slice-owner"
         data = d._json({"transaction": self.transaction_id, "seal": self.plan.seal,
                         "store": str(self.store.root), "destination": asdict(self.plan.destination)})
         op = self._op(path, "control", size=len(data), sha=hashlib.sha256(data).hexdigest())
-        info = self._owned(path, op)
-        self._check()
-        if info is None:
-            self.destination.create_file(path, op["token"])
-            self.destination.append(path, op["token"], data)
-            self._fault("control_created")
-        elif not self._matches(path, op):
-            raise TransferRefusal("CONTROL_CORRUPT")
-        self.destination.flush(path)
-        self.destination.flush(".")
-        self._fault("control_flushed")
-        self._record(op, "complete")
-        self._fault("control_complete")
+        if op["state"] in {"prepared", "complete"}:
+            self._publish(op)
+        else:
+            self._write(op, io.BytesIO(data))
 
     def _directory(self, path):
         op = self._op(path, "directory")
         self._check()
         if self._owned(path, op) is None:
             self.destination.create_directory(path, op["token"])
+            self._owned(path, op)
+            self._refresh_parent(path)
             self._fault("directory_created")
         self.destination.flush(path)
         self._fault("directory_flushed")
@@ -385,6 +432,7 @@ class Session:
         digest, size = hashlib.sha256(), 0
         with self.destination.read(path) as stream:
             while data := stream.read(1024 * 1024):
+                self._boundary()
                 digest.update(data)
                 size += len(data)
         return size == op["size"] and digest.hexdigest() == op["sha"]
@@ -395,7 +443,12 @@ class Session:
         if self._owned(path, op) is None:
             if self._owned(temp, op) is None or not self._matches(temp, op):
                 raise TransferRefusal("RECOVERY_DIGEST_MISMATCH", temp)
-            self.destination.publish(temp, path, op["token"])
+            try:
+                self.destination.publish(temp, path, op["token"])
+            except FileExistsError as exc:
+                raise TransferRefusal("OUTPUT_COLLISION", path) from exc
+            self._owned(path, op)
+            self._refresh_parent(path)
             self._fault(kind + "_published")
         elif not self._matches(path, op):
             raise TransferRefusal("RECOVERY_DIGEST_MISMATCH", path)
@@ -405,6 +458,8 @@ class Session:
         self._fault(kind + "_complete")
         if self._owned(temp, op) is not None:
             self.destination.discard_temporary(temp, op["token"])
+            self._owned(temp, op)
+            self._refresh_parent(temp)
             self.destination.flush(str(PurePosixPath(temp).parent))
         return op
 
@@ -418,20 +473,22 @@ class Session:
         op = self._record(dict(op, source=None), "intent")
         if self._owned(temp, op) is not None:
             self.destination.discard_temporary(temp, op["token"])
+            self._owned(temp, op)
         self.destination.create_file(temp, op["token"])
-        self._fault("temporary_created" if kind == "file" else "receipt_created")
+        self._owned(temp, op)
+        self._refresh_parent(temp)
+        self._fault("temporary_created" if kind == "file" else kind + "_created")
         digest, size = hashlib.sha256(), 0
         while data := stream.read(1024 * 1024):
-            self._check()
-            if self.store.stop_requested(self.transaction_id):
-                raise TransferRefusal("STOPPED")
+            self._boundary()
             size += len(data)
             if size > op["size"]:
                 raise TransferRefusal("SOURCE_DIGEST_MISMATCH")
             self.destination.append(temp, op["token"], data)
+            self._owned(temp, op)
             digest.update(data)
             # Intent and ownership certificate authenticate actual in-flight allocation on recovery.
-            self._fault("chunk_written")
+            self._fault("chunk_written" if kind == "file" else kind + "_chunk_written")
         if size != op["size"] or digest.hexdigest() != op["sha"]:
             raise TransferRefusal("SOURCE_DIGEST_MISMATCH")
         self.destination.flush(temp)
@@ -460,13 +517,15 @@ class Session:
             except TransferRefusal as exc:
                 if not (exc.code.startswith("SOURCE_") or exc.code == "WAITING_SOURCE"):
                     raise
-                errors.append((exc.code, source.drive.drive_label))
-        waiting = any(code == "WAITING_SOURCE" for code, _ in errors)
-        raise TransferRefusal("WAITING_SOURCE" if waiting else "SOURCE_BLOCKED", json.dumps(errors))
+                errors.append({"code": exc.code, "drive_label": source.drive.drive_label, "detail": exc.detail})
+        waiting = any(error["code"] == "WAITING_SOURCE" for error in errors)
+        detail = {"repo_id": artifact.repo_id, "rfilename": artifact.rfilename, "candidates": errors}
+        raise TransferRefusal("WAITING_SOURCE" if waiting else "SOURCE_BLOCKED", json.dumps(detail))
 
     def _finish(self):
+        self._verify_control(required=True)
         self.store.set_state(self.transaction_id, "verifying")
-        ops = _operations(self.store, self.transaction_id)
+        ops = self.ops
         files = []
         for artifact in self.plan.proposal.closure:
             path = str(PurePosixPath(self.plan.proposal.spec.destination_root) / artifact.repo_id / artifact.rfilename)
@@ -474,11 +533,11 @@ class Session:
             if op["state"] != "complete" or not op["source"] or not self._owned(path, op) or not self._matches(path, op):
                 raise TransferRefusal("VERIFICATION_FAILED", path)
             files.append({"path": path, "size": op["size"], "sha256": op["sha"], "source": op["source"]})
-        expected = set(ops)
-        expected.update(op["temporary"] for op in ops.values() if op.get("temporary"))
-        unexpected = set(self.destination.list_paths(self.plan.proposal.spec.destination_root)) - expected
-        if unexpected:
-            raise TransferRefusal("OUTPUT_COLLISION", str(sorted(unexpected)))
+        expected = dict(ops)
+        expected.update((op["temporary"], op) for op in ops.values() if op.get("temporary"))
+        for path in self.destination.list_paths(self.plan.proposal.spec.destination_root):
+            if path not in expected or self._owned(path, expected[path]) is None:
+                raise TransferRefusal("OUTPUT_COLLISION", path)
         receipt = {"version": self.plan.version, "transaction": self.transaction_id, "seal": self.plan.seal,
                    "destination": asdict(self.plan.destination), "files": files}
         path = str(PurePosixPath(self.plan.proposal.spec.destination_root) / ".modelark-slice-receipt.json")
@@ -488,7 +547,7 @@ class Session:
             self._publish(op)
         else:
             self._write(op, io.BytesIO(data))
-        self.store.append(self.transaction_id, "receipt", receipt)
+        self.head = self.store.append(self.transaction_id, "receipt", receipt, expected_head=self.head)
         self.store.complete(self.transaction_id, self.plan.destination.device_id)
 
     def step(self):
@@ -497,9 +556,7 @@ class Session:
             return self.store.status(self.transaction_id)
         try:
             self._check()
-            if self.store.stop_requested(self.transaction_id):
-                raise TransferRefusal("STOPPED")
-            ops = _operations(self.store, self.transaction_id)
+            ops = self.ops
             for artifact in self.plan.proposal.closure:
                 path = str(PurePosixPath(self.plan.proposal.spec.destination_root) / artifact.repo_id / artifact.rfilename)
                 op = ops.get(path)
