@@ -2563,3 +2563,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Completes Slice 1 compatibility tests for non-annex/other-backend copies, durable Hub provenance, and ONNX/MLX/other archived artifacts with partial and absent copies. No acquisition policy, schema, execution authority, or live archive changes.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md
 - `related`: DEC-053, DEC-101, DEC-103, DEC-104, DEF-041
+
+### DEC-106: Require positive weight-format evidence for slice manifest fallback
+- `id`: DEC-106
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #68's review of `77615f4` and four failing regression cases showing auxiliary-only, index-only, unknown, and unclassified repositories becoming source-ready.
+- `decision`: Refine DEC-105's fallback eligibility: require catalog rows positively classified as ONNX or MLX weights, the recognized weight formats outside the acquisition selector. For eligible repositories, continue freezing every declared file to retain exact gaps. Otherwise retain the blocking `MANIFEST_UNAVAILABLE` error even if remaining rows have proven archive copies.
+- `rationale`: A shared acquisition-policy exception does not distinguish recoverable foreign weights from missing weight metadata. Generic `other` classification cannot establish a repository manifest. Copy-level provenance remains valid but cannot by itself prove repository scope.
+- `impact`: Narrows only the Slice 1 fallback, with positive foreign-format and negative incomplete-manifest contracts. Existing restore behavior, acquisition policy, durable copy provenance, and live runtime are unchanged.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md
+- `related`: DEC-101, DEC-104, DEC-105, modelark/slice/catalog.py

@@ -34,9 +34,12 @@ They must never treat this domain artifact alone as permission to write.
 
 `hf-tree-v1` freezes the existing recovery manifest with repository-relative paths, sizes, original
 SHA-256 digests, and format/quant metadata. It is a layout profile, not a functional model-loading
-claim. If current acquisition formats cannot describe a foreign/legacy repository, its full
-declared catalog file set becomes the recovery scope; this retains declared-but-unarchived gaps
-instead of reducing the closure to the subset already archived. No acquisition policy is changed.
+claim. If current acquisition formats cannot describe a repository with positively classified
+ONNX/MLX weights, its full declared catalog file set becomes the recovery scope; this retains
+declared-but-unarchived gaps instead of reducing the closure to the subset already archived.
+A manifest error alone is not legacy-format evidence: auxiliary-only repositories and unknown
+or unclassified `other` formats retain a blocking `MANIFEST_UNAVAILABLE` gap. No acquisition policy
+is changed.
 Catalog-only files yield exact gaps. Missing file sizes stay unknown instead of becoming
 zero. A missing catalog digest may be supplied by unambiguous qualifying archive evidence; a
 missing repository commit SHA is never inferred from a remote head.

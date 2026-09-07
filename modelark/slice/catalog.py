@@ -36,7 +36,11 @@ def read_catalog(path: str | Path, spec: SliceSpec) -> CatalogSnapshot:
             # Like restore, acquisition policy must not strand foreign/legacy archive bytes.
             # Unlike restore's archived-only fallback, retain every declared catalog file so
             # a partially archived foreign repository produces exact gaps instead of shrinking.
-            fallback_repos = {row[0] for row in rows if row[0] in manifests.errors}
+            # A policy error is not itself proof of a legacy weight manifest. ONNX/MLX
+            # are recognized catalog weight formats outside acquisition's selector;
+            # auxiliary-only, unknown, and unclassified "other" data must stay blocked.
+            fallback_repos = {row[0] for row in rows
+                              if row[0] in manifests.errors and row[4] in {"onnx", "mlx"}}
             names.update((row[0], row[1]) for row in rows if row[0] in fallback_repos)
             files.extend(FileFact(*row) for row in rows if (row[0], row[1]) in names)
             issues.extend(Gap(repo, None, "MANIFEST_UNAVAILABLE", detail=str(error))

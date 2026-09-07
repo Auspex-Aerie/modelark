@@ -147,7 +147,8 @@ def test_read_snapshot_is_consistent_across_concurrent_catalog_commit(api, tmp_p
     writer.close()
 
 
-@pytest.mark.parametrize("format", ["onnx", "mlx", "other"])
+# 2026-09-07: "other" is not positive weight evidence; cover it as blocked below.
+@pytest.mark.parametrize("format", ["onnx", "mlx"])
 def test_foreign_archives_are_recoverable_without_hiding_declared_gaps(api, tmp_path, format):
     d, catalog = api
     path = tmp_path / "catalog.sqlite"
@@ -167,4 +168,24 @@ def test_foreign_archives_are_recoverable_without_hiding_declared_gaps(api, tmp_
     con.execute("DELETE FROM archived")
     p = d.preview(spec(d), catalog.read_catalog(path, spec(d)))
     assert {g.rfilename for g in p.gaps} == {name, "config.json"}
+    con.close()
+
+
+@pytest.mark.parametrize("name,format", [
+    ("config.json", "aux"),
+    ("model.safetensors.index.json", "aux"),
+    ("model.other", "other"),
+    ("unknown.dat", None),
+])
+def test_manifest_failure_without_recognized_weights_stays_blocked(api, tmp_path, name, format):
+    d, catalog = api
+    path = tmp_path / "catalog.sqlite"
+    con = seed(path, d)
+    con.execute("UPDATE files SET rfilename=?,format=?", (name, format))
+    con.execute("UPDATE archived SET rfilename=?,stored_relpath=?", (name, name))
+    p = d.preview(spec(d), catalog.read_catalog(path, spec(d)))
+    assert not p.source_ready
+    assert "MANIFEST_UNAVAILABLE" in {g.code for g in p.gaps}
+    with pytest.raises(d.SliceRefusal):
+        d.approve(p, expected_seal=p.seal, current_snapshot=catalog.read_catalog(path, spec(d)))
     con.close()
