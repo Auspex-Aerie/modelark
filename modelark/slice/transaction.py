@@ -203,6 +203,7 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
         store.activate(tx, plan.destination.device_id, serial)
         session = Session(store, tx, plan, destination, sources, lease, fault)
         session._fault("reserved")
+        session._audit_layout()
         session._control()
         return session
     except TransferRefusal as exc:
@@ -411,6 +412,23 @@ class Session:
                     or self._owned(str(parent), op) is None):
                 raise TransferRefusal("OUTPUT_COLLISION", str(parent))
 
+    def _audit_layout(self):
+        # Capacity drift cannot detect foreign empty entries. Inspect the approved tree before
+        # resuming any destination mutation, and at each artifact boundary, not per byte chunk.
+        self._boundary()
+        root = PurePosixPath(self.plan.proposal.spec.destination_root)
+        for parent in reversed((root, *root.parents)):
+            path = str(parent)
+            if path != "." and self.destination.inspect(path) is not None:
+                op = self._paths.get(path)
+                if not op or self._owned(path, op) is None:
+                    raise TransferRefusal("OUTPUT_COLLISION", path)
+        for path in self.destination.list_paths(str(root)):
+            self._boundary()
+            op = self._paths.get(path)
+            if not op or self._owned(path, op) is None:
+                raise TransferRefusal("OUTPUT_COLLISION", path)
+
     def _control(self):
         path = ".modelark-slice-owner"
         data = d._json({"transaction": self.transaction_id, "seal": self.plan.seal,
@@ -557,11 +575,7 @@ class Session:
             if op["state"] != "complete" or not op["source"] or not self._owned(path, op) or not self._matches(path, op):
                 raise TransferRefusal("VERIFICATION_FAILED", path)
             files.append({"path": path, "size": op["size"], "sha256": op["sha"], "source": op["source"]})
-        expected = dict(ops)
-        expected.update((op["temporary"], op) for op in ops.values() if op.get("temporary"))
-        for path in self.destination.list_paths(self.plan.proposal.spec.destination_root):
-            if path not in expected or self._owned(path, expected[path]) is None:
-                raise TransferRefusal("OUTPUT_COLLISION", path)
+        self._audit_layout()
         receipt = {"version": self.plan.version, "transaction": self.transaction_id, "seal": self.plan.seal,
                    "destination": asdict(self.plan.destination), "files": files}
         path = str(PurePosixPath(self.plan.proposal.spec.destination_root) / ".modelark-slice-receipt.json")
@@ -587,6 +601,7 @@ class Session:
         self.lease.check()
         try:
             self._check()
+            self._audit_layout()
             ops = self.ops
             for artifact in self.plan.proposal.closure:
                 path = str(PurePosixPath(self.plan.proposal.spec.destination_root) / artifact.repo_id / artifact.rfilename)

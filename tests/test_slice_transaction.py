@@ -888,6 +888,48 @@ def test_session_verification_cache_does_not_skip_final_digest_pass(setup):
     assert store.receipt(tx) is None
 
 
+@pytest.mark.parametrize("resume", [False, True])
+def test_foreign_descendant_blocks_next_artifact_before_any_mutation(api, tmp_path, resume):
+    t, s = api
+    _, _, snapshot = proposal()
+    snapshot = replace(snapshot,
+                       files=tuple(replace(snapshot.files[0], rfilename=f"part-{i}.safetensors") for i in range(2)),
+                       copies=tuple(replace(snapshot.copies[0], rfilename=f"part-{i}.safetensors") for i in range(2)))
+    p = d.preview(replace(spec(d), destination_id="test-device"), snapshot)
+    approval = d.approve(p, expected_seal=p.seal, current_snapshot=snapshot)
+    dest, store = Destination(tmp_path / "destination", t), s.Store()
+    sources = Sources(snapshot, t)
+    plan = t.TransferPlan(p, dest.binding)
+    tx = store.create(plan, approval)
+    store.approve(tx, expected_seal=plan.seal)
+    with t.start(store, tx, dest, sources) as session:
+        session.step()
+        if resume:
+            session.close()
+        (dest.root / "models/org/model/foreign").touch()  # No capacity signal.
+        before = set(dest.root.rglob("*"))
+        dest.trace.clear()
+        with pytest.raises(t.TransferRefusal, match="OUTPUT_COLLISION"):
+            if resume:
+                with t.start(store, tx, dest, sources) as restarted:
+                    restarted.step()
+            else:
+                session.step()
+        assert set(dest.root.rglob("*")) == before
+        assert not [item for item in dest.trace if item[0] in {"mkdir", "flush", "publish"}]
+        assert len(sources.reads) == 1
+    assert store.receipt(tx) is None
+
+
+def test_unknown_consumer_root_blocks_initial_control_creation(setup):
+    t, _, _, _, dest, _ = setup
+    (dest.root / "models").mkdir()
+    with pytest.raises(t.TransferRefusal, match="OUTPUT_COLLISION"):
+        with start(setup) as session:
+            session.step()
+    assert set(path.name for path in dest.root.iterdir()) == {"models"}
+
+
 def test_terminal_session_cannot_resume_after_adapter_condition_is_restored(setup):
     t, store, _, tx, dest, _ = setup
     with start(setup) as session:

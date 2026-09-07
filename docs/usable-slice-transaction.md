@@ -91,6 +91,10 @@ Already-complete directories are authenticated without repeating their flush/che
 Before child creation, append, publication or temporary cleanup, all journaled parent directories
 must retain completed ownership certificates. The hardware adapter must still prevent replacement
 inside an individual port call; these pre-use checks do not replace descriptor confinement.
+Layout authentication runs before Start/resume touches the destination, at each artifact step,
+and during final verification. Existing consumer roots, ancestor prefixes and descendants must
+be journal-owned, including zero-byte entries that capacity checks cannot detect. These metadata
+scans do not rehash completed artifacts or replay the journal, and do not run for every chunk.
 
 Final verification rehashes every artifact, verifies the control record's presence/token/digest,
 and authenticates every extant descendant, including historical temporary names. The receipt records

@@ -2651,3 +2651,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Internal session error handling, fault regressions and documentation only. No live database, archive or device access.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-108, DEC-110, DEC-112
+
+### DEC-114: Audit destination layout before initial and resumed mutation
+- `id`: DEC-114
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Codex review of PR #69 at `42ed3c3` and three failed regressions for zero-byte foreign descendants and unknown initial consumer roots.
+- `decision`: Authenticate the current consumer tree and its ancestor prefixes against journal-owned paths before Start/resume performs destination mutation, at artifact-step boundaries and during final verification. Refuse unknown roots or descendants even if their allocation is zero. Reuse cached operation certificates, without per-chunk scans, journal replay or redundant content hashing.
+- `rationale`: Final-only layout verification can discover a collision after additional files have already been published. Capacity checks do not prove absence of unknown metadata entries. Resume must re-establish the layout prerequisite before control recovery or artifact transfer.
+- `impact`: Internal transaction pre-use gates and disposable regressions only; inside-call descriptor confinement remains a future adapter obligation, and no real destination or archive is accessed.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-112, DEC-113
