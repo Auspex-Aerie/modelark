@@ -217,6 +217,10 @@ class SlicePreview:
     def canonical_bytes(self) -> bytes:
         payload = asdict(self)
         del payload["seal"]
+        for item in payload["closure"]:
+            for source in item["sources"]:
+                # Placement eligibility is captured annotation, never read-source authority.
+                del source["drive"]["eligibility"]
         return _json(payload)
 
 
@@ -237,6 +241,26 @@ def _index(items, key):
     return result
 
 
+def _scope(snapshot: CatalogSnapshot, spec: SliceSpec) -> CatalogSnapshot:
+    files = tuple(f for f in snapshot.files if f.repo_id in spec.repo_ids)
+    keys = {(f.repo_id, f.rfilename) for f in files}
+    copies = tuple(c for c in snapshot.copies if (c.repo_id, c.rfilename) in keys)
+    labels = {c.drive_label for c in copies}
+    drives = tuple(d for d in snapshot.drives if d.drive_label in labels)
+    current = {(d.drive_label, d.identity_epoch, d.write_generation) for d in drives}
+    anchors = tuple(a for a in snapshot.anchors
+                    if (a.drive_label, a.identity_epoch, a.generation) in current)
+    return replace(snapshot, files=files, copies=copies, drives=drives, anchors=anchors,
+                   issues=tuple(g for g in snapshot.issues if g.repo_id in spec.repo_ids))
+
+
+def _source_snapshot_id(snapshot: CatalogSnapshot) -> str:
+    payload = asdict(snapshot)
+    for drive in payload["drives"]:
+        del drive["eligibility"]
+    return _hash(payload)
+
+
 def _source(file, copy, drive, anchors):
     """Return a (digest, evidence) pair or one exact candidate refusal."""
     def fail(code, detail=""):
@@ -244,7 +268,9 @@ def _source(file, copy, drive, anchors):
 
     if copy.present is False:
         return fail("SOURCE_COPY_ABSENT")
-    if drive is None or not drive.fs_uuid or not drive.annex_uuid:
+    if (drive is None
+            or any(v is not None and not isinstance(v, str) for v in (drive.fs_uuid, drive.annex_uuid))
+            or not any(v and v.strip() for v in (drive.fs_uuid, drive.annex_uuid))):
         return fail("SOURCE_IDENTITY_UNPROVEN")
     if drive.lifecycle != "active":
         return fail("SOURCE_INACTIVE", drive.lifecycle)
@@ -298,6 +324,7 @@ def _source(file, copy, drive, anchors):
 def preview(spec: SliceSpec, snapshot: CatalogSnapshot) -> SlicePreview:
     if snapshot.schema_version != 7 or not snapshot.catalog_id:
         raise SliceRefusal("INVALID_SNAPSHOT", "schema v7 and snapshot provenance required")
+    snapshot = _scope(snapshot, spec)
     files = _index(snapshot.files, lambda f: (f.repo_id, f.rfilename))
     _index(snapshot.copies, lambda c: (c.repo_id, c.rfilename, c.drive_label))
     drives = _index(snapshot.drives, lambda d: d.drive_label)
@@ -345,7 +372,7 @@ def preview(spec: SliceSpec, snapshot: CatalogSnapshot) -> SlicePreview:
         sources = tuple(sorted((src for _, src in available), key=lambda src: src.drive.drive_label))
         closure.append(Artifact(file.repo_id, file.rfilename, file.size_bytes, available[0][0],
                                 file.format, file.quant, sources))
-    p = SlicePreview(spec, snapshot.snapshot_id, tuple(closure),
+    p = SlicePreview(spec, _source_snapshot_id(snapshot), tuple(closure),
                      tuple(sorted(gaps, key=lambda g: _json(asdict(g)))), "")
     return replace(p, seal=hashlib.sha256(p.canonical_bytes()).hexdigest())
 

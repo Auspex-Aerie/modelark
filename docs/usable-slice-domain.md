@@ -39,7 +39,9 @@ zero. A missing catalog digest may be supplied by unambiguous qualifying archive
 missing repository commit SHA is never inferred from a remote head.
 
 Each source carries its recorded copy, physical identity, exact current clean anchor, and the
-digest evidence used. Lifecycle-active excluded drives remain readable. Dirty/unanchored,
+digest evidence used. Identity follows the existing reconciliation contract: at least one proven
+filesystem or annex UUID, with every recorded UUID bound by the matching fingerprint and epoch;
+a serial alone is insufficient. Lifecycle-active excluded drives remain readable. Dirty/unanchored,
 lost/retired, explicitly absent, identity-mismatched, or conflicting copies cannot satisfy a file.
 Replica metadata alone is insufficient. For raw SHA256 annex objects, the key is independent
 original-byte evidence, even when the stored provenance is absent; the derived proof is recorded
@@ -56,7 +58,10 @@ the globally configured catalog connector nor creates/migrates a missing/older d
 
 Canonical JSON is versioned as `modelark.slice.domain.v1` and hashed with SHA-256. Ordering of input
 facts does not affect the result. The seal binds the spec, relevant catalog snapshot content and
-identity, exact closure, alternatives, and gaps. `approve` detects tampering, rejects blocked
+identity, exact closure, alternatives, and gaps. Only requested manifests, their recorded source
+candidates, and those candidates' current drive/anchor facts affect approval freshness. Unrelated
+fleet activity and historical anchors do not. Placement eligibility is retained as captured
+annotation but excluded from read-source seal authority. `approve` detects tampering, rejects blocked
 proposals and mismatched reviewed seals, and rederives against freshly supplied evidence to reject
 stale proposals. The hash detects accidental modification; it is not a signature or an untrusted
 client's authorization credential. Durable concurrency control belongs to Slice 2.

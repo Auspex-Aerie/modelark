@@ -51,15 +51,16 @@ def read_catalog(path: str | Path, spec: SliceSpec) -> CatalogSnapshot:
                 copies.append(CopyFact(repo, name, label, rel, orig_size, stored_size, digest,
                                        provenance, key, bool(compressed),
                                        None if present is None else bool(present)))
+        labels = {copy.drive_label for copy in copies}
         drives = tuple(DriveFact(*row) for row in con.execute(
             "SELECT drive_label,fs_uuid,annex_uuid,serial,identity_epoch,write_generation,"
             "identity_fingerprint,filesystem_capacity_bytes,write_authority,lifecycle,eligibility "
-            "FROM drives"))
+            "FROM drives") if row[0] in labels)
         anchors = tuple(AnchorFact(*row[:-1], str(row[-1])) for row in con.execute(
             "SELECT a.drive_label,a.identity_epoch,a.generation,a.identity_fingerprint,"
             "a.filesystem_capacity_bytes,a.write_authority,a.anchor_id FROM drive_clean_anchors a "
             "JOIN drives d ON d.drive_label=a.drive_label AND d.identity_epoch=a.identity_epoch "
-            "AND d.write_generation=a.generation"))
+            "AND d.write_generation=a.generation") if row[0] in labels)
         return CatalogSnapshot(catalog.as_uri(), tuple(files), tuple(copies), drives, anchors,
                                tuple(issues), version)
     except sqlite3.Error as exc:

@@ -284,3 +284,49 @@ def test_approval_validation_does_not_replan_for_later_source_changes(domain):
     changed = replace(s, drives=(replace(s.drives[0], lifecycle="lost"),))
     assert not domain.preview(spec(domain), changed).source_ready
     assert domain.validate_approval(p, a) is None  # Later execution must apply source-use gates.
+
+
+def test_unrelated_fleet_activity_does_not_stale_slice_approval(domain):
+    s = alternatives(domain)
+    # drive-b has no copy of this slice. Its ongoing Fill generation is not slice evidence.
+    s = replace(s, copies=(s.copies[0],))
+    p = domain.preview(spec(domain), s)
+    changed = replace(s, drives=(s.drives[0], replace(s.drives[1], write_generation=99)),
+                      anchors=(s.anchors[0],))
+    assert domain.preview(spec(domain), changed).seal == p.seal
+    assert domain.approve(p, expected_seal=p.seal, current_snapshot=changed).preview_seal == p.seal
+
+
+def test_placement_exclusion_alone_does_not_stale_read_approval(domain):
+    s = facts(domain)
+    p = domain.preview(spec(domain), s)
+    changed = replace(s, drives=(replace(s.drives[0], eligibility="excluded"),))
+    assert domain.preview(spec(domain), changed).seal == p.seal
+    assert domain.approve(p, expected_seal=p.seal, current_snapshot=changed).preview_seal == p.seal
+
+
+def test_real_candidate_evidence_change_still_stales_approval(domain):
+    s = alternatives(domain)
+    p = domain.preview(spec(domain), s)
+    changed = replace(s, drives=(s.drives[0], replace(s.drives[1], write_generation=99)))
+    with pytest.raises(domain.SliceRefusal, match="PREVIEW_STALE"):
+        domain.approve(p, expected_seal=p.seal, current_snapshot=changed)
+
+
+@pytest.mark.parametrize("fs_uuid,annex_uuid", [("fs-a", None), (None, "annex-a")])
+def test_either_proven_uuid_can_bind_a_clean_source(domain, fs_uuid, annex_uuid):
+    from modelark.capacity_evidence import identity_fingerprint_v1
+
+    s = facts(domain)
+    fingerprint = identity_fingerprint_v1(fs_uuid=fs_uuid, annex_uuid=annex_uuid,
+                                          serial="serial-a", filesystem_capacity_bytes=1000)
+    s = replace(s, drives=(replace(s.drives[0], fs_uuid=fs_uuid, annex_uuid=annex_uuid,
+                                   identity_fingerprint=fingerprint),),
+                anchors=(replace(s.anchors[0], identity_fingerprint=fingerprint),))
+    assert domain.preview(spec(domain), s).source_ready
+
+
+def test_serial_alone_never_proves_source_identity(domain):
+    s = facts(domain)
+    s = replace(s, drives=(replace(s.drives[0], fs_uuid=None, annex_uuid=None),))
+    assert domain.preview(spec(domain), s).gaps[0].code == "SOURCE_IDENTITY_UNPROVEN"
