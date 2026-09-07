@@ -148,12 +148,15 @@ def test_read_snapshot_is_consistent_across_concurrent_catalog_commit(api, tmp_p
 
 
 # 2026-09-07: "other" is not positive weight evidence; cover it as blocked below.
-@pytest.mark.parametrize("format", ["onnx", "mlx"])
-def test_foreign_archives_are_recoverable_without_hiding_declared_gaps(api, tmp_path, format):
+@pytest.mark.parametrize("name,format", [
+    ("model.onnx", "onnx"), ("model.npz", "mlx"),
+    ("model.onnx", "other"), ("model.onnx", None),
+    ("model.npz", "other"), ("model.npy", None),
+])
+def test_foreign_archives_are_recoverable_without_hiding_declared_gaps(api, tmp_path, name, format):
     d, catalog = api
     path = tmp_path / "catalog.sqlite"
     con = seed(path, d)
-    name = f"model.{format}"
     con.execute("UPDATE files SET rfilename=?,format=?", (name, format))
     con.execute("UPDATE archived SET rfilename=?,stored_relpath=?", (name, name))
     p = d.preview(spec(d), catalog.read_catalog(path, spec(d)))
@@ -176,6 +179,8 @@ def test_foreign_archives_are_recoverable_without_hiding_declared_gaps(api, tmp_
     ("model.safetensors.index.json", "aux"),
     ("model.other", "other"),
     ("unknown.dat", None),
+    ("mlx/config.json", "other"),
+    ("model.onnx.json", "other"),
 ])
 def test_manifest_failure_without_recognized_weights_stays_blocked(api, tmp_path, name, format):
     d, catalog = api

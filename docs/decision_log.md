@@ -2574,3 +2574,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Narrows only the Slice 1 fallback, with positive foreign-format and negative incomplete-manifest contracts. Existing restore behavior, acquisition policy, durable copy provenance, and live runtime are unchanged.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md
 - `related`: DEC-101, DEC-104, DEC-105, modelark/slice/catalog.py
+
+### DEC-107: Recognize exact legacy foreign-weight extensions without reclassifying the catalog
+- `id`: DEC-107
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #68 review of `f3a2705`, confirmed against `tests/test_def033_gate1_contracts.py`'s legacy `model.onnx` row tagged `other` and four failing adapter regressions.
+- `decision`: Extend DEC-106's positive ONNX/MLX evidence to exact `.onnx`, `.npz`, and `.npy` extensions when catalog format is `other` or NULL. Preserve original catalog annotations and the full declared fallback scope. Do not infer weight evidence from directory/stem heuristics or generic `other` classification.
+- `rationale`: Durable legacy copies may predate format classification. Exact recognized extensions recover that compatibility without reintroducing auxiliary-only approval through names such as `mlx/config.json` or `model.onnx.json`.
+- `impact`: Slice 1 reader and positive/negative fallback contracts only; no catalog mutation, acquisition change, or live archive access.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md
+- `related`: DEC-105, DEC-106, tests/test_def033_gate1_contracts.py

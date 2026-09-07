@@ -12,6 +12,13 @@ from modelark import archive_manifest
 from .domain import AnchorFact, CatalogSnapshot, CopyFact, DriveFact, FileFact, Gap, SliceRefusal, SliceSpec
 
 
+def _foreign_weight(name: str, format: str | None) -> bool:
+    # Legacy catalogs may predate classification. Use exact weight extensions, not
+    # directory/stem heuristics that would also label e.g. mlx/config.json as weights.
+    return (format in {"onnx", "mlx"}
+            or (format in {None, "other"} and name.lower().endswith((".onnx", ".npz", ".npy"))))
+
+
 def read_catalog(path: str | Path, spec: SliceSpec) -> CatalogSnapshot:
     catalog = Path(path).expanduser().resolve()
     con = None
@@ -37,10 +44,10 @@ def read_catalog(path: str | Path, spec: SliceSpec) -> CatalogSnapshot:
             # Unlike restore's archived-only fallback, retain every declared catalog file so
             # a partially archived foreign repository produces exact gaps instead of shrinking.
             # A policy error is not itself proof of a legacy weight manifest. ONNX/MLX
-            # are recognized catalog weight formats outside acquisition's selector;
-            # auxiliary-only, unknown, and unclassified "other" data must stay blocked.
+            # are recognized weight formats outside acquisition's selector. Legacy
+            # extension evidence may qualify; auxiliary-only/unknown data stays blocked.
             fallback_repos = {row[0] for row in rows
-                              if row[0] in manifests.errors and row[4] in {"onnx", "mlx"}}
+                              if row[0] in manifests.errors and _foreign_weight(row[1], row[4])}
             names.update((row[0], row[1]) for row in rows if row[0] in fallback_repos)
             files.extend(FileFact(*row) for row in rows if (row[0], row[1]) in names)
             issues.extend(Gap(repo, None, "MANIFEST_UNAVAILABLE", detail=str(error))
