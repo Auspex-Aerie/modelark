@@ -100,3 +100,48 @@ def test_manifest_selection_uses_recovery_policy_but_preserves_unknown_sizes(api
     assert next(f for f in snapshot.files if f.rfilename == "config.json").size_bytes is None
     assert "ARTIFACT_SIZE_UNKNOWN" in {g.code for g in d.preview(spec(d), snapshot).gaps}
     con.close()
+
+
+def test_read_snapshot_is_consistent_across_concurrent_catalog_commit(api, tmp_path):
+    d, catalog = api
+    path = tmp_path / "catalog.sqlite"
+    writer = seed(path, d)
+    writer.execute("PRAGMA journal_mode=WAL")
+    connect = sqlite3.connect
+    connections = []
+    mutated = False
+
+    class Reader:
+        def __init__(self, con):
+            self.con = con
+
+        def execute(self, sql, *args):
+            nonlocal mutated
+            if "FROM files " in sql and not mutated:
+                mutated = True
+                # The read transaction is already pinned by user_version. A later writer commits
+                # successfully, but the reader must not combine its old copies with a new manifest.
+                writer.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
+                               "VALUES('org/model','new-config.json',5,'aux')")
+                with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                    self.con.execute("DELETE FROM archived")
+            return self.con.execute(sql, *args)
+
+        def close(self):
+            self.con.close()
+
+    def reader_connect(database_uri, **kwargs):
+        assert database_uri.endswith("?mode=ro") and kwargs["uri"] is True
+        con = connect(database_uri, **kwargs)
+        connections.append(con)
+        return Reader(con)
+
+    with mock.patch.object(catalog.sqlite3, "connect", side_effect=reader_connect):
+        snapshot = catalog.read_catalog(path, spec(d))
+    assert mutated and d.preview(spec(d), snapshot).source_ready
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connections[0].execute("SELECT 1")
+    fresh = catalog.read_catalog(path, spec(d))
+    assert fresh.snapshot_id != snapshot.snapshot_id
+    assert d.preview(spec(d), fresh).gaps[0].rfilename == "new-config.json"
+    writer.close()

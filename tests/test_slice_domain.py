@@ -247,3 +247,40 @@ def test_duplicate_conflicting_evidence_is_not_order_dependent(domain):
     s = facts(domain)
     with pytest.raises(domain.SliceRefusal, match="INVALID_SNAPSHOT"):
         domain.preview(spec(domain), replace(s, drives=(*s.drives, replace(s.drives[0], lifecycle="lost"))))
+
+
+def test_snapshot_rejects_mutable_scalar_fields(domain):
+    s = facts(domain)
+    with pytest.raises(domain.SliceRefusal, match="INVALID_SNAPSHOT"):
+        replace(s, files=(replace(s.files[0], quant=[]),))
+    with pytest.raises(domain.SliceRefusal, match="INVALID_SPEC"):
+        replace(spec(domain), repo_ids=iter(("org/model",)))
+
+
+def test_zero_bytes_are_known_and_malformed_hashes_are_not_proof(domain):
+    s = facts(domain)
+    zero = replace(s, files=(replace(s.files[0], size_bytes=0),),
+                   copies=(replace(s.copies[0], orig_bytes=0, stored_bytes=0,
+                                   annex_key=f"SHA256E-s0--{SHA}"),))
+    assert domain.preview(spec(domain), zero).source_ready
+    bad = replace(s, files=(replace(s.files[0], sha256="not-a-digest"),))
+    assert domain.preview(spec(domain), bad).gaps[0].code == "ARTIFACT_DIGEST_INVALID"
+
+
+def test_catalog_identity_and_source_evidence_are_bound_to_approval(domain):
+    s = facts(domain)
+    p = domain.preview(spec(domain), s)
+    for changed in (replace(s, catalog_id="other-catalog"),
+                    replace(s, copies=(replace(s.copies[0], stored_relpath="different"),)),
+                    replace(s, anchors=())):
+        with pytest.raises(domain.SliceRefusal, match="PREVIEW_STALE"):
+            domain.approve(p, expected_seal=p.seal, current_snapshot=changed)
+
+
+def test_approval_validation_does_not_replan_for_later_source_changes(domain):
+    s = facts(domain)
+    p = domain.preview(spec(domain), s)
+    a = domain.approve(p, expected_seal=p.seal, current_snapshot=s)
+    changed = replace(s, drives=(replace(s.drives[0], lifecycle="lost"),))
+    assert not domain.preview(spec(domain), changed).source_ready
+    assert domain.validate_approval(p, a) is None  # Later execution must apply source-use gates.

@@ -2541,3 +2541,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Corrects the charter's excluded-source and offline-resolution wording and completes its directory-durability and per-file provenance contracts. Adds acceptance cases within the existing three development slices; no production or runtime change.
 - `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
 - `related`: DEC-081, DEC-101, DEC-102, DEF-041, tests/test_lifecycle_eligibility.py
+
+### DEC-104: Implement the slice domain as an internal immutable proposal boundary
+- `id`: DEC-104
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Operator authorization to implement Slice 1 after PR #67 merged at `c371884`.
+- `decision`: Introduce `modelark.slice.domain` with frozen catalog/source facts, exact per-file gaps, deterministic closure and alternatives, a versioned canonical domain seal, and explicit pure approval validation. Introduce `modelark.slice.catalog` as an explicit-path, schema-v7, read-only transactional reader using the established recovery manifest. Keep `execution_ready` false and approval tagged `domain` until later slices add hardware preflight and durable execution authority. Raw SHA256 annex keys may independently establish original-byte digest evidence without modifying stored provenance; compressed keys may not.
+- `rationale`: The first implementation should prove archive eligibility and immutable intent without exposing half-implemented execution or coupling domain tests to the live portal. Separate source evidence retains the distinction between original-byte provenance, clean residency, and later physical verification. A dedicated read-only snapshot prevents global catalog configuration changes and mixed evidence during concurrent Fill commits.
+- `impact`: Adds the internal Slice 1 package, focused domain/catalog tests, and API documentation. Durable state, CAS/ownership, source-use recovery, filesystem preflight, CLI/portal integration, byte transfer, and real-device trials remain in their accepted later slices. Existing Fill behavior and catalog schema are unchanged.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md, docs/plans/usable-slice-implementation-charter.md
+- `related`: DEC-081, DEC-101, DEC-102, DEC-103, DEF-041
