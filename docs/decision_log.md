@@ -2541,3 +2541,47 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Corrects the charter's excluded-source and offline-resolution wording and completes its directory-durability and per-file provenance contracts. Adds acceptance cases within the existing three development slices; no production or runtime change.
 - `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md
 - `related`: DEC-081, DEC-101, DEC-102, DEF-041, tests/test_lifecycle_eligibility.py
+
+### DEC-104: Implement the slice domain as an internal immutable proposal boundary
+- `id`: DEC-104
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Operator authorization to implement Slice 1 after PR #67 merged at `c371884`.
+- `decision`: Introduce `modelark.slice.domain` with frozen catalog/source facts, exact per-file gaps, deterministic closure and alternatives, a versioned canonical domain seal, and explicit pure approval validation. Introduce `modelark.slice.catalog` as an explicit-path, schema-v7, read-only transactional reader using the established recovery manifest. Keep `execution_ready` false and approval tagged `domain` until later slices add hardware preflight and durable execution authority. Raw SHA256 annex keys may independently establish original-byte digest evidence without modifying stored provenance; compressed keys may not.
+- `rationale`: The first implementation should prove archive eligibility and immutable intent without exposing half-implemented execution or coupling domain tests to the live portal. Separate source evidence retains the distinction between original-byte provenance, clean residency, and later physical verification. A dedicated read-only snapshot prevents global catalog configuration changes and mixed evidence during concurrent Fill commits.
+- `impact`: Adds the internal Slice 1 package, focused domain/catalog tests, and API documentation. Durable state, CAS/ownership, source-use recovery, filesystem preflight, CLI/portal integration, byte transfer, and real-device trials remain in their accepted later slices. Existing Fill behavior and catalog schema are unchanged.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md, docs/plans/usable-slice-implementation-charter.md
+- `related`: DEC-081, DEC-101, DEC-102, DEC-103, DEF-041
+
+### DEC-105: Preserve proven legacy slice sources without suppressing catalog gaps
+- `id`: DEC-105
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #68's completed review of `24db4f3`, checked against `restore.restore_repo`, the non-annex fetch path, and the durable original-digest provenance contract.
+- `decision`: A safe stored path on a clean, proven drive may qualify through its durable original-byte digest/provenance without a current SHA256 annex key or current catalog digest. Use raw SHA256 annex keys as independent digest evidence when available; compressed object keys never replace original-byte evidence. If the acquisition manifest cannot describe a foreign/legacy repository, freeze all its declared catalog files as the slice recovery scope and evaluate each for archive evidence.
+- `rationale`: Acquisition format policy and current storage backend must not strand previously accepted, provable archive bytes. Restore's archived-only fallback cannot be copied literally into a gap-reporting preview because it could silently omit declared but unarchived files. The full declared fallback preserves both recovery compatibility and exact missing-file reporting.
+- `impact`: Completes Slice 1 compatibility tests for non-annex/other-backend copies, durable Hub provenance, and ONNX/MLX/other archived artifacts with partial and absent copies. No acquisition policy, schema, execution authority, or live archive changes.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md
+- `related`: DEC-053, DEC-101, DEC-103, DEC-104, DEF-041
+
+### DEC-106: Require positive weight-format evidence for slice manifest fallback
+- `id`: DEC-106
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #68's review of `77615f4` and four failing regression cases showing auxiliary-only, index-only, unknown, and unclassified repositories becoming source-ready.
+- `decision`: Refine DEC-105's fallback eligibility: require catalog rows positively classified as ONNX or MLX weights, the recognized weight formats outside the acquisition selector. For eligible repositories, continue freezing every declared file to retain exact gaps. Otherwise retain the blocking `MANIFEST_UNAVAILABLE` error even if remaining rows have proven archive copies.
+- `rationale`: A shared acquisition-policy exception does not distinguish recoverable foreign weights from missing weight metadata. Generic `other` classification cannot establish a repository manifest. Copy-level provenance remains valid but cannot by itself prove repository scope.
+- `impact`: Narrows only the Slice 1 fallback, with positive foreign-format and negative incomplete-manifest contracts. Existing restore behavior, acquisition policy, durable copy provenance, and live runtime are unchanged.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md
+- `related`: DEC-101, DEC-104, DEC-105, modelark/slice/catalog.py
+
+### DEC-107: Recognize exact legacy foreign-weight extensions without reclassifying the catalog
+- `id`: DEC-107
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #68 review of `f3a2705`, confirmed against `tests/test_def033_gate1_contracts.py`'s legacy `model.onnx` row tagged `other` and four failing adapter regressions.
+- `decision`: Extend DEC-106's positive ONNX/MLX evidence to exact `.onnx`, `.npz`, and `.npy` extensions when catalog format is `other` or NULL. Preserve original catalog annotations and the full declared fallback scope. Do not infer weight evidence from directory/stem heuristics or generic `other` classification.
+- `rationale`: Durable legacy copies may predate format classification. Exact recognized extensions recover that compatibility without reintroducing auxiliary-only approval through names such as `mlx/config.json` or `model.onnx.json`.
+- `impact`: Slice 1 reader and positive/negative fallback contracts only; no catalog mutation, acquisition change, or live archive access.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md
+- `related`: DEC-105, DEC-106, tests/test_def033_gate1_contracts.py

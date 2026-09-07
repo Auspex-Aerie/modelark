@@ -1,8 +1,10 @@
 # Usable Slice implementation charter
 
-Status: architecture locked; implementation has not started  
-Updated: 2026-09-06  
-Decision anchors: DEC-081, DEC-098, BOT-006, DEC-101, DEC-102, DEC-103, DEF-041, DEF-043
+Status: architecture locked; Slice 1 domain implementation under review
+
+Updated: 2026-09-07
+
+Decision anchors: DEC-081, DEC-098, BOT-006, DEC-101, DEC-102, DEC-103, DEC-104, DEF-041, DEF-043
 
 ## Outcome
 
@@ -363,6 +365,10 @@ this change. The next implementation session starts with domain contracts and ex
 for eligibility, exact gap reporting, and the sealed direct-USB transaction.
 
 ## Development entry and review slices
+
+Slice 1's internal API and limits are documented in [Usable Slice domain](../usable-slice-domain.md).
+Its domain approval binds intent and archive evidence; execution readiness stays false until the
+later hardware preflight and durable ownership contracts are implemented.
 
 Finish PR #67's renewed bounded review (up to three iterations) at its exact pushed head and let the
 operator merge it. Then branch from that merged charter for implementation. The first test commit
