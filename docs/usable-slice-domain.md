@@ -34,7 +34,10 @@ They must never treat this domain artifact alone as permission to write.
 
 `hf-tree-v1` freezes the existing recovery manifest with repository-relative paths, sizes, original
 SHA-256 digests, and format/quant metadata. It is a layout profile, not a functional model-loading
-claim. Catalog-only files yield exact gaps. Missing file sizes stay unknown instead of becoming
+claim. If current acquisition formats cannot describe a foreign/legacy repository, its full
+declared catalog file set becomes the recovery scope; this retains declared-but-unarchived gaps
+instead of reducing the closure to the subset already archived. No acquisition policy is changed.
+Catalog-only files yield exact gaps. Missing file sizes stay unknown instead of becoming
 zero. A missing catalog digest may be supplied by unambiguous qualifying archive evidence; a
 missing repository commit SHA is never inferred from a remote head.
 
@@ -43,10 +46,15 @@ digest evidence used. Identity follows the existing reconciliation contract: at 
 filesystem or annex UUID, with every recorded UUID bound by the matching fingerprint and epoch;
 a serial alone is insufficient. Lifecycle-active excluded drives remain readable. Dirty/unanchored,
 lost/retired, explicitly absent, identity-mismatched, or conflicting copies cannot satisfy a file.
-Replica metadata alone is insufficient. For raw SHA256 annex objects, the key is independent
+Replica metadata alone is insufficient. A safe stored path on the proven drive may qualify using
+a valid original digest with durable `hub_confirmed`, `ingestion_computed`, `annex_key`, or
+`archive-head-blob` provenance even if its current annex key is absent or uses another backend.
+Durable original-byte provenance does not disappear when current catalog metadata omits its digest.
+For raw SHA256 annex objects, the key is independent
 original-byte evidence, even when the stored provenance is absent; the derived proof is recorded
 in the proposal without repairing the catalog. A compressed object's annex hash cannot stand in
-for its original-byte digest. Multiple qualifying but disagreeing originals block closure when
+for its original-byte digest; a separately recorded original digest with durable provenance still
+qualifies. Multiple qualifying but disagreeing originals block closure when
 the catalog does not disambiguate them.
 
 Offline sources need no filesystem access at this stage. Preview validates lexical paths; source

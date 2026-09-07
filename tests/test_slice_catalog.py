@@ -145,3 +145,26 @@ def test_read_snapshot_is_consistent_across_concurrent_catalog_commit(api, tmp_p
     assert fresh.snapshot_id != snapshot.snapshot_id
     assert d.preview(spec(d), fresh).gaps[0].rfilename == "new-config.json"
     writer.close()
+
+
+@pytest.mark.parametrize("format", ["onnx", "mlx", "other"])
+def test_foreign_archives_are_recoverable_without_hiding_declared_gaps(api, tmp_path, format):
+    d, catalog = api
+    path = tmp_path / "catalog.sqlite"
+    con = seed(path, d)
+    name = f"model.{format}"
+    con.execute("UPDATE files SET rfilename=?,format=?", (name, format))
+    con.execute("UPDATE archived SET rfilename=?,stored_relpath=?", (name, name))
+    p = d.preview(spec(d), catalog.read_catalog(path, spec(d)))
+    assert p.source_ready and p.closure[0].rfilename == name
+    # The legacy restore fallback lists only archived rows. A slice must also expose any declared
+    # but unarchived artifact in this requested repository instead of silently narrowing its scope.
+    con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format) "
+                "VALUES('org/model','config.json',5,'aux')")
+    p = d.preview(spec(d), catalog.read_catalog(path, spec(d)))
+    assert not p.source_ready
+    assert [(g.rfilename, g.code) for g in p.gaps] == [("config.json", "ARCHIVE_MISSING")]
+    con.execute("DELETE FROM archived")
+    p = d.preview(spec(d), catalog.read_catalog(path, spec(d)))
+    assert {g.rfilename for g in p.gaps} == {name, "config.json"}
+    con.close()

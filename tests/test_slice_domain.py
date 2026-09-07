@@ -104,7 +104,6 @@ def test_catalog_only_and_partial_archives_report_exact_files(domain):
 @pytest.mark.parametrize("field,value,code", [
     ("orig_bytes", 13, "SOURCE_SIZE_MISMATCH"),
     ("orig_sha256", OTHER, "SOURCE_DIGEST_CONFLICT"),
-    ("annex_key", None, "SOURCE_IDENTITY_UNPROVEN"),
     ("present", False, "SOURCE_COPY_ABSENT"),
     ("stored_relpath", "../escape", "SOURCE_PATH_UNSAFE"),
 ])
@@ -330,3 +329,31 @@ def test_serial_alone_never_proves_source_identity(domain):
     s = facts(domain)
     s = replace(s, drives=(replace(s.drives[0], fs_uuid=None, annex_uuid=None),))
     assert domain.preview(spec(domain), s).gaps[0].code == "SOURCE_IDENTITY_UNPROVEN"
+
+
+# 2026-09-07 review correction: absence of an annex key alone is not missing identity.
+# A confined stored path on a proven drive may carry independent durable digest provenance.
+@pytest.mark.parametrize("key", [None, "WORM-s12-m1--model.safetensors", "URL--recorded-object"])
+@pytest.mark.parametrize("provenance", ["ingestion_computed", "hub_confirmed", "annex_key", "archive-head-blob"])
+def test_durable_original_proof_does_not_require_sha256_annex_backend(domain, key, provenance):
+    s = facts(domain)
+    s = replace(s, copies=(replace(s.copies[0], annex_key=key, provenance=provenance),))
+    p = domain.preview(spec(domain), s)
+    assert p.source_ready and p.closure[0].sha256 == SHA
+    assert p.closure[0].sources[0].digest_provenance == provenance
+
+
+def test_keyless_copy_without_durable_original_proof_is_still_blocked(domain):
+    s = facts(domain)
+    s = replace(s, copies=(replace(s.copies[0], annex_key=None, provenance="legacy_unknown"),))
+    assert domain.preview(spec(domain), s).gaps[0].code == "SOURCE_PROVENANCE_UNPROVEN"
+
+
+def test_compressed_hub_provenance_survives_missing_catalog_digest(domain):
+    s = facts(domain)
+    s = replace(s, files=(replace(s.files[0], sha256=None),),
+                copies=(replace(s.copies[0], provenance="hub_confirmed", compressed=True,
+                                stored_bytes=8, annex_key=f"SHA256E-s8--{OTHER}"),))
+    p = domain.preview(spec(domain), s)
+    assert p.source_ready and p.closure[0].sha256 == SHA
+    assert p.closure[0].sources[0].digest_provenance == "hub_confirmed"

@@ -290,11 +290,12 @@ def _source(file, copy, drive, anchors):
         return fail("SOURCE_RECONCILIATION_REQUIRED", "anchor does not bind current identity/generation")
     if not _path(copy.stored_relpath):
         return fail("SOURCE_PATH_UNSAFE", str(copy.stored_relpath))
+    if copy.annex_key is not None and not isinstance(copy.annex_key, str):
+        return fail("SOURCE_IDENTITY_UNPROVEN", "malformed recorded annex identity")
     key = _ANNEX.fullmatch(copy.annex_key or "")
-    if key is None:
-        return fail("SOURCE_IDENTITY_UNPROVEN", "canonical SHA256 annex identity required")
     if (not _integer(copy.orig_bytes) or copy.orig_bytes != file.size_bytes
-            or not _integer(copy.stored_bytes) or int(key[1]) != copy.stored_bytes
+            or not _integer(copy.stored_bytes)
+            or (key is not None and int(key[1]) != copy.stored_bytes)
             or (copy.compressed is False and copy.orig_bytes != copy.stored_bytes)):
         return fail("SOURCE_SIZE_MISMATCH")
     if type(copy.compressed) is not bool:
@@ -308,11 +309,10 @@ def _source(file, copy, drive, anchors):
     except archive_hash.DigestEvidenceError as exc:
         return fail("SOURCE_DIGEST_CONFLICT", str(exc))
     provenance = copy.provenance
-    if (copy.orig_sha256 is not None and provenance in {"ingestion_computed", "hub_confirmed", "archive-head-blob"}
-            and (provenance != "hub_confirmed" or file.sha256 is not None)
-            and (provenance != "archive-head-blob" or not copy.compressed)):
+    if (copy.orig_sha256 is not None and provenance in {
+            "ingestion_computed", "hub_confirmed", "archive-head-blob", "annex_key"}):
         proof = provenance
-    elif not copy.compressed:
+    elif not copy.compressed and key is not None:
         proof = "annex_key"  # Independent raw original-byte identity, not a database backfill.
     else:
         return fail("SOURCE_PROVENANCE_UNPROVEN", "no independently established original-byte digest")

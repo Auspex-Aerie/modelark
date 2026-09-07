@@ -33,9 +33,14 @@ def read_catalog(path: str | Path, spec: SliceSpec) -> CatalogSnapshot:
             manifests = archive_manifest.inspect_manifests_for_repos(
                 con, repos, archive_manifest.recovery_policy())
             names = {(repo, f.rfilename) for repo, manifest in manifests.manifests.items() for f in manifest}
+            # Like restore, acquisition policy must not strand foreign/legacy archive bytes.
+            # Unlike restore's archived-only fallback, retain every declared catalog file so
+            # a partially archived foreign repository produces exact gaps instead of shrinking.
+            fallback_repos = {row[0] for row in rows if row[0] in manifests.errors}
+            names.update((row[0], row[1]) for row in rows if row[0] in fallback_repos)
             files.extend(FileFact(*row) for row in rows if (row[0], row[1]) in names)
             issues.extend(Gap(repo, None, "MANIFEST_UNAVAILABLE", detail=str(error))
-                          for repo, error in manifests.errors.items())
+                          for repo, error in manifests.errors.items() if repo not in fallback_repos)
             rows = con.execute(
                 "SELECT a.repo_id,a.rfilename,a.drive_label,a.stored_relpath,a.stored_name,"
                 "a.orig_bytes,a.stored_bytes,a.orig_sha256,a.orig_sha256_provenance,a.annex_key,"

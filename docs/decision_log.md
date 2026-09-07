@@ -2552,3 +2552,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Adds the internal Slice 1 package, focused domain/catalog tests, and API documentation. Durable state, CAS/ownership, source-use recovery, filesystem preflight, CLI/portal integration, byte transfer, and real-device trials remain in their accepted later slices. Existing Fill behavior and catalog schema are unchanged.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md, docs/plans/usable-slice-implementation-charter.md
 - `related`: DEC-081, DEC-101, DEC-102, DEC-103, DEF-041
+
+### DEC-105: Preserve proven legacy slice sources without suppressing catalog gaps
+- `id`: DEC-105
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #68's completed review of `24db4f3`, checked against `restore.restore_repo`, the non-annex fetch path, and the durable original-digest provenance contract.
+- `decision`: A safe stored path on a clean, proven drive may qualify through its durable original-byte digest/provenance without a current SHA256 annex key or current catalog digest. Use raw SHA256 annex keys as independent digest evidence when available; compressed object keys never replace original-byte evidence. If the acquisition manifest cannot describe a foreign/legacy repository, freeze all its declared catalog files as the slice recovery scope and evaluate each for archive evidence.
+- `rationale`: Acquisition format policy and current storage backend must not strand previously accepted, provable archive bytes. Restore's archived-only fallback cannot be copied literally into a gap-reporting preview because it could silently omit declared but unarchived files. The full declared fallback preserves both recovery compatibility and exact missing-file reporting.
+- `impact`: Completes Slice 1 compatibility tests for non-annex/other-backend copies, durable Hub provenance, and ONNX/MLX/other archived artifacts with partial and absent copies. No acquisition policy, schema, execution authority, or live archive changes.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md
+- `related`: DEC-053, DEC-101, DEC-103, DEC-104, DEF-041
