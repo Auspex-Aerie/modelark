@@ -309,6 +309,7 @@ class Session:
         self._usage = {}
         self._allocated_bytes = 0
         self._verified_files = set()
+        self._terminal = False
         for op in self.ops.values():
             for path in (op["path"], op.get("temporary")):
                 if path:
@@ -574,10 +575,13 @@ class Session:
         self.store.complete(self.transaction_id, self.plan.destination.device_id)
 
     def step(self):
+        if self._terminal:
+            raise TransferRefusal("NOT_RESUMABLE", "session encountered a terminal refusal")
         current = self.store.status(self.transaction_id)
         if current.state == "complete":
             return current
         if current.state in {"failed", "invalidated"}:
+            self._terminal = True
             self.lease.close()
             raise TransferRefusal("NOT_RESUMABLE", current.state)
         self.lease.check()
@@ -602,13 +606,20 @@ class Session:
             states = {"STOPPED": "stopped", "WAITING_SOURCE": "waiting_source",
                       "WAITING_DESTINATION": "waiting_destination", "SOURCE_BLOCKED": "blocked_source"}
             state = _refusal_state(exc.code)
-            self.store.set_state(self.transaction_id, state, str(exc))
+            self._terminal = exc.code not in states
+            try:
+                self.store.set_state(self.transaction_id, state, str(exc))
+            finally:
+                if self._terminal:
+                    self.lease.close()
             if exc.code not in states:
-                self.lease.close()
                 raise
         except FileExistsError as exc:
-            self.store.set_state(self.transaction_id, "failed", "OUTPUT_COLLISION")
-            self.lease.close()
+            self._terminal = True
+            try:
+                self.store.set_state(self.transaction_id, "failed", "OUTPUT_COLLISION")
+            finally:
+                self.lease.close()
             raise TransferRefusal("OUTPUT_COLLISION", str(exc)) from exc
         return self.store.status(self.transaction_id)
 

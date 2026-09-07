@@ -50,6 +50,9 @@ publication; existing output/control records are not automatically deleted or ad
 Terminal refusals release the process descriptor while retaining durable ownership. A failed or
 invalidated transaction cannot resume through the old Session object after an adapter condition
 is restored; `step()` refuses it just as a new Start does.
+Revocation runs even if persisting that terminal status fails: the old Session remembers its
+terminal refusal independently of the database and cannot regain its writer capability. The
+persistence error remains visible; a failed status write is not reported as a durable transition.
 
 ## Journal and recovery
 

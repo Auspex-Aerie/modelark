@@ -904,6 +904,31 @@ def test_terminal_session_cannot_resume_after_adapter_condition_is_restored(setu
     assert store.receipt(tx) is None
 
 
+@pytest.mark.parametrize("failure", ["typed", "file_exists"])
+def test_terminal_revocation_survives_state_persistence_failure(setup, failure):
+    t, store, plan, tx, dest, _ = setup
+    with start(setup) as session:
+        setting = store.set_state
+        def busy(*args, **kwargs):
+            raise t.TransferRefusal("STATE_BUSY")
+        store.set_state = busy
+        if failure == "typed":
+            dest.changed = True
+        else:
+            def collision(*args):
+                raise FileExistsError("racing directory")
+            dest.create_directory = collision
+        with pytest.raises(t.TransferRefusal, match="STATE_BUSY"):
+            session.step()
+        store.set_state = setting
+        dest.changed = False
+        assert not session.can_write
+        assert store.owner(plan.destination.device_id) == tx
+        assert store.status(tx).state == "transferring"  # Persistence really did fail.
+        with pytest.raises(t.TransferRefusal, match="NOT_RESUMABLE"):
+            session.step()
+
+
 @pytest.mark.parametrize("kind", ["directory", "file", "receipt"])
 def test_parent_certificate_loss_is_refused_before_child_creation(setup, kind):
     t, _, _, _, dest, _ = setup

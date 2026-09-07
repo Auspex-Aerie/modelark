@@ -2640,3 +2640,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Internal transaction orchestration, regression tests and API documentation only; no hardware adapter, public Start, catalog change or live Fill action.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-108, DEC-110, DEC-111
+
+### DEC-113: Revoke a terminal session independently of status persistence
+- `id`: DEC-113
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #69 Greptile review of `3f1af34` and two failed regressions injecting `STATE_BUSY` during terminal status persistence.
+- `decision`: Remember terminal refusal in the Session before attempting its durable status write, and release its process descriptor in a finally block for both typed refusals and no-replace collision exceptions. Keep the persistence error visible and reject reuse of that Session even when the durable status did not advance.
+- `rationale`: Failure to record a terminal transition must not preserve or restore the same in-process writer capability. The durable reservation remains intact; an unsuccessful status write must not be claimed as persisted.
+- `impact`: Internal session error handling, fault regressions and documentation only. No live database, archive or device access.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-112
