@@ -1,0 +1,249 @@
+"""Slice 1 contract: archive evidence -> immutable domain preview -> explicit approval.
+
+These contracts intentionally precede implementation. Hardware preflight and execution are later
+slices; a domain approval must never claim that a destination is ready for writes.
+"""
+from dataclasses import FrozenInstanceError, replace
+import importlib
+import random
+from unittest import mock
+
+import pytest
+
+
+@pytest.fixture
+def domain():
+    try:
+        return importlib.import_module("modelark.slice.domain")
+    except ModuleNotFoundError as exc:
+        if exc.name not in {"modelark.slice", "modelark.slice.domain"}:
+            raise
+        pytest.fail("Slice 1 domain preview/approval behavior is not implemented yet")
+
+
+SHA = "a" * 64
+OTHER = "b" * 64
+
+
+def facts(d):
+    from modelark.capacity_evidence import identity_fingerprint_v1
+
+    fingerprint = identity_fingerprint_v1(
+        fs_uuid="fs-a", annex_uuid="annex-a", serial="serial-a", filesystem_capacity_bytes=1000)
+    drive = d.DriveFact("drive-a", "fs-a", "annex-a", "serial-a", 1, 2,
+                        fingerprint, 1000, "dedicated_local", "active", "enabled")
+    anchor = d.AnchorFact("drive-a", 1, 2, fingerprint, 1000, "dedicated_local", "anchor-2")
+    file = d.FileFact("org/model", "model.safetensors", 12, SHA, "safetensors", "bf16")
+    copy = d.CopyFact("org/model", file.rfilename, "drive-a", file.rfilename,
+                      12, 12, SHA, "ingestion_computed", f"SHA256E-s12--{SHA}", False)
+    return d.CatalogSnapshot("fixture", (file,), (copy,), (drive,), (anchor,))
+
+
+def spec(d, **kwargs):
+    return d.SliceSpec(repo_ids=("org/model",), destination_id="usb-destination",
+                       destination_root="models", **kwargs)
+
+
+def test_offline_archive_is_source_ready_without_io(domain):
+    snapshot = facts(domain)
+    with mock.patch("pathlib.Path.resolve", side_effect=AssertionError("no source resolution")), \
+         mock.patch("subprocess.run", side_effect=AssertionError("no annex or mount")), \
+         mock.patch("socket.socket", side_effect=AssertionError("no acquisition")):
+        p = domain.preview(spec(domain), snapshot)
+        assert p.source_ready and not p.execution_ready
+        assert p.total_bytes == 12 and p.required_drives == ("drive-a",)
+        assert p.closure[0].sha256 == SHA
+        assert p.closure[0].sources[0].copy.annex_key == f"SHA256E-s12--{SHA}"
+        assert p.closure[0].sources[0].anchor.anchor_id == "anchor-2"
+
+
+@pytest.mark.parametrize("lifecycle,eligibility,ready", [
+    ("active", "enabled", True), ("active", "excluded", True),
+    ("lost", "enabled", False), ("retired", "excluded", False),
+])
+def test_lifecycle_and_placement_eligibility_are_orthogonal(domain, lifecycle, eligibility, ready):
+    s = facts(domain)
+    s = replace(s, drives=(replace(s.drives[0], lifecycle=lifecycle, eligibility=eligibility),))
+    p = domain.preview(spec(domain), s)
+    assert p.source_ready is ready
+    if not ready:
+        assert p.gaps[0].code == "SOURCE_INACTIVE"
+        assert p.gaps[0].drive_label == "drive-a"
+
+
+@pytest.mark.parametrize("change", ["missing", "old_generation", "old_epoch", "fingerprint", "authority"])
+def test_clean_anchor_must_bind_current_drive(domain, change):
+    s = facts(domain)
+    anchors = s.anchors
+    if change == "missing":
+        anchors = ()
+    else:
+        field, value = {
+            "old_generation": ("generation", 1), "old_epoch": ("identity_epoch", 2),
+            "fingerprint": ("identity_fingerprint", OTHER),
+            "authority": ("write_authority", "unknown"),
+        }[change]
+        anchors = (replace(anchors[0], **{field: value}),)
+    p = domain.preview(spec(domain), replace(s, anchors=anchors))
+    assert not p.source_ready
+    assert p.gaps[0].code == "SOURCE_RECONCILIATION_REQUIRED"
+    assert (p.gaps[0].repo_id, p.gaps[0].rfilename) == ("org/model", "model.safetensors")
+
+
+def test_catalog_only_and_partial_archives_report_exact_files(domain):
+    s = facts(domain)
+    config = domain.FileFact("org/model", "nested/config.json", 4, OTHER, "aux", None)
+    p = domain.preview(spec(domain), replace(s, files=(*s.files, config)))
+    assert not p.source_ready
+    assert [(g.rfilename, g.code) for g in p.gaps] == [(config.rfilename, "ARCHIVE_MISSING")]
+    assert p.closure[0].rfilename == "model.safetensors"
+    p = domain.preview(spec(domain), replace(s, copies=()))
+    assert p.gaps[0].code == "ARCHIVE_MISSING"
+
+
+@pytest.mark.parametrize("field,value,code", [
+    ("orig_bytes", 13, "SOURCE_SIZE_MISMATCH"),
+    ("orig_sha256", OTHER, "SOURCE_DIGEST_CONFLICT"),
+    ("annex_key", None, "SOURCE_IDENTITY_UNPROVEN"),
+    ("present", False, "SOURCE_COPY_ABSENT"),
+    ("stored_relpath", "../escape", "SOURCE_PATH_UNSAFE"),
+])
+def test_unproven_copy_cannot_satisfy_archive_evidence(domain, field, value, code):
+    s = facts(domain)
+    p = domain.preview(spec(domain), replace(s, copies=(replace(s.copies[0], **{field: value}),)))
+    assert not p.source_ready and p.gaps[0].code == code
+
+
+def test_legacy_digest_without_independent_proof_is_blocked(domain):
+    s = facts(domain)
+    copy = replace(s.copies[0], provenance="legacy_unknown", compressed=True,
+                   annex_key=f"SHA256E-s8--{OTHER}", stored_bytes=8)
+    p = domain.preview(spec(domain), replace(s, copies=(copy,)))
+    assert p.gaps[0].code == "SOURCE_PROVENANCE_UNPROVEN"
+
+
+def test_raw_annex_digest_is_independent_proof_not_a_catalog_mutation(domain):
+    s = facts(domain)
+    copy = replace(s.copies[0], provenance=None, orig_sha256=None)
+    p = domain.preview(spec(domain), replace(s, copies=(copy,)))
+    assert p.source_ready
+    assert p.closure[0].sources[0].digest_provenance == "annex_key"
+    assert copy.orig_sha256 is None and copy.provenance is None
+
+
+def test_compressed_annex_hash_is_not_original_byte_evidence(domain):
+    s = facts(domain)
+    copy = replace(s.copies[0], orig_sha256=None, provenance=None, compressed=True)
+    p = domain.preview(spec(domain), replace(s, copies=(copy,)))
+    assert not p.source_ready
+
+
+def alternatives(d):
+    from modelark.capacity_evidence import identity_fingerprint_v1
+
+    s = facts(d)
+    fingerprint = identity_fingerprint_v1(
+        fs_uuid="fs-b", annex_uuid="annex-b", serial="serial-b", filesystem_capacity_bytes=1000)
+    drive = replace(s.drives[0], drive_label="drive-b", fs_uuid="fs-b", annex_uuid="annex-b",
+                    serial="serial-b", identity_fingerprint=fingerprint)
+    anchor = replace(s.anchors[0], drive_label="drive-b", identity_fingerprint=fingerprint,
+                     anchor_id="anchor-b")
+    return replace(s, drives=(*s.drives, drive), anchors=(*s.anchors, anchor),
+                   copies=(*s.copies, replace(s.copies[0], drive_label="drive-b")))
+
+
+def test_valid_alternatives_survive_bad_preferred_source(domain):
+    s = alternatives(domain)
+    p = domain.preview(spec(domain), replace(s, drives=(replace(s.drives[0], lifecycle="lost"), s.drives[1])))
+    assert p.source_ready and p.required_drives == ("drive-b",)
+
+
+def test_missing_catalog_hash_requires_unambiguous_archived_content(domain):
+    s = alternatives(domain)
+    s = replace(s, files=(replace(s.files[0], sha256=None),),
+                copies=(s.copies[0], replace(s.copies[1], orig_sha256=OTHER,
+                                           annex_key=f"SHA256E-s12--{OTHER}")))
+    p = domain.preview(spec(domain), s)
+    assert not p.source_ready and p.gaps[0].code == "SOURCE_DIGEST_AMBIGUOUS"
+
+
+def test_preview_seal_is_order_independent_and_facts_are_immutable(domain):
+    s = alternatives(domain)
+    p = domain.preview(spec(domain), s)
+    for seed in range(10):
+        rng = random.Random(seed)
+        shuffled = {name: tuple(rng.sample(getattr(s, name), len(getattr(s, name))))
+                    for name in ("files", "copies", "drives", "anchors")}
+        assert domain.preview(spec(domain), replace(s, **shuffled)) == p
+    assert tuple(src.drive.drive_label for src in p.closure[0].sources) == ("drive-a", "drive-b")
+    with pytest.raises(FrozenInstanceError):
+        p.closure[0].sources[0].drive.lifecycle = "lost"
+    file_list = list(s.files)
+    copied = replace(s, files=file_list)
+    file_list.clear()
+    assert copied.files == s.files
+
+
+@pytest.mark.parametrize("path", ["/absolute", "../escape", "a/../b", "a\\b", "a//b", "a/./b", "x\0y"])
+def test_unsafe_artifact_paths_block_domain_preview(domain, path):
+    s = facts(domain)
+    p = domain.preview(spec(domain), replace(s, files=(replace(s.files[0], rfilename=path),)))
+    assert not p.source_ready and p.gaps[0].code == "ARTIFACT_PATH_UNSAFE"
+
+
+def test_file_directory_collisions_are_rejected(domain):
+    s = facts(domain)
+    nested = replace(s.files[0], rfilename="model.safetensors/config.json")
+    p = domain.preview(spec(domain), replace(s, files=(*s.files, nested)))
+    assert not p.source_ready and "OUTPUT_COLLISION" in {g.code for g in p.gaps}
+
+
+def test_missing_sizes_and_repositories_are_not_silently_omitted(domain):
+    s = facts(domain)
+    p = domain.preview(spec(domain), replace(s, files=(replace(s.files[0], size_bytes=None),)))
+    assert p.gaps[0].code == "ARTIFACT_SIZE_UNKNOWN"
+    p = domain.preview(replace(spec(domain), repo_ids=("missing/model",)), s)
+    assert not p.source_ready and p.gaps[0].repo_id == "missing/model"
+
+
+def test_explicit_approval_binds_reviewed_seal_and_never_starts_execution(domain):
+    s = facts(domain)
+    p = domain.preview(spec(domain), s)
+    a = domain.approve(p, expected_seal=p.seal, current_snapshot=s)
+    assert a.preview_seal == p.seal and a.stage == "domain"
+    assert domain.validate_approval(p, a) is None
+    assert not p.execution_ready
+    with pytest.raises(domain.SliceRefusal, match="PREVIEW_STALE"):
+        domain.approve(p, expected_seal=OTHER, current_snapshot=s)
+    with pytest.raises(domain.SliceRefusal, match="PREVIEW_STALE"):
+        domain.approve(p, expected_seal=p.seal, current_snapshot=replace(s, copies=()))
+
+
+def test_tampered_preview_and_approval_are_refused(domain):
+    s = facts(domain)
+    p = domain.preview(spec(domain), s)
+    a = domain.approve(p, expected_seal=p.seal, current_snapshot=s)
+    tampered = replace(p, spec=replace(p.spec, destination_id="other-usb"))
+    with pytest.raises(domain.SliceRefusal, match="PREVIEW_TAMPERED"):
+        domain.approve(tampered, expected_seal=p.seal, current_snapshot=s)
+    with pytest.raises(domain.SliceRefusal, match="APPROVAL_MISMATCH"):
+        domain.validate_approval(p, replace(a, preview_seal=OTHER))
+    with pytest.raises(domain.SliceRefusal, match="PREVIEW_BLOCKED"):
+        blocked = domain.preview(spec(domain), replace(s, copies=()))
+        domain.approve(blocked, expected_seal=blocked.seal, current_snapshot=replace(s, copies=()))
+
+
+def test_profile_and_destination_intent_are_part_of_seal(domain):
+    s = facts(domain)
+    p = domain.preview(spec(domain), s)
+    assert domain.preview(replace(p.spec, destination_root="different"), s).seal != p.seal
+    with pytest.raises(domain.SliceRefusal, match="UNSUPPORTED_PROFILE"):
+        domain.preview(spec(domain, consumer_profile="unknown"), s)
+    with pytest.raises(domain.SliceRefusal, match="INVALID_SPEC"):
+        domain.preview(replace(p.spec, destination_root="../outside"), s)
+
+
+def test_duplicate_conflicting_evidence_is_not_order_dependent(domain):
+    s = facts(domain)
+    with pytest.raises(domain.SliceRefusal, match="INVALID_SNAPSHOT"):
+        domain.preview(spec(domain), replace(s, drives=(*s.drives, replace(s.drives[0], lifecycle="lost"))))
