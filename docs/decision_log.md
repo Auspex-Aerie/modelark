@@ -2585,3 +2585,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Slice 1 reader and positive/negative fallback contracts only; no catalog mutation, acquisition change, or live archive access.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md
 - `related`: DEC-105, DEC-106, tests/test_def033_gate1_contracts.py
+
+### DEC-108: Separate durable slice transaction authority from catalog and hardware adapters
+- `id`: DEC-108
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Operator authorization of Slice 2 after PR #68 merged at `8408abe`.
+- `decision`: Persist transaction plans, explicit approval, unfinished device reservations and append-only journals in a private, fixed operator-host SQLite namespace outside the catalog. Combine atomic claims with Linux abstract Unix-socket process exclusion keyed solely by canonical destination device identity. Keep inherited descriptors excluding successor writers; do not support alternate namespaces, cross-host takeover or cleanup. Compose the existing nonblocking archive mutation fence with a fresh read-only catalog snapshot and an injected local source reader. Orchestrate recoverable publication over explicit trusted destination ports; ship no real hardware adapter or public Start entry point in Slice 2.
+- `rationale`: Process death must release only live exclusion, not durable ownership. A fixed host authority prevents catalog/root aliases from creating independent reservations, and abstract socket binds avoid replaceable lock-file identities. Keeping device proof and confined IO behind explicit ports permits disposable fault/concurrency tests without claiming that simulated devices satisfy real USB safety gates.
+- `impact`: Adds internal state, transaction and source-gate modules plus tests and API documentation. Slice 3 must prove confinement, system/archive exclusion, capability accounting and recoverable owned-object certificates inside actual adapter calls before exposing execution. Catalog schemas, archive evidence and live Fill remain unchanged.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md, docs/plans/usable-slice-implementation-charter.md
+- `related`: DEC-101, DEC-102, DEC-103, DEC-104, DEF-041
