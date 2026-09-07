@@ -2629,3 +2629,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Private Slice 2 SQLite initialization and compatibility tests only; no catalog migration, live-state access or real-device execution.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-108, DEC-110
+
+### DEC-112: Retain session verification and revoke terminal writer capabilities
+- `id`: DEC-112
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Final Codex review of PR #69 at `4342578`, reproduced by six failing performance, terminal-session and parent-certificate regressions.
+- `decision`: Authenticate completed directory checkpoints without re-flushing or re-journaling unchanged state. Rehash recovered files once per session and retain successful publication verification, with a mandatory final full digest pass. Refuse failed/invalidated Session reuse and release its process descriptor on terminal refusal without discarding durable ownership. Authenticate all journaled ancestors before child mutations, with inside-call confinement remaining a trusted adapter obligation.
+- `rationale`: Repeated work must not grow quadratically with shard count. A retained Session cannot bypass the same terminal-state gate applied by Start. Discovering lost parent authority only after child creation is too late to preserve unknown content.
+- `impact`: Internal transaction orchestration, regression tests and API documentation only; no hardware adapter, public Start, catalog change or live Fill action.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-111

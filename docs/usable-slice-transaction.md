@@ -47,6 +47,9 @@ is checked between streaming and verification chunks and before publication. Clo
 and closes its process descriptor, but retains the durable reservation. A new seal cannot acquire
 that unfinished device. Completion releases the reservation only after verification and receipt
 publication; existing output/control records are not automatically deleted or adopted.
+Terminal refusals release the process descriptor while retaining durable ownership. A failed or
+invalidated transaction cannot resume through the old Session object after an adapter condition
+is restored; `step()` refuses it just as a new Start does.
 
 ## Journal and recovery
 
@@ -79,6 +82,12 @@ The fenced session caches a validated operation set and incrementally tracks own
 including hard-link aliases. Per-chunk checks do not replay the plan/journal or rescan completed
 objects. A durable-head comparison and append CAS reject unexpected journal changes while using
 the cache. Resume performs a new full replay and owned-object allocation scan.
+Recovered completed files are rehashed once per session, and newly published files retain their
+successful verification within that session. The final full digest pass is still mandatory.
+Already-complete directories are authenticated without repeating their flush/checkpoint sequence.
+Before child creation, append, publication or temporary cleanup, all journaled parent directories
+must retain completed ownership certificates. The hardware adapter must still prevent replacement
+inside an individual port call; these pre-use checks do not replace descriptor confinement.
 
 Final verification rehashes every artifact, verifies the control record's presence/token/digest,
 and authenticates every extant descendant, including historical temporary names. The receipt records

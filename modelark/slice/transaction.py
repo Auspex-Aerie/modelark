@@ -308,6 +308,7 @@ class Session:
         self._paths = {}
         self._usage = {}
         self._allocated_bytes = 0
+        self._verified_files = set()
         for op in self.ops.values():
             for path in (op["path"], op.get("temporary")):
                 if path:
@@ -398,6 +399,17 @@ class Session:
         if parent in self._paths:
             self._owned(parent, self._paths[parent])
 
+    def _check_parents(self, path):
+        # The destination root itself is bound by the port. Every descendant ancestor must
+        # already be a completed, currently authenticated directory before any child mutation.
+        for parent in reversed(PurePosixPath(path).parents):
+            if str(parent) == ".":
+                continue
+            op = self.ops.get(str(parent))
+            if (not op or op["kind"] != "directory" or op["state"] != "complete"
+                    or self._owned(str(parent), op) is None):
+                raise TransferRefusal("OUTPUT_COLLISION", str(parent))
+
     def _control(self):
         path = ".modelark-slice-owner"
         data = d._json({"transaction": self.transaction_id, "seal": self.plan.seal,
@@ -411,7 +423,11 @@ class Session:
     def _directory(self, path):
         op = self._op(path, "directory")
         self._check()
-        if self._owned(path, op) is None:
+        self._check_parents(path)
+        existing = self._owned(path, op)
+        if existing is not None and op["state"] == "complete":
+            return
+        if existing is None:
             self.destination.create_directory(path, op["token"])
             self._owned(path, op)
             self._refresh_parent(path)
@@ -440,9 +456,11 @@ class Session:
     def _publish(self, op):
         self._check()
         path, temp, kind = op["path"], op["temporary"], op["kind"]
+        self._check_parents(path)
         if self._owned(path, op) is None:
             if self._owned(temp, op) is None or not self._matches(temp, op):
                 raise TransferRefusal("RECOVERY_DIGEST_MISMATCH", temp)
+            self._check_parents(path)
             try:
                 self.destination.publish(temp, path, op["token"])
             except FileExistsError as exc:
@@ -457,15 +475,19 @@ class Session:
         op = self._record(op, "complete")
         self._fault(kind + "_complete")
         if self._owned(temp, op) is not None:
+            self._check_parents(temp)
             self.destination.discard_temporary(temp, op["token"])
             self._owned(temp, op)
             self._refresh_parent(temp)
             self.destination.flush(str(PurePosixPath(temp).parent))
+        if kind == "file":
+            self._verified_files.add(op["token"])
         return op
 
     def _write(self, op, stream, source=None):
         path, temp, kind = op["path"], op["temporary"], op["kind"]
         self._check()
+        self._check_parents(path)
         if self._owned(path, op) is not None:
             raise TransferRefusal("OUTPUT_COLLISION", path)
         # A missing completed output may be restarted. Clear its old prepared proof durably
@@ -481,6 +503,7 @@ class Session:
         digest, size = hashlib.sha256(), 0
         while data := stream.read(1024 * 1024):
             self._boundary()
+            self._check_parents(temp)
             size += len(data)
             if size > op["size"]:
                 raise TransferRefusal("SOURCE_DIGEST_MISMATCH")
@@ -551,9 +574,13 @@ class Session:
         self.store.complete(self.transaction_id, self.plan.destination.device_id)
 
     def step(self):
+        current = self.store.status(self.transaction_id)
+        if current.state == "complete":
+            return current
+        if current.state in {"failed", "invalidated"}:
+            self.lease.close()
+            raise TransferRefusal("NOT_RESUMABLE", current.state)
         self.lease.check()
-        if self.store.status(self.transaction_id).state == "complete":
-            return self.store.status(self.transaction_id)
         try:
             self._check()
             ops = self.ops
@@ -561,8 +588,10 @@ class Session:
                 path = str(PurePosixPath(self.plan.proposal.spec.destination_root) / artifact.repo_id / artifact.rfilename)
                 op = ops.get(path)
                 if op and op["state"] == "complete" and self._owned(path, op):
-                    if not self._matches(path, op):
-                        raise TransferRefusal("RECOVERY_DIGEST_MISMATCH", path)
+                    if op["token"] not in self._verified_files:
+                        if not self._matches(path, op):
+                            raise TransferRefusal("RECOVERY_DIGEST_MISMATCH", path)
+                        self._verified_files.add(op["token"])
                     if self._owned(op["temporary"], op) is not None:
                         self._publish(op)
                     continue
@@ -575,9 +604,11 @@ class Session:
             state = _refusal_state(exc.code)
             self.store.set_state(self.transaction_id, state, str(exc))
             if exc.code not in states:
+                self.lease.close()
                 raise
         except FileExistsError as exc:
             self.store.set_state(self.transaction_id, "failed", "OUTPUT_COLLISION")
+            self.lease.close()
             raise TransferRefusal("OUTPUT_COLLISION", str(exc)) from exc
         return self.store.status(self.transaction_id)
 

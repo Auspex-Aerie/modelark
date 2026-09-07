@@ -844,6 +844,100 @@ def test_streaming_does_not_replay_plan_and_journal_per_chunk(setup, monkeypatch
     assert counts["load"] == 0 and counts["events"] <= 2
 
 
+@pytest.mark.parametrize("recovered", [False, True])
+def test_completed_artifact_hashing_is_linear_per_session(api, tmp_path, recovered):
+    t, s = api
+    _, _, snapshot = proposal()
+    snapshot = replace(snapshot,
+                       files=tuple(replace(snapshot.files[0], rfilename=f"shard-{i}.safetensors") for i in range(5)),
+                       copies=tuple(replace(snapshot.copies[0], rfilename=f"shard-{i}.safetensors") for i in range(5)))
+    p = d.preview(replace(spec(d), destination_id="test-device"), snapshot)
+    approval = d.approve(p, expected_seal=p.seal, current_snapshot=snapshot)
+    dest, store = Destination(tmp_path / "destination", t), s.Store()
+    plan = t.TransferPlan(p, dest.binding)
+    tx = store.create(plan, approval)
+    store.approve(tx, expected_seal=plan.seal)
+    reads = []
+    reading = dest.read
+    def counted(path):
+        if path.endswith(".safetensors"):
+            reads.append(path)
+        return reading(path)
+    dest.read = counted
+    if recovered:
+        with t.start(store, tx, dest, Sources(snapshot, t)) as session:
+            session.step()
+            session.step()
+        reads.clear()
+    with t.start(store, tx, dest, Sources(snapshot, t)) as session:
+        assert session.run().state == "complete"
+    # New content is hashed during publication; each final file needs only its final pass.
+    assert len(reads) == len(p.closure) + (2 if recovered else 0)
+    directories = [payload for event, payload in store.events(tx)
+                   if event == "operation" and payload["kind"] == "directory" and payload["state"] == "complete"]
+    assert len(directories) == 3
+
+
+def test_session_verification_cache_does_not_skip_final_digest_pass(setup):
+    t, store, _, tx, dest, _ = setup
+    with start(setup) as session:
+        session.step()
+        (dest.root / "models/org/model/model.safetensors").write_bytes(b"wrong bytes!")
+        with pytest.raises(t.TransferRefusal, match="VERIFICATION_FAILED"):
+            session.run()
+    assert store.receipt(tx) is None
+
+
+def test_terminal_session_cannot_resume_after_adapter_condition_is_restored(setup):
+    t, store, _, tx, dest, _ = setup
+    with start(setup) as session:
+        dest.changed = True
+        with pytest.raises(t.TransferRefusal, match="DESTINATION_CHANGED"):
+            session.step()
+        assert store.status(tx).state == "invalidated"
+        dest.changed = False
+        before = tuple(dest.root.rglob("*"))
+        with pytest.raises(t.TransferRefusal, match="NOT_RESUMABLE"):
+            session.step()
+        assert not session.can_write
+        assert tuple(dest.root.rglob("*")) == before
+    assert store.receipt(tx) is None
+
+
+@pytest.mark.parametrize("kind", ["directory", "file", "receipt"])
+def test_parent_certificate_loss_is_refused_before_child_creation(setup, kind):
+    t, _, _, _, dest, _ = setup
+    with start(setup) as session:
+        if kind == "receipt":
+            session.step()
+            parent = "models"
+        else:
+            session._directory("models")
+            parent = "models"
+        os.removexattr(dest.root / parent, "user.slice-test-owner")
+        before = set(dest.root.rglob("*"))
+        with pytest.raises(t.TransferRefusal, match="OUTPUT_COLLISION"):
+            if kind == "directory":
+                session._directory("models/org")
+            elif kind == "file":
+                op = session._op("models/test", "receipt", size=len(DATA), sha=hashlib.sha256(DATA).hexdigest())
+                session._write(op, io.BytesIO(DATA))
+            else:
+                session.step()
+        assert set(dest.root.rglob("*")) == before
+
+
+def test_completed_directory_has_no_redundant_durable_checkpoint(setup):
+    _, store, _, tx, dest, _ = setup
+    with start(setup) as session:
+        session._directory("models")
+        head = store.head(tx)
+        dest.trace.clear()
+        session._directory("models")
+        assert store.head(tx) == head
+        assert not [item for item in dest.trace if item[0] in {"mkdir", "flush"}]
+
+
 def test_cached_journal_requires_unchanged_durable_head(setup):
     t, store, plan, tx, dest, sources = setup
     with start(setup) as session:
