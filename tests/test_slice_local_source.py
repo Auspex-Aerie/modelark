@@ -20,8 +20,11 @@ def attachment(tmp_path):
     snapshot = facts(d)
     candidate = d.SourceEvidence(snapshot.copies[0], snapshot.drives[0], snapshot.anchors[0],
                                  "ingestion_computed")
+    from modelark.slice.linux import BoundTree
+    with BoundTree(root) as tree:
+        mount_id = tree.mount_id
     evidence = SimpleNamespace(fs_uuid="fs-a", serial="serial-a", total_bytes=1000,
-                               device_id="usb", mount_id="123", mount_path=str(mount))
+                               device_id="usb", mount_id=mount_id, mount_path=str(mount))
 
     class Observer:
         def observe(self, path, **kwargs):
@@ -37,6 +40,15 @@ def test_raw_original_bytes_without_any_subprocess(attachment, monkeypatch):
     with LocalArchiveReader({"drive-a": root}, observer=observer).open(candidate) as stream:
         assert stream.read(20) == b"originaldata"
         assert stream.read(20) == b""
+
+
+def test_source_observer_and_descriptor_must_be_same_attachment(attachment):
+    from modelark.slice.local_source import LocalArchiveReader
+    root, candidate, observer, evidence = attachment
+    evidence.mount_id = -999
+    with pytest.raises(TransferRefusal, match='SOURCE_CHANGED'):
+        with LocalArchiveReader({'drive-a': root}, observer=observer).open(candidate):
+            pytest.fail('unrelated attachment evidence accepted')
 
 
 def test_unattached_archive_is_waiting(attachment):
@@ -126,6 +138,19 @@ def test_archive_replacement_revokes_even_buffered_read(attachment):
             stream.read(1)
 
 
+def test_disappeared_bound_mount_is_a_source_missing_refusal(attachment, monkeypatch):
+    from modelark.slice import linux
+    from modelark.slice.local_source import LocalArchiveReader
+    root, candidate, observer, _ = attachment
+    mounts = set(linux._mount_ids())
+    monkeypatch.setattr(linux, "_mount_ids", lambda: mounts)
+    with LocalArchiveReader({"drive-a": root}, observer=observer).open(candidate) as stream:
+        assert stream.read(1) == b"o"
+        mounts.clear()  # Synthetic disappearance; no real mounts are changed.
+        with pytest.raises(TransferRefusal, match="SOURCE_MISSING"):
+            stream.read(1)
+
+
 def test_compressed_annex_content_yields_original_bytes(attachment):
     from modelark.slice.local_source import LocalArchiveReader
     from modelark.streamznn import _zipnn
@@ -177,6 +202,7 @@ def test_nested_stored_path_uses_repository_relative_annex_link(attachment):
 
 @pytest.mark.parametrize("when", ["initial", "reading"])
 @pytest.mark.parametrize("code,expected", [
+    ("WAITING_DESTINATION", "SOURCE_MISSING"),
     ("DESTINATION_UNPROVEN", "SOURCE_IDENTITY_UNPROVEN"),
     ("DESTINATION_CHANGED", "SOURCE_CHANGED"),
     ("DESTINATION_CAPACITY_UNPROVEN", "SOURCE_IDENTITY_UNPROVEN"),

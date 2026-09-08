@@ -1,12 +1,16 @@
 # Usable Slice transaction core
 
 Slice 2 adds private durable approval, device ownership, source-use gates, and recoverable
-publication orchestration. It remains an **internal API with no hardware adapter or CLI/portal
-entry point**. Do not use the test destination as a real USB adapter. Slice 1's domain approval
+publication orchestration. The core remains an internal port-based API; Slice 3's
+[attended direct-USB assembly](usable-slice-direct.md) supplies real adapters and CLI entry points.
+Do not use the test destination as a real USB adapter. Slice 1's domain approval
 still has no execution authority; a separately reviewed transaction seal binds destination
 evidence, and the destination port must validate that evidence before any writes.
 
 ## Authority and lifetime
+
+Direct admission uses private schema v6's optional sealed capsule (DEC-125). Older internal plans
+retain their semantics without invented hardware evidence; the attempt contract below is unchanged.
 
 `TransferPlan(proposal, destination_binding, metadata_reserve_bytes=...)` freezes the domain
 proposal, destination binding and explicit metadata capacity reservation
@@ -44,7 +48,7 @@ Reader operations use deferred transactions rather than requesting the writer re
 writers have a bounded SQLite busy wait and return typed `STATE_BUSY` on exhaustion. The private
 database handle retains SQLite rollback-recovery capability even for reader operations, so a hot
 journal from a dead writer is recovered rather than exposed as a read-only-database error.
-Private schema version 5 transactionally upgrades development version-1/2/3/4 databases while
+Private schema version 6 transactionally upgrades development version-1/2/3/4/5 databases while
 preserving plans, pending stops, reservations and journal heads. It adds a nullable live-attempt
 token and an acknowledged-stop serial; every pending legacy request remains unacknowledged,
 including on stopped rows which may contain a newer request. Legacy `process_seen` and `activation_serial`

@@ -35,6 +35,8 @@ def _translate_io(exc, label):
 
 
 def _translate_confinement(exc):
+    if exc.code == "WAITING_DESTINATION":
+        return TransferRefusal("SOURCE_MISSING", exc.detail)
     if exc.code == "DESTINATION_CHANGED":
         return TransferRefusal("SOURCE_CHANGED", exc.detail)
     # The shared hardware observer speaks destination-side eligibility codes.
@@ -147,6 +149,8 @@ class LocalArchiveReader:
                         raise TransferRefusal("SOURCE_CHANGED", label)
 
                 tree = stack.enter_context(BoundTree(path, verify=attachment_check))
+                if tree.mount_id != expected[4]:
+                    raise TransferRefusal("SOURCE_CHANGED", "observer and source descriptor attachments differ")
                 drive = candidate.drive
 
                 def check():

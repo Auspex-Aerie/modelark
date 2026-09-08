@@ -108,13 +108,35 @@ def rename_noreplace(src_dirfd, src, dst_dirfd, dst):
                           ctypes.c_uint(1)))
 
 
+def _mount_ids():
+    """Read attachment presence only; no device discovery or mount actions."""
+    try:
+        rows = Path("/proc/self/mountinfo").read_text().splitlines()
+        ids = []
+        for row in rows:
+            fields = row.split()
+            if len(fields) < 10 or " - " not in row:
+                raise ValueError("invalid mountinfo row")
+            value = int(fields[0])
+            if value <= 0:
+                raise ValueError("invalid mount ID")
+            ids.append(value)
+        if not ids or len(set(ids)) != len(ids):
+            raise ValueError("missing or ambiguous mountinfo")
+        return frozenset(ids)
+    except (OSError, ValueError) as exc:
+        raise TransferRefusal("DESTINATION_UNPROVEN", "attachment inventory unavailable") from exc
+
+
 class BoundTree:
     """Retained root fd; each descendant resolution rejects symlinks and mount crossings."""
 
-    def __init__(self, path, verify=None, writable=False):
+    def __init__(self, path, verify=None, writable=False, *, mount_ids=None):
         self.path = Path(os.path.abspath(path))
         self.verify = verify
         self.writable = writable
+        self._mount_ids = mount_ids or _mount_ids
+        self._attachment_lost = False
         self.fd = -1
         root = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:
@@ -139,6 +161,7 @@ class BoundTree:
     def check(self):
         if self.fd < 0:
             raise TransferRefusal("DESTINATION_CHANGED", "closed bound tree")
+        self._check_attachment()
         root = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         current = -1
         try:
@@ -146,13 +169,35 @@ class BoundTree:
                               os.O_RDONLY | os.O_DIRECTORY, resolve=0x0C)
             if (self.identity(current) != self._identity or
                     _statx(current).mount_id != self.mount_id):
+                # An unmount can expose a perfectly ordinary host directory at the
+                # same pathname. Never treat that directory as a replacement writer.
+                self._check_attachment()
                 raise TransferRefusal("DESTINATION_CHANGED", "bound root or attachment changed")
             if self.verify is not None:
                 self.verify()
+            self._check_attachment()
+        except (OSError, TransferRefusal) as exc:
+            # Re-probe after errors: disappearing media can race the initial presence
+            # check or the higher-level identity observer. Only absence proof is a wait.
+            self._check_attachment()
+            if isinstance(exc, FileNotFoundError):
+                raise TransferRefusal("DESTINATION_CHANGED", "bound root disappeared on attached filesystem") from exc
+            raise
         finally:
             if current >= 0:
                 os.close(current)
             os.close(root)
+
+    def _check_attachment(self):
+        if self._attachment_lost:
+            raise TransferRefusal("WAITING_DESTINATION", "attachment was lost; a fresh Start must bind it again")
+        ids = self._mount_ids()
+        if (not isinstance(ids, (set, frozenset, tuple, list))
+                or any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in ids)):
+            raise TransferRefusal("DESTINATION_UNPROVEN", "attachment inventory unavailable")
+        if self.mount_id not in ids:
+            self._attachment_lost = True
+            raise TransferRefusal("WAITING_DESTINATION", "bound attachment is no longer mounted")
 
     def open(self, relative, flags, mode=0o600):
         _relative(relative)

@@ -13,8 +13,9 @@ st_blocks includes an inode's data and charged xattr/directory blocks. It does n
 every filesystem-global metadata/journal allocation. The strict free-space equation therefore
 refuses unexplained drift; it is not a universal proof of future filesystem metadata cost.
 """
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import errno
+from functools import wraps
 import json
 import os
 from pathlib import PurePosixPath
@@ -26,10 +27,78 @@ from .transaction import ObjectInfo, TransferRefusal
 
 
 OWNER_XATTR = "user.modelark.slice-owner"
+_OWNER_PREFIX = b"modelark.slice.owner.v1:"
+_OWNER_PADDING = bytes(1024)
+
+
+def _valid_owner_token(token):
+    return (isinstance(token, str) and len(token) == 32
+            and all(c in "0123456789abcdef" for c in token))
+
+
+def owner_marker(token):
+    """Versioned marker forced outside every supported ext4 inode (size <=1024).
+
+    With EA_inode excluded by capacity admission, this value must inhabit the external
+    xattr block. Its unique operation token prevents sharing that block with another
+    owned inode even when inherited ACLs are identical. The marker remains corroboration,
+    not ownership authority: durable host certificates still bind inode birth identity.
+    """
+    if not _valid_owner_token(token):
+        raise TransferRefusal("OUTPUT_COLLISION", "invalid creation token")
+    return _OWNER_PREFIX + token.encode("ascii") + _OWNER_PADDING
+
+
+def decode_owner_marker(value):
+    """Recognize new markers and legacy internal tokens; admission can require new ones."""
+    if not isinstance(value, bytes):
+        return None
+    try:
+        token = (value.decode("ascii") if len(value) == 32
+                 else value[len(_OWNER_PREFIX):len(_OWNER_PREFIX) + 32].decode("ascii"))
+    except UnicodeDecodeError:
+        return None
+    if not _valid_owner_token(token):
+        return None
+    return token if len(value) == 32 or value == owner_marker(token) else None
+
+
+def _persistent_identity(identity):
+    """Filesystem-scoped inode birth identity; st_dev is attachment-local, not durable."""
+    if (not isinstance(identity, (tuple, list)) or len(identity) != 3
+            or any(type(value) is not int for value in identity)
+            or identity[0] < 0 or identity[1] <= 0 or identity[2] <= 0):
+        raise TransferRefusal("STATE_CORRUPT", "malformed legacy or observed inode identity")
+    return tuple(identity[1:])
+
+
+def _port_io(method):
+    """Translate only IO executed by a synchronous port operation, never fault hooks."""
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except OSError as exc:
+            raise self._io_refusal(exc) from exc
+    return call
+
+
+class _DestinationRead:
+    def __init__(self, destination, stream):
+        self.destination, self.stream = destination, stream
+
+    def read(self, size=-1):
+        try:
+            self.destination.tree.check()
+            data = self.stream.read(size)
+            self.destination.tree.check()
+            return data
+        except OSError as exc:
+            raise self.destination._io_refusal(exc) from exc
 
 
 class UsbDestination:
-    """Unqualified DestinationPort for disposable tests and further safety design only."""
+    """Internal DestinationPort; operator assembly supplies device/capacity admission."""
 
     def __init__(self, tree, binding, store, tx):
         self.tree, self.binding, self.store, self.tx = tree, binding, store, tx
@@ -39,7 +108,8 @@ class UsbDestination:
         self.seal = plan.seal
         self._scope = (tx, self.seal, binding.device_id, binding.filesystem_id, binding.mount_id)
         tree.check()
-        self._root_identity = tuple(tree.identity(tree.fd))
+        self._root_attachment_identity = tuple(tree.identity(tree.fd))
+        self._root_identity = _persistent_identity(self._root_attachment_identity)
         root = store.root
         info = root.lstat()
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
@@ -66,7 +136,7 @@ class UsbDestination:
             raise TransferRefusal("STATE_CORRUPT", "unsafe certificate database")
         with self._connection(write=True) as con:
             version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1):
+            if version not in (0, 1, 2):
                 raise TransferRefusal("STATE_CORRUPT", "unknown certificate schema")
             con.execute("CREATE TABLE IF NOT EXISTS roots (tx TEXT PRIMARY KEY, seal TEXT NOT NULL,"
                         "device TEXT NOT NULL, filesystem TEXT NOT NULL, mount TEXT NOT NULL,"
@@ -75,7 +145,18 @@ class UsbDestination:
                         "device TEXT NOT NULL, filesystem TEXT NOT NULL, mount TEXT NOT NULL,"
                         "path TEXT NOT NULL, token TEXT NOT NULL, identity TEXT NOT NULL, kind TEXT NOT NULL,"
                         "PRIMARY KEY(tx,seal,device,filesystem,mount,path,identity))")
-            con.execute("PRAGMA user_version=1")
+            if version == 1:
+                # Trusted private legacy records already bind the sealed filesystem
+                # and parent disk. Remove only transient st_dev, atomically across
+                # roots and certificates; malformed/colliding rows roll back it all.
+                for table in ("roots", "certificates"):
+                    for rowid, encoded in con.execute(f"SELECT rowid,identity FROM {table}").fetchall():
+                        try:
+                            identity = _persistent_identity(json.loads(encoded))
+                        except (TypeError, json.JSONDecodeError) as exc:
+                            raise TransferRefusal("STATE_CORRUPT", "malformed legacy inode identity") from exc
+                        con.execute(f"UPDATE {table} SET identity=? WHERE rowid=?", (json.dumps(identity), rowid))
+            con.execute("PRAGMA user_version=2")
             row = con.execute("SELECT seal,device,filesystem,mount,identity,blocks FROM roots WHERE tx=?",
                               (tx,)).fetchone()
             identity = json.dumps(self._root_identity)
@@ -86,6 +167,19 @@ class UsbDestination:
                 if row[:5] != (*self._scope[1:], identity):
                     raise TransferRefusal("DESTINATION_CHANGED", "certificate root differs")
                 self._root_blocks = row[5]
+
+    def _io_refusal(self, exc):
+        # Re-observe the pinned attachment before classifying an IO failure. A proven
+        # unplug is an attended wait; an attached-but-replaced root remains changed.
+        try:
+            self.tree.check()
+        except TransferRefusal as refusal:
+            return refusal
+        except OSError:
+            pass  # Without absence proof, preserve the original failure as terminal IO.
+        code = "OUTPUT_COLLISION" if isinstance(exc, FileExistsError) or exc.errno in {
+            errno.ELOOP, errno.EXDEV, errno.ENOTDIR} else "DESTINATION_IO_FAILED"
+        return TransferRefusal(code, str(exc))
 
     @contextmanager
     def _connection(self, *, write=False):
@@ -125,10 +219,14 @@ class UsbDestination:
         return path
 
     def _token(self, fd, path):
-        identity = json.dumps(tuple(self.tree.identity(fd)))
+        identity = json.dumps(_persistent_identity(self.tree.identity(fd)))
         try:
-            token = os.getxattr(fd, OWNER_XATTR).decode("ascii")
-        except (OSError, UnicodeDecodeError):
+            token = decode_owner_marker(os.getxattr(fd, OWNER_XATTR))
+        except OSError as exc:
+            if exc.errno in {errno.ENODATA, errno.EOPNOTSUPP}:
+                return None
+            raise
+        if token is None:
             return None
         kind = "directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
         with self._connection() as con:
@@ -138,7 +236,7 @@ class UsbDestination:
         return token if found else None
 
     def _certify(self, fd, path, token, kind):
-        identity = json.dumps(tuple(self.tree.identity(fd)))
+        identity = json.dumps(_persistent_identity(self.tree.identity(fd)))
         with self._connection(write=True) as con:
             con.execute("INSERT OR IGNORE INTO certificates VALUES(?,?,?,?,?,?,?,?,?)",
                         (*self._scope, path, token, identity, kind))
@@ -150,7 +248,7 @@ class UsbDestination:
         with self.tree.parent(path) as (fd, name):
             parent = str(PurePosixPath(path).parent)
             if parent == ".":
-                if tuple(self.tree.identity(fd)) != self._root_identity:
+                if tuple(self.tree.identity(fd)) != self._root_attachment_identity:
                     raise TransferRefusal("DESTINATION_CHANGED")
             elif self._token(fd, parent) is None:
                 raise TransferRefusal("OUTPUT_COLLISION", parent)
@@ -185,6 +283,7 @@ class UsbDestination:
         info = os.fstatvfs(self.tree.fd)
         return info.f_bavail * info.f_frsize
 
+    @_port_io
     def check(self, binding, allocated, required_bytes):
         self.tree.check()
         if binding != self.binding:
@@ -222,6 +321,7 @@ class UsbDestination:
                 or available < required_bytes - actual - root_delta):
             raise TransferRefusal("DESTINATION_CAPACITY_INSUFFICIENT")
 
+    @_port_io
     def inspect(self, path):
         self._path(path)
         self.tree.check()
@@ -232,6 +332,7 @@ class UsbDestination:
                 return ObjectInfo("unknown", None, self._blocks(info))
             fd = self.tree.open(path, os.O_RDONLY | os.O_NONBLOCK)
         except FileNotFoundError:
+            self.tree.check()
             return None
         try:
             info = os.fstat(fd)
@@ -242,10 +343,10 @@ class UsbDestination:
 
     @staticmethod
     def _validate_token(token):
-        if (not isinstance(token, str) or len(token) != 32
-                or any(c not in "0123456789abcdef" for c in token)):
+        if not _valid_owner_token(token):
             raise TransferRefusal("OUTPUT_COLLISION", "invalid creation token")
 
+    @_port_io
     def create_directory(self, path, token):
         self._validate_token(token)
         with self._parent(path) as (parent, name):
@@ -255,7 +356,7 @@ class UsbDestination:
                 raise TransferRefusal("OUTPUT_COLLISION", "existing or uncertified directory: " + path) from exc
             fd = self.tree.open(path, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                os.setxattr(fd, OWNER_XATTR, token.encode(), os.XATTR_CREATE)
+                os.setxattr(fd, OWNER_XATTR, owner_marker(token), os.XATTR_CREATE)
                 os.fsync(fd)
                 os.fsync(parent)
                 self._certify(fd, path, token, "directory")
@@ -268,15 +369,18 @@ class UsbDestination:
         if PurePosixPath(path).name != ".slice-" + token:
             raise TransferRefusal("OUTPUT_COLLISION", "not the operation's temporary name")
 
+    @_port_io
     def create_file(self, path, token):
         self._temporary(path, token)
         with self._parent(path) as (parent, name):
             try:
                 fd = os.open(".", os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC, 0o600, dir_fd=parent)
             except OSError as exc:
-                raise TransferRefusal("DESTINATION_UNPROVEN", "O_TMPFILE is required") from exc
+                if exc.errno in {errno.EOPNOTSUPP, errno.EINVAL, errno.EISDIR, errno.ENOSYS}:
+                    raise TransferRefusal("DESTINATION_UNPROVEN", "O_TMPFILE is required") from exc
+                raise
             try:
-                os.setxattr(fd, OWNER_XATTR, token.encode(), os.XATTR_CREATE)
+                os.setxattr(fd, OWNER_XATTR, owner_marker(token), os.XATTR_CREATE)
                 os.fsync(fd)
                 self._certify(fd, path, token, "file")
                 try:
@@ -287,6 +391,7 @@ class UsbDestination:
             finally:
                 os.close(fd)
 
+    @_port_io
     def append(self, path, token, data):
         self._temporary(path, token)
         with self._parent(path), self._owned(path, token, write=True) as fd:
@@ -301,6 +406,7 @@ class UsbDestination:
             # Settle delayed allocation before the next capacity/ownership boundary.
             os.fsync(fd)
 
+    @_port_io
     def discard_temporary(self, path, token):
         self._temporary(path, token)
         with self._parent(path) as (parent, name), self._owned(path, token) as fd:
@@ -317,13 +423,35 @@ class UsbDestination:
 
     @contextmanager
     def read(self, path):
-        with self._owned(path) as fd:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise TransferRefusal("OUTPUT_COLLISION", path)
-            with os.fdopen(os.dup(fd), "rb") as stream:
-                yield stream
-            self.tree.check()
+        stack = ExitStack()
+        try:
+            try:
+                fd = stack.enter_context(self._owned(path))
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise TransferRefusal("OUTPUT_COLLISION", path)
+                read_fd = os.dup(fd)
+                try:
+                    stream = os.fdopen(read_fd, "rb")
+                except BaseException:
+                    os.close(read_fd)
+                    raise
+                stream = stack.enter_context(stream)
+            except OSError as exc:
+                raise self._io_refusal(exc) from exc
+            # No exception catcher spans this yield: consumer/source failures must
+            # never be attributed to destination reads merely for using this context.
+            yield _DestinationRead(self, stream)
+            try:
+                self.tree.check()
+            except OSError as exc:
+                raise self._io_refusal(exc) from exc
+        finally:
+            try:
+                stack.close()
+            except OSError as exc:
+                raise self._io_refusal(exc) from exc
 
+    @_port_io
     def flush(self, path):
         self.tree.check()
         self._path(path, root=True)
@@ -333,6 +461,7 @@ class UsbDestination:
             with self._owned(path) as fd:
                 os.fsync(fd)
 
+    @_port_io
     def publish(self, temporary, path, token):
         self._temporary(temporary, token)
         with self._parent(temporary):
@@ -348,12 +477,14 @@ class UsbDestination:
                     raise TransferRefusal("OUTPUT_COLLISION", path) from exc
                 os.fsync(target_parent)
 
+    @_port_io
     def list_paths(self, root):
         self._path(root)
         self.tree.check()
         try:
             fd = self.tree.open(root, os.O_RDONLY | os.O_DIRECTORY)
         except FileNotFoundError:
+            self.tree.check()
             return ()
         result = []
         def visit(directory, prefix):

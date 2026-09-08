@@ -1,5 +1,6 @@
 """Kernel confinement tests on disposable directories, not real mount/device probes."""
 import ctypes
+import errno
 import os
 
 import pytest
@@ -74,3 +75,81 @@ def test_verification_callback_runs_each_boundary(tmp_path):
         with tree.parent("new") as (fd, name):
             assert fd >= 0 and name == "new"
     assert len(seen) >= 2
+
+
+@pytest.mark.parametrize("path_state", ["uncovered", "missing"])
+def test_missing_pinned_mount_waits_without_touching_uncovered_root(tmp_path, path_state):
+    root = tmp_path / "root"
+    root.mkdir()
+    with BoundTree(root) as probe:
+        retained = probe.mount_id
+    mounts = {retained}
+    with BoundTree(root, mount_ids=lambda: mounts) as tree:
+        root.rename(tmp_path / "old")
+        if path_state == "uncovered":
+            root.mkdir()
+        mounts.clear()
+        with pytest.raises(TransferRefusal, match="WAITING_DESTINATION"):
+            tree.check()
+        with pytest.raises(TransferRefusal, match="WAITING_DESTINATION"):
+            tree.open("must-not-write", os.O_CREAT | os.O_WRONLY)
+        assert not (root / "must-not-write").exists()
+        assert not (tmp_path / "old/must-not-write").exists()
+
+
+def test_missing_attachment_never_reacquires_inside_old_bound_tree(tmp_path):
+    with BoundTree(tmp_path) as probe:
+        retained = probe.mount_id
+    mounts = {retained}
+    with BoundTree(tmp_path, mount_ids=lambda: mounts) as tree:
+        mounts.clear()
+        with pytest.raises(TransferRefusal, match="WAITING_DESTINATION"):
+            tree.check()
+        mounts.add(retained)
+        with pytest.raises(TransferRefusal, match="WAITING_DESTINATION"):
+            tree.check()
+
+
+@pytest.mark.parametrize("error", [errno.EIO, errno.ENODEV, errno.ENOENT])
+@pytest.mark.parametrize("disappears", [False, True])
+def test_root_io_errors_require_absence_proof_to_become_waiting(tmp_path, monkeypatch, error, disappears):
+    from modelark.slice import linux
+    with BoundTree(tmp_path) as probe:
+        retained = probe.mount_id
+    mounts = {retained}
+    with BoundTree(tmp_path, mount_ids=lambda: mounts) as tree:
+        def io_error(*args, **kwargs):
+            if disappears:
+                mounts.clear()
+            raise OSError(error, "synthetic root IO failure")
+        monkeypatch.setattr(linux, "_openat2", io_error)
+        if disappears:
+            with pytest.raises(TransferRefusal, match="WAITING_DESTINATION"):
+                tree.check()
+        elif error == errno.ENOENT:
+            with pytest.raises(TransferRefusal, match="DESTINATION_CHANGED"):
+                tree.check()
+        else:
+            with pytest.raises(OSError) as caught:
+                tree.check()
+            assert caught.value.errno == error
+
+
+def test_disappearance_during_verification_is_waiting_not_changed(tmp_path):
+    with BoundTree(tmp_path) as probe:
+        retained = probe.mount_id
+    mounts = {retained}
+    with BoundTree(tmp_path, mount_ids=lambda: mounts) as tree:
+        def verify():
+            mounts.clear()
+            raise TransferRefusal("DESTINATION_CHANGED", "observer saw uncovered host path")
+        tree.verify = verify
+        with pytest.raises(TransferRefusal, match="WAITING_DESTINATION"):
+            tree.check()
+
+
+def test_unknown_mount_inventory_never_counts_as_absence(tmp_path):
+    with BoundTree(tmp_path) as tree:
+        tree._mount_ids = lambda: None
+        with pytest.raises(TransferRefusal, match="DESTINATION_UNPROVEN"):
+            tree.check()

@@ -1,6 +1,9 @@
 """Disposable Linux destination contracts; never use an actual archive or USB drive."""
 import importlib
+import errno
+import json
 import os
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -194,3 +197,194 @@ def test_publication_links_retained_inode_not_replaced_source_name(destination, 
     assert (root / path).read_bytes() == b"foreign replacement"
     assert adapter.inspect("model").token == token
     assert adapter.inspect(path).token is None
+
+
+@pytest.mark.parametrize("operation,number", [("append", errno.ENOSPC), ("append", errno.EIO),
+                                            ("flush", errno.ENOSPC), ("flush", errno.EIO)])
+def test_write_and_flush_errors_are_typed(destination, monkeypatch, operation, number):
+    adapter, _, _, module = destination
+    token, path = "2" * 32, ".slice-" + "2" * 32
+    adapter.create_file(path, token)
+    def fail(*args):
+        raise OSError(number, "synthetic destination error")
+    monkeypatch.setattr(module.os, "write" if operation == "append" else "fsync", fail)
+    with pytest.raises(TransferRefusal, match="DESTINATION_IO_FAILED"):
+        if operation == "append":
+            adapter.append(path, token, b"bytes")
+        else:
+            adapter.flush(path)
+
+
+def test_failed_write_rechecks_attachment_before_classifying_error(destination, monkeypatch):
+    adapter, _, _, module = destination
+    token, path = "2" * 32, ".slice-" + "2" * 32
+    adapter.create_file(path, token)
+    mounts = {adapter.tree.mount_id}
+    adapter.tree._mount_ids = lambda: mounts
+    def disappeared(*args):
+        mounts.clear()
+        raise OSError(errno.EIO, "synthetic removed device")
+    monkeypatch.setattr(module.os, "write", disappeared)
+    with pytest.raises(TransferRefusal, match="WAITING_DESTINATION"):
+        adapter.append(path, token, b"bytes")
+
+
+def test_destination_read_failure_is_typed_but_consumer_errors_are_not(destination, monkeypatch):
+    adapter, _, _, module = destination
+    token, path = "2" * 32, ".slice-" + "2" * 32
+    adapter.create_file(path, token)
+    with pytest.raises(OSError) as caught:
+        with adapter.read(path):
+            raise OSError(errno.ENOSPC, "consumer failure")
+    assert caught.value.errno == errno.ENOSPC
+    assert str(caught.value).endswith("consumer failure")
+
+    fdopen = module.os.fdopen
+    class BrokenReader:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def read(self, size=-1):
+            raise OSError(errno.EIO, "actual stream read failed")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self.stream.close()
+    monkeypatch.setattr(module.os, "fdopen", lambda *args, **kwargs: BrokenReader(fdopen(*args, **kwargs)))
+    with adapter.read(path) as stream, pytest.raises(TransferRefusal, match="DESTINATION_IO_FAILED"):
+        stream.read(1)
+
+
+def test_new_markers_force_unique_external_xattr_blocks_for_supported_inode_sizes(destination):
+    adapter, root, _, module = destination
+    directory_token, file_token = "1" * 32, "2" * 32
+    adapter.create_directory("delivery", directory_token)
+    path = "delivery/.slice-" + file_token
+    adapter.create_file(path, file_token)
+    directory_marker = os.getxattr(root / "delivery", module.OWNER_XATTR)
+    file_marker = os.getxattr(root / path, module.OWNER_XATTR)
+    assert len(directory_marker) > 1024
+    assert len(file_marker) > 1024
+    assert directory_marker == module.owner_marker(directory_token)
+    assert file_marker == module.owner_marker(file_token)
+    assert directory_marker != file_marker
+    assert module.decode_owner_marker(directory_marker) == directory_token
+    assert module.decode_owner_marker(file_marker) == file_token
+    assert adapter.inspect(path).token == file_token
+
+
+def test_legacy_marker_decoder_is_explicit_and_rejects_malformed_new_values(destination):
+    _, _, _, module = destination
+    token = "2" * 32
+    assert module.decode_owner_marker(token.encode()) == token
+    assert module.decode_owner_marker(module.owner_marker(token)[:-1]) is None
+    assert module.decode_owner_marker(module.owner_marker(token) + b"foreign") is None
+    assert module.decode_owner_marker(b"not a token") is None
+
+
+class ReattachedTree:
+    """Same disposable inode, synthetic new st_dev; delegate actual fd confinement."""
+    def __init__(self, tree, *, inode_delta=0, birth_delta=0):
+        self.tree, self.inode_delta, self.birth_delta = tree, inode_delta, birth_delta
+
+    def __getattr__(self, name):
+        return getattr(self.tree, name)
+
+    def identity(self, fd):
+        device, inode, birth = self.tree.identity(fd)
+        return device + 17, inode + self.inode_delta, birth + self.birth_delta
+
+
+def test_certificates_survive_transient_device_number_change(destination):
+    adapter, _, store, module = destination
+    token, path = "2" * 32, ".slice-" + "2" * 32
+    adapter.create_directory("delivery", "1" * 32)
+    adapter.create_file(path, token)
+    replacement = module.UsbDestination(ReattachedTree(adapter.tree), adapter.binding, store, adapter.tx)
+    assert replacement.inspect("delivery").token == "1" * 32
+    assert replacement.inspect(path).token == token
+    replacement.append(path, token, b"resumed")
+    with replacement.read(path) as stream:
+        assert stream.read() == b"resumed"
+
+
+@pytest.mark.parametrize("change", [{"inode_delta": 1}, {"birth_delta": 1}])
+def test_certificate_root_inode_and_birth_still_bind_after_device_number_change(destination, change):
+    adapter, _, store, module = destination
+    with pytest.raises(TransferRefusal, match="DESTINATION_CHANGED"):
+        module.UsbDestination(ReattachedTree(adapter.tree, **change), adapter.binding, store, adapter.tx)
+
+
+@pytest.mark.parametrize("changed_index", [1, 2])
+def test_object_inode_or_birth_change_cannot_inherit_certificate(destination, changed_index):
+    adapter, _, store, module = destination
+    token, path = "2" * 32, ".slice-" + "2" * 32
+    adapter.create_file(path, token)
+    root_inode = adapter.tree.identity(adapter.tree.fd)[1]
+    class ChangedObjectTree(ReattachedTree):
+        def identity(self, fd):
+            value = list(super().identity(fd))
+            if value[1] != root_inode:
+                value[changed_index] += 1
+            return tuple(value)
+    replacement = module.UsbDestination(ChangedObjectTree(adapter.tree), adapter.binding, store, adapter.tx)
+    assert replacement.inspect(path).token is None
+    with pytest.raises(TransferRefusal, match="OUTPUT_COLLISION"):
+        replacement.append(path, token, b"not owned")
+
+
+def legacy_certificate_database(adapter):
+    with sqlite3.connect(adapter._database) as con:
+        for table in ("roots", "certificates"):
+            for rowid, encoded in con.execute(f"SELECT rowid,identity FROM {table}").fetchall():
+                value = json.loads(encoded)
+                con.execute(f"UPDATE {table} SET identity=? WHERE rowid=?",
+                            (json.dumps([99, *value[-2:]]), rowid))
+        con.execute("PRAGMA user_version=1")
+
+
+def test_legacy_certificates_migrate_atomically_and_recognize_legacy_markers(destination):
+    adapter, root, store, module = destination
+    token, path = "2" * 32, ".slice-" + "2" * 32
+    adapter.create_file(path, token)
+    os.setxattr(root / path, module.OWNER_XATTR, token.encode())
+    legacy_certificate_database(adapter)
+    replacement = module.UsbDestination(ReattachedTree(adapter.tree), adapter.binding, store, adapter.tx)
+    assert replacement.inspect(path).token == token
+    with sqlite3.connect(adapter._database) as con:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+        for table in ("roots", "certificates"):
+            assert all(len(json.loads(row[0])) == 2 for row in con.execute(f"SELECT identity FROM {table}"))
+
+
+@pytest.mark.parametrize("malformed", ["not-json", "[]", "[1,2]", "[1,2,3,4]", "[1,true,3]",
+                                       "[1,2,0]", "[1,0,3]", "[-1,2,3]", "[1,2,3.0]"])
+def test_malformed_legacy_certificate_rolls_back_every_migration_change(destination, malformed):
+    adapter, _, store, module = destination
+    adapter.create_file(".slice-" + "2" * 32, "2" * 32)
+    legacy_certificate_database(adapter)
+    with sqlite3.connect(adapter._database) as con:
+        con.execute("UPDATE certificates SET identity=?", (malformed,))
+        before = tuple(con.iterdump())
+    with pytest.raises(TransferRefusal, match="STATE_CORRUPT"):
+        module.UsbDestination(ReattachedTree(adapter.tree), adapter.binding, store, adapter.tx)
+    with sqlite3.connect(adapter._database) as con:
+        assert tuple(con.iterdump()) == before
+
+
+def test_ambiguous_legacy_identity_collapse_rolls_back_migration(destination):
+    adapter, _, store, module = destination
+    adapter.create_file(".slice-" + "2" * 32, "2" * 32)
+    legacy_certificate_database(adapter)
+    with sqlite3.connect(adapter._database) as con:
+        row = list(con.execute("SELECT * FROM certificates").fetchone())
+        value = json.loads(row[7])
+        row[7] = json.dumps([100, *value[1:]])
+        con.execute("INSERT INTO certificates VALUES(?,?,?,?,?,?,?,?,?)", row)
+        before = tuple(con.iterdump())
+    with pytest.raises(TransferRefusal, match="STATE_CORRUPT"):
+        module.UsbDestination(ReattachedTree(adapter.tree), adapter.binding, store, adapter.tx)
+    with sqlite3.connect(adapter._database) as con:
+        assert tuple(con.iterdump()) == before

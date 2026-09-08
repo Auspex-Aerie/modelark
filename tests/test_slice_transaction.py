@@ -205,7 +205,7 @@ def test_private_v1_upgrade_preserves_transaction_authority(setup, api, missing_
         lease.close()
     assert upgraded.stop_requested(tx)  # A newer stop still wins after migration.
     with upgraded._connection(write=False) as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 5
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 6
     assert api[1].Store().events(tx) == before  # Reopening is idempotent.
     assert not list(dest.root.iterdir())
 

@@ -2773,3 +2773,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: All ModelArk CLI invocations are application launches, so a separate query, status, or other CLI command also refuses while the portal or another command holds the guard. Existing in-process portal controls remain available. No service restart, deployment, legacy-process termination or real-device trial is authorized. Processes launched from older unguarded versions are not retroactively enrolled.
 - `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md, docs/usable-slice-transaction.md, docs/deployment.md
 - `related`: DEC-121, DEC-123
+
+### DEC-125: Seal direct delivery admission with a conservative ext4 workload budget
+- `id`: DEC-125
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator authorized continuing the broader Slice 3 arc; architecture consultation derived a bounded initial filesystem profile instead of treating observed inode allocation as a future metadata guarantee.
+- `decision`: Join the existing Slice engine and adapters through explicit attended CLI commands. Seal the catalog/admission capsule into the destination binding, atomically stored in private schema v6. Require verified direct USB ext4 with bounded features, new-directory fanout, a conservative data/extent/xattr/root-growth budget and inode budget. Force unique ownership markers outside inode bodies to exclude shared-xattr double counting. Reconcile actual owned bytes/inodes without drift tolerance and prove disappearance separately from attached-root replacement.
+- `rationale`: Stable hardware identity, filesystem capability, current free capacity and authenticated owned consumption answer different questions. The reserve is an explicit conservative workload bound, not a generic estimate or guarantee against media faults. Unavailable read-only superblock proof means refusal, not automatic privilege escalation.
+- `impact`: Operator assembly retains existing authorities without a scheduler, retrieval, catalog-schema change, service deployment, formatting or real-device trial. Legacy private plans remain readable without invented admission. First attended physical trial and merge remain separate approval gates.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md, docs/usable-slice-transaction.md, docs/plans/usable-slice-implementation-charter.md, README.md
+- `related`: DEC-108, DEC-121, DEC-123, DEC-124

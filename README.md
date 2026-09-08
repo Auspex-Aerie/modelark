@@ -34,6 +34,7 @@ Approval and execution are separate. Approving an exact placement never starts F
 |---|---|
 | Install ModelArk on a new Linux host and create the first archive | [Fresh install and first archive](docs/getting-started.md) |
 | Operate plans, drives, Fill, verification, and restore | [Operating ModelArk](docs/operations.md) |
+| Preview and execute an attended direct-USB Slice | [Direct USB delivery and qualification limits](docs/usable-slice-direct.md) |
 | Upgrade a 0.2.0 or other pre-v7 catalog | [Upgrading ModelArk](docs/upgrading.md) |
 | Install or update the supervised user service | [Deploying ModelArk](docs/deployment.md) |
 | Perform the stopped side-by-side provenance migration | [Live cutover procedure](docs/provenance-live-cutover.md) |

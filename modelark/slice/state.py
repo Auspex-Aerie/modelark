@@ -6,6 +6,7 @@ adapters and a public entry point are not provided by Slice 2.
 """
 from contextlib import contextmanager
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -88,7 +89,7 @@ class Store:
             raise ValueError("unsafe slice state database")
         with self._connection() as con:
             version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5):
+            if version not in (0, 1, 2, 3, 4, 5, 6):
                 raise ValueError("unsupported slice state version")
             con.execute("CREATE TABLE IF NOT EXISTS transactions ("
                         "id TEXT PRIMARY KEY, plan TEXT NOT NULL, seal TEXT NOT NULL,"
@@ -118,6 +119,8 @@ class Store:
             if "attempt" not in columns:
                 con.execute("ALTER TABLE owners ADD COLUMN attempt TEXT")
             transaction_columns = {row[1] for row in con.execute("PRAGMA table_info(transactions)")}
+            if "admission" not in transaction_columns:
+                con.execute("ALTER TABLE transactions ADD COLUMN admission TEXT")
             if "acknowledged_stop_serial" not in transaction_columns:
                 con.execute("ALTER TABLE transactions ADD COLUMN acknowledged_stop_serial INTEGER NOT NULL DEFAULT 0")
                 # Legacy stopped rows can also contain a NEW, unacknowledged request.
@@ -128,7 +131,7 @@ class Store:
             con.execute("CREATE TABLE IF NOT EXISTS journal (tx TEXT NOT NULL REFERENCES transactions(id),"
                         "seq INTEGER NOT NULL, event TEXT NOT NULL, payload TEXT NOT NULL, digest TEXT NOT NULL,"
                         "PRIMARY KEY(tx,seq))")
-            con.execute("PRAGMA user_version=5")
+            con.execute("PRAGMA user_version=6")
 
     @contextmanager
     def _connection(self, *, write=True):
@@ -155,17 +158,53 @@ class Store:
         finally:
             con.close()
 
-    def create(self, plan, approval):
+    def create(self, plan, approval, *, admission=None):
         if plan.version != "modelark.slice.transaction.v3":
             from .transaction import TransferRefusal
             raise TransferRefusal("LEGACY_PLAN", "new transactions require protocol v3")
         validate_approval(plan.proposal, approval)
         plan.required_bytes(self.root)
+        encoded = None
+        if admission is not None:
+            self._validate_admission(plan, admission)
+            encoded = _json(admission).decode()
         tx = uuid.uuid4().hex
         with self._connection() as con:
-            con.execute("INSERT INTO transactions(id,plan,seal,state) VALUES(?,?,?,'ready')",
-                        (tx, plan.to_json(), plan.seal))
+            con.execute("INSERT INTO transactions(id,plan,seal,state,admission) VALUES(?,?,?,'ready',?)",
+                        (tx, plan.to_json(), plan.seal, encoded))
         return tx
+
+    @staticmethod
+    def _validate_admission(plan, admission):
+        from .transaction import TransferRefusal
+        try:
+            valid = (type(admission) is dict and set(admission) == {"version", "catalog", "capacity"}
+                     and admission["version"] == "modelark.slice.direct.v1"
+                     and isinstance(admission["catalog"], str) and Path(admission["catalog"]).is_absolute()
+                     and "\0" not in admission["catalog"]
+                     and os.path.normpath(admission["catalog"]) == admission["catalog"]
+                     and type(admission["capacity"]) is dict)
+            digest = hashlib.sha256(_json(admission)).hexdigest()
+        except (TypeError, ValueError) as exc:
+            raise TransferRefusal("ADMISSION_CORRUPT", "invalid direct admission record") from exc
+        if not valid or plan.destination.mount_id != "direct-v1:" + digest:
+            raise TransferRefusal("ADMISSION_CORRUPT", "direct admission differs from sealed binding")
+
+    def load_admission(self, tx):
+        from .transaction import TransferRefusal
+        plan = self.load(tx)
+        with self._connection(write=False) as con:
+            row = con.execute("SELECT admission FROM transactions WHERE id=?", (tx,)).fetchone()
+        if row is None:
+            raise TransferRefusal("TRANSACTION_MISSING", tx)
+        if row[0] is None:
+            raise TransferRefusal("ADMISSION_MISSING", "legacy internal transaction has no direct admission")
+        try:
+            admission = json.loads(row[0])
+        except (TypeError, ValueError) as exc:
+            raise TransferRefusal("ADMISSION_CORRUPT", "invalid admission JSON") from exc
+        self._validate_admission(plan, admission)
+        return admission
 
     def load(self, tx):
         from .transaction import TransferPlan, TransferRefusal
