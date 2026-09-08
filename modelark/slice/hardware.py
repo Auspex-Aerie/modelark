@@ -6,6 +6,7 @@ those inventories and bind disposable directories. Evidence is an observation, n
 writers must retain BoundTree and re-observe identity under the shared execution authority.
 """
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
@@ -13,7 +14,7 @@ from pathlib import Path
 import re
 import subprocess
 
-from .linux import BoundTree
+from .linux import BoundTree, require_create_access
 from .transaction import DestinationBinding, TransferRefusal
 
 
@@ -78,7 +79,8 @@ def _mounts(text):
             if not path.startswith("/") or not root.startswith("/"):
                 raise ValueError("nonabsolute mountinfo path")
             result.append(Mount(int(fields[0]), fields[2], root, path,
-                                frozenset(fields[5].split(",")), filesystem[0], _decode(filesystem[1])))
+                                frozenset(fields[5].split(",") + filesystem[2].split(",")),
+                                filesystem[0], _decode(filesystem[1])))
     except (ValueError, TypeError) as exc:
         _refuse("invalid mount inventory: " + str(exc))
     if not result or len({m.mount_id for m in result}) != len(result):
@@ -106,6 +108,37 @@ def _integer(value):
     except (ValueError, TypeError):
         return None
     return result if result > 0 and str(result) == str(value) else None
+
+
+def _backing_identity(major_minor):
+    info = Path('/sys/dev/block', major_minor).stat()
+    return info.st_dev, info.st_ino
+
+
+def _writable_root(tree, mount):
+    if 'rw' not in mount.options or {'ro', 'nouser_xattr'} & mount.options:
+        _refuse('writable mount and user xattrs required', 'DESTINATION_NOT_WRITABLE')
+    if any('quota' in option or option.startswith('jqfmt=') for option in mount.options):
+        _refuse('quota-enabled mounts are unsupported', 'FILESYSTEM_UNSUPPORTED')
+    try:
+        require_create_access(tree.fd)
+        try:
+            os.getxattr(tree.fd, 'user.modelark.slice-capability-probe')
+        except OSError as exc:
+            if exc.errno != errno.ENODATA:
+                raise
+    except OSError as exc:
+        _refuse('effective creation permission/user xattrs unavailable: ' + str(exc),
+                'DESTINATION_NOT_WRITABLE')
+
+
+def _stable_attachment(evidence):
+    return (evidence.device_id, evidence.fs_uuid, evidence.profile, evidence.total_bytes,
+            evidence.mount_id, evidence.mount_path)
+
+
+def _archive_roles(archives):
+    return tuple((getattr(a, 'fs_uuid', None), getattr(a, 'serial', None)) for a in archives)
 
 
 class _Inventory:
@@ -173,16 +206,70 @@ class _Inventory:
 class LinuxObserver:
     """Read-only observer with injectable inventory providers; no implicit live discovery."""
 
-    def __init__(self, *, inventory=None, mounts=None, swaps=None, tree_factory=BoundTree):
+    def __init__(self, *, inventory=None, mounts=None, swaps=None, tree_factory=BoundTree, backing=None):
         self._inventory = inventory or _inventory
         self._mounts = mounts or (lambda: Path("/proc/self/mountinfo").read_text())
         self._swaps = swaps or (lambda: Path("/proc/swaps").read_text())
         self._tree_factory = tree_factory
+        self._backing = backing or _backing_identity
+        self._observed = {}
+
+    def check_attachment(self, tree, evidence, *, archives=None):
+        """No subprocess on unchanged topology; cached proof belongs to this attachment only."""
+        key = (str(tree.path), tree.mount_id)
+        proof = self._observed.get(key)
+        if proof is None or _stable_attachment(proof['evidence']) != _stable_attachment(evidence):
+            _refuse('no full observation for retained attachment', 'DESTINATION_CHANGED')
+        try:
+            # Check backing before path/stat IO: a disconnected filesystem may return EIO
+            # while its mount ID is still present. A lost tree never silently reacquires.
+            self._check_backing(tree, proof)
+            tree.check()
+            roles = proof['archives'] if archives is None else tuple(archives)
+            if (_mounts(self._mounts()) != proof['mounts'] or self._swaps() != proof['swaps']
+                    or _archive_roles(roles) != _archive_roles(proof['archives'])):
+                fresh = self.observe(tree.path, writable=proof['writable'], archives=roles)
+                if _stable_attachment(fresh) != _stable_attachment(evidence):
+                    _refuse('attachment changed during revalidation', 'DESTINATION_CHANGED')
+            elif proof['writable']:
+                _writable_root(tree, proof['mount'])
+            tree.check()
+            self._check_backing(tree, proof)
+        except (OSError, TransferRefusal) as exc:
+            try:
+                self._check_backing(tree, proof)
+            except OSError:
+                pass  # Unknown probe failure is not disappearance evidence.
+            if isinstance(exc, TransferRefusal):
+                raise
+            raise TransferRefusal('DESTINATION_UNPROVEN', 'attachment check failed: ' + str(exc)) from exc
+
+    def _check_backing(self, tree, proof):
+        if tree._attachment_lost:
+            _refuse('attachment lost; fresh Start required', 'WAITING_DESTINATION')
+        try:
+            backing = self._backing(proof['device'])
+        except FileNotFoundError:
+            tree._attachment_lost = True
+            _refuse('mounted block backing disappeared', 'WAITING_DESTINATION')
+        if backing != proof['backing']:
+            _refuse('block backing was replaced', 'DESTINATION_CHANGED')
 
     def observe(self, path, writable=False, archives=()):
         try:
             return self._observe(path, writable, tuple(archives))
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TransferRefusal) as exc:
+            target = str(Path(path).expanduser().absolute())
+            for (observed_path, _), proof in self._observed.items():
+                if observed_path == target:
+                    try:
+                        self._backing(proof['device'])
+                    except FileNotFoundError:
+                        _refuse('previously observed block backing disappeared', 'WAITING_DESTINATION')
+                    except OSError:
+                        pass
+            if isinstance(exc, TransferRefusal):
+                raise
             raise TransferRefusal("DESTINATION_UNPROVEN", "device observation failed: " + str(exc)) from exc
 
     def _observe(self, path, writable, archives):
@@ -207,7 +294,11 @@ class LinuxObserver:
             if mount.root != "/" or mount.mount_id != tree.mount_id or mount.major_minor != major_minor:
                 _refuse("mount inventory differs from retained descriptor")
             if mount.major_minor not in inventory.nodes:
-                _refuse("mounted filesystem has no unambiguous block device")
+                _refuse("mounted block backing is absent", "WAITING_DESTINATION")
+            try:
+                backing = self._backing(major_minor)
+            except FileNotFoundError:
+                _refuse('mounted block backing disappeared', 'WAITING_DESTINATION')
             if sum(m.major_minor == mount.major_minor for m in mounts) != 1:
                 _refuse("filesystem has multiple mount aliases")
             if any(m.path.startswith(mount.path.rstrip("/") + "/") and m != mount for m in mounts):
@@ -227,6 +318,8 @@ class LinuxObserver:
             if writable and (disk.get("tran") != "usb" or "rw" not in mount.options or "ro" in mount.options
                              or node.get("ro") not in (False, 0, "0") or disk.get("ro") not in (False, 0, "0")):
                 _refuse("destination must be a writable direct USB disk")
+            if writable:
+                _writable_root(tree, mount)
 
             def covering(value):
                 candidates = [m for m in mounts if value == m.path or value.startswith(m.path.rstrip("/") + "/")]
@@ -268,6 +361,10 @@ class LinuxObserver:
             if writable:
                 for other in mounts:
                     if other.major_minor in inventory.nodes and other.major_minor != mount.major_minor:
+                        # Loop mounts are not sibling partitions. Protected/system/swap
+                        # ancestry above remains strict, as do unknown mapped devices here.
+                        if inventory.nodes[other.major_minor].get('type') == 'loop':
+                            continue
                         if inventory.disk(other.major_minor) == disk_key:
                             _refuse("destination disk has another mounted partition")
                 for archive in archives:
@@ -302,5 +399,15 @@ class LinuxObserver:
             if (json.dumps(self._inventory(), sort_keys=True) != inventory_snapshot
                     or _mounts(self._mounts()) != mounts or self._swaps() != swaps):
                 _refuse("hardware inventory changed during descriptor observation")
-            return DeviceEvidence(device_id, uuid, serial, total, mount.path, mount.mount_id, mount.fs_type,
-                                  available, block_size, name_max, device_size, profile)
+            try:
+                final_backing = self._backing(major_minor)
+            except FileNotFoundError:
+                _refuse('mounted block backing disappeared', 'WAITING_DESTINATION')
+            if final_backing != backing:
+                _refuse('block backing changed during observation', 'DESTINATION_CHANGED')
+            evidence = DeviceEvidence(device_id, uuid, serial, total, mount.path, mount.mount_id, mount.fs_type,
+                                      available, block_size, name_max, device_size, profile)
+            self._observed[(target, tree.mount_id)] = {
+                'evidence': evidence, 'device': major_minor, 'backing': backing, 'mounts': mounts,
+                'mount': mount, 'swaps': swaps, 'writable': writable, 'archives': archives}
+            return evidence

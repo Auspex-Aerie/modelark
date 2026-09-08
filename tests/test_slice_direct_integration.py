@@ -284,7 +284,8 @@ def test_local_archive_and_fresh_catalog_deliver_under_shared_fence_without_muta
         source_mount_id = source_tree.mount_id
     evidence = SimpleNamespace(fs_uuid="fs-a", serial="serial-a", total_bytes=1000,
                                device_id="synthetic-source", mount_id=source_mount_id, mount_path=str(mount))
-    observer = SimpleNamespace(observe=lambda *args, **kwargs: evidence)
+    observer = SimpleNamespace(observe=lambda *args, **kwargs: evidence,
+                               check_attachment=lambda tree, *a, **k: tree.check())
     reader = LocalArchiveReader({"drive-a": root}, observer=observer)
     opened = []
 

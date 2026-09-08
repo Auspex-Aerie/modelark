@@ -45,11 +45,21 @@ identities, stacked/ambiguous devices, aliases and nested mounts are excluded. F
 distinct from block-device capacity. Stable capabilities are sealed separately from transient Linux
 mount IDs, which are checked through retained descriptors.
 Each fresh observation must match the retained descriptor's mount ID and attachment path before use.
+Unrelated loop mounts are not sibling partitions; unresolved protected/system/swap or registered
+archive ancestry still refuses. Loop-backed system roles are not inferred from an unrelated mount.
 
 Descendant IO uses `openat2` confinement with no symlink/mount crossing. A vanished pinned mount waits
 and never redirects writes into an uncovered host mountpoint; the old binding cannot reacquire.
 Fresh Start must prove the sealed identity again. Replacement of a still-attached root refuses.
 Each mutation also passes the existing transaction authority and capacity gate.
+Loss of the backing sysfs block device also waits, even if the disconnected mount remains listed.
+That loss is sticky on the retained tree: reattachment requires a fresh Start, not cached reacquisition.
+
+Full inventory runs at Start, artifact/layout audits, file creation and publication; source opening
+observes before binding and after opening its confined content. Chunk boundaries use retained-root,
+mount and backing-device checks, effective destination permissions, and exact allocation checks.
+Changed mount/swap topology or archive-role inputs trigger a fresh full observation immediately.
+No complete `lsblk` scan or archive-config parsing occurs for each megabyte of ordinary streaming.
 
 Host certificates bind transaction, seal, filesystem, path, token and inode birth identity. Files
 are certified while unnamed, then linked without replacement using the retained inode. Directories
@@ -63,6 +73,9 @@ sealed key beneath the pinned object store is permitted. No annex command or ret
 bounded ZipNN 0.5 byte-format, StreamZNN and optional zstd streams yield original bytes. The default
 64-MiB limit bounds individual frames/windows, not the native codec's entire working set; oversized
 legacy whole-ZipNN blobs and unsupported modes refuse. Consumer errors are not relabeled as source IO.
+Explicit source attachments expand `~` and become absolute before observation, without following
+symlinks; their required location remains `<mount>/modelark`. Layout auditing is iterative, including
+valid deep paths, and still treats unowned files, directories and symlinks as collisions.
 
 ## Initial ext4 capacity profile
 
@@ -70,6 +83,11 @@ This deliberately conservative profile is not a general ext4 estimator. Read-onl
 comes from an opened block-device handle whose device number matches the mounted filesystem. Read
 permission must already exist: there is no automatic sudo or permissive override. An unsupported
 volume refuses; do not reformat an archive or a drive with wanted data to satisfy this profile.
+Admission additionally uses kernel effective-credential/ACL directory write+search checks and a
+read-only user-xattr namespace probe. `nouser_xattr` mounts refuse before sealing. These checks prove
+current DAC/ACL and namespace eligibility, not success under every future LSM policy, permission
+change or media fault; runtime IO errors remain typed refusals. No permission-changing or write probe
+is performed to make a destination pass.
 
 Require 4-KiB blocks/clusters, internal journal, supported inode/xattr capabilities and an initially
 one-block nonindexed mount root. Quotas, bigalloc, EA-inodes, inline data, encryption/casefold/verity,

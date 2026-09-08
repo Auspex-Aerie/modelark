@@ -124,6 +124,35 @@ def test_unknown_objects_are_reported_without_traversing_symlinks(destination):
     assert adapter.list_paths("delivery") == ("delivery/foreign", "delivery/link")
 
 
+def test_layout_walk_handles_deep_valid_paths_without_python_recursion(destination):
+    adapter, root, _, _ = destination
+    adapter.create_directory("delivery", "1" * 32)
+    created, leaves = [], []
+    current = "delivery"
+    try:
+        # 1100 short components are valid Linux paths, but exceed Python's normal
+        # recursion budget. These unknown directories must still reach the audit.
+        for _ in range(1100):
+            current += "/d"
+            os.mkdir(root / current)
+            created.append(current)
+        assert len(os.fsencode(root / current)) < 4096
+        foreign = current + "/foreign"
+        (root / foreign).write_bytes(b"unknown content")
+        leaves.append(foreign)
+        link = current + "/link"
+        (root / link).symlink_to("/etc")
+        leaves.append(link)
+        assert adapter.list_paths("delivery") == tuple(sorted([*created, *leaves]))
+    finally:
+        # Avoid delegating cleanup of this deliberately deep fixture to a recursive
+        # shutil/pytest walk. Remove only this test's exact created paths.
+        for path in leaves:
+            os.unlink(root / path)
+        for path in reversed(created):
+            os.rmdir(root / path)
+
+
 def test_mutating_final_path_is_forbidden(destination):
     adapter, root, _, _ = destination
     token = "2" * 32

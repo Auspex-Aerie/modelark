@@ -80,6 +80,14 @@ def _relative(path):
     return parts
 
 
+def require_create_access(fd):
+    """Kernel effective-credential/ACL check on the retained directory, without writes."""
+    # faccessat2(AT_EMPTY_PATH | AT_EACCESS), syscall439 on both supported ABIs.
+    # Do not fall back to older glibc faccessat mode-bit emulation (which can ignore ACLs).
+    _result(_libc().syscall(ctypes.c_long(439), ctypes.c_int(fd), ctypes.c_char_p(b""),
+                          ctypes.c_int(os.W_OK | os.X_OK), ctypes.c_int(0x1200)))
+
+
 def link_fd(fd, parent_fd, name):
     """Publish the opened inode exclusively; never resolve a source pathname."""
     if len(_relative(name)) != 1:

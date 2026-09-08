@@ -11,8 +11,9 @@ ModelArk acquires a nonblocking launch guard before CLI configuration/dispatch o
 (DEC-124). A second launch exits with `ModelArk is already running`; changing the catalog directory,
 state directory or portal port does not bypass it. This includes separate help, query and status
 commands. Use controls inside the running portal, or stop that instance before running a CLI command.
-The standalone migration tools share the guard; deployment health checks inspect the installed
-package and existing portal without launching another application. Internal compression/download
+The standalone migration tools share the guard; both post-install validation and deployment health
+checks inspect installed package metadata without launching another application. Health checks also
+inspect the existing portal. Internal compression/download
 helpers remain children of the active application, not independently admitted instances.
 
 Exclusion uses a Linux kernel-held abstract socket, not a PID file. It releases when its final

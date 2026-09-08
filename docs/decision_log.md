@@ -2784,3 +2784,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Operator assembly retains existing authorities without a scheduler, retrieval, catalog-schema change, service deployment, formatting or real-device trial. Legacy private plans remain readable without invented admission. First attended physical trial and merge remain separate approval gates.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md, docs/usable-slice-transaction.md, docs/plans/usable-slice-implementation-charter.md, README.md
 - `related`: DEC-108, DEC-121, DEC-123, DEC-124
+
+### DEC-126: Separate direct attachment admission from streaming checks
+- `id`: DEC-126
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: PR #70 round-1 Greptile/Codex findings at b751cee; disposable regressions reproduced loop-mount rejection, still-mounted unplug invalidation, missing effective permission admission, per-chunk inventory scans, source-path mismatch, recursive audit failure and the remaining deployment launch probe.
+- `decision`: Retain full identity/role/filesystem admission at attempt, artifact audit, file creation and publication boundaries; stream under lightweight retained-root/mount/backing checks with exact allocation reconciliation. Topology or archive-role changes force full observation. Missing block backing latches an attended wait even when the mount ID survives. Require read-only effective DAC/ACL creation and user-xattr namespace checks before admission. Ignore explicit unrelated loops only in sibling-partition comparison; keep protected and ambiguous ancestry fail-closed. Both deployment validation paths share metadata-only inspection without a second application launch.
+- `rationale`: Mount visibility is not media presence; writable mount flags are not effective operator permission; full hardware discovery is not a practical per-megabyte lease check. These signals need distinct scopes without weakening descriptor confinement or expanding the trusted-operator threat model.
+- `impact`: Direct adapters, read-only admission, source path normalization, iterative layout audit and deployment validation only. No schema change, live deployment or physical trial. Permission checks do not guarantee future LSM/media behavior; runtime errors still refuse.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md, docs/deployment.md
+- `related`: DEC-123, DEC-124, DEC-125

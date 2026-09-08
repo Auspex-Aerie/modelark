@@ -481,25 +481,25 @@ class UsbDestination:
     def list_paths(self, root):
         self._path(root)
         self.tree.check()
-        try:
-            fd = self.tree.open(root, os.O_RDONLY | os.O_DIRECTORY)
-        except FileNotFoundError:
-            self.tree.check()
-            return ()
-        result = []
-        def visit(directory, prefix):
-            for name in sorted(os.listdir(directory)):
-                path = prefix + "/" + name
-                result.append(path)
-                info = os.stat(name, dir_fd=directory, follow_symlinks=False)
-                if stat.S_ISDIR(info.st_mode):
-                    child = self.tree.open(path, os.O_RDONLY | os.O_DIRECTORY)
-                    try:
-                        visit(child, path)
-                    finally:
-                        os.close(child)
-        try:
-            visit(fd, root)
-        finally:
-            os.close(fd)
+        result, pending = [], [root]
+        while pending:
+            prefix = pending.pop()
+            try:
+                directory = self.tree.open(prefix, os.O_RDONLY | os.O_DIRECTORY)
+            except FileNotFoundError:
+                self.tree.check()
+                if prefix == root:
+                    return ()
+                raise
+            try:
+                for name in sorted(os.listdir(directory)):
+                    path = prefix + "/" + name
+                    result.append(path)
+                    info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    if stat.S_ISDIR(info.st_mode):
+                        pending.append(path)
+            finally:
+                # Reopen queued directories through BoundTree's confined resolver.
+                # Neither Python stack depth nor retained descriptors scale with depth.
+                os.close(directory)
         return tuple(sorted(result))

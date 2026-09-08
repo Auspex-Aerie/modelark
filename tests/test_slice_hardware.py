@@ -10,8 +10,9 @@ from modelark.slice.transaction import TransferRefusal
 
 
 @pytest.fixture
-def hardware(tmp_path):
+def hardware(tmp_path, monkeypatch):
     module = importlib.import_module("modelark.slice.hardware")
+    monkeypatch.setattr(module, '_backing_identity', lambda key: (42, key))
     root = tmp_path / "usb"
     root.mkdir()
     with BoundTree(root) as tree:
@@ -301,3 +302,159 @@ def test_lsblk_uses_explicit_read_only_json_columns(monkeypatch, hardware):
         return SimpleNamespace(stdout='{"blockdevices": []}')
     monkeypatch.setattr(module.subprocess, "run", run)
     assert module._inventory() == {"blockdevices": []}
+
+
+def test_unrelated_mounted_loop_does_not_block_usb(hardware):
+    observer, root, state, _, _, _ = hardware
+    state['inventory']['blockdevices'].append({'name': '/dev/loop0', 'path': '/dev/loop0',
+                                              'type': 'loop', 'maj:min': '7:0'})
+    state['mounts'].append('901 1 7:0 / /snap/example ro - squashfs /dev/loop0 ro')
+    assert observer.observe(root, writable=True).fs_uuid == 'USB-FS'
+
+
+def test_still_mounted_device_missing_from_inventory_is_attended_loss(hardware):
+    observer, root, state, _, _, _ = hardware
+    state['inventory']['blockdevices'].pop()
+    with pytest.raises(TransferRefusal, match='WAITING_DESTINATION'):
+        observer.observe(root, writable=True)
+
+
+@pytest.mark.parametrize('side', ['mount', 'super'])
+def test_disabled_user_xattrs_refuse_readonly_admission(hardware, side):
+    observer, root, state, _, _, _ = hardware
+    line = state['mounts'][1]
+    left, right = line.split(' - ')
+    if side == 'mount':
+        left = left.replace('rw,relatime', 'rw,relatime,nouser_xattr')
+    else:
+        right += ',nouser_xattr'
+    state['mounts'][1] = left + ' - ' + right
+    with pytest.raises(TransferRefusal, match='DESTINATION_NOT_WRITABLE'):
+        observer.observe(root, writable=True)
+    assert not list(root.iterdir())
+
+
+def test_operator_without_root_creation_permission_refuses_before_writes(hardware):
+    observer, root, *_ = hardware
+    root.chmod(0o555)
+    try:
+        with pytest.raises(TransferRefusal, match='DESTINATION_NOT_WRITABLE'):
+            observer.observe(root, writable=True)
+        assert not list(root.iterdir())
+    finally:
+        root.chmod(0o755)
+
+
+def test_chunk_checks_do_not_repeat_full_inventory(hardware):
+    observer, root, state, _, _, _ = hardware
+    calls = []
+    observer._inventory = lambda: calls.append('inventory') or state['inventory']
+    evidence = observer.observe(root, writable=True)
+    with BoundTree(root, writable=True) as tree:
+        for _ in range(20):
+            observer.check_attachment(tree, evidence)
+    assert calls == ['inventory', 'inventory']
+
+
+def test_backing_loss_is_sticky_even_while_mount_id_survives(hardware):
+    observer, root, *_ = hardware
+    evidence = observer.observe(root, writable=True)
+    original = observer._backing
+    def gone(key):
+        raise FileNotFoundError(key)
+    with BoundTree(root, writable=True) as tree:
+        observer._backing = gone
+        with pytest.raises(TransferRefusal, match='WAITING_DESTINATION'):
+            observer.check_attachment(tree, evidence)
+        observer._backing = original
+        with pytest.raises(TransferRefusal, match='WAITING_DESTINATION'):
+            observer.check_attachment(tree, evidence)
+    # Only a new retained attachment can continue after an explicit fresh observation.
+    fresh = observer.observe(root, writable=True)
+    with BoundTree(root, writable=True) as tree:
+        observer.check_attachment(tree, fresh)
+
+
+@pytest.mark.parametrize('change', ['sibling', 'swap', 'archive', 'readonly', 'backing'])
+def test_hot_checks_revalidate_changed_topology_or_roles(hardware, change):
+    from types import SimpleNamespace
+    observer, root, state, disk, _, _ = hardware
+    evidence = observer.observe(root, writable=True)
+    archives = ()
+    if change in {'sibling', 'swap'}:
+        disk['children'].append({'name': '/dev/testusb2', 'type': 'part', 'pkname': '/dev/testusb',
+                                 'maj:min': '240:2', 'uuid': 'other-fs'})
+        if change == 'sibling':
+            state['mounts'].append('901 1 240:2 / /other rw - ext4 /dev/testusb2 rw')
+        else:
+            state['swaps'] += '/dev/testusb2 partition 4096 0 -2\n'
+    elif change == 'archive':
+        archives = (SimpleNamespace(fs_uuid='USB-FS', serial=None),)
+    elif change == 'readonly':
+        state['mounts'][1] = state['mounts'][1].replace('rw', 'ro')
+    else:
+        observer._backing = lambda key: (99, key)
+    with BoundTree(root, writable=True) as tree, pytest.raises(TransferRefusal):
+        observer.check_attachment(tree, evidence, archives=archives)
+
+
+def test_protected_loop_backing_remains_unproven(hardware):
+    observer, root, state, *_ = hardware
+    state['inventory']['blockdevices'].append({'name': '/dev/loop0', 'type': 'loop', 'maj:min': '7:0'})
+    state['mounts'].append('901 1 7:0 / /var/lib/foreign ro - squashfs /dev/loop0 ro')
+    with pytest.raises(TransferRefusal, match='DESTINATION_UNPROVEN'):
+        observer.observe(root, writable=True)
+
+
+def test_user_xattr_read_probe_refuses_unsupported_namespace(hardware, monkeypatch):
+    import errno
+    observer, root, _, _, _, module = hardware
+    def unsupported(*args):
+        raise OSError(errno.EOPNOTSUPP, 'user namespace disabled')
+    monkeypatch.setattr(module.os, 'getxattr', unsupported)
+    with pytest.raises(TransferRefusal, match='DESTINATION_NOT_WRITABLE'):
+        observer.observe(root, writable=True)
+
+
+def test_unplug_between_backing_probe_and_descriptor_check_remains_waiting(hardware, monkeypatch):
+    import errno
+    observer, root, *_ = hardware
+    evidence = observer.observe(root, writable=True)
+    def absent(key):
+        raise FileNotFoundError(key)
+    with BoundTree(root, writable=True) as tree:
+        def unplug_during_check():
+            observer._backing = absent
+            raise OSError(errno.EIO, 'device unplugged during descriptor check')
+        monkeypatch.setattr(tree, 'check', unplug_during_check)
+        with pytest.raises(TransferRefusal, match='WAITING_DESTINATION'):
+            observer.check_attachment(tree, evidence)
+        assert tree._attachment_lost
+
+
+def test_unplug_during_full_refresh_io_remains_waiting(hardware):
+    import errno
+    observer, root, *_ = hardware
+    observer.observe(root, writable=True)
+    def absent(key):
+        raise FileNotFoundError(key)
+    def unplug_during_bind(*args, **kwargs):
+        observer._backing = absent
+        raise OSError(errno.EIO, 'device unplugged during full observation')
+    observer._tree_factory = unplug_during_bind
+    with pytest.raises(TransferRefusal, match='WAITING_DESTINATION'):
+        observer.observe(root, writable=True)
+
+
+def test_unplug_during_full_refresh_xattr_proof_remains_waiting(hardware, monkeypatch):
+    import errno
+    observer, root, _, _, _, module = hardware
+    observer.observe(root, writable=True)
+    def absent(key):
+        raise FileNotFoundError(key)
+    def unplug_during_xattr(*args):
+        observer._backing = absent
+        raise OSError(errno.EIO, 'device unplugged during namespace probe')
+    monkeypatch.setattr(module.os, 'getxattr', unplug_during_xattr)
+    with pytest.raises(TransferRefusal, match='WAITING_DESTINATION'):
+        observer.observe(root, writable=True)

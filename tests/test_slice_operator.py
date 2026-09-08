@@ -320,19 +320,22 @@ def test_boundary_capacity_refusal_precedes_destination_mutation_gate(operator, 
     adapter._attachment_path, adapter._catalog = "/destination", "/sealed/catalog"
     adapter._proposal, adapter._caps = object(), {"policy": "sealed"}
     binding = t.DestinationBinding("device", "filesystem", "binding", 1000)
+    adapter._budget = None
+    adapter._evidence = SimpleNamespace(device_id='device', fs_uuid='filesystem')
     adapter._observer = SimpleNamespace(observe=lambda *a, **k:
-                                       SimpleNamespace(device_id="device", fs_uuid="filesystem"))
+                                       SimpleNamespace(device_id="device", fs_uuid="filesystem"),
+                                       check_attachment=lambda tree, *a, **k: tree.check())
     monkeypatch.setattr(operator, "_archives", lambda path: checked.append(path) or ())
     monkeypatch.setattr(operator.UsbDestination, "check", lambda *a: pytest.fail("capacity refusal ignored"))
 
-    def refuse(tree, evidence, proposal, caps, *, adapter):
+    def refuse(tree, evidence, proposal, caps, *, adapter, refresh_volume):
         assert caps == {"policy": "sealed"}
         raise t.TransferRefusal("DESTINATION_CAPACITY_CHANGED")
 
     monkeypatch.setattr(operator, "_capacity", lambda: SimpleNamespace(verify=refuse))
     with pytest.raises(t.TransferRefusal, match="DESTINATION_CAPACITY_CHANGED"):
         adapter.check(binding, 0, 100)
-    assert checked == ["tree", "/sealed/catalog"]
+    assert checked == ["/sealed/catalog", "tree"]
 
 
 @pytest.mark.parametrize("error", [ValueError("unsafe state"), OSError("state inaccessible")])
@@ -370,7 +373,8 @@ def test_already_typed_bootstrap_refusal_is_preserved(operator, monkeypatch):
     assert caught.value.code == "STATE_BUSY"
 
 
-def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, monkeypatch, tmp_path):
+@pytest.mark.parametrize('mode', ['small', 'large', 'unplug'])
+def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, monkeypatch, tmp_path, mode):
     """Only hardware/free-space observations are fake; all assembly and IO are real."""
     import os
     import uuid
@@ -380,12 +384,17 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
     from test_slice_catalog import seed
     from test_slice_direct_integration import physical_descendants
     from test_slice_transaction import DATA
+    if mode != 'small':
+        DATA = b'x' * (2 * 1024 * 1024 + 17)
 
     catalog = tmp_path / "explicit-catalog.sqlite"
     con = seed(catalog, d)
     digest = hashlib.sha256(DATA).hexdigest()
     con.execute("UPDATE files SET sha256=?", (digest,))
     con.execute("UPDATE archived SET orig_sha256=?,annex_key=?", (digest, f"SHA256E-s12--{digest}"))
+    con.execute('UPDATE files SET size_bytes=?', (len(DATA),))
+    con.execute('UPDATE archived SET orig_bytes=?,stored_bytes=?,annex_key=?',
+                (len(DATA), len(DATA), f'SHA256E-s{len(DATA)}--{digest}'))
     con.execute("INSERT INTO drives(drive_label,fs_uuid,serial) VALUES('unselected','other-fs','other-disk')")
     before = tuple(con.iterdump())
     con.close()
@@ -397,9 +406,10 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
     destination = tmp_path / "usb"
     destination.mkdir()
     initial_root_blocks = destination.stat().st_blocks * 512
-    baseline, initial_inodes = 10_000_000, 1_000_000
+    baseline, initial_inodes = 100_000_000, 1_000_000
     device = "operator-integration-" + uuid.uuid4().hex
     observations = []
+    connected = [True]
 
     def availability(tree):
         identities = set()
@@ -412,6 +422,13 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
                 initial_inodes - len(identities))
 
     class Observer:
+        def check_attachment(self, tree, evidence, **kwargs):
+            if tree.path == destination and not connected[0]:
+                # Model physical backing disappearance while the mount ID remains present.
+                tree._attachment_lost = True
+                raise t.TransferRefusal('WAITING_DESTINATION')
+            tree.check()
+
         def observe(self, path, *, writable=False, archives=()):
             from pathlib import Path
             path = Path(path)
@@ -425,9 +442,9 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
             observations.append(tuple(a.fs_uuid for a in archives))
             with BoundTree(destination) as observed_tree:
                 mount_id = observed_tree.mount_id
-            return DeviceEvidence(device, "destination-fs", "destination-serial", 20_000_000,
+            return DeviceEvidence(device, "destination-fs", "destination-serial", 200_000_000,
                                   str(destination), mount_id, "ext4", availability(None)[0],
-                                  4096, 255, 20_000_000, "synthetic-stable-hardware-profile")
+                                  4096, 255, 200_000_000, "synthetic-stable-hardware-profile")
 
     monkeypatch.setattr(operator, "LinuxObserver", Observer)
     monkeypatch.setattr(capacity, "_volume", lambda *a: {"uuid": "destination-fs", "block_size": 4096})
@@ -436,18 +453,34 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
     monkeypatch.setattr(operator.UsbDestination, "_available", lambda self: availability(self.tree)[0])
     monkeypatch.setattr(db, "connect", lambda *a, **k: pytest.fail("global catalog opened"))
     monkeypatch.setattr("subprocess.run", lambda *a, **k: pytest.fail("retrieval/real observer invoked"))
+    original_write = operator.UsbDestination.append
+    def unplug_after_payload(self, path, token, data):
+        result = original_write(self, path, token, data)
+        if data == DATA[:len(data)]:
+            connected[0] = False
+        return result
+    if mode == 'unplug':
+        monkeypatch.setattr(operator.UsbDestination, 'append', unplug_after_payload)
 
     reviewed = operator.preview(catalog, destination, ["org/model"], "delivery")
     tx = reviewed["transaction_id"]
     assert reviewed["state"] == "ready" and not list(destination.iterdir())
     assert operator.approve(tx, reviewed["seal"])["state"] == "approved"
     result = operator.start(tx, destination, {"drive-a": archive})
+    if mode == 'unplug':
+        assert result['state'] == 'waiting_destination'
+        assert store.status(tx).state == 'waiting_destination'
+        assert not (destination / 'delivery/.modelark-slice-receipt.json').exists()
+        connected[0] = True
+        monkeypatch.setattr(operator.UsbDestination, 'append', original_write)
+        result = operator.start(tx, destination, {'drive-a': archive})
     assert result["state"] == "complete" and result["can_write"] is False
     assert (destination / "delivery/org/model/model.safetensors").read_bytes() == DATA
     receipt = json.loads((destination / "delivery/.modelark-slice-receipt.json").read_text())
     assert receipt["status"] == "complete" and receipt["transaction"] == tx
     assert receipt["seal"] == reviewed["seal"]
     assert all(set(uuids) == {"fs-a", "other-fs"} for uuids in observations)
+    assert len(observations) <= (30 if mode == 'unplug' else 16)
     assert not tuple(destination.rglob(".slice-*"))
     import sqlite3
     with sqlite3.connect(catalog.as_uri() + "?mode=ro", uri=True) as con:

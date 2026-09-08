@@ -214,13 +214,13 @@ def _require_unique_marker(fd, token):
         _refuse('external unique ownership marker required', 'DESTINATION_ALLOCATION_UNPROVEN')
 
 
-def verify(tree, evidence, proposal, caps, adapter=None):
+def verify(tree, evidence, proposal, caps, adapter=None, *, refresh_volume=True):
     """Run from DestinationPort.check, never from BoundTree.verify (which would recurse)."""
     tree.check()
     _attachment(tree, evidence)
     if (caps.get('policy') != POLICY or evidence.profile != caps['hardware_profile']
             or list(tree.identity(tree.fd)[1:]) != caps['root_identity']
-            or _volume(tree, evidence) != caps['filesystem']):
+            or (refresh_volume and _volume(tree, evidence) != caps['filesystem'])):
         _refuse('sealed filesystem/capability evidence changed', 'DESTINATION_CHANGED')
     size, flags = _root_metadata(tree)
     if size > caps['root_max_bytes'] or flags & ~INDEX != caps['root_flags'] & ~INDEX:

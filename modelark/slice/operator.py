@@ -109,21 +109,58 @@ def approve(tx, seal):
 
 
 class _CheckedDestination(UsbDestination):
-    def __init__(self, tree, binding, store, tx, observer, path, proposal, caps, catalog):
+    def __init__(self, tree, binding, store, tx, observer, path, proposal, caps, catalog, evidence):
         self._observer, self._attachment_path = observer, path
         self._proposal, self._caps, self._catalog = proposal, caps, catalog
+        self._evidence = evidence
+        self._budget = None
         super().__init__(tree, binding, store, tx)
 
     @_port_io
     def check(self, binding, allocated, required_bytes):
         # Do not put capacity.verify into BoundTree.verify: it itself opens
         # confined paths. Core boundaries call this gate before every mutation.
-        self.tree.check()
-        evidence = self._observer.observe(self._attachment_path, writable=True, archives=_archives(self._catalog))
-        if (evidence.device_id, evidence.fs_uuid) != (binding.device_id, binding.filesystem_id):
+        first = self._budget is None
+        self._budget = (binding, allocated, required_bytes)
+        self._validate(refresh=first)
+
+    def _validate(self, *, refresh, reconcile=True):
+        binding, allocated, required_bytes = self._budget
+        archives = _archives(self._catalog)
+        self._observer.check_attachment(self.tree, self._evidence, archives=archives)
+        if refresh:
+            self._evidence = self._observer.observe(self._attachment_path, writable=True, archives=archives)
+        if (self._evidence.device_id, self._evidence.fs_uuid) != (binding.device_id, binding.filesystem_id):
             raise t.TransferRefusal("DESTINATION_CHANGED", "destination differs from reviewed device")
-        _capacity().verify(self.tree, evidence, self._proposal, self._caps, adapter=self)
-        super().check(binding, allocated, required_bytes)
+        _capacity().verify(self.tree, self._evidence, self._proposal, self._caps, adapter=self,
+                           refresh_volume=refresh)
+        if reconcile:
+            super().check(binding, allocated, required_bytes)
+
+    @_port_io
+    def create_file(self, path, token):
+        # Recovery may have just discarded an old temp since the engine's last
+        # check. Refresh physical eligibility, not its now-stale allocation total.
+        self._validate(refresh=True, reconcile=False)
+        return super().create_file(path, token)
+
+    @_port_io
+    def publish(self, temporary, path, token):
+        self._validate(refresh=True, reconcile=False)
+        return super().publish(temporary, path, token)
+
+    @_port_io
+    def list_paths(self, root):
+        # Core audits occur at Start, each artifact/attended resume and final receipt.
+        self._validate(refresh=True, reconcile=False)
+        return super().list_paths(root)
+
+    def _io_refusal(self, exc):
+        try:
+            self._observer.check_attachment(self.tree, self._evidence)
+        except t.TransferRefusal as refusal:
+            return refusal
+        return super()._io_refusal(exc)
 
 
 def _acknowledge_interrupt(store, tx, destination, sources, session=None):
@@ -170,7 +207,7 @@ def start(tx, destination_path, attachments):
             # Recovery may already own charged allocations. Full free-space
             # reconciliation belongs to the authenticated adapter, not fresh-start admission.
             destination = _CheckedDestination(tree, plan.destination, store, tx, observer, path,
-                                              plan.proposal, admission["capacity"], admission["catalog"])
+                                              plan.proposal, admission["capacity"], admission["catalog"], evidence)
             sources = FencedSources(admission["catalog"], LocalArchiveReader(attachments, observer=observer))
             try:
                 session = t.start(store, tx, destination, sources)

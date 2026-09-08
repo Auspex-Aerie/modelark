@@ -27,8 +27,18 @@ def attachment(tmp_path):
                                device_id="usb", mount_id=mount_id, mount_path=str(mount))
 
     class Observer:
+        def __init__(self):
+            from modelark.slice.local_source import _identity
+            self.identity = _identity(evidence)
+
         def observe(self, path, **kwargs):
             return evidence
+
+        def check_attachment(self, tree, observed):
+            from modelark.slice.local_source import _identity
+            tree.check()
+            if _identity(evidence) != self.identity:
+                raise TransferRefusal("SOURCE_CHANGED", "synthetic attachment proof changed")
 
     return root, candidate, Observer(), evidence
 
@@ -40,6 +50,82 @@ def test_raw_original_bytes_without_any_subprocess(attachment, monkeypatch):
     with LocalArchiveReader({"drive-a": root}, observer=observer).open(candidate) as stream:
         assert stream.read(20) == b"originaldata"
         assert stream.read(20) == b""
+
+
+@pytest.mark.parametrize("path_kind", ["relative", "tilde"])
+def test_explicit_attachment_paths_are_expanded_before_observation(attachment, monkeypatch, path_kind):
+    from pathlib import Path
+    from modelark.slice.local_source import LocalArchiveReader
+    root, candidate, observer, evidence = attachment
+    if path_kind == "relative":
+        monkeypatch.chdir(root.parent.parent)
+        supplied = "usb/modelark"
+    else:
+        supplied = "~/usb/modelark"
+        expanduser = Path.expanduser
+        # Resolve a synthetic home without modifying HOME or creating real home files.
+        monkeypatch.setattr(Path, "expanduser", lambda path:
+                            root if str(path) == supplied else expanduser(path))
+    observed = []
+
+    def observe(path, **kwargs):
+        observed.append(path)
+        return evidence
+
+    monkeypatch.setattr(observer, "observe", observe)
+    with LocalArchiveReader({"drive-a": supplied}, observer=observer).open(candidate) as stream:
+        assert stream.read(20) == b"originaldata"
+    assert observed and all(path == root for path in observed)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 6, 64])
+def test_source_inventory_and_annex_proof_are_per_artifact_not_per_chunk(attachment, monkeypatch, chunk_size):
+    from modelark.slice import local_source
+    root, candidate, observer, evidence = attachment
+    observed, configs = [], []
+    annex_uuid = local_source._annex_uuid
+    monkeypatch.setattr(observer, "observe", lambda path, **kwargs: observed.append(path) or evidence)
+    monkeypatch.setattr(local_source, "_annex_uuid", lambda tree: configs.append(tree.path) or annex_uuid(tree))
+    with local_source.LocalArchiveReader({"drive-a": root}, observer=observer).open(candidate) as stream:
+        pieces = []
+        while chunk := stream.read(chunk_size):
+            pieces.append(chunk)
+    assert b"".join(pieces) == b"originaldata"
+    assert len(observed) == 2
+    assert len(configs) == 1
+
+
+def test_changed_observation_during_artifact_open_is_refused(attachment, monkeypatch):
+    from modelark.slice.local_source import LocalArchiveReader
+    root, candidate, observer, evidence = attachment
+    calls = []
+
+    def observe(path, **kwargs):
+        calls.append(path)
+        if len(calls) == 2:
+            evidence.serial = "replaced-device"
+        return evidence
+
+    monkeypatch.setattr(observer, "observe", observe)
+    with pytest.raises(TransferRefusal, match="SOURCE_CHANGED"):
+        with LocalArchiveReader({"drive-a": root}, observer=observer).open(candidate):
+            pytest.fail("changed attachment yielded bytes")
+
+
+def test_multi_megabyte_source_has_constant_full_inventory_count(attachment, monkeypatch):
+    from modelark.slice.local_source import LocalArchiveReader
+    root, candidate, observer, evidence = attachment
+    payload = b"a" * (3 << 20)
+    (root / "org/model/model.safetensors").write_bytes(payload)
+    candidate = replace(candidate, copy=replace(candidate.copy, orig_bytes=len(payload), stored_bytes=len(payload)))
+    calls = []
+    monkeypatch.setattr(observer, "observe", lambda path, **kwargs: calls.append(path) or evidence)
+    with LocalArchiveReader({"drive-a": root}, observer=observer).open(candidate) as stream:
+        assert stream.read(1 << 20) == payload[:1 << 20]
+        assert stream.read(1 << 20) == payload[:1 << 20]
+        assert stream.read(1 << 20) == payload[:1 << 20]
+        assert stream.read(1 << 20) == b""
+    assert len(calls) == 2
 
 
 def test_source_observer_and_descriptor_must_be_same_attachment(attachment):
@@ -141,12 +227,30 @@ def test_archive_replacement_revokes_even_buffered_read(attachment):
 def test_disappeared_bound_mount_is_a_source_missing_refusal(attachment, monkeypatch):
     from modelark.slice import linux
     from modelark.slice.local_source import LocalArchiveReader
-    root, candidate, observer, _ = attachment
+    root, candidate, observer, evidence = attachment
     mounts = set(linux._mount_ids())
     monkeypatch.setattr(linux, "_mount_ids", lambda: mounts)
     with LocalArchiveReader({"drive-a": root}, observer=observer).open(candidate) as stream:
         assert stream.read(1) == b"o"
         mounts.clear()  # Synthetic disappearance; no real mounts are changed.
+        with pytest.raises(TransferRefusal, match="SOURCE_MISSING"):
+            stream.read(1)
+        mounts.add(evidence.mount_id)
+        with pytest.raises(TransferRefusal, match="SOURCE_MISSING"):
+            stream.read(1)  # A retained stale source cannot silently resume after reattachment.
+
+
+def test_lost_backing_device_refuses_even_when_mount_remains(attachment, monkeypatch):
+    from modelark.slice.local_source import LocalArchiveReader
+    root, candidate, observer, _ = attachment
+    with LocalArchiveReader({"drive-a": root}, observer=observer).open(candidate) as stream:
+        assert stream.read(1) == b"o"
+
+        def gone(tree, observed):
+            tree.check()  # The directory and mount still exist in this schedule.
+            raise TransferRefusal("WAITING_DESTINATION", "backing USB device disappeared")
+
+        monkeypatch.setattr(observer, "check_attachment", gone)
         with pytest.raises(TransferRefusal, match="SOURCE_MISSING"):
             stream.read(1)
 
@@ -224,7 +328,7 @@ def test_shared_observer_refusals_are_source_side(attachment, monkeypatch, when,
     else:
         with reader.open(candidate) as stream:
             assert stream.read(1) == b"o"
-            monkeypatch.setattr(observer, "observe", refuse)
+            monkeypatch.setattr(observer, "check_attachment", lambda *args: refuse(None))
             with pytest.raises(TransferRefusal) as caught:
                 stream.read(1)
     assert caught.value.code == expected

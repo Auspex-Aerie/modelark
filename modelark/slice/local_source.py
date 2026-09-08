@@ -123,10 +123,12 @@ def _open_content(tree, candidate):
 
 
 class LocalArchiveReader:
-    """Internal reader; production assembly awaits an approved hardware observer."""
+    """Internal reader with full per-artifact and lightweight per-read attachment proofs."""
 
     def __init__(self, attachments, *, observer, max_decode_bytes=64 << 20):
-        self.attachments = {label: Path(path) for label, path in attachments.items()}
+        # Expand operator spelling before observation without following symlinks;
+        # BoundTree still performs the authoritative no-symlink path resolution.
+        self.attachments = {label: Path(path).expanduser().absolute() for label, path in attachments.items()}
         self.observer = observer
         self.max_decode_bytes = max_decode_bytes
 
@@ -144,27 +146,30 @@ class LocalArchiveReader:
                 if path != Path(observed.mount_path) / "modelark":
                     raise TransferRefusal("SOURCE_PATH_UNSAFE", "archive must be <mount>/modelark")
 
-                def attachment_check():
-                    if _identity(self.observer.observe(path)) != expected:
-                        raise TransferRefusal("SOURCE_CHANGED", label)
-
-                tree = stack.enter_context(BoundTree(path, verify=attachment_check))
+                tree = stack.enter_context(BoundTree(path))
                 if tree.mount_id != expected[4]:
                     raise TransferRefusal("SOURCE_CHANGED", "observer and source descriptor attachments differ")
                 drive = candidate.drive
+                annex = _annex_uuid(tree)
+                fingerprint = identity_fingerprint_v1(
+                    fs_uuid=expected[0], annex_uuid=annex, serial=expected[1],
+                    filesystem_capacity_bytes=expected[2])
+                if (expected[:3] != (drive.fs_uuid, drive.serial, drive.filesystem_capacity_bytes)
+                        or annex != drive.annex_uuid or fingerprint != drive.identity_fingerprint):
+                    raise TransferRefusal("SOURCE_CHANGED", label)
+                stream = stack.enter_context(os.fdopen(_open_content(tree, candidate), "rb"))
+                confirmed = self.observer.observe(path)
+                if _identity(confirmed) != expected:
+                    raise TransferRefusal("SOURCE_CHANGED", label)
 
                 def check():
-                    tree.check()
-                    annex = _annex_uuid(tree)
-                    fingerprint = identity_fingerprint_v1(
-                        fs_uuid=expected[0], annex_uuid=annex, serial=expected[1],
-                        filesystem_capacity_bytes=expected[2])
-                    if (expected[:3] != (drive.fs_uuid, drive.serial, drive.filesystem_capacity_bytes)
-                            or annex != drive.annex_uuid or fingerprint != drive.identity_fingerprint):
-                        raise TransferRefusal("SOURCE_CHANGED", label)
+                    # The archive fence spans this context. Full inventory and
+                    # annex identity are checked at artifact-open boundaries;
+                    # each read retains kernel attachment/backing-device proof
+                    # without spawning a complete inventory for every chunk.
+                    self.observer.check_attachment(tree, confirmed)
 
                 check()
-                stream = stack.enter_context(os.fdopen(_open_content(tree, candidate), "rb"))
                 decoded = original_stream(stream, compressed=candidate.copy.compressed,
                                           expected_bytes=candidate.copy.orig_bytes,
                                           max_decode_bytes=self.max_decode_bytes, check=check)
