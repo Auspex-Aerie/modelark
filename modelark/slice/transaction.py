@@ -236,7 +236,7 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
         lease = _Lease(plan.destination.device_id)
     except TransferRefusal:
         current = store.status(tx)
-        if current.state == "complete" or store.owner(plan.destination.device_id) == tx:
+        if current.state == "complete" or (not serial.created and store.owner(plan.destination.device_id) == tx):
             return current  # Observation only; never hands out a writer capability.
         raise
     try:
@@ -637,7 +637,7 @@ class Session:
         else:
             self._write(op, io.BytesIO(data))
         self.head = self.store.append(self.transaction_id, "receipt", receipt, expected_head=self.head)
-        self.store.complete(self.transaction_id, self.plan.destination.device_id)
+        self.store.complete(self.transaction_id, self.plan.destination.device_id, self.lease.close)
 
     def step(self):
         if self._terminal:

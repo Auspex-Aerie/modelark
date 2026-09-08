@@ -11,11 +11,17 @@ from pathlib import Path
 import sqlite3
 import stat
 import uuid
+from typing import NamedTuple
 
 from .domain import _json, validate_approval
 
 
 HOST_STATE_DIR = Path.home() / ".local" / "state" / "modelark" / "slice"
+
+
+class Reservation(NamedTuple):
+    stop_serial: int
+    created: bool
 
 
 def _private_directory(path):
@@ -79,7 +85,7 @@ class Store:
             raise ValueError("unsafe slice state database")
         with self._connection() as con:
             version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2):
+            if version not in (0, 1, 2, 3):
                 raise ValueError("unsupported slice state version")
             con.execute("CREATE TABLE IF NOT EXISTS transactions ("
                         "id TEXT PRIMARY KEY, plan TEXT NOT NULL, seal TEXT NOT NULL,"
@@ -93,11 +99,19 @@ class Store:
                 if "stop_serial" not in columns:
                     con.execute("ALTER TABLE transactions ADD COLUMN stop_serial INTEGER NOT NULL DEFAULT 0")
             con.execute("CREATE TABLE IF NOT EXISTS owners (device TEXT PRIMARY KEY,"
-                        "tx TEXT UNIQUE NOT NULL REFERENCES transactions(id))")
+                        "tx TEXT UNIQUE NOT NULL REFERENCES transactions(id),"
+                        "activation_serial INTEGER NOT NULL DEFAULT 0)")
+            columns = {row[1] for row in con.execute("PRAGMA table_info(owners)")}
+            if "activation_serial" not in columns:
+                con.execute("ALTER TABLE owners ADD COLUMN activation_serial INTEGER NOT NULL DEFAULT 0")
+                # Old initializations did not retain the activation token. Preserve any
+                # pending stop conservatively; an explicit stopped-state resume can clear it.
+                con.execute("UPDATE owners SET activation_serial=(SELECT stop_serial-stop "
+                            "FROM transactions WHERE id=owners.tx)")
             con.execute("CREATE TABLE IF NOT EXISTS journal (tx TEXT NOT NULL REFERENCES transactions(id),"
                         "seq INTEGER NOT NULL, event TEXT NOT NULL, payload TEXT NOT NULL, digest TEXT NOT NULL,"
                         "PRIMARY KEY(tx,seq))")
-            con.execute("PRAGMA user_version=2")
+            con.execute("PRAGMA user_version=3")
 
     @contextmanager
     def _connection(self, *, write=True):
@@ -174,25 +188,28 @@ class Store:
     def reserve(self, tx, device):
         from .transaction import TransferRefusal, _RESUMABLE_STATES
         def inspect(con):
-            owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
+            owner = con.execute("SELECT tx,activation_serial FROM owners WHERE device=?", (device,)).fetchone()
             if owner and owner[0] != tx:
                 raise TransferRefusal("DESTINATION_BUSY", owner[0])
             state, serial = con.execute("SELECT state,stop_serial FROM transactions WHERE id=?", (tx,)).fetchone()
             if state not in _RESUMABLE_STATES:
                 raise TransferRefusal("APPROVAL_MISSING" if state == "ready" else "NOT_RESUMABLE", state)
+            if owner and state == "starting":
+                serial = owner[1]
             return owner, serial
         # Repeated Start is a reader while an owner is actively journaling. Only the first
         # reservation needs the writer transaction; recheck inside it to close the CAS race.
         with self._connection(write=False) as con:
             owner, serial = inspect(con)
             if owner:
-                return serial
+                return Reservation(serial, False)
         with self._connection() as con:
             owner, serial = inspect(con)
-            con.execute("INSERT OR IGNORE INTO owners(device,tx) VALUES(?,?)", (device, tx))
+            con.execute("INSERT OR IGNORE INTO owners(device,tx,activation_serial) VALUES(?,?,?)",
+                        (device, tx, serial))
             if not owner:
                 con.execute("UPDATE transactions SET state='starting',reason='' WHERE id=?", (tx,))
-            return serial
+            return Reservation(serial, not owner)
 
     def activate(self, tx, device, stop_serial):
         from .transaction import TransferRefusal, _RESUMABLE_STATES
@@ -205,7 +222,7 @@ class Store:
                 raise TransferRefusal("NOT_RESUMABLE", state)
             # A stop arriving during initialization must not be erased by activation.
             con.execute("UPDATE transactions SET state='transferring',reason='',"
-                        "stop=CASE WHEN stop_serial=? THEN 0 ELSE stop END WHERE id=?", (stop_serial, tx))
+                        "stop=CASE WHEN stop_serial=? THEN 0 ELSE stop END WHERE id=?", (stop_serial.stop_serial, tx))
 
     def set_state(self, tx, state, reason=""):
         with self._connection() as con:
@@ -261,10 +278,11 @@ class Store:
     def receipt(self, tx):
         return next((payload for event, payload in reversed(self.events(tx)) if event == "receipt"), None)
 
-    def complete(self, tx, device):
+    def complete(self, tx, device, release_process):
         from .transaction import TransferRefusal
         if self.receipt(tx) is None:
             raise TransferRefusal("RECEIPT_MISSING")
         with self._connection() as con:
             con.execute("UPDATE transactions SET state='complete',reason='' WHERE id=?", (tx,))
+            release_process()
             con.execute("DELETE FROM owners WHERE device=? AND tx=?", (device, tx))

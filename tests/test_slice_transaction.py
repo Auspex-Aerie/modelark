@@ -189,7 +189,7 @@ def test_private_v1_upgrade_preserves_transaction_authority(setup, api, missing_
     upgraded.activate(tx, plan.destination.device_id, serial)
     assert upgraded.stop_requested(tx)  # A newer stop still wins after migration.
     with upgraded._connection(write=False) as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 3
     assert api[1].Store().events(tx) == before  # Reopening is idempotent.
     assert not list(dest.root.iterdir())
 
@@ -1023,6 +1023,60 @@ def test_stop_requested_during_startup_is_not_lost(setup):
         start(setup)
     assert not list(dest.root.iterdir())
     assert store.status(tx).state == "stopped"
+
+
+def test_overlapping_starter_preserves_stop_after_reservation(setup):
+    t, store, plan, tx, dest, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    def fault(point):
+        if point == "reservation_committed":
+            store.request_stop(tx)
+            with pytest.raises(t.TransferRefusal, match="STOPPED"):
+                t.start(store, tx, dest, sources)
+    with pytest.raises(t.TransferRefusal, match="STOPPED"):
+        t.start(store, tx, dest, sources, fault=fault)
+    assert store.stop_requested(tx)
+    assert not list(dest.root.iterdir())
+    with t.start(store, tx, dest, sources) as resumed:
+        assert resumed.run().state == "complete"
+
+
+def test_completed_retained_session_releases_process_lease(setup):
+    t, store, plan, tx, dest, sources = setup
+    with start(setup) as session:
+        assert session.run().state == "complete"
+        assert not session.can_write
+        with t._Lease(plan.destination.device_id).socket:
+            pass
+
+
+def test_v2_initializing_reservation_migration_preserves_pending_stop(setup, api):
+    t, store, plan, tx, dest, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    store.reserve(tx, plan.destination.device_id)
+    store.request_stop(tx)
+    with store._connection() as con:
+        con.execute("ALTER TABLE owners DROP COLUMN activation_serial")
+        con.execute("PRAGMA user_version=2")
+    upgraded = api[1].Store()
+    with pytest.raises(t.TransferRefusal, match="STOPPED"):
+        t.start(upgraded, tx, dest, sources)
+    assert not list(dest.root.iterdir())
+    with t.start(upgraded, tx, dest, sources) as resumed:
+        assert resumed.run().state == "complete"
+
+
+def test_new_reservation_cannot_observe_an_unrelated_process_as_its_writer(setup):
+    t, store, plan, tx, dest, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    lease = t._Lease(plan.destination.device_id)
+    try:
+        with pytest.raises(t.TransferRefusal, match="DESTINATION_BUSY"):
+            t.start(store, tx, dest, sources)
+    finally:
+        lease.close()
+    with t.start(store, tx, dest, sources) as resumed:
+        assert resumed.run().state == "complete"
 
 
 def test_verification_checks_stop_between_read_chunks(setup):

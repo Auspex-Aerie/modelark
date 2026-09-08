@@ -2695,3 +2695,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Internal source-read and publication boundaries with control/file/receipt stop regressions, partial-read source failure/fallback tests and existing destination-error isolation coverage. No live device, archive, catalog or service access.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-108, DEC-110, DEC-112, DEC-114
+
+### DEC-118: Serialize initialization stops, completion release and source revocation
+- `id`: DEC-118
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: PR #69 Codex findings 3953499094, 3953499106 and 3953499111; operator-authorized three-round correction/review limit.
+- `decision`: Persist the first reservation's activation stop serial in private schema v3 and reuse it for overlapping initializing callers. Migrate older pending initializations conservatively. Release the completing Session's process descriptor before durable ownership becomes available, and report a newly reserved transaction's bind failure as busy. Serialize operator lifecycle loss with the same nonblocking identity/epoch fence held by source reads, retaining it through graph commit.
+- `rationale`: A refreshed snapshot of a stop counter is not the original activation authority; a durable reservation is not proof of process ownership; and a source fence only prevents revocation if the revoker participates. The three corrections establish ordering at those actual authority boundaries.
+- `impact`: Private state migration, transaction Start/completion and drive-loss synchronization with disposable regressions. No deployment, live Fill, real-device execution or catalog-schema change. Broader architectural changes remain proposals for the operator after at most three fix/review rounds.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-111, DEC-115, DEC-117

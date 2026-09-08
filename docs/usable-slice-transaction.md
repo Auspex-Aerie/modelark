@@ -19,6 +19,9 @@ activation preserves any stop request arriving during initialization. It returns
 non-writing `Status` for a repeated Start while that same transaction holds the device.
 Both the post-bind check and activation's SQLite write transaction reject terminal state; a delayed
 starter cannot reactivate a transaction that another starter invalidated while it was paused.
+Initializing duplicates reuse the activation stop serial persisted with the first reservation.
+A new reservation that loses process exclusion reports `DESTINATION_BUSY`, rather than claiming
+that the unrelated incumbent is an active writer for the newly reserved transaction.
 
 The private SQLite store is separate from every catalog, under the fixed operator-host namespace
 `~/.local/state/modelark/slice`. This is not a catalog/state-directory option: local workers for
@@ -31,8 +34,10 @@ Reader operations use deferred transactions rather than requesting the writer re
 writers have a bounded SQLite busy wait and return typed `STATE_BUSY` on exhaustion. The private
 database handle retains SQLite rollback-recovery capability even for reader operations, so a hot
 journal from a dead writer is recovered rather than exposed as a read-only-database error.
-Private schema version 2 transactionally upgrades development version-1 databases, adding the
-stop serial when absent while preserving plans, pending stops, reservations and journal heads.
+Private schema version 3 transactionally upgrades development version-1/2 databases, adding the
+stop serial when absent and the reservation's activation serial while preserving plans, pending
+stops, reservations and journal heads. An old initializing reservation with no saved activation
+serial conservatively preserves a pending stop until an explicit stopped-state resume.
 This migration never opens or changes a catalog database.
 Transient `STATE_BUSY` during Start or execution releases the process handle without turning the
 durable transaction into a terminal failure. A fresh Start can retry its existing approved authority.
@@ -53,6 +58,8 @@ is checked between streaming and verification chunks and before publication. Clo
 and closes its process descriptor, but retains the durable reservation. A new seal cannot acquire
 that unfinished device. Completion releases the reservation only after verification and receipt
 publication; existing output/control records are not automatically deleted or adopted.
+Completion closes the Session's process descriptor inside the final state transaction before
+releasing durable ownership, including when the caller retains the completed Session object.
 When a retained Session retries a resolved source/destination wait, it returns to transferring
 before more work, so `run()` continues through receipt publication.
 Terminal refusals release the process descriptor while retaining durable ownership. A failed or
@@ -137,6 +144,10 @@ keeps it through the injected local reader's stream lifetime. The engine revalid
 sealed candidate before reading. Only approved alternatives can be used. Placement exclusion alone
 does not revoke reads; changed lifecycle, identity, generation, copy or digest evidence does.
 Busy, offline and locally missing sources remain distinct reasons; none triggers retrieval.
+Operator `declare_lost` acquires that same identity/epoch fence nonblocking and holds it through
+its graph commit. An active source read yields `DRIVE_BUSY` on revocation, leaving its preview
+and lifecycle unchanged for an explicit retry. Identities without a proven fingerprint cannot
+qualify as slice sources and do not require this source-read exclusion.
 Source waits/blocks identify the exact repository, filename and candidate drive reasons. Source
 open-error translation does not encompass destination exceptions from the consuming transaction.
 The yielded source-read wrapper converts missing-source and other source IO errors raised during

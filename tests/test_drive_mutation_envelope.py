@@ -626,7 +626,7 @@ def test_envelope_wired_only_into_reviewed_transport():
     # 2026-09-07 / DEC-109: Slice 2's read-only gate shares the neutral fence, not mutation authority.
     fence_allowed = mutation_allowed | {
         "admission.py", "proposal.py", "execution_service.py", "execution_recovery.py",
-        "slice/sources.py",
+        "slice/sources.py", "drive_lifecycle.py",
     }
     importers, offenders = set(), []
     for path in root.rglob("*.py"):

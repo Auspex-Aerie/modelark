@@ -7,11 +7,12 @@ row so historical claims remain reviewable, while excluding the identity from ne
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 import re
 import shlex
 from typing import Any, Callable, Iterable, Mapping
 
-from modelark import plan, proposal
+from modelark import drive_fence, plan, proposal
 
 
 def planner_revision(con) -> int:
@@ -918,6 +919,16 @@ def declare_lost(
                 value={"changed": False, "approval_invalidated": False},
             )
 
+        # Source-use gates hold this identity fence through the read. Keep revocation
+        # serialized through the graph commit; never wait while holding SQLite's writer.
+        if drive["identity_fingerprint"]:
+            try:
+                fences.enter_context(drive_fence.hold_drives_sorted(
+                    [(drive["identity_fingerprint"], drive["identity_epoch"])], blocking=False))
+            except drive_fence.FenceUnavailable as exc:
+                raise proposal.Refusal("DRIVE_BUSY", {"drive_label": drive_label},
+                                       ("retry_after_source_read",)) from exc
+
         active_approval = c.execute(
             "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
         ).fetchone()[0]
@@ -943,7 +954,8 @@ def declare_lost(
             },
         )
 
-    result = proposal.graph_write(con, op)
+    with ExitStack() as fences:
+        result = proposal.graph_write(con, op)
     drive = _drive(con, drive_label)
     return {
         "drive_label": drive_label,
