@@ -201,3 +201,85 @@ def test_first_reservation_keeps_snapshot_while_waiting_for_writer(setup, monkey
     assert intervened and not list(destination.root.iterdir())
     with t.start(store, tx, destination, sources) as resumed:
         assert resumed.run().state == "complete"
+
+
+@pytest.mark.parametrize("stop_at", ["boundary", "chunk_written", "file_prepared"])
+def test_acknowledged_stop_releases_attempt_without_caller_close(setup, stop_at):
+    t, store, plan, tx, destination, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    with t.start(store, tx, destination, sources) as stopped:
+        old_attempt = stopped.authority.attempt
+        if stop_at == "boundary":
+            store.request_stop(tx)
+        else:
+            stopped._fault = lambda point: store.request_stop(tx) if point == stop_at else None
+        assert stopped.run().state == "stopped"
+        assert not stopped.can_write
+        assert not stopped.lease.retained(plan.destination.device_id, old_attempt)
+        assert store.owner(plan.destination.device_id) == tx
+        with pytest.raises(t.TransferRefusal, match="NOT_RESUMABLE"):
+            stopped.step()
+        with t.start(store, tx, destination, sources) as resumed:
+            assert resumed.can_write and resumed.authority.attempt != old_attempt
+            stopped.close()  # A retained old object must not release or stop the fresh attempt.
+            assert resumed.run().state == "complete"
+
+
+def test_stop_release_returns_its_outcome_when_new_start_wins(setup, monkeypatch):
+    t, store, plan, tx, destination, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    successors = []
+    with t.start(store, tx, destination, sources) as stopped:
+        close = stopped.lease.close
+        def release_and_restart():
+            close()
+            if not successors:
+                successors.append(t.start(store, tx, destination, sources))
+        monkeypatch.setattr(stopped.lease, "close", release_and_restart)
+        store.request_stop(tx)
+        try:
+            assert stopped.run().state == "stopped"
+            assert not stopped.can_write
+            assert len(successors) == 1 and successors[0].can_write
+            assert store.status(tx).state == "transferring"
+            assert successors[0].run().state == "complete"
+        finally:
+            monkeypatch.setattr(stopped.lease, "close", close)
+            for successor in successors:
+                successor.close()
+
+
+def test_stop_revokes_attempt_even_when_acknowledgment_write_fails(setup, monkeypatch):
+    t, store, plan, tx, destination, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    with t.start(store, tx, destination, sources) as stopped:
+        store.request_stop(tx)
+        def busy(*args, **kwargs):
+            raise t.TransferRefusal("STATE_BUSY")
+        with monkeypatch.context() as patch:
+            patch.setattr(store, "transition", busy)
+            with pytest.raises(t.TransferRefusal, match="STATE_BUSY"):
+                stopped.run()
+        assert not stopped.can_write
+        with pytest.raises(t.TransferRefusal, match="NOT_RESUMABLE"):
+            stopped.run()
+        # A failed persistence attempt is not a durable acknowledgment.
+        with pytest.raises(t.TransferRefusal, match="STOPPED"):
+            t.start(store, tx, destination, sources)
+        with t.start(store, tx, destination, sources) as resumed:
+            assert resumed.run().state == "complete"
+
+
+def test_stop_winning_over_source_wait_releases_attempt(setup, monkeypatch):
+    t, store, plan, tx, destination, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    with t.start(store, tx, destination, sources) as stopped:
+        def source_gap(*args):
+            store.request_stop(tx)
+            raise t.TransferRefusal("WAITING_SOURCE")
+        with monkeypatch.context() as patch:
+            patch.setattr(sources, "open", source_gap)
+            assert stopped.run().state == "stopped"
+        assert not stopped.can_write
+        with t.start(store, tx, destination, sources) as resumed:
+            assert resumed.run().state == "complete"

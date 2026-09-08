@@ -77,6 +77,13 @@ resume permission from another caller's later acknowledgment. Closing a live ses
 and closes its process descriptor, but retains the durable reservation. A new seal cannot acquire
 that unfinished device. Completion releases the reservation only after verification and receipt
 publication; existing output/control records are not automatically deleted or adopted.
+An observed Stop ends the current Session attempt: it returns its stopped outcome and releases
+the attempt/device descriptors before returning, without requiring caller cleanup. The old object
+reports `can_write=False` and cannot resume; a fresh Start can claim the still-reserved transaction.
+Stop also revokes the local attempt if acknowledgment persistence fails, while leaving that error
+visible and the durable request unacknowledged. An attended wait retains its attempt unless a
+pending Stop wins during outcome publication. A concurrent fresh Start cannot change the stopped
+result returned by the ending attempt.
 Completion closes the Session's process descriptor inside the final state transaction before
 releasing durable ownership, including when the caller retains the completed Session object.
 If a same-transaction starter acquires exclusion during that final commit window, its claim

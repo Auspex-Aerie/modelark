@@ -2740,3 +2740,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `supersedes`: DEC-120
 - `related`: DEC-108, DEC-110, DEC-115, DEC-118, DEC-119
+
+### DEC-122: Release stopped delivery attempts before returning their outcome
+- `id`: DEC-122
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator-authorized correction of Codex P2 3954091840 on PR #69 at c5ec843; retained stopped-session and stop-persistence regressions reproduced writable capability after Stop.
+- `decision`: Treat Stop as ending the current Session attempt while retaining the transaction's durable reservation. Revoke the local Session before acknowledgment persistence, release its descriptors in the existing finally path, and return the captured stopped outcome rather than rereading successor state. Apply the same release when Stop wins over an attended-wait outcome; ordinary attended waits remain resumable on their retained attempt.
+- `rationale`: A stopped attempt cannot legally resume under DEC-121, so retaining its capability blocks the required fresh claim. Failure to persist acknowledgment must not preserve that local capability or be reported as durable success.
+- `impact`: Slice Session outcome handling and six disposable stop/restart regressions only; no Fill, schema, hardware-adapter, deployment or live-service change.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-113, DEC-121

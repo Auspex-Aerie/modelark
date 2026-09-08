@@ -633,12 +633,22 @@ class Session:
             states = {"STOPPED": "stopped", "WAITING_SOURCE": "waiting_source",
                       "WAITING_DESTINATION": "waiting_destination", "SOURCE_BLOCKED": "blocked_source"}
             state = _refusal_state(exc.code)
-            self._terminal = exc.code not in states
+            # Stop ends this attempt; attended source/destination waits may retain it.
+            self._terminal = exc.code == "STOPPED" or exc.code not in states
             try:
-                self.authority.transition(state, str(exc))
+                outcome = self.authority.transition(state, str(exc))
+            except TransferRefusal as transition_error:
+                if transition_error.code != "STOPPED":
+                    raise
+                # A pending stop can win while publishing an attended-wait outcome.
+                # The authority committed its acknowledgment before raising STOPPED.
+                self._terminal = True
+                outcome = Status(self.transaction_id, "stopped", "STOPPED")
             finally:
                 if self._terminal:
                     self.lease.close()
+            if outcome.state == "stopped":
+                return outcome  # Never replace this result with a successor attempt's state.
             if exc.code not in states:
                 raise
         except FileExistsError as exc:
