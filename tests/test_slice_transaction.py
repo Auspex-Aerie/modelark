@@ -18,6 +18,17 @@ from test_slice_domain import facts, spec
 DATA = b"slice bytes!"
 
 
+def tamper_append(store, tx, event, payload):
+    """Explicit hostile private-state edit for journal-validation tests, not a writer API."""
+    encoded = d._json(payload).decode()
+    with store._connection() as con:
+        seq, previous = con.execute("SELECT journal_seq,journal_digest FROM transactions WHERE id=?", (tx,)).fetchone()
+        seq += 1
+        digest = hashlib.sha256(d._json([tx, seq, previous, event, encoded])).hexdigest()
+        con.execute("INSERT INTO journal VALUES(?,?,?,?,?)", (tx, seq, event, encoded, digest))
+        con.execute("UPDATE transactions SET journal_seq=?,journal_digest=? WHERE id=?", (seq, digest, tx))
+
+
 @pytest.fixture
 def api(tmp_path, monkeypatch):
     try:
@@ -170,11 +181,11 @@ def test_approval_is_durable_and_does_not_start_or_touch_destination(setup, api)
 
 @pytest.mark.parametrize("missing_serial", [True, False])
 def test_private_v1_upgrade_preserves_transaction_authority(setup, api, missing_serial):
-    _, store, plan, tx, dest, _ = setup
+    t, store, plan, tx, dest, _ = setup
     store.approve(tx, expected_seal=plan.seal)
     store.reserve(tx, plan.destination.device_id)
     store.request_stop(tx)
-    store.append(tx, "test-marker", {"preserved": True})
+    tamper_append(store, tx, "test-marker", {"preserved": True})
     before = store.events(tx)
     with store._connection() as con:
         if missing_serial:
@@ -187,10 +198,14 @@ def test_private_v1_upgrade_preserves_transaction_authority(setup, api, missing_
     assert upgraded.stop_requested(tx)
     serial = upgraded.reserve(tx, plan.destination.device_id)
     upgraded.request_stop(tx)
-    upgraded.activate(tx, plan.destination.device_id, serial)
+    lease = t._Lease(plan.destination.device_id, tx)
+    try:
+        assert upgraded.claim(tx, plan.destination.device_id, lease.attempt, serial).state == "stopped"
+    finally:
+        lease.close()
     assert upgraded.stop_requested(tx)  # A newer stop still wins after migration.
     with upgraded._connection(write=False) as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 5
     assert api[1].Store().events(tx) == before  # Reopening is idempotent.
     assert not list(dest.root.iterdir())
 
@@ -305,9 +320,15 @@ def test_activation_itself_checks_terminal_state(setup):
     t, store, plan, tx, _, _ = setup
     store.approve(tx, expected_seal=plan.seal)
     serial = store.reserve(tx, plan.destination.device_id)
-    store.set_state(tx, "invalidated")
-    with pytest.raises(t.TransferRefusal, match="NOT_RESUMABLE"):
-        store.activate(tx, plan.destination.device_id, serial)
+    lease = t._Lease(plan.destination.device_id, tx)
+    try:
+        store.claim(tx, plan.destination.device_id, lease.attempt, serial)
+        with store._connection() as con:
+            con.execute("UPDATE transactions SET state='invalidated' WHERE id=?", (tx,))
+        with pytest.raises(t.TransferRefusal, match="NOT_RESUMABLE"):
+            store.transition(lease.attempt, plan.destination.device_id, "transferring")
+    finally:
+        lease.close()
     assert store.status(tx).state == "invalidated"
 
 
@@ -556,7 +577,7 @@ def test_completed_owners_child_is_not_a_new_transactions_writer(setup):
             for _ in range(2):
                 with pytest.raises(t.TransferRefusal, match="DESTINATION_BUSY"):
                     t.start(store, second, dest, sources)
-            assert store.process_owner(plan.destination.device_id) is None
+            assert store.current_attempt(plan.destination.device_id) is None
             assert store.receipt(second) is None
             assert store.status(tx).state == "complete"
         finally:
@@ -859,7 +880,7 @@ def test_contradictory_journal_binding_is_rejected(setup):
     with start(setup):
         pass
     op = next(payload for event, payload in store.events(tx) if event == "operation")
-    store.append(tx, "operation", dict(op, seal="other-seal"))
+    tamper_append(store, tx, "operation", dict(op, seal="other-seal"))
     with pytest.raises(t.TransferRefusal, match="JOURNAL_CORRUPT"):
         t.start(store, tx, dest, sources)
 
@@ -1022,7 +1043,7 @@ def test_journal_rejects_nonhex_creation_tokens(setup):
     with store._connection() as con:
         con.execute("DELETE FROM journal WHERE tx=?", (tx,))
         con.execute("UPDATE transactions SET journal_seq=0,journal_digest='' WHERE id=?", (tx,))
-    store.append(tx, "operation", dict(op, token="x" * 32))
+    tamper_append(store, tx, "operation", dict(op, token="x" * 32))
     with pytest.raises(t.TransferRefusal, match="JOURNAL_CORRUPT"):
         t.start(store, tx, dest, sources)
 
@@ -1120,7 +1141,7 @@ def test_v3_migration_does_not_invent_process_ownership(setup, api):
         con.execute("PRAGMA user_version=3")
     upgraded = api[1].Store()
     assert upgraded.owner(plan.destination.device_id) == tx
-    assert upgraded.process_owner(plan.destination.device_id) is None
+    assert upgraded.current_attempt(plan.destination.device_id) is None
     lease = t._Lease(plan.destination.device_id)
     try:
         for _ in range(2):
@@ -1282,10 +1303,10 @@ def test_terminal_session_cannot_resume_after_adapter_condition_is_restored(setu
 def test_terminal_revocation_survives_state_persistence_failure(setup, failure):
     t, store, plan, tx, dest, _ = setup
     with start(setup) as session:
-        setting = store.set_state
+        setting = store.transition
         def busy(*args, **kwargs):
             raise t.TransferRefusal("STATE_BUSY")
-        store.set_state = busy
+        store.transition = busy
         if failure == "typed":
             dest.changed = True
         else:
@@ -1294,7 +1315,7 @@ def test_terminal_revocation_survives_state_persistence_failure(setup, failure):
             dest.create_directory = collision
         with pytest.raises(t.TransferRefusal, match="STATE_BUSY"):
             session.step()
-        store.set_state = setting
+        store.transition = setting
         dest.changed = False
         assert not session.can_write
         assert store.owner(plan.destination.device_id) == tx
@@ -1341,7 +1362,7 @@ def test_cached_journal_requires_unchanged_durable_head(setup):
     t, store, plan, tx, dest, sources = setup
     with start(setup) as session:
         op = next(payload for event, payload in store.events(tx) if event == "operation")
-        store.append(tx, "operation", op)
+        tamper_append(store, tx, "operation", op)
         with pytest.raises(t.TransferRefusal, match="JOURNAL_CORRUPT"):
             session.run()
 
@@ -1379,8 +1400,8 @@ def test_delayed_first_starter_cannot_downgrade_a_completed_winner(setup):
     assert store.status(tx).state == "complete"
 
 
-@pytest.mark.parametrize("adapter_refuses", [False, True])
-def test_starter_in_completion_commit_window_cannot_downgrade_completion(setup, adapter_refuses):
+@pytest.mark.parametrize("pause_at", ["snapshot", "claim"])
+def test_starter_in_completion_commit_window_cannot_downgrade_completion(setup, monkeypatch, pause_at):
     t, store, _, tx, dest, sources = setup
     checked, committed = threading.Event(), threading.Event()
     outcomes = []
@@ -1392,18 +1413,34 @@ def test_starter_in_completion_commit_window_cannot_downgrade_completion(setup, 
     process = threading.Thread(target=contender)
     with start(setup) as winner:
         original_check, original_close = dest.check, winner.lease.close
+        original_status, original_claim = store.status, store.claim
+        snapshots = 0
+        def pause():
+            checked.set()
+            assert committed.wait(10)
+        def status(*args):
+            nonlocal snapshots
+            result = original_status(*args)
+            if threading.current_thread() is process:
+                snapshots += 1
+                if pause_at == "snapshot" and snapshots == 2:
+                    pause()
+            return result
+        def claim(*args):
+            if threading.current_thread() is process and pause_at == "claim":
+                pause()
+            return original_claim(*args)
         def check(*args):
             if threading.current_thread() is process:
-                checked.set()
-                assert committed.wait(10)
-                if adapter_refuses:
-                    raise t.TransferRefusal("DESTINATION_CHANGED")
+                pytest.fail("a completed contender must not reach destination checking")
             return original_check(*args)
         def release():
             original_close()
             process.start()
             assert checked.wait(10)
         dest.check, winner.lease.close = check, release
+        monkeypatch.setattr(store, "status", status)
+        monkeypatch.setattr(store, "claim", claim)
         try:
             assert winner.run().state == "complete"
         finally:

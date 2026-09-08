@@ -7,21 +7,18 @@ catalog and opens *local original bytes* under that fence. Real adapters belong 
 """
 from contextlib import AbstractContextManager
 from dataclasses import asdict, dataclass
-import errno
 import hashlib
 import io
 import json
-import os
 from pathlib import PurePosixPath
-import socket
 from typing import BinaryIO, Protocol
 import uuid
 
 from . import domain as d
+from .authority import DeliveryAuthority, Lease, refusal_state as _refusal_state
 
 
-_RESUMABLE_STATES = frozenset({"approved", "starting", "transferring", "verifying", "stopped",
-                              "waiting_source", "blocked_source", "waiting_destination"})
+_Lease = Lease  # Compatibility for the internal disposable exclusion tests.
 
 
 class TransferRefusal(ValueError):
@@ -176,32 +173,6 @@ class SourcePort(Protocol):
     def open(self, source: d.SourceEvidence) -> AbstractContextManager[tuple[d.CatalogSnapshot, BinaryIO]]: ...
 
 
-class _Lease:
-    """Linux host-wide process fence, independent of paths and immune to lock-file replacement.
-
-    Closing the parent's descriptor does not unlock an inherited child's descriptor. Workers
-    spawning an exec child capable of writing must pass fd explicitly; it is CLOEXEC by default.
-    """
-    def __init__(self, device):
-        self.pid = os.getpid()
-        self.socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        key = hashlib.sha256(device.encode()).hexdigest()
-        try:
-            self.socket.bind("\0modelark-slice-device-" + key)
-        except OSError as exc:
-            self.socket.close()
-            if exc.errno == errno.EADDRINUSE:
-                raise TransferRefusal("DESTINATION_BUSY") from exc
-            raise
-
-    def close(self):
-        self.socket.close()
-
-    def check(self):
-        if os.getpid() != self.pid or self.socket.fileno() < 0:
-            raise TransferRefusal("EXECUTION_FENCE_LOST")
-
-
 def _same_source(artifact, candidate, snapshot):
     files = [f for f in snapshot.files if (f.repo_id, f.rfilename) == (artifact.repo_id, artifact.rfilename)]
     copies = [c for c in snapshot.copies if (c.repo_id, c.rfilename, c.drive_label)
@@ -231,29 +202,16 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
         return status
     required = plan.required_bytes(store.root)
     serial = store.reserve(tx, plan.destination.device_id)
+    if isinstance(serial, Status):
+        return serial
     (fault or (lambda point: None))("reservation_committed")
+    authority = DeliveryAuthority.acquire(store, tx, plan.destination.device_id, serial)
+    if isinstance(authority, Status):
+        return authority
     try:
-        lease = _Lease(plan.destination.device_id)
-    except TransferRefusal:
-        current = store.status(tx)
-        if current.state == "complete" or store.process_owner(plan.destination.device_id) == tx:
-            return current  # Observation only; never hands out a writer capability.
-        raise
-    try:
-        # Another first starter may have won, completed, and released exclusion while this
-        # caller was between durable reservation and process bind. Never downgrade completion.
-        current = store.status(tx)
-        if current.state == "complete":
-            lease.close()
-            return current
-        if current.state not in _RESUMABLE_STATES:
-            raise TransferRefusal("NOT_RESUMABLE", current.state)
-        store.record_process(tx, plan.destination.device_id)
         destination.check(plan.destination, 0 if not store.events(tx) else _allocated(store, tx, destination), required)
-        if not store.activate(tx, plan.destination.device_id, serial):
-            lease.close()
-            return store.status(tx)
-        session = Session(store, tx, plan, destination, sources, lease, fault)
+        authority.activate()
+        session = Session(store, tx, plan, destination, sources, authority, fault)
         session._fault("reserved")
         session._audit_layout()
         session._control()
@@ -261,14 +219,12 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
     except TransferRefusal as exc:
         try:
             if exc.code not in {"DESTINATION_BUSY", "STATE_BUSY", "NOT_RESUMABLE"}:
-                current = store.refuse_start(tx, plan.destination.device_id, _refusal_state(exc.code), str(exc))
-                if current.state == "complete":
-                    return current
+                authority.refuse(exc)
         finally:
-            lease.close()
+            authority.lease.close()
         raise
     except BaseException:
-        lease.close()
+        authority.lease.close()
         raise
 
 
@@ -325,12 +281,6 @@ def _operations(store, tx):
     return result
 
 
-def _refusal_state(code):
-    return {"STOPPED": "stopped", "WAITING_SOURCE": "waiting_source",
-            "WAITING_DESTINATION": "waiting_destination", "SOURCE_BLOCKED": "blocked_source"}.get(
-                code, "invalidated" if code.startswith("DESTINATION_") else "failed")
-
-
 def _allocated(store, tx, destination):
     total, seen = 0, set()
     for op in _operations(store, tx).values():
@@ -352,11 +302,16 @@ def _allocated(store, tx, destination):
 class Session:
     @property
     def can_write(self):
-        return self.lease.socket.fileno() >= 0 and os.getpid() == self.lease.pid
+        try:
+            self.lease.check()
+        except TransferRefusal:
+            return False
+        return True
 
-    def __init__(self, store, tx, plan, destination, sources, lease, fault):
+    def __init__(self, store, tx, plan, destination, sources, authority, fault):
         self.store, self.transaction_id, self.plan = store, tx, plan
-        self.destination, self.sources, self.lease = destination, sources, lease
+        self.destination, self.sources, self.authority = destination, sources, authority
+        self.lease = authority.lease
         self._fault = fault or (lambda point: None)
         self.ops = _operations(store, tx)
         self.head = store.head(tx)
@@ -379,23 +334,12 @@ class Session:
         self.close()
 
     def close(self):
-        if self.lease.socket.fileno() < 0:
-            return
-        try:
-            if os.getpid() == self.lease.pid and self.store.status(self.transaction_id).state in {"transferring", "verifying"}:
-                self.store.set_state(self.transaction_id, "stopped")
-        finally:
-            self.lease.close()  # Never explicit unlock: inherited writer children retain exclusion.
+        self.authority.close()
 
     def _boundary(self):
-        self.lease.check()
-        stopped, head, owner = self.store.guard(self.transaction_id, self.plan.destination.device_id)
-        if owner != self.transaction_id:
-            raise TransferRefusal("EXECUTION_FENCE_LOST")
+        head = self.authority.boundary()
         if head != self.head:
             raise TransferRefusal("JOURNAL_CORRUPT", "journal changed outside its fenced writer")
-        if stopped:
-            raise TransferRefusal("STOPPED")
         self.destination.check(self.plan.destination, self._allocated_bytes, self._required_bytes)
 
     def _check(self):
@@ -413,7 +357,7 @@ class Session:
 
     def _record(self, op, state):
         op = dict(op, state=state)
-        self.head = self.store.append(self.transaction_id, "operation", op, expected_head=self.head)
+        self.head = self.authority.append("operation", op, expected_head=self.head)
         self.ops[op["path"]] = op
         for path in (op["path"], op.get("temporary")):
             if path:
@@ -623,7 +567,7 @@ class Session:
 
     def _finish(self):
         self._verify_control(required=True)
-        self.store.set_state(self.transaction_id, "verifying")
+        self.authority.transition("verifying")
         ops = self.ops
         files = []
         for artifact in self.plan.proposal.closure:
@@ -641,8 +585,8 @@ class Session:
             self._publish(op)
         else:
             self._write(op, io.BytesIO(data))
-        self.head = self.store.append(self.transaction_id, "receipt", receipt, expected_head=self.head)
-        self.store.complete(self.transaction_id, self.plan.destination.device_id, self.lease.close)
+        self.head = self.authority.append("receipt", receipt, expected_head=self.head)
+        self.authority.complete()
 
     def step(self):
         if self._terminal:
@@ -664,7 +608,7 @@ class Session:
             self._check()
             self._audit_layout()
             if current.state in {"waiting_source", "blocked_source", "waiting_destination"}:
-                self.store.set_state(self.transaction_id, "transferring")
+                self.authority.transition("transferring")
             ops = self.ops
             for artifact in self.plan.proposal.closure:
                 path = str(PurePosixPath(self.plan.proposal.spec.destination_root) / artifact.repo_id / artifact.rfilename)
@@ -691,7 +635,7 @@ class Session:
             state = _refusal_state(exc.code)
             self._terminal = exc.code not in states
             try:
-                self.store.set_state(self.transaction_id, state, str(exc))
+                self.authority.transition(state, str(exc))
             finally:
                 if self._terminal:
                     self.lease.close()
@@ -700,7 +644,7 @@ class Session:
         except FileExistsError as exc:
             self._terminal = True
             try:
-                self.store.set_state(self.transaction_id, "failed", "OUTPUT_COLLISION")
+                self.authority.transition("failed", "OUTPUT_COLLISION")
             finally:
                 self.lease.close()
             raise TransferRefusal("OUTPUT_COLLISION", str(exc)) from exc

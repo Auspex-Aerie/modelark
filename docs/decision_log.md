@@ -2721,10 +2721,22 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEC-120: Require process-acquisition evidence for duplicate observation
 - `id`: DEC-120
 - `date`: 2026-09-08
-- `status`: accepted
+- `status`: superseded by DEC-121
 - `triggered_by`: Local round 2 boundary review extended the new-reservation busy regression to a second retry and reproduced a false initializing-writer observation despite no process for that transaction. Both external reviewers were clear on 46744c1.
 - `decision`: Record process acquisition on the durable owner only while holding device exclusion. Combine a failed bind with that same reservation's acquisition evidence before returning duplicate observation; otherwise report busy on every retry. Private schema v4 conservatively initializes older reservations without inventing acquisition evidence.
 - `rationale`: A reservation's existence, including a repeated reservation, does not identify the incumbent process. A retained child of a completed previous transaction may still own the socket. Once a reservation actually acquires exclusion, no other transaction can become the incumbent while that durable owner remains, because all Starts reserve before binding and there is no takeover/expiry path.
 - `impact`: Final correction round (3 of 3). Strengthened retry regression, inherited-child completion regression and v3 migration coverage. An initializing duplicate in the short pre-record interval conservatively receives busy. No new IPC/listener, hardware adapter, deployment, catalog-schema change or real-device execution. Stop after fresh reviews and report residual findings/common architectural causes.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-108, DEC-110, DEC-118, DEC-119
+
+### DEC-121: Centralize delivery execution around current attempt capabilities
+- `id`: DEC-121
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator approval after the three-round PR #69 review stop; residual findings 3953777477, 3953814659 and 3953814662 exposed historical-acquisition, terminal-snapshot and stop-acknowledgment assumptions.
+- `decision`: Route Slice delivery claims, execution boundaries, legal transitions, journal mutation and completion through one attempt authority. Pair device exclusion with a unique kernel-held datagram marker, queried without messages or a listener, and publish its token only while both descriptors are held. Close marker before device exclusion. Require exact attempt identity within each durable mutation. Record requested and acknowledged stop serials separately in private schema v5; a Start can resume only a stop already acknowledged in its own snapshot. Recognize completion in reservation and claim before destination access.
+- `rationale`: Durable history is not proof of current process ownership, a preflight snapshot cannot authorize a later mutation, and observing a stop request is distinct from acknowledging it. Transitional uncertainty must refuse busy rather than invent a worker. Marker retention proves exclusion, not progress or worker responsiveness; a child retaining both descriptors is deliberately included.
+- `impact`: Existing Fill session-write/recovery guards adopt the same neutral attempt identity/state contract while retaining their catalog storage, expiry/CAS rules and current stop Event semantics. Slice retains its private delivery state, and actual Slice reads, Fill writers and drive-loss revocation share the existing archive identity/epoch fence. No catalog schema migration, scheduler rewrite, hardware adapter, public Start/Stop, live service change or deployment. The implementation/design skills guided the common contract and the ledger records the operator-authorized scope.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `supersedes`: DEC-120
+- `related`: DEC-108, DEC-110, DEC-115, DEC-118, DEC-119

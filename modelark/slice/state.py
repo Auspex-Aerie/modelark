@@ -13,6 +13,8 @@ import stat
 import uuid
 from typing import NamedTuple
 
+from modelark.execution_authority import Attempt, AuthorityLost, require_current
+from .authority import RESUMABLE_STATES, RUNNING_STATES, TERMINAL_STATES, TRANSITIONS
 from .domain import _json, validate_approval
 
 
@@ -20,8 +22,9 @@ HOST_STATE_DIR = Path.home() / ".local" / "state" / "modelark" / "slice"
 
 
 class Reservation(NamedTuple):
+    state: str
     stop_serial: int
-    created: bool
+    acknowledged_stop_serial: int
 
 
 def _private_directory(path):
@@ -85,7 +88,7 @@ class Store:
             raise ValueError("unsafe slice state database")
         with self._connection() as con:
             version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4):
+            if version not in (0, 1, 2, 3, 4, 5):
                 raise ValueError("unsupported slice state version")
             con.execute("CREATE TABLE IF NOT EXISTS transactions ("
                         "id TEXT PRIMARY KEY, plan TEXT NOT NULL, seal TEXT NOT NULL,"
@@ -112,10 +115,20 @@ class Store:
             if "process_seen" not in columns:
                 # An old reservation alone cannot prove that its process ever held exclusion.
                 con.execute("ALTER TABLE owners ADD COLUMN process_seen INTEGER NOT NULL DEFAULT 0")
+            if "attempt" not in columns:
+                con.execute("ALTER TABLE owners ADD COLUMN attempt TEXT")
+            transaction_columns = {row[1] for row in con.execute("PRAGMA table_info(transactions)")}
+            if "acknowledged_stop_serial" not in transaction_columns:
+                con.execute("ALTER TABLE transactions ADD COLUMN acknowledged_stop_serial INTEGER NOT NULL DEFAULT 0")
+                # Legacy stopped rows can also contain a NEW, unacknowledged request.
+                # No old state label proves which request was actually acknowledged.
+                con.execute("UPDATE transactions SET acknowledged_stop_serial=stop_serial-stop")
+            # Legacy fields are retained for development-database compatibility only.
+            # Neither process_seen nor activation_serial is execution authority in v5.
             con.execute("CREATE TABLE IF NOT EXISTS journal (tx TEXT NOT NULL REFERENCES transactions(id),"
                         "seq INTEGER NOT NULL, event TEXT NOT NULL, payload TEXT NOT NULL, digest TEXT NOT NULL,"
                         "PRIMARY KEY(tx,seq))")
-            con.execute("PRAGMA user_version=4")
+            con.execute("PRAGMA user_version=5")
 
     @contextmanager
     def _connection(self, *, write=True):
@@ -190,75 +203,93 @@ class Store:
         return row[0] if row else None
 
     def reserve(self, tx, device):
-        from .transaction import TransferRefusal, _RESUMABLE_STATES
+        from .transaction import TransferRefusal, Status
         def inspect(con):
-            owner = con.execute("SELECT tx,activation_serial FROM owners WHERE device=?", (device,)).fetchone()
+            state, serial, acknowledged = con.execute(
+                "SELECT state,stop_serial,acknowledged_stop_serial FROM transactions WHERE id=?", (tx,)).fetchone()
+            if state == "complete":
+                return None, Status(tx, state)
+            owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
             if owner and owner[0] != tx:
                 raise TransferRefusal("DESTINATION_BUSY", owner[0])
-            state, serial = con.execute("SELECT state,stop_serial FROM transactions WHERE id=?", (tx,)).fetchone()
-            if state not in _RESUMABLE_STATES:
+            if state not in RESUMABLE_STATES:
                 raise TransferRefusal("APPROVAL_MISSING" if state == "ready" else "NOT_RESUMABLE", state)
-            if owner and state == "starting":
-                serial = owner[1]
-            return owner, serial
+            return owner, Reservation(state, serial, acknowledged)
         # Repeated Start is a reader while an owner is actively journaling. Only the first
         # reservation needs the writer transaction; recheck inside it to close the CAS race.
         with self._connection(write=False) as con:
-            owner, serial = inspect(con)
-            if owner:
-                return Reservation(serial, False)
+            owner, reservation = inspect(con)
+            if owner or isinstance(reservation, Status):
+                return reservation
         with self._connection() as con:
-            owner, serial = inspect(con)
-            con.execute("INSERT OR IGNORE INTO owners(device,tx,activation_serial) VALUES(?,?,?)",
-                        (device, tx, serial))
+            owner, current = inspect(con)
+            if isinstance(current, Status):
+                return current
+            con.execute("INSERT OR IGNORE INTO owners(device,tx) VALUES(?,?)", (device, tx))
             if not owner:
                 con.execute("UPDATE transactions SET state='starting',reason='' WHERE id=?", (tx,))
-            return Reservation(serial, not owner)
+            # Revalidate ownership/state, but never upgrade this caller's original
+            # resume permission using a stop acknowledgment that happened while waiting.
+            return reservation
 
-    def process_owner(self, device):
+    def current_attempt(self, device):
         with self._connection(write=False) as con:
-            row = con.execute("SELECT tx FROM owners WHERE device=? AND process_seen=1", (device,)).fetchone()
-        return row[0] if row else None
+            row = con.execute("SELECT tx,attempt FROM owners WHERE device=?", (device,)).fetchone()
+        return Attempt(*row) if row and row[1] is not None else None
 
-    def record_process(self, tx, device):
-        # Only call while holding device exclusion. The bit remains valid for this durable
-        # reservation: no other transaction can acquire the device until that owner is deleted.
-        if self.process_owner(device) == tx:
-            return
+    def claim(self, tx, device, attempt, reservation):
+        """Publish an attempt only while its caller holds exclusion and its live marker."""
+        from .transaction import TransferRefusal, Status
         with self._connection() as con:
-            con.execute("UPDATE owners SET process_seen=1 WHERE device=? AND tx=?", (device, tx))
-
-    def activate(self, tx, device, stop_serial):
-        from .transaction import TransferRefusal, _RESUMABLE_STATES
-        with self._connection() as con:
-            state = con.execute("SELECT state FROM transactions WHERE id=?", (tx,)).fetchone()[0]
+            state, stop, serial, acknowledged = con.execute(
+                "SELECT state,stop,stop_serial,acknowledged_stop_serial FROM transactions WHERE id=?", (tx,)).fetchone()
             if state == "complete":
-                return False
-            if state not in _RESUMABLE_STATES:
+                return Status(tx, state)
+            if state not in RESUMABLE_STATES:
                 raise TransferRefusal("NOT_RESUMABLE", state)
             owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
-            if not owner or owner[0] != tx:
+            if not owner or owner[0] != tx or attempt.owner != tx:
                 raise TransferRefusal("EXECUTION_FENCE_LOST")
-            # A stop arriving during initialization must not be erased by activation.
-            con.execute("UPDATE transactions SET state='transferring',reason='',"
-                        "stop=CASE WHEN stop_serial=? THEN 0 ELSE stop END WHERE id=?", (stop_serial.stop_serial, tx))
-        return True
+            con.execute("UPDATE owners SET attempt=? WHERE device=? AND tx=?", (attempt.token, device, tx))
+            # Only a Start issued AFTER this exact stop was acknowledged may clear it.
+            resume = (reservation.state == state == "stopped"
+                      and reservation.stop_serial == reservation.acknowledged_stop_serial == serial == acknowledged)
+            if stop and not resume:
+                con.execute("UPDATE transactions SET state='stopped',reason='STOPPED',"
+                            "acknowledged_stop_serial=stop_serial WHERE id=?", (tx,))
+                return Status(tx, "stopped", "STOPPED")
+            con.execute("UPDATE transactions SET state='starting',reason='',stop=0 WHERE id=?", (tx,))
+            return Status(tx, "starting")
 
-    def refuse_start(self, tx, device, state, reason):
-        from .transaction import Status, _RESUMABLE_STATES
-        # A pre-activation adapter check may finish after another Session commits its
-        # terminal outcome. Serialize refusal publication with that outcome, not a snapshot.
-        with self._connection() as con:
-            current = con.execute("SELECT state,reason FROM transactions WHERE id=?", (tx,)).fetchone()
-            owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
-            if current[0] in _RESUMABLE_STATES and owner and owner[0] == tx:
-                con.execute("UPDATE transactions SET state=?,reason=? WHERE id=?", (state, reason, tx))
-                current = state, reason
-            return Status(tx, *current)
+    def _require_attempt(self, con, attempt, device, *, allow_stop=False):
+        from .transaction import TransferRefusal
+        row = con.execute("SELECT t.state,t.stop,o.tx,o.attempt FROM transactions t "
+                          "LEFT JOIN owners o ON o.device=? WHERE t.id=?", (device, attempt.owner)).fetchone()
+        if row is None:
+            raise TransferRefusal("EXECUTION_FENCE_LOST")
+        try:
+            require_current(attempt, Attempt(row[2], row[3]), row[0], RUNNING_STATES)
+        except AuthorityLost as exc:
+            code = "NOT_RESUMABLE" if row[0] in TERMINAL_STATES else "EXECUTION_FENCE_LOST"
+            raise TransferRefusal(code, str(exc)) from exc
+        if row[1] and not allow_stop:
+            raise TransferRefusal("STOPPED")
+        return row[0], bool(row[1])
 
-    def set_state(self, tx, state, reason=""):
+    def transition(self, attempt, device, state, reason=""):
+        from .transaction import Status, TransferRefusal
+        if state not in RUNNING_STATES | {"failed", "invalidated"}:
+            raise TransferRefusal("STATE_TRANSITION_INVALID", state)
         with self._connection() as con:
-            con.execute("UPDATE transactions SET state=?,reason=? WHERE id=?", (state, reason, tx))
+            current, stopped = self._require_attempt(con, attempt, device, allow_stop=True)
+            if stopped and state not in {"failed", "invalidated"}:
+                state, reason = "stopped", "STOPPED"
+            if state not in TRANSITIONS[current]:
+                raise TransferRefusal("STATE_TRANSITION_INVALID", f"{current} -> {state}")
+            con.execute("UPDATE transactions SET state=?,reason=?,acknowledged_stop_serial="
+                        "CASE WHEN ?='stopped' THEN stop_serial ELSE acknowledged_stop_serial END WHERE id=?",
+                        (state, reason, state, attempt.owner))
+            return Status(attempt.owner, state, reason)
 
     def request_stop(self, tx):
         with self._connection() as con:
@@ -268,19 +299,25 @@ class Store:
         with self._connection(write=False) as con:
             return bool(con.execute("SELECT stop FROM transactions WHERE id=?", (tx,)).fetchone()[0])
 
-    def guard(self, tx, device):
+    def guard(self, attempt, device):
         with self._connection(write=False) as con:
-            row = con.execute("SELECT t.stop,t.journal_seq,t.journal_digest,o.tx FROM transactions t "
-                              "LEFT JOIN owners o ON o.device=? WHERE t.id=?", (device, tx)).fetchone()
-        return bool(row[0]), (row[1], row[2]), row[3]
+            _, stopped = self._require_attempt(con, attempt, device, allow_stop=True)
+            head = con.execute("SELECT journal_seq,journal_digest FROM transactions WHERE id=?", (attempt.owner,)).fetchone()
+        return stopped, head
 
     def head(self, tx):
         with self._connection(write=False) as con:
             return con.execute("SELECT journal_seq,journal_digest FROM transactions WHERE id=?", (tx,)).fetchone()
 
-    def append(self, tx, event, payload, *, expected_head=None):
+    def append(self, tx, event, payload, *, expected_head=None, attempt, device):
+        from .transaction import TransferRefusal
         encoded = _json(payload).decode()
         with self._connection() as con:
+            state, _ = self._require_attempt(con, attempt, device)
+            if state not in {"transferring", "verifying"}:
+                raise TransferRefusal("STATE_TRANSITION_INVALID", f"journal append in {state}")
+            if attempt.owner != tx:
+                raise TransferRefusal("EXECUTION_FENCE_LOST")
             last = con.execute("SELECT journal_seq,journal_digest FROM transactions WHERE id=?", (tx,)).fetchone()
             if expected_head is not None and last != expected_head:
                 from .transaction import TransferRefusal
@@ -310,11 +347,15 @@ class Store:
     def receipt(self, tx):
         return next((payload for event, payload in reversed(self.events(tx)) if event == "receipt"), None)
 
-    def complete(self, tx, device, release_process):
+    def complete(self, attempt, device, release_process):
         from .transaction import TransferRefusal
+        tx = attempt.owner
         if self.receipt(tx) is None:
             raise TransferRefusal("RECEIPT_MISSING")
         with self._connection() as con:
+            state, _ = self._require_attempt(con, attempt, device)
+            if state != "verifying":
+                raise TransferRefusal("STATE_TRANSITION_INVALID", f"completion in {state}")
             con.execute("UPDATE transactions SET state='complete',reason='' WHERE id=?", (tx,))
             release_process()
             con.execute("DELETE FROM owners WHERE device=? AND tx=?", (device, tx))

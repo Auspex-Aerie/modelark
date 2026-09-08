@@ -12,19 +12,26 @@ evidence, and the destination port must validate that evidence before any writes
 proposal, destination binding and explicit metadata capacity reservation
 into a versioned seal. `Store.create(plan, domain_approval)` persists a ready transaction;
 `Store.approve(id, expected_seal=...)` durably approves that exact plan but starts nothing.
-`start(store, id, destination_port, source_port)` acquires device exclusion and atomically claims
-the approved transaction and durable reservation. The initializing reservation is committed before
-process exclusion becomes visible, so overlapping first Starts can identify the same owner. Final
-activation preserves any stop request arriving during initialization. It returns a `Session` to the sole writer, or a
-non-writing `Status` for a repeated Start while that same transaction holds the device.
-Both the post-bind check and activation's SQLite write transaction reject terminal state; a delayed
-starter cannot reactivate a transaction that another starter invalidated while it was paused.
-Initializing duplicates reuse the activation stop serial persisted with the first reservation.
-A reservation records process acquisition only while its caller actually holds device exclusion.
-A failed bind permits duplicate observation only if that still-current durable reservation has
-recorded process acquisition. Otherwise every retry reports `DESTINATION_BUSY`, including while
-a completed former owner's child retains an inherited descriptor. Before acquisition is recorded,
-an overlapping initializing caller conservatively reports busy rather than asserting writer identity.
+`start(store, id, destination_port, source_port)` delegates execution to `DeliveryAuthority`:
+reserve the approved device, acquire kernel exclusion plus a unique attempt marker, and publish
+that attempt in a guarded SQLite claim before checking the destination or activating. It returns
+a `Session` to the sole writer, or non-writing `Status` when the same attempt's exclusion is retained.
+Completion is recognized both during reservation and inside the claim transaction; a delayed
+starter returns completed status without touching the destination after completion wins.
+
+Every execution transition and journal append checks the exact `(transaction, attempt token)`
+inside its state transaction. The lifecycle transition table permits attended-wait retries but
+requires a fresh claim to resume stopped execution; completion has a separate receipt-bound gate.
+The neutral `modelark.execution_authority` identity/state contract is also used by existing Fill
+session writes and recovery. These remain separate stores and workflow policies: Fill's existing
+portal stop Event, expiry rules and SQL fencing-token CAS are unchanged. Slice delivery receipts
+do not become archive evidence, and this is not a scheduler or public Start/Stop implementation.
+
+A busy bind permits observation only after finding a current durable attempt, querying that
+attempt's live kernel marker, and re-reading the same durable attempt. Historical acquisition
+flags are not authority. Otherwise every retry reports `DESTINATION_BUSY`, including when an
+unrelated former owner's child retains exclusion. Transitional uncertainty is also busy.
+Observation proves retained attempt exclusion, not progress, responsiveness, or a live worker.
 
 The private SQLite store is separate from every catalog, under the fixed operator-host namespace
 `~/.local/state/modelark/slice`. This is not a catalog/state-directory option: local workers for
@@ -37,35 +44,42 @@ Reader operations use deferred transactions rather than requesting the writer re
 writers have a bounded SQLite busy wait and return typed `STATE_BUSY` on exhaustion. The private
 database handle retains SQLite rollback-recovery capability even for reader operations, so a hot
 journal from a dead writer is recovered rather than exposed as a read-only-database error.
-Private schema version 4 transactionally upgrades development version-1/2/3 databases, adding the
-stop serial when absent and the reservation's activation serial while preserving plans, pending
-stops, reservations and journal heads. An old initializing reservation with no saved activation
-serial conservatively preserves a pending stop until an explicit stopped-state resume.
-Older reservations do not infer process-acquisition evidence from ownership or state labels;
-they must successfully acquire exclusion before that evidence can be recorded.
+Private schema version 5 transactionally upgrades development version-1/2/3/4 databases while
+preserving plans, pending stops, reservations and journal heads. It adds a nullable live-attempt
+token and an acknowledged-stop serial; every pending legacy request remains unacknowledged,
+including on stopped rows which may contain a newer request. Legacy `process_seen` and `activation_serial`
+columns are retained for compatibility but are never read as execution authority. Older owners
+must acquire a new lease before publishing an attempt; migration invents no live marker.
 This migration never opens or changes a catalog database.
 Transient `STATE_BUSY` during Start or execution releases the process handle without turning the
 durable transaction into a terminal failure. A fresh Start can retry its existing approved authority.
 This differs from a terminal refusal whose subsequent status write fails: that old Session is revoked.
 
-A Linux abstract Unix socket bind provides process exclusion keyed only by the destination's
-canonical physical-device identity. No listener, remote connection, or replaceable lock file is
-used. The fence is shared across catalog paths, transaction IDs, and consumer roots in the same
-host/network namespace. Durable reservations survive loss of this process fence. An inherited
-descriptor retains exclusion after its parent closes or dies; an exec child capable of writing
-must explicitly inherit it. The engine itself spawns no writer children, and a forked child cannot
+A Linux abstract Unix stream socket bind provides process exclusion keyed only by the destination's
+canonical physical-device identity. A second abstract datagram endpoint identifies the unique
+attempt; probes only connect, never send or queue messages. There is no listener, helper service,
+remote connection, or replaceable lock file. Bind exclusion before the marker, publish the token
+only while both are held, and close the marker before exclusion. The fence is shared across
+catalog paths, transaction IDs, and consumer roots in the same host/network namespace.
+Durable reservations survive loss of this process fence. Inherited descriptors retain exclusion
+and identity after their parent closes or dies; an exec child capable of writing must explicitly
+inherit both and follow the same release order. The engine itself spawns no writer children, and a forked child cannot
 reuse the parent's `Session` methods. Container/network-namespace isolation and cross-host ownership
 are not supported execution topologies.
 
 `Session.step()` transfers one remaining file, or verifies and completes a fully transferred
 transaction. `run()` continues until complete, a stop, or an attended wait/block. `request_stop`
-is checked between streaming and verification chunks and before publication. Closing a live session records stopped state
+is checked between streaming and verification chunks and before publication. Each Start snapshots
+both requested and acknowledged stop serials. A crashed writer's unacknowledged stop is recorded
+as stopped on recovery without destination mutation; only a subsequent explicit Start whose
+snapshot already contains that exact acknowledgment can clear it. A delayed Start cannot gain
+resume permission from another caller's later acknowledgment. Closing a live session records stopped state
 and closes its process descriptor, but retains the durable reservation. A new seal cannot acquire
 that unfinished device. Completion releases the reservation only after verification and receipt
 publication; existing output/control records are not automatically deleted or adopted.
 Completion closes the Session's process descriptor inside the final state transaction before
 releasing durable ownership, including when the caller retains the completed Session object.
-If a same-transaction starter acquires exclusion during that final commit window, activation
+If a same-transaction starter acquires exclusion during that final commit window, its claim
 observes completion inside its own write transaction and returns a nonwriting completed status.
 Startup refusal publication is also serialized with terminal state and device ownership, so
 an adapter error based on a stale pre-activation snapshot cannot downgrade a terminal winner.
