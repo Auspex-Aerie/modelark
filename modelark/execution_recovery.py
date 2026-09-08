@@ -6,6 +6,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from modelark import execution_authority as authority
 from modelark.proposal import Refusal
 
 # session_id -> list of open file handles holding drive/controller fences (OS-visible flock).
@@ -247,18 +248,27 @@ def recover_expired_session(con, *, session_id, services):
                 "WHERE session_id=?", [session_id]).fetchone()
             if not row2:
                 raise Refusal("SESSION_NOT_FOUND", {"session_id": session_id}, ())
-            if int(row2[1]) != token:
+            expected = authority.Attempt(session_id, token)
+            actual = authority.Attempt(session_id, int(row2[1]))
+            try:
+                # Preserve refusal precedence: changed identity precedes expiry, and
+                # the workflow-state check follows expiry revalidation below.
+                authority.require_current(expected, actual, row2[0], (row2[0],))
+            except authority.AuthorityLost as exc:
                 raise Refusal(
                     "SESSION_TOKEN_MISMATCH",
-                    {"session_id": session_id, "token": token}, ())
+                    {"session_id": session_id, "token": token}, ()) from exc
             now2 = _now(services)
             if not _expired(row2[2], now2):
                 raise Refusal(
                     "SESSION_NOT_EXPIRED",
                     {"expires_at": row2[2], "now": now2.isoformat()}, ())
-            if row2[0] not in ("starting", "running", "stopping"):
+            try:
+                authority.require_current(expected, actual, row2[0],
+                                          ("starting", "running", "stopping"))
+            except authority.AuthorityLost as exc:
                 raise Refusal(
-                    "SESSION_STATE_INVALID", {"state": row2[0]}, ())
+                    "SESSION_STATE_INVALID", {"state": row2[0]}, ()) from exc
             # Expiry re-validated above; CAS on token + live state + still-expired expires_at.
             exp_bound = row2[2]
             if exp_bound is None:

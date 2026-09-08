@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
 from modelark import execution_config as ecfg
+from modelark import execution_authority as authority
 from modelark import execution_projection as eproj
 from modelark.proposal import Refusal, bump_revision, current_draft_ids, load_proposal
 
@@ -646,8 +647,14 @@ def session_write(con, session_id, fencing_token, operation: Callable):
             row2 = con.execute(
                 "SELECT fencing_token, state FROM execution_sessions WHERE session_id=?",
                 [session_id]).fetchone()
-            if not row2 or int(row2[0]) != int(fencing_token) or row2[1] not in LIVE_STATES:
+            if not row2:
                 raise Refusal("SESSION_TOKEN_MISMATCH", {"session_id": session_id}, ())
+            try:
+                authority.require_current(
+                    authority.Attempt(session_id, int(fencing_token)),
+                    authority.Attempt(session_id, int(row2[0])), row2[1], LIVE_STATES)
+            except authority.AuthorityLost as exc:
+                raise Refusal("SESSION_TOKEN_MISMATCH", {"session_id": session_id}, ()) from exc
             result = operation(con)
             new_rev = bump_revision(con)
             con.execute(

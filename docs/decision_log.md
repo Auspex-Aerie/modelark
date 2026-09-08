@@ -2585,3 +2585,169 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Slice 1 reader and positive/negative fallback contracts only; no catalog mutation, acquisition change, or live archive access.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-domain.md
 - `related`: DEC-105, DEC-106, tests/test_def033_gate1_contracts.py
+
+### DEC-108: Separate durable slice transaction authority from catalog and hardware adapters
+- `id`: DEC-108
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Operator authorization of Slice 2 after PR #68 merged at `8408abe`.
+- `decision`: Persist transaction plans, explicit approval, unfinished device reservations and append-only journals in a private, fixed operator-host SQLite namespace outside the catalog. Combine atomic claims with Linux abstract Unix-socket process exclusion keyed solely by canonical destination device identity. Keep inherited descriptors excluding successor writers; do not support alternate namespaces, cross-host takeover or cleanup. Compose the existing nonblocking archive mutation fence with a fresh read-only catalog snapshot and an injected local source reader. Orchestrate recoverable publication over explicit trusted destination ports; ship no real hardware adapter or public Start entry point in Slice 2.
+- `rationale`: Process death must release only live exclusion, not durable ownership. A fixed host authority prevents catalog/root aliases from creating independent reservations, and abstract socket binds avoid replaceable lock-file identities. Keeping device proof and confined IO behind explicit ports permits disposable fault/concurrency tests without claiming that simulated devices satisfy real USB safety gates.
+- `impact`: Adds internal state, transaction and source-gate modules plus tests and API documentation. Slice 3 must prove confinement, system/archive exclusion, capability accounting and recoverable owned-object certificates inside actual adapter calls before exposing execution. Catalog schemas, archive evidence and live Fill remain unchanged.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md, docs/plans/usable-slice-implementation-charter.md
+- `related`: DEC-101, DEC-102, DEC-103, DEC-104, DEF-041
+
+### DEC-109: Admit only the slice source gate to the neutral drive-fence import boundary
+- `id`: DEC-109
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #69 CI at `7dbbe4e`: 1,152 tests passed and the reviewed-import guard rejected the new `slice/sources.py` fence import.
+- `decision`: Extend the neutral `drive_fence` import allowlist to the exact `slice/sources.py` path required by DEC-108. Match repo-relative paths rather than basenames; leave `drive_mutation` limited to its existing reviewed writer modules.
+- `rationale`: Slice reads must share the writer's exclusion primitive without gaining authority to dirty or anchor a drive. An explicit path exception preserves the architectural guard instead of bypassing it through dynamic imports or broadening mutation authority.
+- `impact`: Updates the import-policy contract and source-gate documentation; no production writer or catalog changes.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-103, DEC-108, tests/test_drive_mutation_envelope.py
+
+### DEC-110: Make initializing ownership observable and control publication restartable
+- `id`: DEC-110
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #69 reviews at `7dbbe4e` and reproductions of read contention, overlapping first Starts, missing/changed controls and incomplete control creation.
+- `decision`: Commit an initializing device reservation before acquiring process exclusion, then activate only the fenced owner without erasing a newer stop request. Use deferred private-state reader transactions and bounded writer contention, retaining SQLite crash rollback capability. Publish control records through the same restartable prepared/no-replace protocol as receipts. Verify control contents and extant temporary certificates at final verification; check stop/ownership during hashing. Cache validated operation/allocation state under a durable-head guard and append CAS rather than replaying the journal per chunk. Limit source error translation to source setup, preserving downstream destination failures.
+- `rationale`: Repeated Start must observe an initializing owner, not depend on timing. An interrupted control write cannot strand durable ownership. Prepared evidence and current object certificates, not historical names, establish recovery authority. Cached execution state must retain a checkable link to its durable journal while avoiding work proportional to journal size for every content chunk.
+- `impact`: Refines only the internal Slice 2 authority, publication and source interfaces, with concurrency/crash/stop and bounded-replay contracts. The historical-temporary reproduction was already refused by the later allocation scan; explicit final authentication preserves that refusal after removing per-chunk scans. No catalog, live Fill or real-device changes.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-102, DEC-103, DEC-108, DEC-109
+
+### DEC-111: Upgrade early private slice state without losing durable authority
+- `id`: DEC-111
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #69 second Greptile review at `c0a52d2` and a failing version-1 database regression reproducing missing `stop_serial` on Start.
+- `decision`: Advance private transaction state to schema version 2. In the existing initialization write transaction, add the stop serial only when an accepted version-1 database lacks it, then commit the version update with all existing plans, reservations, stop flags and journal heads preserved. Accept both development version-1 layouts and make reopening idempotent.
+- `rationale`: Even an internal API must not silently accept an earlier durable schema and fail later on reachable Start/Stop operations. An additive transactional migration preserves ownership rather than requiring state deletion or adoption.
+- `impact`: Private Slice 2 SQLite initialization and compatibility tests only; no catalog migration, live-state access or real-device execution.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110
+
+### DEC-112: Retain session verification and revoke terminal writer capabilities
+- `id`: DEC-112
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Final Codex review of PR #69 at `4342578`, reproduced by six failing performance, terminal-session and parent-certificate regressions.
+- `decision`: Authenticate completed directory checkpoints without re-flushing or re-journaling unchanged state. Rehash recovered files once per session and retain successful publication verification, with a mandatory final full digest pass. Refuse failed/invalidated Session reuse and release its process descriptor on terminal refusal without discarding durable ownership. Authenticate all journaled ancestors before child mutations, with inside-call confinement remaining a trusted adapter obligation.
+- `rationale`: Repeated work must not grow quadratically with shard count. A retained Session cannot bypass the same terminal-state gate applied by Start. Discovering lost parent authority only after child creation is too late to preserve unknown content.
+- `impact`: Internal transaction orchestration, regression tests and API documentation only; no hardware adapter, public Start, catalog change or live Fill action.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-111
+
+### DEC-113: Revoke a terminal session independently of status persistence
+- `id`: DEC-113
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: PR #69 Greptile review of `3f1af34` and two failed regressions injecting `STATE_BUSY` during terminal status persistence.
+- `decision`: Remember terminal refusal in the Session before attempting its durable status write, and release its process descriptor in a finally block for both typed refusals and no-replace collision exceptions. Keep the persistence error visible and reject reuse of that Session even when the durable status did not advance.
+- `rationale`: Failure to record a terminal transition must not preserve or restore the same in-process writer capability. The durable reservation remains intact; an unsuccessful status write must not be claimed as persisted.
+- `impact`: Internal session error handling, fault regressions and documentation only. No live database, archive or device access.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-112
+
+### DEC-114: Audit destination layout before initial and resumed mutation
+- `id`: DEC-114
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Codex review of PR #69 at `42ed3c3` and three failed regressions for zero-byte foreign descendants and unknown initial consumer roots.
+- `decision`: Authenticate the current consumer tree and its ancestor prefixes against journal-owned paths before Start/resume performs destination mutation, at artifact-step boundaries and during final verification. Refuse unknown roots or descendants even if their allocation is zero. Reuse cached operation certificates, without per-chunk scans, journal replay or redundant content hashing.
+- `rationale`: Final-only layout verification can discover a collision after additional files have already been published. Capacity checks do not prove absence of unknown metadata entries. Resume must re-establish the layout prerequisite before control recovery or artifact transfer.
+- `impact`: Internal transaction pre-use gates and disposable regressions only; inside-call descriptor confinement remains a future adapter obligation, and no real destination or archive is accessed.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-112, DEC-113
+
+### DEC-115: Preserve retry authority and make new delivery receipts self-contained
+- `id`: DEC-115
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Codex review of PR #69 at `81bc4e0` and six failing regressions for transient state contention, terminal activation races and missing portable receipt context.
+- `decision`: Release process exclusion on `STATE_BUSY` without persisting a terminal failure, retaining approved retry authority. Check resumable state after process binding and inside activation's write transaction so delayed starters cannot overwrite terminal outcomes. Default new plans to transaction protocol v2 and embed the full sealed plan, direct topology, terminal delivery status and content/layout verification result in receipts. Preserve protocol-v1 seals and receipt bytes for legacy recovery instead of rewriting prepared publications.
+- `rationale`: Shared-state contention is transient, unlike a revoked approval. Activation must check authority at its actual state transition, not only before waiting for exclusion. A portable delivery receipt must retain its approved context without relying on the host database, while no-replace recovery forbids retroactively changing legacy receipt bytes.
+- `impact`: Internal state-transition and receipt protocols, compatibility regressions and documentation only. Legacy receipts remain explicitly non-self-contained; no real archive, catalog, device or service is accessed.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-111, DEC-113, DEC-114
+
+### DEC-116: Seal metadata capacity and resume retained attended sessions
+- `id`: DEC-116
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Codex review of PR #69 at `8faebc1` and five failed regressions for retained waits and missing metadata capacity reservation.
+- `decision`: New transaction protocol v3 requires an explicit sealed metadata reserve above original artifact bytes. Check that reserve against the control/receipt payload upper bound over sealed source alternatives and actual private-state root, and pass the full required capacity to every destination gate. The trusted preflight adapter must account for filesystem allocation rounding, directories and temporary/control/receipt metadata within that reserve. Preserve v1/v2 seals and receipt formats for recovery only, with known payload-capacity checks. Return retained attended-wait sessions to transferring after their gates pass so run continues to completion.
+- `rationale`: Artifact bytes alone understate required destination space, especially with self-contained receipts. An adapter needs the remaining total reservation, not only historical allocation. A resolved attended wait must not terminate run on its stale status after successfully publishing a file.
+- `impact`: Internal plan/port capacity contract, receipt compatibility, session state and disposable tests; real filesystem charge proof is still an explicit Slice 3 prerequisite. No real device, archive, catalog or service mutation.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-114, DEC-115
+
+### DEC-117: Check the final publication boundary and classify lazy source reads
+- `id`: DEC-117
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Codex review of PR #69 at `44989bc` and seven failed regressions covering stops at verification EOF and source failures during lazy reads.
+- `decision`: Recheck the execution boundary after verification EOF/stream close and immediately before no-replace publication. Wrap only the yielded source stream's read operation to translate missing-source and other IO failures into typed source gaps, preserving destination exceptions outside that scope and keeping the reader/fence context alive through consumption.
+- `rationale`: A last-chunk check does not cover the subsequent EOF interval. Source availability can change after successful open; classifying only setup errors bypasses sealed fallback and actionable source blocking. Catching transaction-consumer exceptions would reintroduce incorrect destination attribution.
+- `impact`: Internal source-read and publication boundaries with control/file/receipt stop regressions, partial-read source failure/fallback tests and existing destination-error isolation coverage. No live device, archive, catalog or service access.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-112, DEC-114
+
+### DEC-118: Serialize initialization stops, completion release and source revocation
+- `id`: DEC-118
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: PR #69 Codex findings 3953499094, 3953499106 and 3953499111; operator-authorized three-round correction/review limit.
+- `decision`: Persist the first reservation's activation stop serial in private schema v3 and reuse it for overlapping initializing callers. Migrate older pending initializations conservatively. Release the completing Session's process descriptor before durable ownership becomes available, and report a newly reserved transaction's bind failure as busy. Serialize operator lifecycle loss with the same nonblocking identity/epoch fence held by source reads, retaining it through graph commit.
+- `rationale`: A refreshed snapshot of a stop counter is not the original activation authority; a durable reservation is not proof of process ownership; and a source fence only prevents revocation if the revoker participates. The three corrections establish ordering at those actual authority boundaries.
+- `impact`: Private state migration, transaction Start/completion and drive-loss synchronization with disposable regressions. No deployment, live Fill, real-device execution or catalog-schema change. Broader architectural changes remain proposals for the operator after at most three fix/review rounds.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-111, DEC-115, DEC-117
+
+### DEC-119: Serialize startup outcomes with committed terminal authority
+- `id`: DEC-119
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Round 1 Greptile finding 3953694180 and Codex finding 3953703340 on PR #69, independently identifying the completion handoff race introduced by DEC-118's release ordering.
+- `decision`: Inside activation's write transaction, recognize committed completion before checking removed ownership and return observation-only status. Publish startup refusals only while the transaction remains resumable and owns the device, in the same write transaction as those checks; preserve already-terminal outcomes.
+- `rationale`: Closing the lease and committing SQLite are separate authority boundaries. A pre-activation read can see the prior committed state during handoff, and even a destination check can finish late. Rechecking only successful activation leaves refusal publication able to overwrite the terminal winner. Terminal authority must be checked at both durable mutation points.
+- `impact`: Round 2 of at most three correction/re-review rounds. Two deterministic threaded regressions reproduced completion downgrades to failed and invalidated before correction. No adapter implementation, real-device execution, catalog-schema change or deployment.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-115, DEC-118
+
+### DEC-120: Require process-acquisition evidence for duplicate observation
+- `id`: DEC-120
+- `date`: 2026-09-08
+- `status`: superseded by DEC-121
+- `triggered_by`: Local round 2 boundary review extended the new-reservation busy regression to a second retry and reproduced a false initializing-writer observation despite no process for that transaction. Both external reviewers were clear on 46744c1.
+- `decision`: Record process acquisition on the durable owner only while holding device exclusion. Combine a failed bind with that same reservation's acquisition evidence before returning duplicate observation; otherwise report busy on every retry. Private schema v4 conservatively initializes older reservations without inventing acquisition evidence.
+- `rationale`: A reservation's existence, including a repeated reservation, does not identify the incumbent process. A retained child of a completed previous transaction may still own the socket. Once a reservation actually acquires exclusion, no other transaction can become the incumbent while that durable owner remains, because all Starts reserve before binding and there is no takeover/expiry path.
+- `impact`: Final correction round (3 of 3). Strengthened retry regression, inherited-child completion regression and v3 migration coverage. An initializing duplicate in the short pre-record interval conservatively receives busy. No new IPC/listener, hardware adapter, deployment, catalog-schema change or real-device execution. Stop after fresh reviews and report residual findings/common architectural causes.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-118, DEC-119
+
+### DEC-121: Centralize delivery execution around current attempt capabilities
+- `id`: DEC-121
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator approval after the three-round PR #69 review stop; residual findings 3953777477, 3953814659 and 3953814662 exposed historical-acquisition, terminal-snapshot and stop-acknowledgment assumptions.
+- `decision`: Route Slice delivery claims, execution boundaries, legal transitions, journal mutation and completion through one attempt authority. Pair device exclusion with a unique kernel-held datagram marker, queried without messages or a listener, and publish its token only while both descriptors are held. Close marker before device exclusion. Require exact attempt identity within each durable mutation. Record requested and acknowledged stop serials separately in private schema v5; a Start can resume only a stop already acknowledged in its own snapshot. Recognize completion in reservation and claim before destination access.
+- `rationale`: Durable history is not proof of current process ownership, a preflight snapshot cannot authorize a later mutation, and observing a stop request is distinct from acknowledging it. Transitional uncertainty must refuse busy rather than invent a worker. Marker retention proves exclusion, not progress or worker responsiveness; a child retaining both descriptors is deliberately included.
+- `impact`: Existing Fill session-write/recovery guards adopt the same neutral attempt identity/state contract while retaining their catalog storage, expiry/CAS rules and current stop Event semantics. Slice retains its private delivery state, and actual Slice reads, Fill writers and drive-loss revocation share the existing archive identity/epoch fence. No catalog schema migration, scheduler rewrite, hardware adapter, public Start/Stop, live service change or deployment. The implementation/design skills guided the common contract and the ledger records the operator-authorized scope.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `supersedes`: DEC-120
+- `related`: DEC-108, DEC-110, DEC-115, DEC-118, DEC-119
+
+### DEC-122: Release stopped delivery attempts before returning their outcome
+- `id`: DEC-122
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator-authorized correction of Codex P2 3954091840 on PR #69 at c5ec843; retained stopped-session and stop-persistence regressions reproduced writable capability after Stop.
+- `decision`: Treat Stop as ending the current Session attempt while retaining the transaction's durable reservation. Revoke the local Session before acknowledgment persistence, release its descriptors in the existing finally path, and return the captured stopped outcome rather than rereading successor state. Apply the same release when Stop wins over an attended-wait outcome; ordinary attended waits remain resumable on their retained attempt.
+- `rationale`: A stopped attempt cannot legally resume under DEC-121, so retaining its capability blocks the required fresh claim. Failure to persist acknowledgment must not preserve that local capability or be reported as durable success.
+- `impact`: Slice Session outcome handling and six disposable stop/restart regressions only; no Fill, schema, hardware-adapter, deployment or live-service change.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-113, DEC-121

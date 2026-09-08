@@ -623,12 +623,15 @@ def test_envelope_wired_only_into_reviewed_transport():
     mutation_allowed = {"fetch.py", "drive_bootstrap.py"}
     # #35-C admission preview + PR-08 proposal approval (A6) hold drive fences.
     # PR-09 execution session/recovery holds real controller+drive fences (B8/B9).
+    # 2026-09-07 / DEC-109: Slice 2's read-only gate shares the neutral fence, not mutation authority.
     fence_allowed = mutation_allowed | {
         "admission.py", "proposal.py", "execution_service.py", "execution_recovery.py",
+        "slice/sources.py", "drive_lifecycle.py",
     }
     importers, offenders = set(), []
     for path in root.rglob("*.py"):
-        if path.name in ("drive_fence.py", "drive_mutation.py"):
+        relative = path.relative_to(root).as_posix()
+        if relative in ("drive_fence.py", "drive_mutation.py"):
             continue
         tree = ast.parse(path.read_text(), filename=str(path))
         for node in ast.walk(tree):
@@ -639,9 +642,9 @@ def test_envelope_wired_only_into_reviewed_transport():
                 module = (node.module or "").split(".")
                 hits = (set(module) & envelope) | {a.name for a in node.names if a.name in envelope}
             for mod in hits:
-                importers.add(path.name)
+                importers.add(relative)
                 allowed = fence_allowed if mod == "drive_fence" else mutation_allowed
-                if path.name not in allowed:
+                if relative not in allowed:
                     offenders.append(f"{path.relative_to(root)}:{node.lineno} ({mod})")
     assert offenders == [], f"envelope import policy violated; found: {offenders}"
     assert "fetch.py" in importers, (

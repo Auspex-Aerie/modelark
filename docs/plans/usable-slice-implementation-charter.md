@@ -1,6 +1,6 @@
 # Usable Slice implementation charter
 
-Status: architecture locked; Slice 1 domain implementation under review
+Status: Slice 1 merged; Slice 2 transaction implementation in progress
 
 Updated: 2026-09-07
 
@@ -369,6 +369,10 @@ for eligibility, exact gap reporting, and the sealed direct-USB transaction.
 Slice 1's internal API and limits are documented in [Usable Slice domain](../usable-slice-domain.md).
 Its domain approval binds intent and archive evidence; execution readiness stays false until the
 later hardware preflight and durable ownership contracts are implemented.
+
+Slice 2's private state, process fencing, journal, and trusted adapter boundary are documented in
+[Usable Slice transaction](../usable-slice-transaction.md). Hardware adapters and real-device
+proof remain Slice 3 work; temporary-fixture success does not grant real-device execution authority.
 
 Finish PR #67's renewed bounded review (up to three iterations) at its exact pushed head and let the
 operator merge it. Then branch from that merged charter for implementation. The first test commit

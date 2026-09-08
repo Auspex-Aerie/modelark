@@ -199,6 +199,21 @@ def test_declare_lost_refuses_while_fill_is_live(tmp_path):
     con.close()
 
 
+def test_declare_lost_serializes_with_source_read_fence(tmp_path, monkeypatch):
+    from modelark import drive_fence
+    monkeypatch.setattr(drive_fence, "_LOCK_DIR", tmp_path / "locks")
+    con = _catalog(tmp_path)
+    preview = drive_lifecycle.loss_preview(con, "drive-02")
+    key = (preview["identity_fingerprint"], preview["identity_epoch"])
+    with drive_fence.hold_drives_sorted([key], blocking=False):
+        with pytest.raises(proposal.Refusal) as caught:
+            _declare(con, preview)
+        assert caught.value.code == "DRIVE_BUSY"
+        assert drive_lifecycle.loss_preview(con, "drive-02") == preview
+    assert _declare(con, preview)["lifecycle"] == "lost"
+    con.close()
+
+
 def test_portal_operation_returns_canonical_replan_without_targeting_lost_drive(tmp_path):
     con = _catalog(tmp_path)
     from modelark.web import data, drive_api
