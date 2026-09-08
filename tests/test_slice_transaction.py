@@ -715,6 +715,82 @@ def test_fenced_sources_use_real_archive_fence_and_read_only_snapshot(api, tmp_p
     con.close()
 
 
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("error,code", [(FileNotFoundError, "SOURCE_MISSING"), (OSError, "SOURCE_READ_FAILED")])
+def test_lazy_source_read_failure_blocks_or_uses_sealed_fallback(setup, tmp_path, monkeypatch, fallback, error, code):
+    from modelark import drive_fence
+    from modelark.slice import sources as gate
+    t, store, original, _, dest, synthetic = setup
+    snapshot = synthetic.snapshot
+    if fallback:
+        snapshot = replace(snapshot, drives=(*snapshot.drives, replace(snapshot.drives[0], drive_label="drive-b")),
+                           copies=(*snapshot.copies, replace(snapshot.copies[0], drive_label="drive-b")),
+                           anchors=(*snapshot.anchors, replace(snapshot.anchors[0], drive_label="drive-b")))
+    p = d.preview(original.proposal.spec, snapshot)
+    plan = t.TransferPlan(p, dest.binding, metadata_reserve_bytes=65536)
+    tx = store.create(plan, d.approve(p, expected_seal=p.seal, current_snapshot=snapshot))
+    store.approve(tx, expected_seal=plan.seal)
+    monkeypatch.setattr(drive_fence, "_LOCK_DIR", tmp_path / "locks")
+    monkeypatch.setattr(gate, "read_catalog", lambda *args: snapshot)
+    closed = []
+    class Failing(io.BytesIO):
+        def read(self, size=-1):
+            if self.tell():
+                raise error("source disappeared mid-read")
+            return super().read(2)
+    class Reader:
+        @contextmanager
+        def open(self, candidate):
+            stream = Failing(DATA) if candidate.drive.drive_label == "drive-a" else io.BytesIO(DATA)
+            try:
+                yield stream
+            finally:
+                stream.close()
+                closed.append(candidate.drive.drive_label)
+    source = gate.FencedSources(tmp_path / "unused-catalog", Reader())
+    with t.start(store, tx, dest, source) as session:
+        result = session.run()
+    if fallback:
+        assert result.state == "complete"
+        assert store.receipt(tx)["files"][0]["source"]["drive"]["drive_label"] == "drive-b"
+        assert closed == ["drive-a", "drive-b"]
+    else:
+        assert result.state == "blocked_source" and code in result.reason
+        assert store.receipt(tx) is None and closed == ["drive-a"]
+
+
+@pytest.mark.parametrize("kind", ["control", "file", "receipt"])
+def test_stop_at_verification_eof_prevents_publication(setup, kind):
+    t, store, _, tx, dest, _ = setup
+    targets = []
+    class StopAtEOF(io.BytesIO):
+        def read(self, size=-1):
+            data = super().read(size)
+            if not data:
+                store.request_stop(tx)
+            return data
+    def fault(point):
+        if point == kind + "_prepared":
+            op = next(payload for event, payload in reversed(store.events(tx))
+                      if event == "operation" and payload["kind"] == kind)
+            targets.append(op["path"])
+            read = dest.read
+            def stopping_read(path):
+                if path == op["temporary"]:
+                    return StopAtEOF((dest.root / path).read_bytes())
+                return read(path)
+            dest.read = stopping_read
+    if kind == "control":
+        with pytest.raises(t.TransferRefusal, match="STOPPED"):
+            with start(setup, fault):
+                pass
+    else:
+        with start(setup, fault) as session:
+            assert session.run().state == "stopped"
+    assert targets and not (dest.root / targets[0]).exists()
+    assert store.receipt(tx) is None
+
+
 def test_capacity_drift_is_not_hidden_by_own_partial_allocation(setup):
     t, store, plan, tx, dest, sources = setup
     original_check = dest.check

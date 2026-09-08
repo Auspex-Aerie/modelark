@@ -520,6 +520,7 @@ class Session:
                 self._boundary()
                 digest.update(data)
                 size += len(data)
+        self._boundary()  # Includes EOF/stream-close time, including zero-byte objects.
         return size == op["size"] and digest.hexdigest() == op["sha"]
 
     def _publish(self, op):
@@ -530,6 +531,7 @@ class Session:
             if self._owned(temp, op) is None or not self._matches(temp, op):
                 raise TransferRefusal("RECOVERY_DIGEST_MISMATCH", temp)
             self._check_parents(path)
+            self._boundary()  # Parent authentication and recovery hashing may observe a stop.
             try:
                 self.destination.publish(temp, path, op["token"])
             except FileExistsError as exc:

@@ -2684,3 +2684,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Internal plan/port capacity contract, receipt compatibility, session state and disposable tests; real filesystem charge proof is still an explicit Slice 3 prerequisite. No real device, archive, catalog or service mutation.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-108, DEC-110, DEC-114, DEC-115
+
+### DEC-117: Check the final publication boundary and classify lazy source reads
+- `id`: DEC-117
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Codex review of PR #69 at `44989bc` and seven failed regressions covering stops at verification EOF and source failures during lazy reads.
+- `decision`: Recheck the execution boundary after verification EOF/stream close and immediately before no-replace publication. Wrap only the yielded source stream's read operation to translate missing-source and other IO failures into typed source gaps, preserving destination exceptions outside that scope and keeping the reader/fence context alive through consumption.
+- `rationale`: A last-chunk check does not cover the subsequent EOF interval. Source availability can change after successful open; classifying only setup errors bypasses sealed fallback and actionable source blocking. Catching transaction-consumer exceptions would reintroduce incorrect destination attribution.
+- `impact`: Internal source-read and publication boundaries with control/file/receipt stop regressions, partial-read source failure/fallback tests and existing destination-error isolation coverage. No live device, archive, catalog or service access.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-112, DEC-114

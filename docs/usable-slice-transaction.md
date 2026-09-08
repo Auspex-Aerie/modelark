@@ -76,6 +76,8 @@ owned temporaries, checked for exact original size/SHA-256, flushed, and durably
 actual source record. Publication is atomic no-replace; the parent is flushed before completion.
 Receipt publication uses the same prepared/no-replace/parent-flush protocol. Temporary cleanup is
 restricted to authenticated transaction-owned objects.
+The execution boundary is checked after verification EOF/stream close and again immediately before
+publication, so a stop arriving at the end of hashing cannot slip through the last chunk check.
 The destination control record also uses restartable temporary/prepared/no-replace publication;
 a crash between its exclusive creation and content flush does not strand an empty final control.
 
@@ -137,6 +139,9 @@ does not revoke reads; changed lifecycle, identity, generation, copy or digest e
 Busy, offline and locally missing sources remain distinct reasons; none triggers retrieval.
 Source waits/blocks identify the exact repository, filename and candidate drive reasons. Source
 open-error translation does not encompass destination exceptions from the consuming transaction.
+The yielded source-read wrapper converts missing-source and other source IO errors raised during
+lazy reads into typed source failures. It does not wrap destination operations; sealed fallback
+selection and source blocking work even when the source fails after partial bytes have been read.
 The repository's import-policy guard permits this exact source-gate path to import the neutral
 fence only. It still forbids the slice package from importing the drive mutation envelope.
 
