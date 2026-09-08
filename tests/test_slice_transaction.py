@@ -51,16 +51,17 @@ class Destination:
         self.root = root
         root.mkdir()
         self.t = t
-        self.binding = t.DestinationBinding("test-device", "test-filesystem", "test-mount", 10000)
+        self.binding = t.DestinationBinding("test-device", "test-filesystem", "test-mount", 1_000_000)
         self.trace = []
         self.available = True
         self.changed = False
 
-    def check(self, binding, allocated):
+    def check(self, binding, allocated, required_bytes):
         if not self.available:
             raise self.t.TransferRefusal("WAITING_DESTINATION")
         if self.changed or self.binding != binding:
             raise self.t.TransferRefusal("DESTINATION_CHANGED")
+        assert required_bytes <= binding.available_bytes
         self.trace.append(("check", allocated))
 
     def inspect(self, path):
@@ -144,7 +145,7 @@ def setup(api, tmp_path):
     dest = Destination(tmp_path / "destination", t)
     sources = Sources(snapshot, t)
     store = s.Store()
-    plan = t.TransferPlan(p, dest.binding)
+    plan = t.TransferPlan(p, dest.binding, metadata_reserve_bytes=65536)
     tx = store.create(plan, approval)
     return t, store, plan, tx, dest, sources
 
@@ -222,7 +223,8 @@ def test_destination_receipt_is_self_contained_without_private_state(setup):
                                        "result": "verified", "file_count": len(plan.proposal.closure)}
 
 
-@pytest.mark.parametrize("version", ["modelark.slice.transaction.v1", "modelark.slice.transaction.v2"])
+@pytest.mark.parametrize("version", ["modelark.slice.transaction.v1", "modelark.slice.transaction.v2",
+                                      "modelark.slice.transaction.v3"])
 def test_receipt_recovery_preserves_its_approved_protocol_version(setup, version):
     t, store, original, tx, dest, sources = setup
     plan = replace(original, version=version)
@@ -248,11 +250,12 @@ def test_receipt_recovery_preserves_its_approved_protocol_version(setup, version
         assert receipt["status"] == "complete"
 
 
-def test_new_transactions_cannot_request_legacy_receipts(setup):
+@pytest.mark.parametrize("version", ["modelark.slice.transaction.v1", "modelark.slice.transaction.v2"])
+def test_new_transactions_cannot_request_legacy_receipts(setup, version):
     t, store, plan, _, _, _ = setup
     _, approval, _ = proposal()
     with pytest.raises(t.TransferRefusal, match="LEGACY_PLAN"):
-        store.create(replace(plan, version="modelark.slice.transaction.v1"), approval)
+        store.create(replace(plan, version=version), approval)
 
 
 @pytest.mark.parametrize("phase", ["start", "step", "status"])
@@ -334,6 +337,51 @@ def test_source_waits_preserve_approval_and_can_resume(setup, code, state):
         assert session.run().state == "complete"
     assert store.receipt(tx)["seal"] == plan.seal
     assert not list(dest.root.rglob(".slice-*"))
+
+
+@pytest.mark.parametrize("condition", ["WAITING_SOURCE", "SOURCE_BUSY", "destination"])
+def test_retained_session_run_finishes_after_attended_wait(setup, condition):
+    _, store, _, tx, dest, sources = setup
+    with start(setup) as session:
+        if condition == "destination":
+            dest.available = False
+        else:
+            sources.status["drive-a"] = condition
+        assert session.run().state in {"waiting_source", "blocked_source", "waiting_destination"}
+        sources.status.clear()
+        dest.available = True
+        assert session.run().state == "complete"
+    assert store.receipt(tx) is not None
+
+
+def test_plan_reserves_metadata_in_addition_to_original_artifact_bytes(api, tmp_path):
+    t, _ = api
+    p, _, _ = proposal()
+    dest = Destination(tmp_path / "destination", t)
+    with pytest.raises(t.TransferRefusal, match="DESTINATION_CAPACITY_INSUFFICIENT"):
+        t.TransferPlan(p, replace(dest.binding, available_bytes=p.total_bytes), metadata_reserve_bytes=8192)
+    with pytest.raises(t.TransferRefusal, match="DESTINATION_CAPACITY_INSUFFICIENT"):
+        t.TransferPlan(p, dest.binding, metadata_reserve_bytes=1)
+    with pytest.raises(t.TransferRefusal, match="DESTINATION_CAPACITY_UNPROVEN"):
+        t.TransferPlan(p, dest.binding)
+    with pytest.raises(t.TransferRefusal, match="DESTINATION_CAPACITY_INSUFFICIENT"):
+        t.TransferPlan(p, replace(dest.binding, available_bytes=p.total_bytes + 8191), metadata_reserve_bytes=8192)
+    plan = t.TransferPlan(p, replace(dest.binding, available_bytes=p.total_bytes + 8192), metadata_reserve_bytes=8192)
+    assert plan.required_bytes(tmp_path) == p.total_bytes + 8192
+    assert replace(plan, metadata_reserve_bytes=8191).seal != plan.seal
+
+
+def test_destination_gate_receives_the_full_sealed_capacity_requirement(setup):
+    t, _, plan, _, dest, _ = setup
+    check = dest.check
+    required = []
+    def checking(binding, allocated, required_bytes):
+        required.append(required_bytes)
+        check(binding, allocated, required_bytes)
+    dest.check = checking
+    with start(setup) as session:
+        assert session.run().state == "complete"
+    assert required and all(value == plan.proposal.total_bytes + plan.metadata_reserve_bytes for value in required)
 
 
 @pytest.mark.parametrize("change", ["lifecycle", "generation", "copy", "digest"])
@@ -598,7 +646,7 @@ def test_only_sealed_alternatives_may_be_used_and_actual_choice_is_retained(setu
                        anchors=(*snapshot.anchors, replace(snapshot.anchors[0], drive_label="drive-b",
                                                             identity_fingerprint=fp)))
     p = d.preview(plan.proposal.spec, snapshot)
-    plan2 = t.TransferPlan(p, dest.binding)
+    plan2 = t.TransferPlan(p, dest.binding, metadata_reserve_bytes=65536)
     tx2 = store.create(plan2, d.approve(p, expected_seal=p.seal, current_snapshot=snapshot))
     sources.snapshot = snapshot
     sources.status["drive-a"] = "WAITING_SOURCE"
@@ -621,7 +669,7 @@ def test_sealed_fallback_records_the_source_actually_read(setup):
                        copies=(*snapshot.copies, replace(snapshot.copies[0], drive_label="drive-b")),
                        anchors=(*snapshot.anchors, replace(snapshot.anchors[0], drive_label="drive-b")))
     p = d.preview(plan.proposal.spec, snapshot)
-    plan = t.TransferPlan(p, dest.binding)
+    plan = t.TransferPlan(p, dest.binding, metadata_reserve_bytes=65536)
     tx = store.create(plan, d.approve(p, expected_seal=p.seal, current_snapshot=snapshot))
     sources.snapshot = snapshot
     sources.status["drive-a"] = "SOURCE_BUSY"
@@ -671,9 +719,9 @@ def test_capacity_drift_is_not_hidden_by_own_partial_allocation(setup):
     t, store, plan, tx, dest, sources = setup
     original_check = dest.check
     seen = []
-    def check(binding, allocated):
+    def check(binding, allocated, required_bytes):
         seen.append(allocated)
-        original_check(binding, allocated)
+        original_check(binding, allocated, required_bytes)
         if (dest.root / "foreign").exists():
             raise t.TransferRefusal("DESTINATION_CAPACITY_CHANGED")
     dest.check = check
@@ -781,7 +829,7 @@ def test_atomic_publication_race_never_overwrites_unknown_bytes(setup, target):
 def test_different_consumer_roots_share_device_exclusion_and_busy_preserves_approval(setup):
     t, store, plan, tx, dest, sources = setup
     p = d.preview(replace(plan.proposal.spec, destination_root="another-root"), sources.snapshot)
-    second_plan = t.TransferPlan(p, dest.binding)
+    second_plan = t.TransferPlan(p, dest.binding, metadata_reserve_bytes=65536)
     second = store.create(second_plan, d.approve(p, expected_seal=p.seal, current_snapshot=sources.snapshot))
     store.approve(second, expected_seal=second_plan.seal)
     with start(setup):
@@ -808,10 +856,10 @@ def test_overlapping_first_start_observes_initializing_owner(setup):
     t, store, plan, tx, dest, sources = setup
     check = dest.check
     observed = []
-    def overlap(binding, allocated):
+    def overlap(binding, allocated, required_bytes):
         if not observed:
             observed.append(t.start(store, tx, dest, sources))
-        check(binding, allocated)
+        check(binding, allocated, required_bytes)
     dest.check = overlap
     with start(setup):
         assert len(observed) == 1 and not observed[0].can_write
@@ -891,9 +939,9 @@ def test_control_publication_is_recoverable_at_each_new_boundary(setup, boundary
 def test_stop_requested_during_startup_is_not_lost(setup):
     t, store, plan, tx, dest, sources = setup
     check = dest.check
-    def stop_at_check(binding, allocated):
+    def stop_at_check(binding, allocated, required_bytes):
         store.request_stop(tx)
-        check(binding, allocated)
+        check(binding, allocated, required_bytes)
     dest.check = stop_at_check
     with pytest.raises(t.TransferRefusal, match="STOPPED"):
         start(setup)
@@ -955,7 +1003,7 @@ def test_completed_artifact_hashing_is_linear_per_session(api, tmp_path, recover
     p = d.preview(replace(spec(d), destination_id="test-device"), snapshot)
     approval = d.approve(p, expected_seal=p.seal, current_snapshot=snapshot)
     dest, store = Destination(tmp_path / "destination", t), s.Store()
-    plan = t.TransferPlan(p, dest.binding)
+    plan = t.TransferPlan(p, dest.binding, metadata_reserve_bytes=65536)
     tx = store.create(plan, approval)
     store.approve(tx, expected_seal=plan.seal)
     reads = []
@@ -1000,7 +1048,7 @@ def test_foreign_descendant_blocks_next_artifact_before_any_mutation(api, tmp_pa
     approval = d.approve(p, expected_seal=p.seal, current_snapshot=snapshot)
     dest, store = Destination(tmp_path / "destination", t), s.Store()
     sources = Sources(snapshot, t)
-    plan = t.TransferPlan(p, dest.binding)
+    plan = t.TransferPlan(p, dest.binding, metadata_reserve_bytes=65536)
     tx = store.create(plan, approval)
     store.approve(tx, expected_seal=plan.seal)
     with t.start(store, tx, dest, sources) as session:

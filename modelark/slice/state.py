@@ -125,10 +125,11 @@ class Store:
             con.close()
 
     def create(self, plan, approval):
-        if plan.version != "modelark.slice.transaction.v2":
+        if plan.version != "modelark.slice.transaction.v3":
             from .transaction import TransferRefusal
-            raise TransferRefusal("LEGACY_PLAN", "new transactions require protocol v2")
+            raise TransferRefusal("LEGACY_PLAN", "new transactions require protocol v3")
         validate_approval(plan.proposal, approval)
+        plan.required_bytes(self.root)
         tx = uuid.uuid4().hex
         with self._connection() as con:
             con.execute("INSERT INTO transactions(id,plan,seal,state) VALUES(?,?,?,'ready')",

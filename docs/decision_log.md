@@ -2673,3 +2673,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Internal state-transition and receipt protocols, compatibility regressions and documentation only. Legacy receipts remain explicitly non-self-contained; no real archive, catalog, device or service is accessed.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-108, DEC-110, DEC-111, DEC-113, DEC-114
+
+### DEC-116: Seal metadata capacity and resume retained attended sessions
+- `id`: DEC-116
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Codex review of PR #69 at `8faebc1` and five failed regressions for retained waits and missing metadata capacity reservation.
+- `decision`: New transaction protocol v3 requires an explicit sealed metadata reserve above original artifact bytes. Check that reserve against the control/receipt payload upper bound over sealed source alternatives and actual private-state root, and pass the full required capacity to every destination gate. The trusted preflight adapter must account for filesystem allocation rounding, directories and temporary/control/receipt metadata within that reserve. Preserve v1/v2 seals and receipt formats for recovery only, with known payload-capacity checks. Return retained attended-wait sessions to transferring after their gates pass so run continues to completion.
+- `rationale`: Artifact bytes alone understate required destination space, especially with self-contained receipts. An adapter needs the remaining total reservation, not only historical allocation. A resolved attended wait must not terminate run on its stale status after successfully publishing a file.
+- `impact`: Internal plan/port capacity contract, receipt compatibility, session state and disposable tests; real filesystem charge proof is still an explicit Slice 3 prerequisite. No real device, archive, catalog or service mutation.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-114, DEC-115

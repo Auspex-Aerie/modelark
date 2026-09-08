@@ -8,7 +8,8 @@ evidence, and the destination port must validate that evidence before any writes
 
 ## Authority and lifetime
 
-`TransferPlan(proposal, destination_binding)` freezes the domain proposal and destination binding
+`TransferPlan(proposal, destination_binding, metadata_reserve_bytes=...)` freezes the domain
+proposal, destination binding and explicit metadata capacity reservation
 into a versioned seal. `Store.create(plan, domain_approval)` persists a ready transaction;
 `Store.approve(id, expected_seal=...)` durably approves that exact plan but starts nothing.
 `start(store, id, destination_port, source_port)` acquires device exclusion and atomically claims
@@ -52,6 +53,8 @@ is checked between streaming and verification chunks and before publication. Clo
 and closes its process descriptor, but retains the durable reservation. A new seal cannot acquire
 that unfinished device. Completion releases the reservation only after verification and receipt
 publication; existing output/control records are not automatically deleted or adopted.
+When a retained Session retries a resolved source/destination wait, it returns to transferring
+before more work, so `run()` continues through receipt publication.
 Terminal refusals release the process descriptor while retaining durable ownership. A failed or
 invalidated transaction cannot resume through the old Session object after an adapter condition
 is restored; `step()` refuses it just as a new Start does.
@@ -85,6 +88,14 @@ cleared so interrupted new bytes cannot inherit it. Unrelated or replaced object
 bytes—are collisions. In-flight allocation is derived only from journal-owned object certificates,
 including partial temporaries, and passed to the capacity gate; external consumption is not
 subtracted as transaction work.
+Protocol-v3 plans require an explicit metadata reserve in addition to original artifact bytes.
+The trusted preflight adapter must charge allocation rounding, directories, temporary names and
+control/receipt storage for the bound filesystem. The engine checks the reserve against a serialized
+control/receipt upper bound over all sealed source alternatives, using the actual private-state root
+before transaction creation and Start. Insufficient total capacity fails before destination writes.
+Every destination check receives the full required byte total and authenticated owned allocation,
+so the adapter can preserve the remaining reservation throughout the transfer. Tests supply a
+simulated charge; proving real filesystem charges remains Slice 3's adapter obligation.
 
 The fenced session caches a validated operation set and incrementally tracks owned allocation,
 including hard-link aliases. Per-chunk checks do not replay the plan/journal or rescan completed
@@ -105,14 +116,16 @@ Final verification rehashes every artifact, verifies the control record's presen
 and authenticates every extant descendant, including historical temporary names. The receipt records
 the sealed transaction, destination, exact delivered bytes and actual per-file source evidence.
 It is delivery history, never an archive replica or placement claim.
-New plans use transaction protocol v2. Their destination receipts embed the entire sealed plan,
+New plans use transaction protocol v3. Their destination receipts embed the entire sealed plan,
 including the evidence snapshot ID, slice specification/profile, approved closure and ordered source
 evidence, alongside actual delivered-file sources, direct topology, terminal delivery status and
 explicit content/layout verification results. The plan seal can be reconstructed without the host
 database. These fields describe the verified delivery, not continuing physical verification or archive
-replica evidence. Existing protocol-v1 plans retain their legacy receipt format and seals so an
-already-prepared receipt can recover without replacement; legacy receipts are not self-contained.
-Creation of new protocol-v1 transactions is refused; legacy support is recovery-only.
+replica evidence. Existing protocol-v1/v2 plans retain their receipt formats and seals so an
+already-prepared receipt can recover without replacement. Protocol-v1 receipts are not self-contained;
+v2 receipts carry context but their plans did not seal a filesystem metadata reserve. Legacy resume
+checks at least the known control/receipt byte requirement and still requires adapter capacity proof.
+Creation of new protocol-v1/v2 transactions is refused; legacy support is recovery-only.
 
 ## Adapter boundary and remaining work
 

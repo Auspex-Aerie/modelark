@@ -48,27 +48,64 @@ class DestinationBinding:
 class TransferPlan:
     proposal: d.SlicePreview
     destination: DestinationBinding
-    version: str = "modelark.slice.transaction.v2"
+    version: str = "modelark.slice.transaction.v3"
+    metadata_reserve_bytes: int | None = None
 
     def __post_init__(self):
         d._verify(self.proposal)
         if not self.proposal.source_ready or self.version not in {
-                "modelark.slice.transaction.v1", "modelark.slice.transaction.v2"}:
+                "modelark.slice.transaction.v1", "modelark.slice.transaction.v2", "modelark.slice.transaction.v3"}:
             raise TransferRefusal("PREVIEW_BLOCKED")
         if self.proposal.spec.destination_id != self.destination.device_id:
             raise TransferRefusal("DESTINATION_CHANGED", "binding differs from reviewed destination intent")
         if self.proposal.total_bytes > self.destination.available_bytes:
             raise TransferRefusal("DESTINATION_CAPACITY_INSUFFICIENT")
+        if self.version == "modelark.slice.transaction.v3":
+            if not d._integer(self.metadata_reserve_bytes):
+                raise TransferRefusal("DESTINATION_CAPACITY_UNPROVEN", "explicit metadata reserve required")
+        else:
+            object.__setattr__(self, "metadata_reserve_bytes", None)
         root = PurePosixPath(self.proposal.spec.destination_root)
         if root.parts[0] == ".modelark-slice-owner":
             raise TransferRefusal("OUTPUT_COLLISION", "reserved control path")
+        if self.version == "modelark.slice.transaction.v3":
+            self.required_bytes("")
 
     @property
     def seal(self):
         return hashlib.sha256(self.to_json().encode()).hexdigest()
 
     def to_json(self):
-        return d._json(asdict(self)).decode()
+        payload = asdict(self)
+        if self.version != "modelark.slice.transaction.v3":
+            payload.pop("metadata_reserve_bytes")
+        return d._json(payload).decode()
+
+    def receipt(self, tx, files):
+        receipt = {"version": self.version, "transaction": tx, "seal": self.seal,
+                   "destination": asdict(self.destination), "files": files}
+        if self.version != "modelark.slice.transaction.v1":
+            receipt.update(plan=json.loads(self.to_json()), topology="direct", status="complete",
+                           verification={"content": "sha256-original-bytes", "layout": "authenticated",
+                                         "result": "verified", "file_count": len(files)})
+        return receipt
+
+    def required_bytes(self, store_root):
+        # Exact upper bound on serialized control/receipt payloads: source choice can vary only
+        # within the sealed alternatives. Filesystem allocation padding/metadata is the trusted
+        # preflight adapter's responsibility and must also fit its explicit sealed reserve.
+        tx = "0" * 32
+        files = [{"path": str(PurePosixPath(self.proposal.spec.destination_root) / a.repo_id / a.rfilename),
+                  "size": a.size_bytes, "sha256": a.sha256,
+                  "source": asdict(max(a.sources, key=lambda source: len(d._json(asdict(source)))))}
+                 for a in self.proposal.closure]
+        control = d._json({"transaction": tx, "seal": self.seal, "store": str(store_root),
+                           "destination": asdict(self.destination)})
+        minimum = len(control) + len(d._json(self.receipt(tx, files)))
+        reserve = minimum if self.metadata_reserve_bytes is None else self.metadata_reserve_bytes
+        if reserve < minimum or self.proposal.total_bytes + reserve > self.destination.available_bytes:
+            raise TransferRefusal("DESTINATION_CAPACITY_INSUFFICIENT", "artifact and transaction metadata charge")
+        return self.proposal.total_bytes + reserve
 
     @classmethod
     def from_json(cls, payload):
@@ -83,7 +120,8 @@ class TransferPlan:
                 closure.append(d.Artifact(**item, sources=sources))
             proposal = d.SlicePreview(d.SliceSpec(**p["spec"]), p["snapshot_id"], tuple(closure),
                                       tuple(d.Gap(**g) for g in p["gaps"]), p["seal"], p["version"])
-            return cls(proposal, DestinationBinding(**obj["destination"]), obj["version"])
+            return cls(proposal, DestinationBinding(**obj["destination"]), obj["version"],
+                       obj.get("metadata_reserve_bytes"))
         except (KeyError, TypeError, ValueError) as exc:
             raise TransferRefusal("STATE_CORRUPT", str(exc)) from exc
 
@@ -107,14 +145,17 @@ class DestinationPort(Protocol):
     """Bound destination operations; never resolve a mountpoint again during writes.
 
     check must reject changed/system/archive/ambiguous devices, incompatible capabilities,
-    and unexplained capacity drift after subtracting the supplied owned allocations.
+    and unexplained capacity drift after subtracting the supplied owned allocations. It must
+    reserve required_bytes (artifacts plus transaction metadata), crediting only authenticated
+    already-owned allocations. The sealed metadata charge includes filesystem rounding, directory
+    and temporary-entry costs; the preflight adapter must prove that charge for the bound device.
     inspect must authenticate creation tokens (not filenames/hashes) against actual objects.
     create_* must be exclusive and recoverable after a crash inside the adapter. flush on a
     directory includes its metadata. publish is atomic no-replace and may retain the temp link.
     list_paths returns every descendant, including directories and unexpected objects.
     A concrete adapter must prove these obligations separately; the test port is not production.
     """
-    def check(self, binding: DestinationBinding, allocated: int) -> None: ...
+    def check(self, binding: DestinationBinding, allocated: int, required_bytes: int) -> None: ...
     def inspect(self, path: str) -> ObjectInfo | None: ...
     def create_directory(self, path: str, token: str) -> None: ...
     def create_file(self, path: str, token: str) -> None: ...
@@ -188,6 +229,7 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
         raise TransferRefusal("APPROVAL_MISSING")
     if status.state == "complete":
         return status
+    required = plan.required_bytes(store.root)
     serial = store.reserve(tx, plan.destination.device_id)
     (fault or (lambda point: None))("reservation_committed")
     try:
@@ -206,7 +248,7 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
             return current
         if current.state not in _RESUMABLE_STATES:
             raise TransferRefusal("NOT_RESUMABLE", current.state)
-        destination.check(plan.destination, 0 if not store.events(tx) else _allocated(store, tx, destination))
+        destination.check(plan.destination, 0 if not store.events(tx) else _allocated(store, tx, destination), required)
         store.activate(tx, plan.destination.device_id, serial)
         session = Session(store, tx, plan, destination, sources, lease, fault)
         session._fault("reserved")
@@ -318,6 +360,7 @@ class Session:
         self._allocated_bytes = 0
         self._verified_files = set()
         self._terminal = False
+        self._required_bytes = plan.required_bytes(store.root)
         for op in self.ops.values():
             for path in (op["path"], op.get("temporary")):
                 if path:
@@ -348,7 +391,7 @@ class Session:
             raise TransferRefusal("JOURNAL_CORRUPT", "journal changed outside its fenced writer")
         if stopped:
             raise TransferRefusal("STOPPED")
-        self.destination.check(self.plan.destination, self._allocated_bytes)
+        self.destination.check(self.plan.destination, self._allocated_bytes, self._required_bytes)
 
     def _check(self):
         self._boundary()
@@ -583,12 +626,7 @@ class Session:
                 raise TransferRefusal("VERIFICATION_FAILED", path)
             files.append({"path": path, "size": op["size"], "sha256": op["sha"], "source": op["source"]})
         self._audit_layout()
-        receipt = {"version": self.plan.version, "transaction": self.transaction_id, "seal": self.plan.seal,
-                   "destination": asdict(self.plan.destination), "files": files}
-        if self.plan.version == "modelark.slice.transaction.v2":
-            receipt.update(plan=json.loads(self.plan.to_json()), topology="direct", status="complete",
-                           verification={"content": "sha256-original-bytes", "layout": "authenticated",
-                                         "result": "verified", "file_count": len(files)})
+        receipt = self.plan.receipt(self.transaction_id, files)
         path = str(PurePosixPath(self.plan.proposal.spec.destination_root) / ".modelark-slice-receipt.json")
         data = d._json(receipt)
         op = self._op(path, "receipt", size=len(data), sha=hashlib.sha256(data).hexdigest())
@@ -618,6 +656,8 @@ class Session:
         try:
             self._check()
             self._audit_layout()
+            if current.state in {"waiting_source", "blocked_source", "waiting_destination"}:
+                self.store.set_state(self.transaction_id, "transferring")
             ops = self.ops
             for artifact in self.plan.proposal.closure:
                 path = str(PurePosixPath(self.plan.proposal.spec.destination_root) / artifact.repo_id / artifact.rfilename)
