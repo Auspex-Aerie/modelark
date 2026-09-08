@@ -190,7 +190,7 @@ def test_private_v1_upgrade_preserves_transaction_authority(setup, api, missing_
     upgraded.activate(tx, plan.destination.device_id, serial)
     assert upgraded.stop_requested(tx)  # A newer stop still wins after migration.
     with upgraded._connection(write=False) as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 4
     assert api[1].Store().events(tx) == before  # Reopening is idempotent.
     assert not list(dest.root.iterdir())
 
@@ -537,6 +537,36 @@ def test_surviving_child_prevents_resume_after_parent_closes_session(setup):
     assert process.exitcode == 0
     with t.start(store, tx, dest, sources) as session:
         assert session.run().state == "complete"
+
+
+def test_completed_owners_child_is_not_a_new_transactions_writer(setup):
+    t, store, plan, tx, dest, sources = setup
+    second = store.create(plan, d.approve(plan.proposal, expected_seal=plan.proposal.seal,
+                                         current_snapshot=sources.snapshot))
+    store.approve(second, expected_seal=plan.seal)
+    with start(setup) as session:
+        parent, child = multiprocessing.Pipe()
+        process = multiprocessing.get_context("fork").Process(target=_retain_inherited_fence, args=(child,))
+        process.start()
+        child.close()
+        assert parent.recv() == "held"
+        try:
+            assert session.run().state == "complete"
+            assert store.owner(plan.destination.device_id) is None
+            for _ in range(2):
+                with pytest.raises(t.TransferRefusal, match="DESTINATION_BUSY"):
+                    t.start(store, second, dest, sources)
+            assert store.process_owner(plan.destination.device_id) is None
+            assert store.receipt(second) is None
+            assert store.status(tx).state == "complete"
+        finally:
+            parent.send("exit")
+            process.join()
+            parent.close()
+        assert process.exitcode == 0
+    # Exclusion is now available, but existing output is not adopted by the new transaction.
+    with pytest.raises(t.TransferRefusal, match="OUTPUT_COLLISION|CONTROL_CORRUPT"):
+        t.start(store, second, dest, sources)
 
 
 def test_unprepared_matching_temporary_requires_fresh_source(setup):
@@ -1072,11 +1102,33 @@ def test_new_reservation_cannot_observe_an_unrelated_process_as_its_writer(setup
     store.approve(tx, expected_seal=plan.seal)
     lease = t._Lease(plan.destination.device_id)
     try:
-        with pytest.raises(t.TransferRefusal, match="DESTINATION_BUSY"):
-            t.start(store, tx, dest, sources)
+        for _ in range(2):
+            with pytest.raises(t.TransferRefusal, match="DESTINATION_BUSY"):
+                t.start(store, tx, dest, sources)
     finally:
         lease.close()
     with t.start(store, tx, dest, sources) as resumed:
+        assert resumed.run().state == "complete"
+
+
+def test_v3_migration_does_not_invent_process_ownership(setup, api):
+    t, store, plan, tx, dest, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    store.reserve(tx, plan.destination.device_id)
+    with store._connection() as con:
+        con.execute("ALTER TABLE owners DROP COLUMN process_seen")
+        con.execute("PRAGMA user_version=3")
+    upgraded = api[1].Store()
+    assert upgraded.owner(plan.destination.device_id) == tx
+    assert upgraded.process_owner(plan.destination.device_id) is None
+    lease = t._Lease(plan.destination.device_id)
+    try:
+        for _ in range(2):
+            with pytest.raises(t.TransferRefusal, match="DESTINATION_BUSY"):
+                t.start(upgraded, tx, dest, sources)
+    finally:
+        lease.close()
+    with t.start(upgraded, tx, dest, sources) as resumed:
         assert resumed.run().state == "complete"
 
 

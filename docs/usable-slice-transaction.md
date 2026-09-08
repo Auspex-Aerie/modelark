@@ -20,8 +20,11 @@ non-writing `Status` for a repeated Start while that same transaction holds the 
 Both the post-bind check and activation's SQLite write transaction reject terminal state; a delayed
 starter cannot reactivate a transaction that another starter invalidated while it was paused.
 Initializing duplicates reuse the activation stop serial persisted with the first reservation.
-A new reservation that loses process exclusion reports `DESTINATION_BUSY`, rather than claiming
-that the unrelated incumbent is an active writer for the newly reserved transaction.
+A reservation records process acquisition only while its caller actually holds device exclusion.
+A failed bind permits duplicate observation only if that still-current durable reservation has
+recorded process acquisition. Otherwise every retry reports `DESTINATION_BUSY`, including while
+a completed former owner's child retains an inherited descriptor. Before acquisition is recorded,
+an overlapping initializing caller conservatively reports busy rather than asserting writer identity.
 
 The private SQLite store is separate from every catalog, under the fixed operator-host namespace
 `~/.local/state/modelark/slice`. This is not a catalog/state-directory option: local workers for
@@ -34,10 +37,12 @@ Reader operations use deferred transactions rather than requesting the writer re
 writers have a bounded SQLite busy wait and return typed `STATE_BUSY` on exhaustion. The private
 database handle retains SQLite rollback-recovery capability even for reader operations, so a hot
 journal from a dead writer is recovered rather than exposed as a read-only-database error.
-Private schema version 3 transactionally upgrades development version-1/2 databases, adding the
+Private schema version 4 transactionally upgrades development version-1/2/3 databases, adding the
 stop serial when absent and the reservation's activation serial while preserving plans, pending
 stops, reservations and journal heads. An old initializing reservation with no saved activation
 serial conservatively preserves a pending stop until an explicit stopped-state resume.
+Older reservations do not infer process-acquisition evidence from ownership or state labels;
+they must successfully acquire exclusion before that evidence can be recorded.
 This migration never opens or changes a catalog database.
 Transient `STATE_BUSY` during Start or execution releases the process handle without turning the
 durable transaction into a terminal failure. A fresh Start can retry its existing approved authority.

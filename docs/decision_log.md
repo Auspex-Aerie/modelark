@@ -2717,3 +2717,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Round 2 of at most three correction/re-review rounds. Two deterministic threaded regressions reproduced completion downgrades to failed and invalidated before correction. No adapter implementation, real-device execution, catalog-schema change or deployment.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-108, DEC-115, DEC-118
+
+### DEC-120: Require process-acquisition evidence for duplicate observation
+- `id`: DEC-120
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Local round 2 boundary review extended the new-reservation busy regression to a second retry and reproduced a false initializing-writer observation despite no process for that transaction. Both external reviewers were clear on 46744c1.
+- `decision`: Record process acquisition on the durable owner only while holding device exclusion. Combine a failed bind with that same reservation's acquisition evidence before returning duplicate observation; otherwise report busy on every retry. Private schema v4 conservatively initializes older reservations without inventing acquisition evidence.
+- `rationale`: A reservation's existence, including a repeated reservation, does not identify the incumbent process. A retained child of a completed previous transaction may still own the socket. Once a reservation actually acquires exclusion, no other transaction can become the incumbent while that durable owner remains, because all Starts reserve before binding and there is no takeover/expiry path.
+- `impact`: Final correction round (3 of 3). Strengthened retry regression, inherited-child completion regression and v3 migration coverage. An initializing duplicate in the short pre-record interval conservatively receives busy. No new IPC/listener, hardware adapter, deployment, catalog-schema change or real-device execution. Stop after fresh reviews and report residual findings/common architectural causes.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-118, DEC-119

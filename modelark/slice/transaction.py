@@ -236,7 +236,7 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
         lease = _Lease(plan.destination.device_id)
     except TransferRefusal:
         current = store.status(tx)
-        if current.state == "complete" or (not serial.created and store.owner(plan.destination.device_id) == tx):
+        if current.state == "complete" or store.process_owner(plan.destination.device_id) == tx:
             return current  # Observation only; never hands out a writer capability.
         raise
     try:
@@ -248,6 +248,7 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
             return current
         if current.state not in _RESUMABLE_STATES:
             raise TransferRefusal("NOT_RESUMABLE", current.state)
+        store.record_process(tx, plan.destination.device_id)
         destination.check(plan.destination, 0 if not store.events(tx) else _allocated(store, tx, destination), required)
         if not store.activate(tx, plan.destination.device_id, serial):
             lease.close()

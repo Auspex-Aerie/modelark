@@ -85,7 +85,7 @@ class Store:
             raise ValueError("unsafe slice state database")
         with self._connection() as con:
             version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise ValueError("unsupported slice state version")
             con.execute("CREATE TABLE IF NOT EXISTS transactions ("
                         "id TEXT PRIMARY KEY, plan TEXT NOT NULL, seal TEXT NOT NULL,"
@@ -100,7 +100,8 @@ class Store:
                     con.execute("ALTER TABLE transactions ADD COLUMN stop_serial INTEGER NOT NULL DEFAULT 0")
             con.execute("CREATE TABLE IF NOT EXISTS owners (device TEXT PRIMARY KEY,"
                         "tx TEXT UNIQUE NOT NULL REFERENCES transactions(id),"
-                        "activation_serial INTEGER NOT NULL DEFAULT 0)")
+                        "activation_serial INTEGER NOT NULL DEFAULT 0,"
+                        "process_seen INTEGER NOT NULL DEFAULT 0)")
             columns = {row[1] for row in con.execute("PRAGMA table_info(owners)")}
             if "activation_serial" not in columns:
                 con.execute("ALTER TABLE owners ADD COLUMN activation_serial INTEGER NOT NULL DEFAULT 0")
@@ -108,10 +109,13 @@ class Store:
                 # pending stop conservatively; an explicit stopped-state resume can clear it.
                 con.execute("UPDATE owners SET activation_serial=(SELECT stop_serial-stop "
                             "FROM transactions WHERE id=owners.tx)")
+            if "process_seen" not in columns:
+                # An old reservation alone cannot prove that its process ever held exclusion.
+                con.execute("ALTER TABLE owners ADD COLUMN process_seen INTEGER NOT NULL DEFAULT 0")
             con.execute("CREATE TABLE IF NOT EXISTS journal (tx TEXT NOT NULL REFERENCES transactions(id),"
                         "seq INTEGER NOT NULL, event TEXT NOT NULL, payload TEXT NOT NULL, digest TEXT NOT NULL,"
                         "PRIMARY KEY(tx,seq))")
-            con.execute("PRAGMA user_version=3")
+            con.execute("PRAGMA user_version=4")
 
     @contextmanager
     def _connection(self, *, write=True):
@@ -210,6 +214,19 @@ class Store:
             if not owner:
                 con.execute("UPDATE transactions SET state='starting',reason='' WHERE id=?", (tx,))
             return Reservation(serial, not owner)
+
+    def process_owner(self, device):
+        with self._connection(write=False) as con:
+            row = con.execute("SELECT tx FROM owners WHERE device=? AND process_seen=1", (device,)).fetchone()
+        return row[0] if row else None
+
+    def record_process(self, tx, device):
+        # Only call while holding device exclusion. The bit remains valid for this durable
+        # reservation: no other transaction can acquire the device until that owner is deleted.
+        if self.process_owner(device) == tx:
+            return
+        with self._connection() as con:
+            con.execute("UPDATE owners SET process_seen=1 WHERE device=? AND tx=?", (device, tx))
 
     def activate(self, tx, device, stop_serial):
         from .transaction import TransferRefusal, _RESUMABLE_STATES
