@@ -125,6 +125,9 @@ class Store:
             con.close()
 
     def create(self, plan, approval):
+        if plan.version != "modelark.slice.transaction.v2":
+            from .transaction import TransferRefusal
+            raise TransferRefusal("LEGACY_PLAN", "new transactions require protocol v2")
         validate_approval(plan.proposal, approval)
         tx = uuid.uuid4().hex
         with self._connection() as con:
@@ -168,14 +171,13 @@ class Store:
         return row[0] if row else None
 
     def reserve(self, tx, device):
-        from .transaction import TransferRefusal
+        from .transaction import TransferRefusal, _RESUMABLE_STATES
         def inspect(con):
             owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
             if owner and owner[0] != tx:
                 raise TransferRefusal("DESTINATION_BUSY", owner[0])
             state, serial = con.execute("SELECT state,stop_serial FROM transactions WHERE id=?", (tx,)).fetchone()
-            if state not in {"approved", "starting", "transferring", "verifying", "stopped", "waiting_source",
-                             "blocked_source", "waiting_destination"}:
+            if state not in _RESUMABLE_STATES:
                 raise TransferRefusal("APPROVAL_MISSING" if state == "ready" else "NOT_RESUMABLE", state)
             return owner, serial
         # Repeated Start is a reader while an owner is actively journaling. Only the first
@@ -192,11 +194,14 @@ class Store:
             return serial
 
     def activate(self, tx, device, stop_serial):
-        from .transaction import TransferRefusal
+        from .transaction import TransferRefusal, _RESUMABLE_STATES
         with self._connection() as con:
             owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
             if not owner or owner[0] != tx:
                 raise TransferRefusal("EXECUTION_FENCE_LOST")
+            state = con.execute("SELECT state FROM transactions WHERE id=?", (tx,)).fetchone()[0]
+            if state not in _RESUMABLE_STATES:
+                raise TransferRefusal("NOT_RESUMABLE", state)
             # A stop arriving during initialization must not be erased by activation.
             con.execute("UPDATE transactions SET state='transferring',reason='',"
                         "stop=CASE WHEN stop_serial=? THEN 0 ELSE stop END WHERE id=?", (stop_serial, tx))

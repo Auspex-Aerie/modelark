@@ -20,6 +20,10 @@ import uuid
 from . import domain as d
 
 
+_RESUMABLE_STATES = frozenset({"approved", "starting", "transferring", "verifying", "stopped",
+                              "waiting_source", "blocked_source", "waiting_destination"})
+
+
 class TransferRefusal(ValueError):
     def __init__(self, code, detail=""):
         self.code, self.detail = code, detail
@@ -44,11 +48,12 @@ class DestinationBinding:
 class TransferPlan:
     proposal: d.SlicePreview
     destination: DestinationBinding
-    version: str = "modelark.slice.transaction.v1"
+    version: str = "modelark.slice.transaction.v2"
 
     def __post_init__(self):
         d._verify(self.proposal)
-        if not self.proposal.source_ready or self.version != "modelark.slice.transaction.v1":
+        if not self.proposal.source_ready or self.version not in {
+                "modelark.slice.transaction.v1", "modelark.slice.transaction.v2"}:
             raise TransferRefusal("PREVIEW_BLOCKED")
         if self.proposal.spec.destination_id != self.destination.device_id:
             raise TransferRefusal("DESTINATION_CHANGED", "binding differs from reviewed destination intent")
@@ -199,6 +204,8 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
         if current.state == "complete":
             lease.close()
             return current
+        if current.state not in _RESUMABLE_STATES:
+            raise TransferRefusal("NOT_RESUMABLE", current.state)
         destination.check(plan.destination, 0 if not store.events(tx) else _allocated(store, tx, destination))
         store.activate(tx, plan.destination.device_id, serial)
         session = Session(store, tx, plan, destination, sources, lease, fault)
@@ -208,7 +215,7 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
         return session
     except TransferRefusal as exc:
         try:
-            if exc.code != "DESTINATION_BUSY":
+            if exc.code not in {"DESTINATION_BUSY", "STATE_BUSY", "NOT_RESUMABLE"}:
                 store.set_state(tx, _refusal_state(exc.code), str(exc))
         finally:
             lease.close()
@@ -578,6 +585,10 @@ class Session:
         self._audit_layout()
         receipt = {"version": self.plan.version, "transaction": self.transaction_id, "seal": self.plan.seal,
                    "destination": asdict(self.plan.destination), "files": files}
+        if self.plan.version == "modelark.slice.transaction.v2":
+            receipt.update(plan=json.loads(self.plan.to_json()), topology="direct", status="complete",
+                           verification={"content": "sha256-original-bytes", "layout": "authenticated",
+                                         "result": "verified", "file_count": len(files)})
         path = str(PurePosixPath(self.plan.proposal.spec.destination_root) / ".modelark-slice-receipt.json")
         data = d._json(receipt)
         op = self._op(path, "receipt", size=len(data), sha=hashlib.sha256(data).hexdigest())
@@ -591,7 +602,12 @@ class Session:
     def step(self):
         if self._terminal:
             raise TransferRefusal("NOT_RESUMABLE", "session encountered a terminal refusal")
-        current = self.store.status(self.transaction_id)
+        try:
+            current = self.store.status(self.transaction_id)
+        except TransferRefusal as exc:
+            if exc.code == "STATE_BUSY":
+                self.lease.close()
+            raise
         if current.state == "complete":
             return current
         if current.state in {"failed", "invalidated"}:
@@ -618,6 +634,11 @@ class Session:
                 return self.store.status(self.transaction_id)
             self._finish()
         except TransferRefusal as exc:
+            if exc.code == "STATE_BUSY":
+                # Transient shared-state contention does not revoke the approved transaction.
+                # Release this writer and let a fresh Start retry its still-durable authority.
+                self.lease.close()
+                raise
             states = {"STOPPED": "stopped", "WAITING_SOURCE": "waiting_source",
                       "WAITING_DESTINATION": "waiting_destination", "SOURCE_BLOCKED": "blocked_source"}
             state = _refusal_state(exc.code)

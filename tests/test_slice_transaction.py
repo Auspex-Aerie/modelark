@@ -206,6 +206,107 @@ def test_run_records_actual_source_and_verified_receipt_without_catalog_mutation
     assert store.status(tx).state == "complete"
 
 
+def test_destination_receipt_is_self_contained_without_private_state(setup):
+    import json
+    t, _, plan, _, dest, _ = setup
+    with start(setup) as session:
+        assert session.run().state == "complete"
+    receipt = json.loads((dest.root / "models/.modelark-slice-receipt.json").read_text())
+    reconstructed = t.TransferPlan.from_json(json.dumps(receipt["plan"]))
+    assert reconstructed == plan and reconstructed.seal == receipt["seal"]
+    assert receipt["plan"]["proposal"]["snapshot_id"] == plan.proposal.snapshot_id
+    assert receipt["plan"]["proposal"]["spec"]["consumer_profile"] == plan.proposal.spec.consumer_profile
+    assert receipt["topology"] == "direct"
+    assert receipt["status"] == "complete"
+    assert receipt["verification"] == {"content": "sha256-original-bytes", "layout": "authenticated",
+                                       "result": "verified", "file_count": len(plan.proposal.closure)}
+
+
+@pytest.mark.parametrize("version", ["modelark.slice.transaction.v1", "modelark.slice.transaction.v2"])
+def test_receipt_recovery_preserves_its_approved_protocol_version(setup, version):
+    t, store, original, tx, dest, sources = setup
+    plan = replace(original, version=version)
+    # Simulate an already-persisted plan from its original protocol implementation.
+    with store._connection() as con:
+        con.execute("UPDATE transactions SET plan=?,seal=?,state='approved' WHERE id=?",
+                    (plan.to_json(), plan.seal, tx))
+    def crash(point):
+        if point == "receipt_prepared":
+            raise RuntimeError("simulated receipt interruption")
+    with pytest.raises(RuntimeError, match="simulated receipt interruption"):
+        with t.start(store, tx, dest, sources, fault=crash) as session:
+            session.run()
+    assert store.load(tx).seal == plan.seal
+    with t.start(store, tx, dest, sources) as session:
+        assert session.run().state == "complete"
+    receipt = store.receipt(tx)
+    assert receipt["version"] == version
+    if version.endswith("v1"):
+        assert set(receipt) == {"version", "transaction", "seal", "destination", "files"}
+    else:
+        assert receipt["plan"]["version"] == version
+        assert receipt["status"] == "complete"
+
+
+def test_new_transactions_cannot_request_legacy_receipts(setup):
+    t, store, plan, _, _, _ = setup
+    _, approval, _ = proposal()
+    with pytest.raises(t.TransferRefusal, match="LEGACY_PLAN"):
+        store.create(replace(plan, version="modelark.slice.transaction.v1"), approval)
+
+
+@pytest.mark.parametrize("phase", ["start", "step", "status"])
+def test_state_contention_preserves_resumable_authority(setup, phase):
+    t, store, plan, tx, dest, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    def busy(*args, **kwargs):
+        raise t.TransferRefusal("STATE_BUSY")
+    if phase == "start":
+        original = store.events
+        store.events = busy
+        with pytest.raises(t.TransferRefusal, match="STATE_BUSY"):
+            t.start(store, tx, dest, sources)
+        store.events = original
+    else:
+        with t.start(store, tx, dest, sources) as session:
+            name = "guard" if phase == "step" else "status"
+            original = getattr(store, name)
+            setattr(store, name, busy)
+            with pytest.raises(t.TransferRefusal, match="STATE_BUSY"):
+                session.step()
+            setattr(store, name, original)
+            assert not session.can_write
+    assert store.status(tx).state in {"starting", "transferring", "stopped"}
+    assert store.owner(plan.destination.device_id) == tx
+    with t.start(store, tx, dest, sources) as session:
+        assert session.run().state == "complete"
+
+
+def test_delayed_starter_cannot_reactivate_a_terminal_winner(setup):
+    t, store, plan, tx, dest, sources = setup
+    store.approve(tx, expected_seal=plan.seal)
+    def fault(point):
+        if point == "reservation_committed":
+            dest.changed = True
+            with pytest.raises(t.TransferRefusal, match="DESTINATION_CHANGED"):
+                t.start(store, tx, dest, sources)
+            dest.changed = False
+    with pytest.raises(t.TransferRefusal, match="NOT_RESUMABLE"):
+        t.start(store, tx, dest, sources, fault=fault)
+    assert store.status(tx).state == "invalidated"
+    assert not list(dest.root.iterdir())
+
+
+def test_activation_itself_checks_terminal_state(setup):
+    t, store, plan, tx, _, _ = setup
+    store.approve(tx, expected_seal=plan.seal)
+    serial = store.reserve(tx, plan.destination.device_id)
+    store.set_state(tx, "invalidated")
+    with pytest.raises(t.TransferRefusal, match="NOT_RESUMABLE"):
+        store.activate(tx, plan.destination.device_id, serial)
+    assert store.status(tx).state == "invalidated"
+
+
 def test_duplicate_start_is_observation_not_second_writer_and_stop_reserves_device(setup):
     t, store, plan, tx, dest, sources = setup
     with start(setup) as session:

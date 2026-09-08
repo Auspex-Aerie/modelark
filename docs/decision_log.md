@@ -2662,3 +2662,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Internal transaction pre-use gates and disposable regressions only; inside-call descriptor confinement remains a future adapter obligation, and no real destination or archive is accessed.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-108, DEC-110, DEC-112, DEC-113
+
+### DEC-115: Preserve retry authority and make new delivery receipts self-contained
+- `id`: DEC-115
+- `date`: 2026-09-07
+- `status`: accepted
+- `triggered_by`: Codex review of PR #69 at `81bc4e0` and six failing regressions for transient state contention, terminal activation races and missing portable receipt context.
+- `decision`: Release process exclusion on `STATE_BUSY` without persisting a terminal failure, retaining approved retry authority. Check resumable state after process binding and inside activation's write transaction so delayed starters cannot overwrite terminal outcomes. Default new plans to transaction protocol v2 and embed the full sealed plan, direct topology, terminal delivery status and content/layout verification result in receipts. Preserve protocol-v1 seals and receipt bytes for legacy recovery instead of rewriting prepared publications.
+- `rationale`: Shared-state contention is transient, unlike a revoked approval. Activation must check authority at its actual state transition, not only before waiting for exclusion. A portable delivery receipt must retain its approved context without relying on the host database, while no-replace recovery forbids retroactively changing legacy receipt bytes.
+- `impact`: Internal state-transition and receipt protocols, compatibility regressions and documentation only. Legacy receipts remain explicitly non-self-contained; no real archive, catalog, device or service is accessed.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-110, DEC-111, DEC-113, DEC-114

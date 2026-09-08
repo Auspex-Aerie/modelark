@@ -16,6 +16,8 @@ the approved transaction and durable reservation. The initializing reservation i
 process exclusion becomes visible, so overlapping first Starts can identify the same owner. Final
 activation preserves any stop request arriving during initialization. It returns a `Session` to the sole writer, or a
 non-writing `Status` for a repeated Start while that same transaction holds the device.
+Both the post-bind check and activation's SQLite write transaction reject terminal state; a delayed
+starter cannot reactivate a transaction that another starter invalidated while it was paused.
 
 The private SQLite store is separate from every catalog, under the fixed operator-host namespace
 `~/.local/state/modelark/slice`. This is not a catalog/state-directory option: local workers for
@@ -31,6 +33,9 @@ journal from a dead writer is recovered rather than exposed as a read-only-datab
 Private schema version 2 transactionally upgrades development version-1 databases, adding the
 stop serial when absent while preserving plans, pending stops, reservations and journal heads.
 This migration never opens or changes a catalog database.
+Transient `STATE_BUSY` during Start or execution releases the process handle without turning the
+durable transaction into a terminal failure. A fresh Start can retry its existing approved authority.
+This differs from a terminal refusal whose subsequent status write fails: that old Session is revoked.
 
 A Linux abstract Unix socket bind provides process exclusion keyed only by the destination's
 canonical physical-device identity. No listener, remote connection, or replaceable lock file is
@@ -100,6 +105,14 @@ Final verification rehashes every artifact, verifies the control record's presen
 and authenticates every extant descendant, including historical temporary names. The receipt records
 the sealed transaction, destination, exact delivered bytes and actual per-file source evidence.
 It is delivery history, never an archive replica or placement claim.
+New plans use transaction protocol v2. Their destination receipts embed the entire sealed plan,
+including the evidence snapshot ID, slice specification/profile, approved closure and ordered source
+evidence, alongside actual delivered-file sources, direct topology, terminal delivery status and
+explicit content/layout verification results. The plan seal can be reconstructed without the host
+database. These fields describe the verified delivery, not continuing physical verification or archive
+replica evidence. Existing protocol-v1 plans retain their legacy receipt format and seals so an
+already-prepared receipt can recover without replacement; legacy receipts are not self-contained.
+Creation of new protocol-v1 transactions is refused; legacy support is recovery-only.
 
 ## Adapter boundary and remaining work
 
