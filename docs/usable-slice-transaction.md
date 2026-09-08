@@ -197,6 +197,17 @@ implemented by arbitrary callbacks. Slice 3 must supply and test:
   adapter calls; device-bound reads/writes and atomic no-replace publication.
 - Actual device disappearance/replacement handling and the operator entry point.
 
+DEC-123 qualifies the crash-inside-create contract for directories: creation and certification are
+separate operations. An uncertified directory left in that interval requires operator intervention;
+the adapter must neither adopt nor delete it. Certified-object recovery remains automatic. This
+exception does not authorize cleanup, takeover, formatting, or an unattended real-device trial.
+
+DEC-124 additionally requires application-wide exclusion at launch, before CLI configuration or
+portal startup. It is not a replacement for these internal transaction/device/archive fences.
+Every separate CLI invocation is a launch and refuses while another instance runs, even for query
+or status; controls within the running portal remain available. The operator account is trusted,
+without adding protection against unrelated processes deliberately mutating delivery paths.
+
 The test adapter uses temporary files and simulated device/ownership evidence (test-only xattrs).
 It proves the orchestration's protocol ordering and recovery across port boundaries, not a real
 USB filesystem's identity, ownership-certificate or durability guarantees. Real mounts, live

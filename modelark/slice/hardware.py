@@ -1,0 +1,306 @@
+"""Explicit, read-only Linux device eligibility observations for direct Slice delivery.
+
+No discovery is performed at import or construction. Production observation reads lsblk,
+mountinfo and active swap inventory only when observe() is explicitly called. Tests inject
+those inventories and bind disposable directories. Evidence is an observation, not a lease:
+writers must retain BoundTree and re-observe identity under the shared execution authority.
+"""
+from dataclasses import dataclass
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+
+from .linux import BoundTree
+from .transaction import DestinationBinding, TransferRefusal
+
+
+@dataclass(frozen=True)
+class DeviceEvidence:
+    device_id: str
+    fs_uuid: str
+    serial: str | None
+    total_bytes: int
+    mount_path: str
+    mount_id: int
+    fs_type: str
+    available_bytes: int
+    block_size: int
+    name_max: int
+    device_size: int
+    profile: str
+
+    def binding(self):
+        """Legacy mount_id slot seals the stable capability profile, NOT an attachment ID.
+
+        Linux mount IDs change on reattachment and are separately checked against retained
+        descriptors. The stable profile includes capacity/filesystem/device capabilities,
+        allowing a later explicit Start to re-observe the same device after remounting.
+        """
+        return DestinationBinding(self.device_id, self.fs_uuid, self.profile, self.available_bytes)
+
+
+@dataclass(frozen=True)
+class Mount:
+    mount_id: int
+    major_minor: str
+    root: str
+    path: str
+    options: frozenset[str]
+    fs_type: str
+    source: str
+
+
+def _refuse(detail, code="DESTINATION_UNPROVEN"):
+    raise TransferRefusal(code, detail)
+
+
+def _decode(value):
+    # proc mountinfo and swaps encode whitespace/backslash using octal escapes.
+    if re.search(r"\\(?![0-7]{3})", value):
+        _refuse("invalid procfs path encoding")
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), value)
+
+
+def _mounts(text):
+    result = []
+    try:
+        for line in text.splitlines():
+            if not line:
+                continue
+            left, right = line.split(" - ", 1)
+            fields, filesystem = left.split(), right.split()
+            if len(fields) < 6 or len(filesystem) < 3:
+                raise ValueError("short mountinfo row")
+            path, root = _decode(fields[4]), _decode(fields[3])
+            if not path.startswith("/") or not root.startswith("/"):
+                raise ValueError("nonabsolute mountinfo path")
+            result.append(Mount(int(fields[0]), fields[2], root, path,
+                                frozenset(fields[5].split(",")), filesystem[0], _decode(filesystem[1])))
+    except (ValueError, TypeError) as exc:
+        _refuse("invalid mount inventory: " + str(exc))
+    if not result or len({m.mount_id for m in result}) != len(result):
+        _refuse("missing or ambiguous mount inventory")
+    return tuple(result)
+
+
+def _inventory():
+    result = subprocess.run(
+        ["lsblk", "--json", "--bytes", "--paths", "--output",
+         "NAME,PATH,TYPE,PKNAME,MAJ:MIN,SIZE,FSTYPE,UUID,SERIAL,WWN,TRAN,RO"],
+        check=True, capture_output=True, text=True)
+    return json.loads(result.stdout)
+
+
+def _nonempty(value):
+    return value if isinstance(value, str) and value.strip() == value and value else None
+
+
+def _integer(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        result = int(value)
+    except (ValueError, TypeError):
+        return None
+    return result if result > 0 and str(result) == str(value) else None
+
+
+class _Inventory:
+    def __init__(self, payload):
+        self.nodes, self.parents, self.paths = {}, {}, {}
+        def visit(node, parent=None):
+            if not isinstance(node, dict):
+                _refuse("invalid block-device inventory")
+            key = node.get("maj:min")
+            path = _nonempty(node.get("path")) or _nonempty(node.get("name"))
+            if (not isinstance(key, str) or not re.fullmatch(r"\d+:\d+", key)
+                    or not path or not path.startswith("/dev/") or key in self.nodes or path in self.paths):
+                _refuse("ambiguous block-device inventory")
+            self.nodes[key], self.parents[key], self.paths[path] = node, parent, key
+            for child in node.get("children") or ():
+                visit(child, key)
+        if not isinstance(payload, dict) or not isinstance(payload.get("blockdevices"), list):
+            _refuse("invalid lsblk JSON")
+        for node in payload["blockdevices"]:
+            visit(node)
+        # --json trees are expected, but resolve explicit PKNAME on a flat inventory too.
+        for key, node in self.nodes.items():
+            parent_path = _nonempty(node.get("pkname"))
+            if parent_path and not parent_path.startswith("/"):
+                parent_path = "/dev/" + parent_path
+            if parent_path:
+                parent = self.paths.get(parent_path)
+                if parent is None or self.parents[key] not in {None, parent}:
+                    _refuse("ambiguous parent disk")
+                self.parents[key] = parent
+        uuids, disk_ids = set(), set()
+        for node in self.nodes.values():
+            uuid = _nonempty(node.get("uuid"))
+            if uuid:
+                if uuid.casefold() in uuids:
+                    _refuse("duplicate filesystem UUID")
+                uuids.add(uuid.casefold())
+            if node.get("type") == "disk":
+                for field in ("serial", "wwn"):
+                    value = _nonempty(node.get(field))
+                    if value:
+                        key = (field, value)
+                        if key in disk_ids:
+                            _refuse("duplicate whole-disk identity")
+                        disk_ids.add(key)
+
+    def disk(self, key, *, direct=False):
+        """Follow ancestry for exclusion, requiring a direct disk/partition for delivery."""
+        seen = set()
+        while key in self.nodes and key not in seen:
+            seen.add(key)
+            node = self.nodes[key]
+            kind, parent = node.get("type"), self.parents[key]
+            if kind == "disk" and parent is None:
+                return key
+            if direct and (kind != "part" or parent is None
+                           or self.nodes[parent].get("type") != "disk"):
+                _refuse("stacked or unknown delivery device")
+            if parent is None:
+                break
+            key = parent
+        _refuse("cannot prove whole parent disk")
+
+
+class LinuxObserver:
+    """Read-only observer with injectable inventory providers; no implicit live discovery."""
+
+    def __init__(self, *, inventory=None, mounts=None, swaps=None, tree_factory=BoundTree):
+        self._inventory = inventory or _inventory
+        self._mounts = mounts or (lambda: Path("/proc/self/mountinfo").read_text())
+        self._swaps = swaps or (lambda: Path("/proc/swaps").read_text())
+        self._tree_factory = tree_factory
+
+    def observe(self, path, writable=False, archives=()):
+        try:
+            return self._observe(path, writable, tuple(archives))
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            raise TransferRefusal("DESTINATION_UNPROVEN", "device observation failed: " + str(exc)) from exc
+
+    def _observe(self, path, writable, archives):
+        inventory_snapshot = json.dumps(self._inventory(), sort_keys=True)
+        inventory = _Inventory(json.loads(inventory_snapshot))
+        mounts = _mounts(self._mounts())
+        swaps = self._swaps()
+        with self._tree_factory(path, writable=writable) as tree:
+            target = str(tree.path)
+            if target == "/":
+                _refuse("host root is not a delivery device")
+            matching = [m for m in mounts if m.path == target or (
+                not writable and target.startswith(m.path.rstrip("/") + "/"))]
+            if matching and not writable:
+                longest = max(len(m.path) for m in matching)
+                matching = [m for m in matching if len(m.path) == longest]
+            if len(matching) != 1:
+                _refuse("path must have a unique covering mount; writable paths require its exact root")
+            mount = matching[0]
+            actual = os.fstat(tree.fd)
+            major_minor = f"{os.major(actual.st_dev)}:{os.minor(actual.st_dev)}"
+            if mount.root != "/" or mount.mount_id != tree.mount_id or mount.major_minor != major_minor:
+                _refuse("mount inventory differs from retained descriptor")
+            if mount.major_minor not in inventory.nodes:
+                _refuse("mounted filesystem has no unambiguous block device")
+            if sum(m.major_minor == mount.major_minor for m in mounts) != 1:
+                _refuse("filesystem has multiple mount aliases")
+            if any(m.path.startswith(mount.path.rstrip("/") + "/") and m != mount for m in mounts):
+                _refuse("nested mounts within delivery filesystem")
+            node = inventory.nodes[mount.major_minor]
+            disk_key = inventory.disk(mount.major_minor, direct=True)
+            disk = inventory.nodes[disk_key]
+            uuid = _nonempty(node.get("uuid"))
+            serial, wwn = _nonempty(disk.get("serial")), _nonempty(disk.get("wwn"))
+            device_size = _integer(node.get("size"))
+            disk_size = _integer(disk.get("size"))
+            if not uuid or not (serial or wwn) or not device_size or not disk_size or device_size > disk_size:
+                _refuse("stable filesystem and parent disk identity/capacity required")
+            permitted = {"ext4"} if writable else {"ext4", "xfs"}
+            if node.get("fstype") != mount.fs_type or mount.fs_type not in permitted:
+                _refuse("unsupported or inconsistent filesystem", "FILESYSTEM_UNSUPPORTED")
+            if writable and (disk.get("tran") != "usb" or "rw" not in mount.options or "ro" in mount.options
+                             or node.get("ro") not in (False, 0, "0") or disk.get("ro") not in (False, 0, "0")):
+                _refuse("destination must be a writable direct USB disk")
+
+            def covering(value):
+                candidates = [m for m in mounts if value == m.path or value.startswith(m.path.rstrip("/") + "/")]
+                if not candidates:
+                    _refuse("cannot determine protected path backing device")
+                longest = max(len(m.path) for m in candidates)
+                result = [m for m in candidates if len(m.path) == longest]
+                if len(result) != 1:
+                    _refuse("ambiguous protected mount")
+                return result[0]
+
+            protected = set()
+            system_paths = ("/boot", "/home", "/var", "/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64")
+            for value in ("/", *system_paths):
+                protected.add(inventory.disk(covering(value).major_minor))
+            for other in mounts:
+                if any(other.path.startswith(value + "/") for value in system_paths):
+                    # Pseudo mounts (e.g. /var/lib/docker/.../proc) cannot hide a block
+                    # device, but every listed block-backed nested system mount counts.
+                    if other.major_minor in inventory.nodes:
+                        protected.add(inventory.disk(other.major_minor))
+            swap_rows = swaps.splitlines()
+            if not swap_rows or not swap_rows[0].split() or swap_rows[0].split()[0] != "Filename":
+                _refuse("active swap inventory unavailable")
+            for row in swap_rows[1:]:
+                fields = row.split()
+                if len(fields) < 5:
+                    _refuse("invalid active swap inventory")
+                name = _decode(fields[0])
+                if name in inventory.paths:
+                    key = inventory.paths[name]
+                elif fields[1] == "file" and name.startswith("/"):
+                    key = covering(name).major_minor
+                else:
+                    _refuse("cannot resolve active swap parent disk")
+                protected.add(inventory.disk(key))
+            if disk_key in protected:
+                _refuse("system or swap disk and all siblings are excluded")
+            if writable:
+                for other in mounts:
+                    if other.major_minor in inventory.nodes and other.major_minor != mount.major_minor:
+                        if inventory.disk(other.major_minor) == disk_key:
+                            _refuse("destination disk has another mounted partition")
+                for archive in archives:
+                    archive_uuid = _nonempty(getattr(archive, "fs_uuid", None))
+                    archive_serial = _nonempty(getattr(archive, "serial", None))
+                    if not archive_uuid and not archive_serial:
+                        _refuse("registered archive lacks comparable physical identity")
+                    if archive_serial and archive_serial in {serial, wwn}:
+                        _refuse("registered archive parent disk is excluded")
+                    for key, candidate in inventory.nodes.items():
+                        candidate_uuid = _nonempty(candidate.get("uuid"))
+                        if (archive_uuid and candidate_uuid and candidate_uuid.casefold() == archive_uuid.casefold()
+                                and inventory.disk(key) == disk_key):
+                            _refuse("registered archive filesystem or sibling disk is excluded")
+
+            capacity = os.fstatvfs(tree.fd)
+            total = capacity.f_blocks * capacity.f_frsize
+            available = capacity.f_bavail * capacity.f_frsize
+            block_size = capacity.f_frsize
+            name_max = os.fpathconf(tree.fd, "PC_NAME_MAX")
+            if (total <= 0 or total > device_size or not 0 <= available <= total
+                    or block_size <= 0 or name_max <= 0):
+                _refuse("filesystem capacity/capability cannot be proven")
+            device_id = ("wwn:" + wwn) if wwn else ("serial:" + serial)
+            profile_fields = {"version": "modelark.linux.direct.v1", "device_id": device_id,
+                              "disk_size": disk_size, "device_size": device_size, "filesystem_id": uuid,
+                              "filesystem": mount.fs_type, "total_bytes": total,
+                              "block_size": block_size, "name_max": name_max}
+            profile = "linux-direct-v1:" + hashlib.sha256(json.dumps(
+                profile_fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            tree.check()
+            if (json.dumps(self._inventory(), sort_keys=True) != inventory_snapshot
+                    or _mounts(self._mounts()) != mounts or self._swaps() != swaps):
+                _refuse("hardware inventory changed during descriptor observation")
+            return DeviceEvidence(device_id, uuid, serial, total, mount.path, mount.mount_id, mount.fs_type,
+                                  available, block_size, name_max, device_size, profile)

@@ -15,6 +15,32 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts import deploy
 
+
+def test_health_check_does_not_launch_a_second_application(tmp_path, monkeypatch):
+    source, venv = tmp_path / "source", tmp_path / "venv"
+    executable = venv / "bin/modelark"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    unit = tmp_path / "modelark.service"
+    data, state = tmp_path / "data", tmp_path / "state"
+    unit.write_text(deploy.render_unit(source, executable, data, state, None, 8077, False))
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda args, **kwargs: calls.append(args))
+    class Response:
+        status = 200
+        def read(self):
+            return b'{"os":"linux"}'
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+    monkeypatch.setattr(deploy.urllib.request, "urlopen", lambda *a, **k: Response())
+    deploy._check(source, venv, unit, data, state, None, 8077)
+    assert all(str(executable) != call[0] for call in calls)
+    assert any(call[:4] == ["systemctl", "--user", "is-active", "--quiet"] for call in calls)
+    assert calls[0][0] == str(venv / "bin/python")
+    assert "importlib.metadata" in calls[0][3]
+
 def test_unit_is_unprivileged_explicit_and_resume_is_opt_in(tmp_path):
     source = tmp_path / "source with space"
     executable = source / ".venv/bin/modelark"

@@ -5,6 +5,22 @@ checkout-local virtual environment plus a `systemd --user` service. The deployer
 does not install operating-system packages, edit sudoers, prepare drives, attach storage, migrate a
 catalog, or start archive work unless the operator explicitly asks for resume behavior.
 
+## One application instance
+
+ModelArk acquires a nonblocking launch guard before CLI configuration/dispatch or portal startup
+(DEC-124). A second launch exits with `ModelArk is already running`; changing the catalog directory,
+state directory or portal port does not bypass it. This includes separate help, query and status
+commands. Use controls inside the running portal, or stop that instance before running a CLI command.
+The standalone migration tools share the guard; deployment health checks inspect the installed
+package and existing portal without launching another application. Internal compression/download
+helpers remain children of the active application, not independently admitted instances.
+
+Exclusion uses a Linux kernel-held abstract socket, not a PID file. It releases when its final
+descriptor closes, including after process death; a surviving fork child can conservatively retain
+it. Separate network namespaces/containers and old versions without this guard are outside this
+guarantee. Existing archive/device/attempt fences remain in place. Installing this code does not
+retroactively guard or stop an already running older version; deployment/restart stays explicit.
+
 ## Prerequisites
 
 ModelArk currently supports the supervised deployment on Linux with Python 3.10+ and systemd. Install

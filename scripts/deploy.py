@@ -191,7 +191,15 @@ def _check(
     if not unit_path.is_file():
         raise RuntimeError(f"systemd user unit is missing: {unit_path}")
     _validate_unit(unit_path, source, executable, data_dir, state_dir, config, port)
-    subprocess.run([str(executable), "--help"], check=True, stdout=subprocess.DEVNULL)
+    # Inspect the installed distribution without launching another ModelArk instance.
+    # The active service owns application-wide launch exclusion (DEC-124).
+    subprocess.run([
+        str(venv / "bin" / "python"), "-I", "-c",
+        "import importlib.metadata as m; "
+        "d=m.distribution('modelark'); "
+        "assert any(e.group=='console_scripts' and e.name=='modelark' "
+        "and e.value=='modelark.cli:main' for e in d.entry_points), 'missing ModelArk entry point'",
+    ], check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["systemctl", "--user", "is-active", "--quiet", UNIT_NAME], check=True)
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/api/meta",

@@ -1,8 +1,8 @@
 # Usable Slice implementation charter
 
-Status: Slice 1 merged; Slice 2 transaction implementation in progress
+Status: Slices 1 and 2 merged; Slice 3 direct-USB implementation in progress
 
-Updated: 2026-09-07
+Updated: 2026-09-08
 
 Decision anchors: DEC-081, DEC-098, BOT-006, DEC-101, DEC-102, DEC-103, DEC-104, DEF-041, DEF-043
 
@@ -189,6 +189,29 @@ first slice does not support checkpoint adoption across successor transactions. 
 retains its original seal and progress; changing the approved source set requires a separately
 approved transaction on an empty destination root, leaving earlier output intact. Other seal
 invalidations likewise preserve evidence without promising automatic successor resume.
+
+DEC-123 qualifies automatic directory recovery: a crash between directory creation and durable
+ownership certification can leave ambiguous residue. Such a directory is never adopted or deleted
+automatically, even if empty or at an intended name. Execution refuses for operator intervention.
+Certified objects retain automatic recovery; this exception grants no cleanup or takeover authority.
+
+### Slice 3 implementation gates (2026-09-08)
+
+The Linux primitives and adapters under development are internal, unqualified components, not an
+operator-enabled direct-USB implementation. Disposable tests do not establish real-device safety.
+Before production assembly, resolve these additional gates without weakening DEC-123:
+
+- Launch exclusion (DEC-124): admit only one ModelArk application instance before configuration
+  or startup, regardless of catalog path, port or operation. A competing launch exits immediately;
+  internal attempt/device/archive fences remain. The operator account is trusted, and unrelated
+  processes deliberately substituting destination entries are outside the threat model. This does
+  not relax collision detection, unknown-content preservation, descriptor confinement or DEC-123.
+- Capacity admission: observed free space plus authenticated inode allocation and root-directory
+  allocation detects drift, but does not bound future filesystem-global metadata allocation.
+  A supported filesystem policy must justify the sealed reserve before approval or writes.
+- Physical identity/system-role exclusion, production source attachment observation, operator CLI,
+  integrated recovery and installed-wheel qualification remain unfinished. No attended USB trial
+  is authorized by the current coding work.
 
 ## Transaction and state model
 

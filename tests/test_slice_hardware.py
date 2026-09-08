@@ -1,0 +1,303 @@
+"""Read-only hardware eligibility using only synthetic inventories and disposable trees."""
+import copy
+import importlib
+import os
+
+import pytest
+
+from modelark.slice.linux import BoundTree
+from modelark.slice.transaction import TransferRefusal
+
+
+@pytest.fixture
+def hardware(tmp_path):
+    module = importlib.import_module("modelark.slice.hardware")
+    root = tmp_path / "usb"
+    root.mkdir()
+    with BoundTree(root) as tree:
+        major_minor = f"{os.major(os.fstat(tree.fd).st_dev)}:{os.minor(os.fstat(tree.fd).st_dev)}"
+        mount_id = tree.mount_id
+    leaf = {"name": "/dev/testusb1", "path": "/dev/testusb1", "type": "part", "pkname": "/dev/testusb",
+            "maj:min": major_minor, "size": 10**15, "fstype": "ext4", "uuid": "USB-FS", "ro": False}
+    usb = {"name": "/dev/testusb", "path": "/dev/testusb", "type": "disk", "maj:min": "240:0",
+           "size": 10**15, "serial": "USB-SERIAL", "wwn": "USB-WWN", "tran": "usb", "ro": False,
+           "children": [leaf]}
+    host = {"name": "/dev/testhost", "path": "/dev/testhost", "type": "disk", "maj:min": "241:0",
+            "size": 10**15, "serial": "HOST-SERIAL", "wwn": "HOST-WWN", "tran": "nvme", "ro": False,
+            "children": [{"name": "/dev/testhost1", "path": "/dev/testhost1", "type": "part",
+                          "pkname": "/dev/testhost", "maj:min": "241:1", "size": 10**15,
+                          "fstype": "ext4", "uuid": "HOST-FS", "ro": False}]}
+    inventory = {"blockdevices": [host, usb]}
+    mounts = ["1 0 241:1 / / rw,relatime - ext4 /dev/testhost1 rw",
+              f"{mount_id} 1 {major_minor} / {root} rw,relatime - ext4 /dev/testusb1 rw"]
+    state = {"inventory": inventory, "mounts": mounts, "swaps": "Filename\tType\tSize\tUsed\tPriority\n"}
+    observer = module.LinuxObserver(inventory=lambda: state["inventory"], mounts=lambda: "\n".join(state["mounts"]),
+                                    swaps=lambda: state["swaps"])
+    return observer, root, state, usb, leaf, module
+
+
+def test_direct_usb_evidence_binds_whole_disk_and_stable_capability_profile(hardware):
+    observer, root, _, _, _, _ = hardware
+    value = observer.observe(root, writable=True)
+    assert value.serial == "USB-SERIAL"
+    assert value.fs_uuid == "USB-FS"
+    assert value.mount_path == str(root)
+    assert value.fs_type == "ext4"
+    assert value.available_bytes > 0
+    assert value.block_size > 0
+    assert value.name_max > 0
+    capacity = os.statvfs(root)
+    assert value.total_bytes == capacity.f_blocks * capacity.f_frsize
+    assert value.device_size == 10**15
+    assert value.binding().device_id == value.device_id
+    assert value.binding().filesystem_id == "USB-FS"
+    assert value.binding().mount_id != str(value.mount_id)
+    assert value.device_id != value.fs_uuid
+
+
+@pytest.mark.parametrize("field,value", [("tran", "sata"), ("serial", None), ("ro", True)])
+def test_destination_requires_usb_identity_and_writability(hardware, field, value):
+    observer, root, _, disk, _, _ = hardware
+    disk[field] = value
+    if field == "serial":
+        disk["wwn"] = None
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+def test_read_only_source_need_not_be_usb_and_may_be_xfs(hardware):
+    observer, root, state, disk, leaf, _ = hardware
+    disk["tran"] = "sata"
+    leaf["fstype"] = "xfs"
+    state["mounts"][1] = state["mounts"][1].replace(" - ext4 ", " - xfs ")
+    assert observer.observe(root).fs_type == "xfs"
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+@pytest.mark.parametrize("kind", ["crypt", "lvm", "raid1", "loop", "rom"])
+def test_stacked_or_unknown_target_devices_refuse(hardware, kind):
+    observer, root, _, _, leaf, _ = hardware
+    leaf["type"] = kind
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+def test_unknown_or_mismatched_filesystem_refuses(hardware):
+    observer, root, _, _, leaf, _ = hardware
+    leaf["fstype"] = "vfat"
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+@pytest.mark.parametrize("protected", ["/", "/boot", "/home", "/var"])
+def test_system_filesystem_sibling_excludes_whole_disk(hardware, protected):
+    observer, root, state, disk, _, _ = hardware
+    disk["children"].append({"name": "/dev/testusb2", "path": "/dev/testusb2", "type": "part",
+                             "pkname": "/dev/testusb", "maj:min": "240:2", "size": 10**14,
+                             "fstype": "ext4", "uuid": "SIBLING-FS", "ro": False})
+    if protected == "/":
+        state["mounts"][0] = "1 0 240:2 / / rw - ext4 /dev/testusb2 rw"
+    else:
+        state["mounts"].append(f"912 1 240:2 / {protected} rw - ext4 /dev/testusb2 rw")
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+def test_active_swap_sibling_excludes_whole_disk(hardware):
+    observer, root, state, disk, _, _ = hardware
+    disk["children"].append({"name": "/dev/testusb2", "path": "/dev/testusb2", "type": "part",
+                             "pkname": "/dev/testusb", "maj:min": "240:2", "size": 10**14,
+                             "fstype": "swap", "uuid": "SWAP-FS", "ro": False})
+    state["swaps"] += "/dev/testusb2 partition 4096 0 -2\n"
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+@pytest.mark.parametrize("archive", [{"fs_uuid": "USB-FS", "serial": None},
+                                     {"fs_uuid": "OFFLINE-FS", "serial": "USB-SERIAL"},
+                                     {"fs_uuid": "OFFLINE-FS", "serial": "USB-WWN"}])
+def test_all_registered_archive_identity_exclusions(hardware, archive):
+    observer, root, _, _, _, _ = hardware
+    from types import SimpleNamespace
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True, archives=(SimpleNamespace(**archive),))
+
+
+def test_duplicate_filesystem_uuid_refuses(hardware):
+    observer, root, state, _, leaf, _ = hardware
+    state["inventory"]["blockdevices"][0]["children"][0]["uuid"] = leaf["uuid"]
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+def test_duplicate_whole_disk_identity_refuses(hardware):
+    observer, root, state, disk, _, _ = hardware
+    state["inventory"]["blockdevices"][0]["wwn"] = disk["wwn"]
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+@pytest.mark.parametrize("change", ["alias", "nested", "bind", "mount-id", "major-minor"])
+def test_mount_binding_must_be_unique_exact_and_descriptor_matched(hardware, change):
+    observer, root, state, _, leaf, _ = hardware
+    if change == "alias":
+        state["mounts"].append(f"991 1 {leaf['maj:min']} / /different rw - ext4 /dev/testusb1 rw")
+    elif change == "nested":
+        state["mounts"].append(f"991 1 242:1 / {root}/nested rw - ext4 /dev/foreign rw")
+    elif change == "bind":
+        parts = state["mounts"][1].split()
+        parts[3] = "/subdirectory"
+        state["mounts"][1] = " ".join(parts)
+    else:
+        parts = state["mounts"][1].split()
+        parts[0 if change == "mount-id" else 2] = "999999" if change == "mount-id" else "245:9"
+        state["mounts"][1] = " ".join(parts)
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+def test_descendant_of_mount_root_is_not_a_dedicated_destination(hardware):
+    observer, root, _, _, _, _ = hardware
+    child = root / "child"
+    child.mkdir()
+    with pytest.raises(TransferRefusal):
+        observer.observe(child, writable=True)
+
+
+def test_archive_subdirectory_uses_covering_mount_for_read_only_evidence(hardware):
+    observer, root, _, _, _, _ = hardware
+    archive = root / "modelark"
+    archive.mkdir()
+    evidence = observer.observe(archive)
+    assert evidence.mount_path == str(root)
+    assert evidence.fs_uuid == "USB-FS"
+    with pytest.raises(TransferRefusal):
+        observer.observe(archive, writable=True)
+
+
+def test_archive_subdirectory_still_rejects_nested_mounts_and_system_disk(hardware):
+    observer, root, state, _, leaf, _ = hardware
+    archive = root / "modelark"
+    archive.mkdir()
+    state["mounts"].append(f"991 1 242:1 / {root}/other rw - ext4 /dev/foreign rw")
+    with pytest.raises(TransferRefusal):
+        observer.observe(archive)
+    state["mounts"].pop()
+    state["mounts"][0] = state["mounts"][0].replace("241:1", leaf["maj:min"])
+    with pytest.raises(TransferRefusal):
+        observer.observe(archive)
+
+
+def test_observations_do_not_mutate_supplied_inventory(hardware):
+    observer, root, state, _, _, _ = hardware
+    before = copy.deepcopy(state)
+    observer.observe(root, writable=True)
+    assert state == before
+
+
+def test_remount_attachment_changes_do_not_change_stable_binding(hardware):
+    observer, root, state, _, _, module = hardware
+    before = observer.observe(root, writable=True)
+    class ReattachedTree(BoundTree):
+        @property
+        def mount_id(self):
+            return self._actual_mount_id + 123
+
+        @mount_id.setter
+        def mount_id(self, value):
+            self._actual_mount_id = value
+
+        def check(self):
+            # Synthetic reattachment evidence: retain actual disposable identity; the
+            # fixture changes mountinfo's attachment number consistently with this view.
+            actual = self._actual_mount_id
+            self._actual_mount_id -= 123
+            try:
+                super().check()
+            finally:
+                self._actual_mount_id = actual
+    parts = state["mounts"][1].split()
+    parts[0] = str(int(parts[0]) + 123)
+    state["mounts"][1] = " ".join(parts)
+    after = module.LinuxObserver(inventory=lambda: state["inventory"], mounts=lambda: "\n".join(state["mounts"]),
+                                 swaps=lambda: state["swaps"], tree_factory=ReattachedTree).observe(root, writable=True)
+    assert after.mount_id == before.mount_id + 123
+    assert after.binding().mount_id == before.binding().mount_id
+    assert after.device_id == before.device_id
+
+
+def test_archive_uuid_on_unmounted_sibling_excludes_whole_disk(hardware):
+    from types import SimpleNamespace
+    observer, root, _, disk, _, _ = hardware
+    disk["children"].append({"name": "/dev/testusb2", "path": "/dev/testusb2", "type": "part",
+                             "pkname": "/dev/testusb", "maj:min": "240:2", "size": 10**14,
+                             "fstype": "ext4", "uuid": "ARCHIVE-FS", "ro": False})
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True, archives=(SimpleNamespace(fs_uuid="archive-fs", serial=None),))
+
+
+def test_swapfile_backing_disk_is_excluded(hardware):
+    observer, root, state, _, _, _ = hardware
+    state["swaps"] += f"{root}/swapfile file 4096 0 -2\n"
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+def test_nested_system_filesystem_on_sibling_is_excluded(hardware):
+    observer, root, state, disk, _, _ = hardware
+    disk["children"].append({"name": "/dev/testusb2", "path": "/dev/testusb2", "type": "part",
+                             "pkname": "/dev/testusb", "maj:min": "240:2", "size": 10**14,
+                             "fstype": "ext4", "uuid": "VAR-FS", "ro": False})
+    state["mounts"].append("912 1 240:2 / /var/lib rw - ext4 /dev/testusb2 rw")
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+def test_unknown_protected_backing_disk_refuses(hardware):
+    observer, root, state, _, _, _ = hardware
+    state["mounts"][0] = "1 0 245:1 / / rw - overlay overlay rw"
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+@pytest.mark.parametrize("inventory", [{}, {"blockdevices": []}, {"blockdevices": [None]}])
+def test_missing_or_malformed_inventory_refuses(hardware, inventory):
+    observer, root, state, _, _, _ = hardware
+    state["inventory"] = inventory
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+def test_inventory_change_during_observation_refuses(hardware):
+    _, root, state, _, _, module = hardware
+    count = 0
+    def changes():
+        nonlocal count
+        count += 1
+        result = copy.deepcopy(state["inventory"])
+        if count > 1:
+            result["blockdevices"][1]["serial"] = "REPLACEMENT"
+        return result
+    observer = module.LinuxObserver(inventory=changes, mounts=lambda: "\n".join(state["mounts"]),
+                                    swaps=lambda: state["swaps"])
+    with pytest.raises(TransferRefusal):
+        observer.observe(root, writable=True)
+
+
+def test_construction_never_observes_live_hardware(monkeypatch, hardware):
+    *_, module = hardware
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: pytest.fail("implicit hardware discovery"))
+    module.LinuxObserver()
+
+
+def test_lsblk_uses_explicit_read_only_json_columns(monkeypatch, hardware):
+    from types import SimpleNamespace
+    *_, module = hardware
+    def run(command, **kwargs):
+        assert command == ["lsblk", "--json", "--bytes", "--paths", "--output",
+                           "NAME,PATH,TYPE,PKNAME,MAJ:MIN,SIZE,FSTYPE,UUID,SERIAL,WWN,TRAN,RO"]
+        assert kwargs == {"check": True, "capture_output": True, "text": True}
+        return SimpleNamespace(stdout='{"blockdevices": []}')
+    monkeypatch.setattr(module.subprocess, "run", run)
+    assert module._inventory() == {"blockdevices": []}

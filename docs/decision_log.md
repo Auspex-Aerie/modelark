@@ -2751,3 +2751,25 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Slice Session outcome handling and six disposable stop/restart regressions only; no Fill, schema, hardware-adapter, deployment or live-service change.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-113, DEC-121
+
+### DEC-123: Refuse ambiguous pre-certificate directory residue in direct delivery
+- `id`: DEC-123
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Slice 3 architecture consultation identified the mkdir-to-certificate crash interval; operator explicitly agreed to the proposed recovery exception.
+- `decision`: A directory left without a verifiable ownership certificate after a crash is never adopted or deleted automatically. Direct delivery stops for operator intervention in that case; certified objects retain automatic recovery. The initial adapter fails closed when device, confinement, filesystem or decoding guarantees cannot be established.
+- `rationale`: Directory creation and ownership certification are separate operations. An intended name or empty directory shape cannot prove that an existing object belongs to this transaction. The prior universal crash-inside-create guarantee must not override the unknown-content boundary.
+- `impact`: Narrows only the ambiguous directory-creation recovery case in the Slice 3 contract; no automatic cleanup, formatting, takeover, archive mutation or real-device trial is authorized.
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-121, DEC-122
+
+### DEC-124: Admit only one ModelArk application instance at launch
+- `id`: DEC-124
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator corrected the proposed concurrency scope: Start means launching another ModelArk instance, not starting Fill or Slice; reject the second instance right up front.
+- `decision`: Acquire one application-wide, nonblocking kernel-held launch guard before CLI configuration/dispatch or direct portal startup, independent of catalog directory, port, destination and operation. A second launch exits clearly without startup work. Retain the existing device/attempt and archive fences as internal safeguards. The local operator account is trusted; defending against unrelated processes deliberately substituting namespace entries is not a new Slice 3 requirement.
+- `rationale`: Competing ModelArk application instances should not coexist. Operation-level exclusion alone does not implement the requested launch policy; adversarial same-account namespace isolation would add a materially different threat model.
+- `impact`: All ModelArk CLI invocations are application launches, so a separate query, status, or other CLI command also refuses while the portal or another command holds the guard. Existing in-process portal controls remain available. No service restart, deployment, legacy-process termination or real-device trial is authorized. Processes launched from older unguarded versions are not retroactively enrolled.
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md, docs/usable-slice-transaction.md, docs/deployment.md
+- `related`: DEC-121, DEC-123
