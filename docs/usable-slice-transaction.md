@@ -60,6 +60,10 @@ that unfinished device. Completion releases the reservation only after verificat
 publication; existing output/control records are not automatically deleted or adopted.
 Completion closes the Session's process descriptor inside the final state transaction before
 releasing durable ownership, including when the caller retains the completed Session object.
+If a same-transaction starter acquires exclusion during that final commit window, activation
+observes completion inside its own write transaction and returns a nonwriting completed status.
+Startup refusal publication is also serialized with terminal state and device ownership, so
+an adapter error based on a stale pre-activation snapshot cannot downgrade a terminal winner.
 When a retained Session retries a resolved source/destination wait, it returns to transferring
 before more work, so `run()` continues through receipt publication.
 Terminal refusals release the process descriptor while retaining durable ownership. A failed or

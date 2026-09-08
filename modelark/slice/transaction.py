@@ -249,7 +249,9 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
         if current.state not in _RESUMABLE_STATES:
             raise TransferRefusal("NOT_RESUMABLE", current.state)
         destination.check(plan.destination, 0 if not store.events(tx) else _allocated(store, tx, destination), required)
-        store.activate(tx, plan.destination.device_id, serial)
+        if not store.activate(tx, plan.destination.device_id, serial):
+            lease.close()
+            return store.status(tx)
         session = Session(store, tx, plan, destination, sources, lease, fault)
         session._fault("reserved")
         session._audit_layout()
@@ -258,7 +260,9 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
     except TransferRefusal as exc:
         try:
             if exc.code not in {"DESTINATION_BUSY", "STATE_BUSY", "NOT_RESUMABLE"}:
-                store.set_state(tx, _refusal_state(exc.code), str(exc))
+                current = store.refuse_start(tx, plan.destination.device_id, _refusal_state(exc.code), str(exc))
+                if current.state == "complete":
+                    return current
         finally:
             lease.close()
         raise

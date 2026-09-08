@@ -2706,3 +2706,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Private state migration, transaction Start/completion and drive-loss synchronization with disposable regressions. No deployment, live Fill, real-device execution or catalog-schema change. Broader architectural changes remain proposals for the operator after at most three fix/review rounds.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-108, DEC-110, DEC-111, DEC-115, DEC-117
+
+### DEC-119: Serialize startup outcomes with committed terminal authority
+- `id`: DEC-119
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Round 1 Greptile finding 3953694180 and Codex finding 3953703340 on PR #69, independently identifying the completion handoff race introduced by DEC-118's release ordering.
+- `decision`: Inside activation's write transaction, recognize committed completion before checking removed ownership and return observation-only status. Publish startup refusals only while the transaction remains resumable and owns the device, in the same write transaction as those checks; preserve already-terminal outcomes.
+- `rationale`: Closing the lease and committing SQLite are separate authority boundaries. A pre-activation read can see the prior committed state during handoff, and even a destination check can finish late. Rechecking only successful activation leaves refusal publication able to overwrite the terminal winner. Terminal authority must be checked at both durable mutation points.
+- `impact`: Round 2 of at most three correction/re-review rounds. Two deterministic threaded regressions reproduced completion downgrades to failed and invalidated before correction. No adapter implementation, real-device execution, catalog-schema change or deployment.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-115, DEC-118

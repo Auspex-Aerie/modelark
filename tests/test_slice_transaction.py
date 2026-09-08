@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import io
 import multiprocessing
+import threading
 import os
 from pathlib import PurePosixPath
 
@@ -1324,6 +1325,43 @@ def test_delayed_first_starter_cannot_downgrade_a_completed_winner(setup):
     result = t.start(store, tx, dest, sources, fault=fault)
     assert finished and not result.can_write and result.state == "complete"
     assert store.status(tx).state == "complete"
+
+
+@pytest.mark.parametrize("adapter_refuses", [False, True])
+def test_starter_in_completion_commit_window_cannot_downgrade_completion(setup, adapter_refuses):
+    t, store, _, tx, dest, sources = setup
+    checked, committed = threading.Event(), threading.Event()
+    outcomes = []
+    def contender():
+        try:
+            outcomes.append(t.start(store, tx, dest, sources))
+        except BaseException as exc:
+            outcomes.append(exc)
+    process = threading.Thread(target=contender)
+    with start(setup) as winner:
+        original_check, original_close = dest.check, winner.lease.close
+        def check(*args):
+            if threading.current_thread() is process:
+                checked.set()
+                assert committed.wait(10)
+                if adapter_refuses:
+                    raise t.TransferRefusal("DESTINATION_CHANGED")
+            return original_check(*args)
+        def release():
+            original_close()
+            process.start()
+            assert checked.wait(10)
+        dest.check, winner.lease.close = check, release
+        try:
+            assert winner.run().state == "complete"
+        finally:
+            winner.lease.close = original_close
+            committed.set()
+            process.join()
+    assert store.status(tx).state == "complete"
+    assert len(outcomes) == 1 and isinstance(outcomes[0], t.Status)
+    assert outcomes[0].state == "complete" and not outcomes[0].can_write
+    assert store.owner(dest.binding.device_id) is None
 
 
 def test_crash_between_reservation_and_process_bind_is_resumable(setup):

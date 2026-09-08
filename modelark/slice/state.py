@@ -214,15 +214,30 @@ class Store:
     def activate(self, tx, device, stop_serial):
         from .transaction import TransferRefusal, _RESUMABLE_STATES
         with self._connection() as con:
+            state = con.execute("SELECT state FROM transactions WHERE id=?", (tx,)).fetchone()[0]
+            if state == "complete":
+                return False
+            if state not in _RESUMABLE_STATES:
+                raise TransferRefusal("NOT_RESUMABLE", state)
             owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
             if not owner or owner[0] != tx:
                 raise TransferRefusal("EXECUTION_FENCE_LOST")
-            state = con.execute("SELECT state FROM transactions WHERE id=?", (tx,)).fetchone()[0]
-            if state not in _RESUMABLE_STATES:
-                raise TransferRefusal("NOT_RESUMABLE", state)
             # A stop arriving during initialization must not be erased by activation.
             con.execute("UPDATE transactions SET state='transferring',reason='',"
                         "stop=CASE WHEN stop_serial=? THEN 0 ELSE stop END WHERE id=?", (stop_serial.stop_serial, tx))
+        return True
+
+    def refuse_start(self, tx, device, state, reason):
+        from .transaction import Status, _RESUMABLE_STATES
+        # A pre-activation adapter check may finish after another Session commits its
+        # terminal outcome. Serialize refusal publication with that outcome, not a snapshot.
+        with self._connection() as con:
+            current = con.execute("SELECT state,reason FROM transactions WHERE id=?", (tx,)).fetchone()
+            owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
+            if current[0] in _RESUMABLE_STATES and owner and owner[0] == tx:
+                con.execute("UPDATE transactions SET state=?,reason=? WHERE id=?", (state, reason, tx))
+                current = state, reason
+            return Status(tx, *current)
 
     def set_state(self, tx, state, reason=""):
         with self._connection() as con:
