@@ -2861,3 +2861,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Drive-bootstrap adapter, existing CLI refusal translation and focused regressions only. No schema change, auto-resume/completion, destructive cleanup, full-byte verification claim, deployment or live catalog/device mutation. A subsequent clean reconciliation keeps ordinary refresh semantics.
 - `docs_updated`: docs/decision_log.md, docs/operations.md, docs/plans/terminal-session-reconciliation.md
 - `related`: modelark/execution_authority.py, modelark/execution_recovery.py, modelark/drive_bootstrap.py
+
+### DEC-133: Correct archive serial evidence with compatible exclusion and explicit repair
+- `id`: DEC-133
+- `date`: 2026-09-09
+- `status`: accepted
+- `triggered_by`: Attended source preflight found canonical disk serial present but v1 anchors bound a null partition serial; operator approved the locally Grok-reviewed plan and sliced implementation in one PR.
+- `decision`: Share workflow-neutral physical ancestry observation without changing Slice destination policy. Retain v1 identity hashes and capacity epochs; updated operations permanently hold both canonical and null-serial identity locks derived from facts, including every child FD. Correct recognized legacy evidence only through explicit bound reconciliation, preserving dirty-owner history via a separate old-identity recovery milestone. Publish a new clean generation, invalidate affected Fill approvals and raise catalog reader floor to 8 in one transaction. Accept physical catalog 7/8 as the same logical Slice snapshot schema; do not mass-upgrade on open.
+- `rationale`: The canonical serial is correct; independent observers supplied inconsistent hash inputs. A probe-only fix would strand admission and split physical exclusion. Updated dual locks alone cannot exclude two old binaries using repaired versus unrepaired catalog copies, so repaired catalogs must reject old readers. Neither identity compatibility nor a revision bump makes old approvals executable.
+- `impact`: Shared observation/fences, catalog readers, archive/Fill/source consumers, explicit repair, invariant and cross-process qualification in docs/plans/archive-serial-identity-consistency.md. Preserve archive bytes, provenance, task/session history, old anchors, Slice output and receipts. New Preview/Approve/Start is required for affected work. No live repair, service restart, device operation or automatic merge is authorized by this code change.
+- `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
+- `related`: DEC-132, DEC-129, DEC-130

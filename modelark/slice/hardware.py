@@ -11,9 +11,9 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 
+from ..block_identity import BlockInventory, BlockObservationError, read_inventory
 from .linux import BoundTree, require_create_access, require_no_default_acl
 from .paths import canonical_attachment
 from .io_errors import attachment_refusal, classify_io, probe_io
@@ -79,11 +79,7 @@ def _swap_records(swaps):
 
 
 def _inventory():
-    result = subprocess.run(
-        ["lsblk", "--json", "--bytes", "--paths", "--output",
-         "NAME,PATH,KNAME,TYPE,PKNAME,MAJ:MIN,SIZE,FSTYPE,UUID,SERIAL,WWN,TRAN,RO"],
-        check=True, capture_output=True, text=True)
-    return json.loads(result.stdout)
+    return read_inventory()
 
 
 def _nonempty(value):
@@ -129,76 +125,20 @@ def _archive_roles(archives):
     return tuple((getattr(a, 'fs_uuid', None), getattr(a, 'serial', None)) for a in archives)
 
 
-class _Inventory:
+class _Inventory(BlockInventory):
+    """Compatibility adapter retaining Slice's existing refusal classification."""
+
     def __init__(self, payload):
-        self.nodes, self.parents, self.paths = {}, {}, {}
-        def visit(node, parent=None):
-            if not isinstance(node, dict):
-                _refuse("invalid block-device inventory")
-            key = node.get("maj:min")
-            path = _nonempty(node.get("path")) or _nonempty(node.get("name"))
-            if (not isinstance(key, str) or not re.fullmatch(r"\d+:\d+", key)
-                    or not path or not path.startswith("/dev/") or key in self.nodes or path in self.paths):
-                _refuse("ambiguous block-device inventory")
-            self.nodes[key], self.parents[key], self.paths[path] = node, parent, key
-            # lsblk may spell a mapper node as /dev/mapper/name while a child's
-            # PKNAME uses /dev/dm-N. KNAME is explicit inventory evidence for that
-            # alias; do not infer ancestry from names or ignore a disagreement.
-            kernel_path = _nonempty(node.get("kname"))
-            if kernel_path:
-                if not kernel_path.startswith("/"):
-                    kernel_path = "/dev/" + kernel_path
-                if not kernel_path.startswith("/dev/") or self.paths.get(kernel_path, key) != key:
-                    _refuse("ambiguous kernel block-device alias")
-                self.paths[kernel_path] = key
-            for child in node.get("children") or ():
-                visit(child, key)
-        if not isinstance(payload, dict) or not isinstance(payload.get("blockdevices"), list):
-            _refuse("invalid lsblk JSON")
-        for node in payload["blockdevices"]:
-            visit(node)
-        # --json trees are expected, but resolve explicit PKNAME on a flat inventory too.
-        for key, node in self.nodes.items():
-            parent_path = _nonempty(node.get("pkname"))
-            if parent_path and not parent_path.startswith("/"):
-                parent_path = "/dev/" + parent_path
-            if parent_path:
-                parent = self.paths.get(parent_path)
-                if parent is None or self.parents[key] not in {None, parent}:
-                    _refuse("ambiguous parent disk")
-                self.parents[key] = parent
-        uuids, disk_ids = set(), set()
-        for node in self.nodes.values():
-            uuid = _nonempty(node.get("uuid"))
-            if uuid:
-                if uuid.casefold() in uuids:
-                    _refuse("duplicate filesystem UUID")
-                uuids.add(uuid.casefold())
-            if node.get("type") == "disk":
-                for field in ("serial", "wwn"):
-                    value = _nonempty(node.get(field))
-                    if value:
-                        key = (field, value)
-                        if key in disk_ids:
-                            _refuse("duplicate whole-disk identity")
-                        disk_ids.add(key)
+        try:
+            super().__init__(payload)
+        except BlockObservationError as exc:
+            _refuse(str(exc))
 
     def disk(self, key, *, direct=False):
-        """Follow ancestry for exclusion, requiring a direct disk/partition for delivery."""
-        seen = set()
-        while key in self.nodes and key not in seen:
-            seen.add(key)
-            node = self.nodes[key]
-            kind, parent = node.get("type"), self.parents[key]
-            if kind == "disk" and parent is None:
-                return key
-            if direct and (kind != "part" or parent is None
-                           or self.nodes[parent].get("type") != "disk"):
-                _refuse("stacked or unknown delivery device")
-            if parent is None:
-                break
-            key = parent
-        _refuse("cannot prove whole parent disk")
+        try:
+            return super().disk(key, direct=direct)
+        except BlockObservationError as exc:
+            _refuse(str(exc))
 
 
 class LinuxObserver:
