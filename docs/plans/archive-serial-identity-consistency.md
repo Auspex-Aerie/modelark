@@ -301,7 +301,7 @@ epoch-alias registry or new serialized authority format requires a separately ex
 
 | Slice | Scope | State |
 | --- | --- | --- |
-| 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Implemented; 336 targeted tests passed; PR review pending |
+| 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Round-1 findings fixed; 379 targeted tests and isolated browser E2E passed; round-2 review pending |
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Pending |
 | 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Pending |
 | 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Pending |
@@ -317,6 +317,28 @@ Slice-2 audit note: independent execution recovery also manufactures `d0` after
 proposal-load failure and can leak the just-opened handle if its raw flock fails.
 Remove that unproven production fallback and make partial acquisition cleanup
 exception-safe as part of the already approved all-caller/child-FD integration.
+
+### PR 72 review record (mutable)
+
+Slice 1, round 1, `be84377332ddc1e04a332f83855b8a538baa340a`: Greptile and Codex
+both found stale backing evidence under a stable mount number and malformed parent
+metadata treated as absent. Codex additionally found differing serial normalization
+between uniqueness validation and observation. These are three distinct defects,
+with overlapping reviewer comments (including a duplicate Codex topology comment).
+The common assumption was that the old ancestry parser's representation rules and
+a mount-only final check were sufficient for the new serial authority producer.
+Corrections stay at that shared boundary: strict optional ancestry-string validation,
+one serial normalization function, and full inventory re-observation before return.
+New command-boundary tests reproduce all three before the fixes.
+
+Both Python CI jobs passed at the round-1 head. E2E failed an immediate graph-link
+count assertion in unchanged browser code; the unchanged browser harness passed
+locally against the isolated temporary catalog. Do not weaken that assertion to
+make this PR green; require fresh CI at the revised head before closing the gate.
+
+Round-1 correction validation: 379 targeted tests passed (82 neutral observation
+cases), two upstream Torch deprecation warnings; isolated browser E2E and all-source
+Ruff passed. No UI/test assertion change was needed for the local browser pass.
 
 ## 7. Questions for Grok
 

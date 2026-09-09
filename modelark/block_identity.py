@@ -22,6 +22,25 @@ def _nonempty(value):
     return value if isinstance(value, str) and value.strip() == value and value else None
 
 
+def _ancestry_string(node, field):
+    """Optional graph fields may be absent, not malformed or silently trimmed."""
+    value = node.get(field)
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str) or value.strip() != value:
+        _refuse("invalid block-device " + field)
+    return value
+
+
+def normalize_serial(value):
+    """One spelling rule for serial observation and ambiguity detection."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        _refuse("invalid physical disk serial observation")
+    return value.strip() or None
+
+
 def read_inventory():
     """Collect the same explicit columns for all physical-ancestry consumers."""
     result = subprocess.run(
@@ -40,14 +59,15 @@ class BlockInventory:
             if not isinstance(node, dict):
                 _refuse("invalid block-device inventory")
             key = node.get("maj:min")
-            path = _nonempty(node.get("path")) or _nonempty(node.get("name"))
+            path, name = _ancestry_string(node, "path"), _ancestry_string(node, "name")
+            path = path or name
             if (not isinstance(key, str) or not re.fullmatch(r"\d+:\d+", key)
                     or not path or not path.startswith("/dev/") or key in self.nodes or path in self.paths):
                 _refuse("ambiguous block-device inventory")
             self.nodes[key], self.parents[key], self.paths[path] = node, parent, key
             # Mapper PATH and PKNAME can differ. Only explicit KNAME evidence
             # establishes the alias; conflicting paths remain an error.
-            kernel_path = _nonempty(node.get("kname"))
+            kernel_path = _ancestry_string(node, "kname")
             if kernel_path:
                 if not kernel_path.startswith("/"):
                     kernel_path = "/dev/" + kernel_path
@@ -65,7 +85,7 @@ class BlockInventory:
             visit(node)
         # Resolve explicit PKNAME on flat inventories as well as JSON trees.
         for key, node in self.nodes.items():
-            parent_path = _nonempty(node.get("pkname"))
+            parent_path = _ancestry_string(node, "pkname")
             if parent_path and not parent_path.startswith("/"):
                 parent_path = "/dev/" + parent_path
             if parent_path:
@@ -82,7 +102,7 @@ class BlockInventory:
                 uuids.add(uuid.casefold())
             if node.get("type") == "disk":
                 for field in ("serial", "wwn"):
-                    value = _nonempty(node.get(field))
+                    value = normalize_serial(node.get(field)) if field == "serial" else _nonempty(node.get(field))
                     if value:
                         key = (field, value)
                         if key in disk_ids:
@@ -147,14 +167,18 @@ def observe_mounted_disk(path):
     """
     try:
         key = _mounted_device(path)
-        inventory = BlockInventory(read_inventory())
+        snapshot = json.dumps(read_inventory(), sort_keys=True)
+        inventory = BlockInventory(json.loads(snapshot))
         disk_key = inventory.disk(key, allowed_intermediates={"part", "crypt", "lvm"})
         disk = inventory.nodes[disk_key]
-        if "serial" not in disk or (disk["serial"] is not None and not isinstance(disk["serial"], str)):
+        if "serial" not in disk:
             _refuse("invalid physical disk serial observation")
-        serial = disk["serial"]
-        if serial is not None:
-            serial = serial.strip() or None
+        serial = normalize_serial(disk["serial"])
+        # A mapper's backing can change while its mounted major:minor stays the
+        # same. Match Slice's conservative full-inventory re-observation, not
+        # just the mount lookup. This still does not grant a lease after return.
+        if json.dumps(read_inventory(), sort_keys=True) != snapshot:
+            _refuse("block-device inventory changed during observation")
         if _mounted_device(path) != key:
             _refuse("covering mount changed during observation")
         return MountedDisk(key, disk_key, serial)

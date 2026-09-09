@@ -40,7 +40,7 @@ def test_partition_serial_absent_parent_present(observed):
     state, _, part = observed
     assert part["serial"] is None
     assert observe() == bi.MountedDisk("8:1", "8:0", "ZR16L100")
-    assert [call[0] for call in state["calls"]] == ["findmnt", "lsblk", "findmnt"]
+    assert [call[0] for call in state["calls"]] == ["findmnt", "lsblk", "lsblk", "findmnt"]
 
 
 def test_whole_disk_mount_needs_no_parent(observed):
@@ -152,6 +152,86 @@ def test_mount_change_during_inventory_refuses(observed, monkeypatch):
         return result
     monkeypatch.setattr(bi.subprocess, "run", changing)
     with pytest.raises(bi.BlockObservationError, match="mount changed"):
+        observe()
+
+
+@pytest.mark.parametrize("field", ["pkname", "kname", "path", "name"])
+@pytest.mark.parametrize("value", [False, 1, [], {}, " /dev/sda ", " "])
+def test_malformed_ancestry_string_fields_never_mean_absent(observed, field, value):
+    state, disk, _ = observed
+    state["mount"] = "8:0"
+    disk[field] = value
+    with pytest.raises(bi.BlockObservationError):
+        observe()
+
+
+@pytest.mark.parametrize("field", ["pkname", "kname"])
+@pytest.mark.parametrize("value", [None, ""])
+def test_explicit_absent_optional_ancestry_fields_remain_valid(observed, field, value):
+    _, disk, _ = observed
+    disk[field] = value
+    assert observe().serial == "ZR16L100"
+
+
+@pytest.mark.parametrize("first,second", [(" X ", "X"), ("X", " X "), (" X ", " X ")])
+def test_serial_uniqueness_uses_same_normalization_as_observation(observed, first, second):
+    state, disk, _ = observed
+    disk["serial"] = first
+    state["payload"]["blockdevices"].append(
+        {"path": "/dev/sdb", "type": "disk", "maj:min": "8:16", "serial": second})
+    with pytest.raises(bi.BlockObservationError, match="duplicate whole-disk identity"):
+        observe()
+
+
+@pytest.mark.parametrize("value", [False, 1, [], {}, " /dev/sda "])
+def test_nested_malformed_parent_is_not_overridden_by_tree(observed, value):
+    _, _, part = observed
+    part["pkname"] = value
+    with pytest.raises(bi.BlockObservationError, match="pkname"):
+        observe()
+
+
+@pytest.mark.parametrize("change", ["parent", "serial", "missing", "malformed"])
+def test_stable_mount_with_changed_backing_snapshot_refuses(observed, monkeypatch, change):
+    state, disk, part = observed
+    # A mounted mapper node retains its major:minor when its table changes.
+    disk.pop("children")
+    mapper = {"path": "/dev/mapper/crypt", "kname": "/dev/dm-0", "type": "crypt",
+              "maj:min": "253:0", "pkname": "sda1"}
+    other = {"path": "/dev/sdb", "type": "disk", "maj:min": "8:16", "serial": "OTHER"}
+    state["payload"]["blockdevices"] += [part, mapper, other]
+    state["mount"] = "253:0"
+    run = bi.subprocess.run
+    def changing(argv, **kwargs):
+        result = run(argv, **kwargs)
+        if argv[0] == "lsblk":
+            if change == "parent":
+                mapper["pkname"] = "sdb"
+            elif change == "serial":
+                disk["serial"] = "REPLACEMENT"
+            elif change == "missing":
+                state["payload"]["blockdevices"] = [other]
+            else:
+                mapper["pkname"] = []
+        return result
+    monkeypatch.setattr(bi.subprocess, "run", changing)
+    with pytest.raises(bi.BlockObservationError, match="inventory changed"):
+        observe()
+
+
+@pytest.mark.parametrize("failure", [PermissionError("denied"), subprocess.CalledProcessError(1, "lsblk"),
+                                     json.JSONDecodeError("bad", "{", 1)])
+def test_final_inventory_failure_is_not_successful_observation(observed, monkeypatch, failure):
+    run = bi.subprocess.run
+    calls = []
+    def failing(argv, **kwargs):
+        if argv[0] == "lsblk":
+            calls.append(argv)
+            if len(calls) == 2:
+                raise failure
+        return run(argv, **kwargs)
+    monkeypatch.setattr(bi.subprocess, "run", failing)
+    with pytest.raises(bi.BlockObservationError, match="observation failed"):
         observe()
 
 
