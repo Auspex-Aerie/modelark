@@ -727,7 +727,8 @@ def test_observe_drive_derives_identity_from_live_evidence(tmp_path):
              mock.patch.object(fetch.register, "probe_serial", return_value="LIVE-serial", create=True), \
              mock.patch.object(fetch.os, "statvfs", return_value=statvfs):
             obs = fetch._observe_drive(con, "drive-00")
-        assert obs.identity_proven is True
+        assert obs.identity_proven is False
+        assert obs.refusal_code == "DRIVE_IDENTITY_MISMATCH"
         assert obs.fingerprint == live_fp, "fingerprint must come from live probes, not the persisted row"
         assert obs.filesystem_capacity == 1000, "capacity must be the live statvfs total, not persisted 222"
         assert obs.free_bytes == 850, "free must be the live statvfs value, not persisted 111"

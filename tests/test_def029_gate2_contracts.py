@@ -508,6 +508,7 @@ def test_physical_preparation_is_receipted_and_exactly_retryable(tmp_path):
         "library": str(library),
     }
     with mock.patch.object(register, "_run", side_effect=exact_mount_probe), \
+            mock.patch.object(register, "probe_serial", return_value="NEW-SEAGATE"), \
             mock.patch.object(register, "smart_baseline") as smart, \
             mock.patch.object(register, "_mkfs") as mkfs, \
             mock.patch.object(register, "_mount") as mount_drive:
@@ -554,6 +555,7 @@ def test_physical_preparation_refuses_unknown_namespace_without_deleting_it(tmp_
         return subprocess.CompletedProcess(args, 1, "", "not configured")
 
     with mock.patch.object(register, "_run", side_effect=probe), \
+            mock.patch.object(register, "probe_serial", return_value="NEW-SEAGATE"), \
             mock.patch.object(register, "_is_annex", return_value=True):
         with pytest.raises(RuntimeError, match="receipt|namespace"):
             register.prepare_new_identity_archive(
@@ -585,7 +587,8 @@ def test_physical_preparation_rechecks_hardware_serial_before_any_namespace_writ
             return subprocess.CompletedProcess(args, 0, "SWAPPED-SERIAL\n", "")
         return subprocess.CompletedProcess(args, 1, "", "not configured")
 
-    with mock.patch.object(register, "_run", side_effect=swapped_serial):
+    with mock.patch.object(register, "_run", side_effect=swapped_serial), \
+            mock.patch.object(register, "probe_serial", return_value="SWAPPED-SERIAL"):
         with pytest.raises(RuntimeError, match="serial changed"):
             register.prepare_new_identity_archive(
                 volume_dev="/dev/mock-seagate1",
@@ -622,6 +625,7 @@ def test_physical_preparation_rechecks_mount_writability_before_git_clone(tmp_pa
         return subprocess.CompletedProcess(args, 1, "", "not configured")
 
     with mock.patch.object(register, "_run", side_effect=exact_identity), \
+            mock.patch.object(register, "probe_serial", return_value="NEW-SEAGATE"), \
             mock.patch.object(register.os, "access", return_value=False):
         with pytest.raises(RuntimeError, match="not writable"):
             register.prepare_new_identity_archive(

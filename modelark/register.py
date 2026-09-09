@@ -472,15 +472,11 @@ def prepare_new_identity_archive(
         raise RuntimeError(
             f"filesystem UUID changed before registration: expected {fs_uuid!r}, "
             f"observed {(live_uuid[0] if live_uuid else None)!r}")
-    parent = _run("lsblk", "-nro", "PKNAME", volume_dev, check=False).stdout.strip()
-    serial_device = f"/dev/{parent.splitlines()[0]}" if parent else volume_dev
-    live_serial = _run(
-        "lsblk", "-dno", "SERIAL", serial_device, check=False
-    ).stdout.strip().splitlines()
-    if not live_serial or live_serial[0] != serial:
+    live_serial = probe_serial(mount_path)
+    if live_serial != serial:
         raise RuntimeError(
             f"hardware serial changed before registration: expected {serial!r}, "
-            f"observed {(live_serial[0] if live_serial else None)!r}")
+            f"observed {live_serial!r}")
     root_source = _run("findmnt", "-nro", "SOURCE", "/", check=False).stdout.strip()
     if root_source and _parent_disk(volume_dev) == _parent_disk(root_source.split("[", 1)[0]):
         raise RuntimeError(
@@ -741,7 +737,8 @@ def archive_path(con, label: str) -> Path | None:
 # ---- live identity probes (read the mounted volume, never the catalog) ------
 # These back the fenced observation used by the physical-mutation envelope: identity is proven from the
 # CURRENT device, so a stale catalog row cannot vouch for a swapped/mismounted volume. Linux-only
-# (findmnt/lsblk); off-platform they degrade to None → identity unknown → the envelope refuses.
+# (findmnt/lsblk); physical serial observation failures raise rather than claiming
+# a successfully observed absent serial. Workflow adapters translate those failures.
 
 def probe_fs_uuid(path) -> str | None:
     """Live filesystem UUID of the volume containing `path`."""
@@ -755,13 +752,12 @@ def probe_annex_uuid(path) -> str | None:
 
 
 def probe_serial(path) -> str | None:
-    """Live hardware serial of the device backing `path` (supporting identity evidence), or None."""
-    src = _run("findmnt", "-fno", "SOURCE", "--target", str(path), check=False).stdout.strip()
-    src = src.splitlines()[0] if src else ""
-    if not src:
-        return None
-    out = _run("lsblk", "-dno", "SERIAL", src, check=False).stdout.strip()
-    return out.splitlines()[0] if out else None
+    """Physical parent-disk serial; None only when a proven disk reports no serial.
+
+    BlockObservationError means failed/ambiguous observation, never absence.
+    """
+    from modelark.block_identity import observe_mounted_disk
+    return observe_mounted_disk(path).serial
 
 
 def list_drives(con) -> list[dict]:

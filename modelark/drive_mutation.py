@@ -34,6 +34,7 @@ class Observation:
     fingerprint: str | None
     identity_proof: str
     fence_proof: str
+    refusal_code: str | None = None
 
 
 class DriveMutationRefused(Exception):
@@ -178,6 +179,8 @@ def begin_generation(con, label, operation_code=None, *, identity_epoch=None, **
 
 
 def _require_identity(observation, fingerprint, capacity, label):
+    if observation.refusal_code:
+        raise DriveMutationRefused(observation.refusal_code, drive=label)
     if (not observation.identity_proven or observation.fingerprint != fingerprint
             or observation.filesystem_capacity != capacity):
         raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)

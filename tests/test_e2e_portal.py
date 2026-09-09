@@ -1053,7 +1053,7 @@ def _browser_flow() -> None:
     """Drive the portal in a headless browser: clear the #35 plan-gate by selecting `ark`, open the
     Catalog, tick the giant, and confirm the over-cap banner shows + dismisses. Patient waits per step
     (the app reloads after a plan is selected); screenshots to /tmp on failure for debugging."""
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         pg = browser.new_page()
@@ -1282,10 +1282,13 @@ def _browser_flow() -> None:
                     break
                 time.sleep(0.1)
             assert "planning view" in pg.inner_text("#planBars").lower()
-            assert pg.locator("#fillGraph svg .linkpath").count() == 1
+            # Cards/text render synchronously, but drawLinks runs on the next
+            # animation frame (and queue refresh may rebuild the cards). Wait
+            # for the same exact link count instead of racing that frame.
+            expect(pg.locator("#fillGraph svg .linkpath")).to_have_count(1)
             pg.set_viewport_size({"width": 1180, "height": 760})
             pg.wait_for_timeout(100)
-            assert pg.locator("#fillGraph svg .linkpath").count() == 1
+            expect(pg.locator("#fillGraph svg .linkpath")).to_have_count(1)
 
             # A live exact Fill remains renderable even when advisory reconciliation fails on a
             # fresh page load; status is execution authority and the plan request is enrichment.

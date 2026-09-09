@@ -310,8 +310,8 @@ epoch-alias registry or new serialized authority format requires a separately ex
 | --- | --- | --- |
 | 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Accepted at 9692b4c in round 3 by Greptile and Codex; all CI green |
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
-| 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Round 1: Greptile/CI passed; fixing Codex audit-snapshot P2 for round 2 |
-| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Pending |
+| 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Accepted at 7a5c6d0 in round 2 by Greptile and Codex; all CI green |
+| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Implemented; 2916 tests and isolated E2E pass; submitting review round 1 |
 | 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Pending |
 
 Slice-1 validation: 39 new command-boundary/ancestry cases plus existing observer,
@@ -471,6 +471,87 @@ for a new catalog layout or identity policy. Round-2 correction qualification:
 live-session/provenance-contract cases passed (124 total). All-source Ruff and
 diff checks passed. No test assertion was relaxed. The preceding 2722-pass full
 run is the round-1 baseline; require fresh full CI at the corrected round-2 head.
+
+Slice 3, round 2, `7a5c6d0799915053a442ecbc45bb1ba81638d793`: Greptile accepted
+5/5 with thumbs-up 414200604; Codex completed with no major issues or new inline
+findings (comment 5609511200). Python 3.10, Python 3.12/wheel smoke and E2E all
+passed (run 34411191853). Slice 3 is accepted; proceed to explicit repair in slice 4.
+
+Slice-4 implementation: `drive reconcile LABEL --inspect-serial-identity` reads
+saved catalog evidence in one snapshot and returns an exact-state binding. It does
+not inspect hardware or authorize archive IO. Explicit repair additionally requires
+`--repair-serial-identity --expected-binding BINDING --writers-stopped`; the last
+flag is an operator assertion, not automatic detection/quiescence of old programs.
+The repair holds controller plus canonical/legacy physical fences, verifies the
+actual saved serial/UUIDs/capacity, inventories claims without changing bytes, and
+retains a SQLite backup and transaction rehearsal before modifying the catalog.
+Backup files and their directory plus its parent are flushed before publication.
+Failure reports retain attempted artifact locations, but do not certify incomplete
+or failed rehearsal files as validated backups.
+
+Dirty recovery applies PR 71's owner/child checks and publishes only the existing
+generation's old-identity anchor, with actual observed serial retained separately
+in fence evidence. It commits and reports that milestone. Enrichment then advances
+the generation, changes the fingerprint, publishes its anchor, supersedes affected
+approvals, stamps reader floor 8 and bumps revision in one guarded transaction.
+Every old anchor/generation/session remains history. A post-bridge failure leaves
+the recovered old-identity clean state intact; inspect again for a fresh retry
+binding. No ordinary open/reconcile/Fill path performs this repair automatically.
+
+Local adversarial review identified a handoff race: rereading state after the
+recovery callback could silently adopt changed session evidence. The clean state
+is now captured and validated within the bridge transaction, and checked again
+after the callback and inside enrichment. Regression tests reproduce token/history
+changes and require refusal, preserving the committed old clean state. Generic
+post-bridge errors now retain the recovery milestone and artifact paths as typed
+operator evidence. These are bounded implementations of the approved CAS and
+two-stage failure contract, not additional identity policy.
+
+Initial focused qualification: 148 repair/proof/observer/approval/CLI/adversarial
+tests passed; then 158 bootstrap/registration/transport/envelope/workflow tests
+passed (overlapping counts). The latter adds real contention on either lock alias
+and a two-connection WAL snapshot race. Expanded adversarial qualification passed
+52 cases: owned paused/no-expiry recovery, live/child refusals, malformed historical
+proof, stale bindings, rollback at every enrichment write point, missing inventory,
+backup/rehearsal/fsync failures and fresh identity changes before and after the
+committed bridge. Seven actual-repair consumer cases passed with nonempty archive
+claims: selective approval supersession, old Start/Resume refusal, immutable
+task/session/content history and preserved old hash-repair fingerprints whose
+later use refuses before resolving archive bytes. All-source Ruff/diff checks pass.
+Slice-4 diagnostic full run: **2911 passed, 6 existing skips, 4 failed in 752.54
+seconds**. One old planner-revision fixture fabricated an observation missing the
+new optional diagnostic field; it now uses the real Observation type, preserving
+all assertions (57 related tests passed). The other three failures reproduced an
+existing replan-test isolation leak: installing its bridge fake before monkeypatch
+captured the original caused teardown to restore the fake instead of real Start.
+The ordered replan/serial consumer run reproduced all three failures. Fix the
+test patch at its source, not the serial-repair refusal expectations. The bridge
+factory is now side-effect-free and both callers scope its installation; a new
+regression guards that contract. The same ordered run passed **54 tests** after
+the fix (previously 3 failed, 50 passed). No production identity/admission check or
+test assertion was weakened. Standalone replan-script execution has a separate
+pre-existing parameterized-test argument limitation reproduced against HEAD;
+the authoritative pytest/CI path is unchanged. Require an isolated browser pass
+and fresh complete suite; the diagnostic full run is not a green gate. No slice-4
+external acceptance or complete slice-5 qualification is claimed.
+
+Browser qualification exposed the previously recorded graph-count race twice:
+cards and text render synchronously, but `drawLinks` runs in requestAnimationFrame
+and an advisory/queue refresh may rebuild those cards. The immediate count could
+run before drawing (the subsequent failure screenshot already contained the link).
+The test now uses Playwright's retrying exact-count assertion for **one** link,
+including after resize. No expected count or production UI behavior changed.
+The entire isolated browser flow then passed, including approval, registration,
+terminal and library flows. All-source Ruff/diff checks pass. A new full pytest
+run is underway alone, with its output separate from the diagnostic failure report.
+
+Slice-4 final frozen-code run, without overlapping jobs: **2916 passed, 6 skipped,
+5 deprecation warnings in 758.86 seconds**. Skips remain five unavailable optional
+zstandard decoder cases and one existing acceptance fixture with absent bytes.
+Isolated browser E2E and all-source Ruff/diff checks passed. All four initial suite
+failures are resolved; no new skips, weakened identity guards or changed expected
+outcomes. Submit this implementation for slice-4 review round 1. Corrected probe
+and explicit repair ship together in this slice; no deployment/live repair occurred.
 
 ## 7. Questions for Grok
 

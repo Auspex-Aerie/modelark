@@ -250,7 +250,7 @@ def test_dirty_and_clean_anchor_bump(tmp_path):
     _require_bump(con, "begin_generation", lambda: dm.begin_generation(con, "d0", "test-op"))
     gen = con.execute(
         "SELECT write_generation FROM drives WHERE drive_label='d0'").fetchone()[0]
-    obs = SimpleNamespace(
+    obs = dm.Observation(
         free_bytes=800, filesystem_capacity=1000, fingerprint="a" * 64,
         identity_proven=True, identity_proof="p", fence_proof="p")
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")

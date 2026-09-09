@@ -561,8 +561,22 @@ def cmd_drive_reconcile(args):
     from modelark import drive_bootstrap
     from modelark.proposal import Refusal
 
+    inspect_serial = getattr(args, "inspect_serial_identity", False)
+    repair_serial = getattr(args, "repair_serial_identity", False)
+    expected_binding = getattr(args, "expected_binding", None)
+    writers_stopped = getattr(args, "writers_stopped", False)
+    if (inspect_serial or repair_serial) and (args.dedicated or args.accept_drift):
+        raise SystemExit("serial identity repair does not adopt authority or accept capacity/free-space drift")
+    if (expected_binding or writers_stopped) and not repair_serial:
+        raise SystemExit("--expected-binding and --writers-stopped require --repair-serial-identity")
+    if repair_serial and (not expected_binding or not writers_stopped):
+        raise SystemExit("serial repair requires --expected-binding from inspection and --writers-stopped")
+
     def progress(event):
-        if event.phase == "inventory_started":
+        if event.phase == "serial_legacy_recovered":
+            print(f"{args.label}: old-identity recovery committed; starting separate serial enrichment",
+                  file=sys.stderr, flush=True)
+        elif event.phase == "inventory_started":
             print(
                 f"{args.label}: inventory started ({event.total or 0} catalogued claims)",
                 file=sys.stderr,
@@ -595,15 +609,27 @@ def cmd_drive_reconcile(args):
                 flush=True,
             )
 
-    con = db.connect()
+    con = db.connect(read_only=True) if inspect_serial else db.connect()
     try:
+        if inspect_serial:
+            print(json.dumps(drive_bootstrap.inspect_serial_identity(con, args.label), indent=2))
+            return
+        if repair_serial:
+            result = drive_bootstrap.repair_serial_identity(
+                con, args.label, expected_binding=expected_binding,
+                now=datetime.now(timezone.utc).isoformat(sep=" "),
+                writers_stopped=writers_stopped, progress=progress)
+            print(json.dumps(result, indent=2))
+            return
         r = drive_bootstrap.reconcile_drive(
             con, args.label, now=datetime.now(timezone.utc).isoformat(sep=" "),
             dedicated=args.dedicated, accept_drift=args.accept_drift, progress=progress)
     except (drive_bootstrap.DriveMutationRefused, Refusal) as exc:
         # an offline/failed/unproven drive is an EXPECTED reconciliation outcome, not a crash: surface the
         # typed refusal as a clean operator message (the restore/hash-repair convention), not a traceback.
-        raise SystemExit(f"drive reconcile failed: {exc.code}") from exc
+        detail = (" " + json.dumps(getattr(exc, "evidence", {}), default=str)
+                  if inspect_serial or repair_serial else "")
+        raise SystemExit(f"drive reconcile failed: {exc.code}{detail}") from exc
     finally:
         con.close()
     if r.inventory is not None:
@@ -834,6 +860,14 @@ def _main(argv, permit):
                           "dedicated_local authority); omit for shared/NAS/unfenceable storage → unknown")
     rec.add_argument("--accept-drift", dest="accept_drift", action="store_true",
                      help="accept an above-tolerance free-space drift and re-anchor after full reconciliation")
+    serial_mode = rec.add_mutually_exclusive_group()
+    serial_mode.add_argument("--inspect-serial-identity", action="store_true",
+                             help="report saved legacy serial evidence and an exact-state repair binding; read-only")
+    serial_mode.add_argument("--repair-serial-identity", action="store_true",
+                             help="explicitly back up, rehearse and repair proven legacy serial evidence")
+    rec.add_argument("--expected-binding", help="exact binding returned by serial identity inspection")
+    rec.add_argument("--writers-stopped", action="store_true",
+                     help="confirm all old ModelArk processes and unsupported archive writers are stopped")
     rec.set_defaults(func=cmd_drive_reconcile)
 
     args = p.parse_args(argv)

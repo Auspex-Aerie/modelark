@@ -665,10 +665,15 @@ def _live_drive_evidence(con, label: str) -> dict | None:
         # the envelope refuses DRIVE_IDENTITY_UNPROVEN (a typed, handled terminal), never an OSError
         # that would escape the refusal handler and crash the caller.
         return None
+    from modelark.block_identity import BlockObservationError
+    try:
+        serial = register.probe_serial(path)
+    except BlockObservationError:
+        return None
     return {
         "fs_uuid": register.probe_fs_uuid(path),
         "annex_uuid": register.probe_annex_uuid(path),
-        "serial": register.probe_serial(path),
+        "serial": serial,
         "filesystem_capacity_bytes": st.f_blocks * st.f_frsize,
         "free_bytes": st.f_bavail * st.f_frsize,
     }
@@ -690,10 +695,27 @@ def _observe_drive(con, label: str) -> drive_mutation.Observation:
     proof = json.dumps(
         {"v": 1, "fs_uuid": ev["fs_uuid"], "annex_uuid": ev["annex_uuid"], "serial": ev["serial"]},
         sort_keys=True, separators=(",", ":"))
+    saved = con.execute(
+        "SELECT fs_uuid,annex_uuid,serial,identity_fingerprint,filesystem_capacity_bytes "
+        "FROM drives WHERE drive_label=?", [label]).fetchone()
+    refusal_code = None
+    if saved is None:
+        refusal_code = "DRIVE_IDENTITY_UNPROVEN"
+    elif saved[2] and saved[2] != ev["serial"]:
+        # In particular, the old null-serial fingerprint must not turn failure
+        # to confirm a KNOWN physical serial into an accepted identity.
+        refusal_code = "DRIVE_IDENTITY_MISMATCH"
+    else:
+        from modelark.serial_identity import is_legacy_serial_mismatch
+        if is_legacy_serial_mismatch(
+                fs_uuid=saved[0], annex_uuid=saved[1], serial=saved[2],
+                fingerprint=saved[3], filesystem_capacity_bytes=saved[4],
+                live_fingerprint=fingerprint):
+            refusal_code = "DRIVE_SERIAL_REPAIR_REQUIRED"
     return drive_mutation.Observation(
-        identity_proven=True, free_bytes=ev["free_bytes"],
+        identity_proven=refusal_code is None, free_bytes=ev["free_bytes"],
         filesystem_capacity=ev["filesystem_capacity_bytes"], fingerprint=fingerprint,
-        identity_proof=proof, fence_proof=proof)
+        identity_proof=proof, fence_proof=proof, refusal_code=refusal_code)
 
 
 def observe_for_admission(con, label: str) -> "drive_mutation.Observation | None":

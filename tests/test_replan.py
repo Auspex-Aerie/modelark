@@ -111,15 +111,14 @@ def _bridge_projection_from_catalog(con):
     )
 
 
-def _install_replan_session_bridge():
+def _make_replan_session_bridge():
     """Characterization bridge: start_fill returns SessionStart with a fixed projection
     built from catalog (not plan_capacity). fill.execute drains that projection only.
 
-    Applied under both pytest and the CI ``python tests/test_replan.py`` script runner.
-    Inserts a durable live session row so heartbeat/terminalize CAS paths remain real.
+    Returns a fake without changing module globals. Callers install a scoped patch
+    under pytest or the CI ``python tests/test_replan.py`` script runner. Inserts
+    a durable live session row so heartbeat/terminalize CAS paths remain real.
     """
-    from modelark import execution_service
-
     def _fake_start_fill(**kw):
         con = kw.get("con")
         proj = _bridge_projection_from_catalog(con) if con is not None else types.SimpleNamespace(tasks=())
@@ -171,14 +170,25 @@ def _install_replan_session_bridge():
             execution_config=None,
         )
 
-    execution_service.start_fill = _fake_start_fill  # type: ignore[method-assign]
     return _fake_start_fill
 
 
 @pytest.fixture(autouse=True)
 def _pr09_fill_session_bridge(monkeypatch):
     from modelark import execution_service
-    monkeypatch.setattr(execution_service, "start_fill", _install_replan_session_bridge())
+    monkeypatch.setattr(execution_service, "start_fill", _make_replan_session_bridge())
+
+
+def test_session_bridge_factory_has_no_global_side_effect():
+    from modelark import execution_service
+
+    original = execution_service.start_fill
+    bridge = _make_replan_session_bridge()
+    assert execution_service.start_fill is original
+    assert bridge is not original
+    with mock.patch.object(execution_service, "start_fill", bridge):
+        assert execution_service.start_fill is bridge
+    assert execution_service.start_fill is original
 
 
 @contextlib.contextmanager
@@ -1038,14 +1048,15 @@ def test_sweep_incomplete(tmp_path):
 if __name__ == "__main__":
     import inspect
     import tempfile
-    _install_replan_session_bridge()
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            # Mirror the autouse pytest fixture under the plain script runner (CI's `python "$t"`).
-            with _admission_compat.seam_patch(), tempfile.TemporaryDirectory() as td:
-                if inspect.signature(fn).parameters:
-                    fn(Path(td))
-                else:
-                    fn()
-            print(f"ok  {name}")
+    from modelark import execution_service
+    with mock.patch.object(execution_service, "start_fill", _make_replan_session_bridge()):
+        for name, fn in sorted(globals().items()):
+            if name.startswith("test_") and callable(fn):
+                # Mirror the autouse pytest fixture under the plain script runner (CI's `python "$t"`).
+                with _admission_compat.seam_patch(), tempfile.TemporaryDirectory() as td:
+                    if inspect.signature(fn).parameters:
+                        fn(Path(td))
+                    else:
+                        fn()
+                print(f"ok  {name}")
     print("all passed")

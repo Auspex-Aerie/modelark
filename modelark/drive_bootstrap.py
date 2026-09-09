@@ -32,17 +32,23 @@ remains out of scope (DEF-029).
 from __future__ import annotations
 
 import json
+import hashlib
 import os
+import sqlite3
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from modelark import capacity_evidence, drive_fence, register
+from modelark.block_identity import BlockObservationError
 from modelark import drive_mutation as dm
 from modelark import execution_authority as authority
 from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity, compatible_keys
 from modelark.core import db
+from modelark.catalog_versions import SUPPORTED_CATALOG_VERSIONS, SERIAL_REPAIR_CATALOG_VERSION
+from modelark.serial_identity import recognize_legacy_anchor, SerialIdentityUnproven, is_legacy_serial_mismatch
 
 # Re-export the typed refusal so operator entry points (the `drive reconcile` CLI) can translate it to a
 # clean message via THIS module, without importing the fenced envelope directly — keeping the envelope
@@ -142,14 +148,19 @@ def _live_evidence(con, label: str) -> _LiveEvidence:
         return _LiveEvidence(str(path), None, None, None, None, None, None, None, False)
     fs_uuid = register.probe_fs_uuid(path)
     annex_uuid = register.probe_annex_uuid(path)
-    serial = register.probe_serial(path)                 # probed ONCE, reused for fingerprint + proof
+    try:
+        serial = register.probe_serial(path)             # one proven physical-disk observation
+    except BlockObservationError:
+        return _LiveEvidence(str(path), fs_uuid, annex_uuid, None, None, None, None, None, False)
     if not (fs_uuid or annex_uuid):
         return _LiveEvidence(str(path), fs_uuid, annex_uuid, serial, None, None, None, None, False)
     capacity = st.f_blocks * st.f_frsize
     fingerprint = capacity_evidence.identity_fingerprint_v1(
         fs_uuid=fs_uuid, annex_uuid=annex_uuid, serial=serial, filesystem_capacity_bytes=capacity)
+    saved = con.execute('SELECT serial FROM drives WHERE drive_label=?', [label]).fetchone()
+    known_serial_matches = saved is not None and (not saved[0] or saved[0] == serial)
     return _LiveEvidence(str(path), fs_uuid, annex_uuid, serial, capacity,
-                         st.f_bavail * st.f_frsize, st.f_frsize, fingerprint, True)
+                         st.f_bavail * st.f_frsize, st.f_frsize, fingerprint, known_serial_matches)
 
 
 def _annex_keys_present(dest, keys, *, target_uuid) -> set[str]:
@@ -272,9 +283,282 @@ def _persisted(con, label: str):
     return row
 
 
+def _serial_repair_state(con, label):
+    """Capture one coherent binding, reusing a caller-owned transaction when present."""
+    own = not con.in_transaction
+    if own:
+        con.execute("BEGIN")
+    try:
+        return _serial_repair_state_snapshot(con, label)
+    finally:
+        if own:
+            con.execute("ROLLBACK")
+
+
+def _serial_repair_state_snapshot(con, label):
+    from modelark.proposal import approved_proposals_bound_to_drive
+
+    version = con.execute("PRAGMA user_version").fetchone()[0]
+    if version not in SUPPORTED_CATALOG_VERSIONS:
+        raise dm.DriveMutationRefused("CATALOG_VERSION_UNSUPPORTED", drive=label)
+    facts = _persisted(con, label)
+    epoch, generation, fingerprint, capacity, write_authority, fs_uuid, annex_uuid, serial = facts
+    try:
+        identity = FenceIdentity(fs_uuid, annex_uuid, serial, capacity, epoch, fingerprint)
+        identity.lock_keys()
+    except UnprovenFenceIdentity as exc:
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_UNPROVEN", drive=label, reason=str(exc)) from exc
+    if write_authority != "dedicated_local" or type(generation) is not int or generation < 1:
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_UNPROVEN", drive=label)
+    metadata = con.execute("SELECT lifecycle,eligibility FROM drives WHERE drive_label=?", [label]).fetchone()
+    if metadata[0] != "active":
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_UNPROVEN", drive=label, lifecycle=metadata[0])
+    dirty = con.execute(
+        "SELECT * FROM drive_dirty_generations WHERE drive_label=? AND identity_epoch=? AND generation=?",
+        [label, epoch, generation]).fetchone()
+    if dirty is None:
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_UNPROVEN", drive=label, reason="generation missing")
+    owner_id = con.execute(
+        "SELECT owner_session_id FROM drive_dirty_generations "
+        "WHERE drive_label=? AND identity_epoch=? AND generation=?", [label, epoch, generation]).fetchone()[0]
+    owner = (con.execute("SELECT * FROM execution_sessions WHERE session_id=?", [owner_id]).fetchone()
+             if owner_id is not None else None)
+    clean = dm._generation_is_clean(con, label, epoch, generation, fingerprint, capacity, write_authority)
+    current_anchor = con.execute(
+        "SELECT * FROM drive_clean_anchors WHERE drive_label=? AND identity_epoch=? AND generation=?",
+        [label, epoch, generation]).fetchone()
+    if current_anchor is not None and not clean:
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_UNPROVEN", drive=label, reason="contradictory anchor")
+    anchor = current_anchor or con.execute(
+        "SELECT * FROM drive_clean_anchors WHERE drive_label=? AND identity_epoch=? AND generation<? "
+        "AND identity_fingerprint=? AND filesystem_capacity_bytes=? AND write_authority=? "
+        "ORDER BY generation DESC LIMIT 1", [label, epoch, generation, fingerprint, capacity, write_authority]
+    ).fetchone()
+    canonical = capacity_evidence.identity_fingerprint_v1(
+        fs_uuid=fs_uuid, annex_uuid=annex_uuid, serial=serial, filesystem_capacity_bytes=capacity)
+    if not isinstance(serial, str) or not serial or serial != serial.strip() or anchor is None:
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_UNPROVEN", drive=label, reason="serial or anchor missing")
+    if fingerprint == canonical:
+        status = "already_correct" if clean else "correct_identity_dirty"
+    else:
+        columns = [r[1] for r in con.execute("PRAGMA table_info(drive_clean_anchors)")]
+        proof = dict(zip(columns, anchor))
+        try:
+            recognize_legacy_anchor(
+                fs_uuid=fs_uuid, annex_uuid=annex_uuid, serial=serial, fingerprint=fingerprint,
+                filesystem_capacity_bytes=capacity, anchor_identity_proof=proof["identity_proof"],
+                anchor_fingerprint=proof["identity_fingerprint"],
+                anchor_capacity_bytes=proof["filesystem_capacity_bytes"],
+                anchor_authority=proof["write_authority"])
+        except SerialIdentityUnproven as exc:
+            raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_UNPROVEN", drive=label, reason=str(exc)) from exc
+        status = "legacy_clean" if clean else "legacy_dirty"
+    return {"catalog_version": version, "drive_label": label, "facts": facts, "metadata": metadata,
+            "dirty_generation": dirty, "owner_session": owner, "anchor": anchor, "status": status,
+            "canonical_fingerprint": canonical,
+            "affected_approvals": approved_proposals_bound_to_drive(con, label)}
+
+
+def _serial_binding(state):
+    return hashlib.sha256(json.dumps(state, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def inspect_serial_identity(con, label: str) -> dict:
+    """Report saved repair evidence without changing it or authorizing archive IO.
+
+    The binding is operator intent for one exact captured state. Repair must still
+    prove live media, ownership, inventory and all fences; inspection is not admission.
+    """
+    own = not con.in_transaction
+    if own:
+        con.execute("BEGIN")
+    try:
+        state = _serial_repair_state(con, label)
+        epoch, generation, fingerprint = state["facts"][:3]
+        return {"drive_label": label, "status": state["status"], "binding": _serial_binding(state),
+                "identity_epoch": epoch, "generation": generation, "old_fingerprint": fingerprint,
+                "canonical_fingerprint": state["canonical_fingerprint"],
+                "affected_approvals": state["affected_approvals"], "requires_live_verification": True}
+    finally:
+        if own:
+            con.execute("ROLLBACK")
+
+
+def _serial_live(con, label, state):
+    ev = _live_evidence(con, label)
+    facts = state["facts"]
+    if (not ev.proven or not ev.path or ev.fs_uuid != facts[5] or ev.annex_uuid != facts[6]
+            or ev.serial != facts[7] or ev.capacity != facts[3]
+            or ev.fingerprint != state["canonical_fingerprint"]
+            or type(ev.free) is not int or not 0 <= ev.free <= facts[3]):
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_LIVE_MISMATCH", drive=label)
+    return ev
+
+
+def _serial_guard(con, label, expected):
+    from modelark.execution_session import require_no_live_session
+    require_no_live_session(con)
+    if _serial_repair_state(con, label) != expected:
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_STALE", drive=label)
+
+
+def _serial_recover_locked(con, label, state, owner, final, now):
+    """Bridge only the existing dirty generation to its OLD identity, never enrich it."""
+    from modelark.proposal import bump_revision
+    _serial_guard(con, label, state)
+    if state["status"] != "legacy_dirty":
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_UNPROVEN", drive=label)
+    observed_owner = _capture_recovery_owner(con, label, state["facts"], expected=owner)
+    if observed_owner != owner:
+        raise dm.DriveMutationRefused("DRIVE_RECOVERY_OWNER_CHANGED", drive=label)
+    facts = state["facts"]
+    legacy_proof = json.dumps({"v": 1, "fs_uuid": facts[5], "annex_uuid": facts[6], "serial": None},
+                              sort_keys=True, separators=(",", ":"))
+    # Identity proof deliberately encodes the legacy identity; fence proof retains
+    # the newly observed serial. Neither claims that today's serial was absent.
+    observation = dm.Observation(True, final.free, final.capacity, facts[2],
+                                 legacy_proof, final.observation().identity_proof)
+    dm._publish_anchor_locked(con, label, facts[0], facts[1], observation, now)
+    bump_revision(con)
+    clean = _serial_repair_state(con, label)
+    if clean["status"] != "legacy_clean" or any(
+            clean[key] != state[key] for key in state if key not in {"anchor", "status"}):
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_STALE", drive=label)
+    return clean
+
+
+def _serial_enrich_locked(con, label, state, final, now):
+    """One composite transaction: old clean -> new generation -> new identity -> anchor."""
+    from modelark.proposal import bump_revision, supersede_serial_repair_approvals
+    _serial_guard(con, label, state)
+    if state["status"] != "legacy_clean":
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_UNPROVEN", drive=label)
+    facts = state["facts"]
+    generation = dm._advance_one(con, label, "serial_identity_repair", captured=facts)
+    con.execute("UPDATE drives SET identity_fingerprint=? WHERE drive_label=?",
+                [state["canonical_fingerprint"], label])
+    dm._publish_anchor_locked(con, label, facts[0], generation, final.observation(), now)
+    affected = supersede_serial_repair_approvals(con, label)
+    con.execute(f"PRAGMA user_version={SERIAL_REPAIR_CATALOG_VERSION}")
+    bump_revision(con)
+    return generation, affected
+
+
+def _serial_backup_rehearsal(con, label, state, owner, final, now, *, artifacts):
+    """Retain a consistent pre-repair backup and rehearse only catalog transactions.
+
+    Archive inspection has already completed under the real fences. Replay uses
+    those captured observations on a disposable clone, never changes archive bytes,
+    and is not a general catalog replacement/publication mechanism.
+    """
+    source = next((r[2] for r in con.execute("PRAGMA database_list") if r[1] == "main"), "")
+    if not source:
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_BACKUP_REQUIRED", drive=label)
+    directory = Path(tempfile.mkdtemp(prefix=".serial-repair-", dir=Path(source).resolve().parent))
+    backup_path, rehearsal_path = directory / "before.sqlite", directory / "rehearsal.sqlite"
+    # Preserve attempted artifact locations even if creation/rehearsal/fsync fails.
+    # A failure report is not evidence that either file is a validated backup.
+    artifacts.update(backup=str(backup_path), rehearsal=str(rehearsal_path))
+    backup = sqlite3.connect(backup_path, isolation_level=None)
+    try:
+        con.backup(backup)
+        if (backup.execute("PRAGMA integrity_check").fetchone() != ("ok",)
+                or backup.execute("PRAGMA foreign_key_check").fetchall()):
+            raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_BACKUP_INVALID", drive=label)
+        if _serial_repair_state(backup, label) != state:
+            raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_STALE", drive=label)
+        rehearsal = sqlite3.connect(rehearsal_path, isolation_level=None)
+        try:
+            backup.backup(rehearsal)
+            rehearsal.execute("PRAGMA foreign_keys=ON")
+            if state["status"] == "legacy_dirty":
+                dm._immediate(rehearsal, lambda: _serial_recover_locked(
+                    rehearsal, label, state, owner, final, now))
+            clean = _serial_repair_state(rehearsal, label)
+            dm._immediate(rehearsal, lambda: _serial_enrich_locked(rehearsal, label, clean, final, now))
+            if (rehearsal.execute("PRAGMA integrity_check").fetchone() != ("ok",)
+                    or rehearsal.execute("PRAGMA foreign_key_check").fetchall()):
+                raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_REHEARSAL_FAILED", drive=label)
+        finally:
+            rehearsal.close()
+    finally:
+        backup.close()
+    for path in (backup_path, rehearsal_path):
+        with path.open("rb") as stream:
+            os.fsync(stream.fileno())
+    for parent in (directory, directory.parent):
+        fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+
+def repair_serial_identity(con, label: str, *, expected_binding: str, now,
+                           writers_stopped: bool = False, blocking: bool = False,
+                           progress: ProgressCallback | None = None) -> dict:
+    """Explicit bound repair; never called by normal reconciliation or catalog open."""
+    from modelark.execution_session import require_no_live_session
+    if writers_stopped is not True:
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_QUIESCENCE_REQUIRED", drive=label)
+    if con.in_transaction:
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_TRANSACTION_ACTIVE", drive=label)
+    if not isinstance(expected_binding, str) or len(expected_binding) != 64:
+        raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_BINDING_REQUIRED", drive=label)
+    require_no_live_session(con)
+    recovered = False
+    artifacts = {}
+    try:
+        with drive_fence.hold_controller(db.DB_PATH, blocking=blocking):
+            require_no_live_session(con)
+            state = _serial_repair_state(con, label)
+            if _serial_binding(state) != expected_binding:
+                raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_STALE", drive=label)
+            facts = state["facts"]
+            keys = FenceIdentity(facts[5], facts[6], facts[7], facts[3], facts[0], facts[2]).lock_keys()
+            with drive_fence.hold_drives_sorted(keys, blocking=blocking):
+                _serial_guard(con, label, state)
+                first = _serial_live(con, label, state)
+                if state["status"] == "already_correct":
+                    return {**inspect_serial_identity(con, label), "observed_serial": first.serial}
+                if state["status"] not in {"legacy_clean", "legacy_dirty"}:
+                    raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_UNPROVEN", drive=label)
+                owner = _capture_recovery_owner(con, label, facts)
+                inventory = _require_complete_inventory(con, label, first.path, progress=progress)
+                final = _serial_live(con, label, state)
+                _serial_guard(con, label, state)
+                _serial_backup_rehearsal(con, label, state, owner, final, now, artifacts=artifacts)
+                _serial_guard(con, label, state)
+                if state["status"] == "legacy_dirty":
+                    final = _serial_live(con, label, state)
+                    state = dm._immediate(
+                        con, lambda: _serial_recover_locked(con, label, state, owner, final, now))
+                    recovered = True
+                    _emit_progress(progress, "serial_legacy_recovered")
+                    _serial_guard(con, label, state)
+                final = _serial_live(con, label, state)
+                generation, affected = dm._immediate(
+                    con, lambda: _serial_enrich_locked(con, label, state, final, now))
+                return {"drive_label": label, "status": "repaired", "identity_epoch": facts[0],
+                        "generation": generation, "old_fingerprint": facts[2],
+                        "canonical_fingerprint": final.fingerprint, "observed_serial": final.serial,
+                        "legacy_recovered": recovered, "superseded_approvals": affected,
+                        "inventory_present": len(inventory.present), "inventory_extra": len(inventory.extra),
+                        "inventory_debris": len(inventory.debris), **artifacts}
+    except drive_fence.FenceUnavailable as exc:
+        raise dm.DriveMutationRefused("DRIVE_FENCE_UNAVAILABLE", **exc.evidence,
+                                     legacy_recovered=recovered, **artifacts) from exc
+    except dm.DriveMutationRefused as exc:
+        exc.evidence.update(legacy_recovered=recovered, **artifacts)
+        raise
+    except Exception as exc:
+        raise dm.DriveMutationRefused(getattr(exc, "code", "DRIVE_SERIAL_REPAIR_FAILED"),
+                                     drive=label, reason=str(exc), legacy_recovered=recovered,
+                                     **artifacts) from exc
+
+
 def _stable_identity_matches(ev: _LiveEvidence, persisted_fs, persisted_annex) -> bool:
-    """The live stable identity must equal every persisted non-null filesystem/annex UUID. Serial is
-    only supporting evidence and never on its own admits or rejects."""
+    """Compare stable UUIDs; the observation separately verifies a known saved serial."""
     if persisted_fs is not None and ev.fs_uuid != persisted_fs:
         return False
     if persisted_annex is not None and ev.annex_uuid != persisted_annex:
@@ -380,6 +664,10 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
             if not _stable_identity_matches(ev, p_fs, p_annex):      # different media under an existing label
                 raise dm.DriveMutationRefused("DRIVE_IDENTITY_MISMATCH", drive=label,
                                               persisted=(p_fs, p_annex), live=(ev.fs_uuid, ev.annex_uuid))
+            if is_legacy_serial_mismatch(
+                    fs_uuid=p_fs, annex_uuid=p_annex, serial=p_serial, fingerprint=p_fp,
+                    filesystem_capacity_bytes=p_cap, live_fingerprint=ev.fingerprint):
+                raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_REQUIRED", drive=label)
             if not dedicated:                            # exclusivity is an explicit assertion, not a probe
                 if p_auth == "dedicated_local":
                     raise dm.DriveMutationRefused("DRIVE_AUTHORITY_DOWNGRADE_REFUSED", drive=label)

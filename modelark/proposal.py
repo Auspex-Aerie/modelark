@@ -1173,6 +1173,47 @@ def load_proposal(con, proposal_id: str) -> dict:
     return d
 
 
+def approved_proposals_bound_to_drive(con, drive_label: str) -> tuple[str, ...]:
+    """Inspect approvals affected by this drive's serial-evidence correction.
+
+    A drive can be a write target, a copy source, or the location satisfying an
+    already-archived requirement. All three bind execution authority, including
+    bindings on an approved proposal that is not the current active pointer.
+    """
+    rows = con.execute(
+        "SELECT DISTINCT p.proposal_id FROM placement_proposals p "
+        "JOIN proposal_tasks t ON t.proposal_id=p.proposal_id "
+        "WHERE p.lifecycle='approved' AND "
+        "(t.target_drive=? OR t.source_drive=? OR t.satisfying_drive=?) "
+        "ORDER BY p.proposal_id",
+        [drive_label, drive_label, drive_label]).fetchall()
+    return tuple(row[0] for row in rows)
+
+
+def supersede_serial_repair_approvals(con, drive_label: str) -> tuple[str, ...]:
+    """Supersede only affected approvals in the repair's BEGIN IMMEDIATE.
+
+    The caller owns physical fences, the IMMEDIATE transaction, and its single
+    planner-revision bump. SQLite exposes whether a transaction is open, not its
+    BEGIN mode; enforce the former here and require the latter of the caller.
+    Like normal approval replacement, change lifecycle/timestamp only. Immutable
+    task/file bindings and paused session history remain historical evidence.
+    """
+    if not con.in_transaction:
+        raise Refusal("SERIAL_REPAIR_TRANSACTION_REQUIRED", {"drive": drive_label}, ())
+    _require_fill_idle(con)
+    affected = approved_proposals_bound_to_drive(con, drive_label)
+    for proposal_id in affected:
+        con.execute(
+            "UPDATE placement_proposals SET lifecycle='superseded', "
+            "superseded_at=CURRENT_TIMESTAMP WHERE proposal_id=? AND lifecycle='approved'",
+            [proposal_id])
+        con.execute(
+            "UPDATE planner_state SET active_approved_proposal_id=NULL "
+            "WHERE singleton_id=1 AND active_approved_proposal_id=?", [proposal_id])
+    return affected
+
+
 def review_input_status(con, stored: Mapping) -> dict:
     """Read-only operator status for the inputs bound by a stored proposal.
 
