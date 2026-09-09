@@ -373,7 +373,7 @@ def test_already_typed_bootstrap_refusal_is_preserved(operator, monkeypatch):
     assert caught.value.code == "STATE_BUSY"
 
 
-@pytest.mark.parametrize('mode', ['small', 'large', 'unplug'])
+@pytest.mark.parametrize('mode', ['small', 'large', 'unplug', 'acl-unplug'])
 def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, monkeypatch, tmp_path, mode):
     """Only hardware/free-space observations are fake; all assembly and IO are real."""
     import os
@@ -461,18 +461,29 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
         return result
     if mode == 'unplug':
         monkeypatch.setattr(operator.UsbDestination, 'append', unplug_after_payload)
+    original_getxattr = os.getxattr
+    def unplug_during_owned_directory_acl(fd, name, *args, **kwargs):
+        import errno
+        if (name == 'system.posix_acl_default'
+                and os.fstat(fd).st_ino != destination.stat().st_ino):
+            connected[0] = False
+            raise OSError(errno.EIO, 'unplug during owned-directory ACL proof')
+        return original_getxattr(fd, name, *args, **kwargs)
+    if mode == 'acl-unplug':
+        monkeypatch.setattr(os, 'getxattr', unplug_during_owned_directory_acl)
 
     reviewed = operator.preview(catalog, destination, ["org/model"], "delivery")
     tx = reviewed["transaction_id"]
     assert reviewed["state"] == "ready" and not list(destination.iterdir())
     assert operator.approve(tx, reviewed["seal"])["state"] == "approved"
     result = operator.start(tx, destination, {"drive-a": archive})
-    if mode == 'unplug':
+    if mode in {'unplug', 'acl-unplug'}:
         assert result['state'] == 'waiting_destination'
         assert store.status(tx).state == 'waiting_destination'
         assert not (destination / 'delivery/.modelark-slice-receipt.json').exists()
         connected[0] = True
         monkeypatch.setattr(operator.UsbDestination, 'append', original_write)
+        monkeypatch.setattr(os, 'getxattr', original_getxattr)
         result = operator.start(tx, destination, {'drive-a': archive})
     assert result["state"] == "complete" and result["can_write"] is False
     assert (destination / "delivery/org/model/model.safetensors").read_bytes() == DATA
@@ -480,7 +491,7 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
     assert receipt["status"] == "complete" and receipt["transaction"] == tx
     assert receipt["seal"] == reviewed["seal"]
     assert all(set(uuids) == {"fs-a", "other-fs"} for uuids in observations)
-    assert len(observations) <= (30 if mode == 'unplug' else 16)
+    assert len(observations) <= (30 if mode in {'unplug', 'acl-unplug'} else 16)
     assert not tuple(destination.rglob(".slice-*"))
     import sqlite3
     with sqlite3.connect(catalog.as_uri() + "?mode=ro", uri=True) as con:

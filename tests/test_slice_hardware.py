@@ -416,6 +416,95 @@ def test_user_xattr_read_probe_refuses_unsupported_namespace(hardware, monkeypat
         observer.observe(root, writable=True)
 
 
+def test_missing_effective_access_syscall_reports_unsupported_platform(hardware, monkeypatch):
+    import ctypes
+    import errno
+    from modelark.slice import linux
+    observer, root, *_ = hardware
+    libc = linux._libc()
+    class OlderKernel:
+        def __getattr__(self, name):
+            return getattr(libc, name)
+
+        def syscall(self, number, *args):
+            if number.value == 439:
+                ctypes.set_errno(errno.ENOSYS)
+                return -1
+            return libc.syscall(number, *args)
+    monkeypatch.setattr(linux, '_libc', OlderKernel)
+    with pytest.raises(TransferRefusal, match='FILESYSTEM_UNSUPPORTED.*faccessat2'):
+        observer.observe(root, writable=True)
+    assert not list(root.iterdir())
+
+
+@pytest.mark.parametrize('capability', ['openat2', 'statx'])
+def test_other_missing_confinement_syscalls_report_unsupported_platform(monkeypatch, capability):
+    import ctypes
+    import errno
+    from types import SimpleNamespace
+    from modelark.slice import linux
+    def unavailable(*args):
+        ctypes.set_errno(errno.ENOSYS)
+        return -1
+    monkeypatch.setattr(linux, '_libc', lambda: SimpleNamespace(syscall=unavailable, statx=unavailable))
+    with pytest.raises(TransferRefusal, match='FILESYSTEM_UNSUPPORTED.*' + capability):
+        if capability == 'openat2':
+            linux._openat2(-1, '.', os.O_RDONLY)
+        else:
+            linux._statx(-1)
+
+
+def _default_acl(named_users):
+    import struct
+    entries = [(1, 7, 0xffffffff)]
+    entries += [(2, 7, 100000 + i) for i in range(named_users)]
+    entries += [(4, 5, 0xffffffff), (16, 7, 0xffffffff), (32, 5, 0xffffffff)]
+    return struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in entries)
+
+
+@pytest.mark.parametrize('named_users', [1, 400])
+def test_inherited_default_acl_refuses_before_admission(hardware, named_users):
+    observer, root, *_ = hardware
+    acl = _default_acl(named_users)
+    os.setxattr(root, 'system.posix_acl_default', acl)
+    with pytest.raises(TransferRefusal, match='DESTINATION_CAPACITY_UNPROVEN.*default ACL'):
+        observer.observe(root, writable=True)
+    assert os.getxattr(root, 'system.posix_acl_default') == acl
+    assert not list(root.iterdir())
+    # Source-only observation must not apply destination inheritance policy.
+    assert observer.observe(root).fs_uuid == 'USB-FS'
+
+
+def test_default_acl_added_after_observation_refuses_hot_check(hardware):
+    observer, root, *_ = hardware
+    evidence = observer.observe(root, writable=True)
+    os.setxattr(root, 'system.posix_acl_default', _default_acl(1))
+    with BoundTree(root, writable=True) as tree:
+        with pytest.raises(TransferRefusal, match='DESTINATION_CAPACITY_UNPROVEN.*default ACL'):
+            observer.check_attachment(tree, evidence)
+
+
+def test_noninherited_access_acl_remains_supported(hardware):
+    observer, root, *_ = hardware
+    os.setxattr(root, 'system.posix_acl_access', _default_acl(1))
+    assert observer.observe(root, writable=True).fs_uuid == 'USB-FS'
+
+
+@pytest.mark.parametrize('number', [5, 13, 95])
+def test_unknown_default_acl_probe_failure_is_not_absence(hardware, monkeypatch, number):
+    observer, root, _, _, _, module = hardware
+    original = module.os.getxattr
+    def uncertain(fd, name):
+        if name == 'system.posix_acl_default':
+            raise OSError(number, 'default ACL cannot be inspected')
+        return original(fd, name)
+    monkeypatch.setattr(module.os, 'getxattr', uncertain)
+    code = 'DESTINATION_UNPROVEN' if number == 5 else 'DESTINATION_CAPACITY_UNPROVEN'
+    with pytest.raises(TransferRefusal, match=code + '.*default ACL'):
+        observer.observe(root, writable=True)
+    assert not list(root.iterdir())
+
+
 def test_unplug_between_backing_probe_and_descriptor_check_remains_waiting(hardware, monkeypatch):
     import errno
     observer, root, *_ = hardware

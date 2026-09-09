@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 import subprocess
 
-from .linux import BoundTree, require_create_access
+from .linux import BoundTree, require_create_access, require_no_default_acl
 from .transaction import DestinationBinding, TransferRefusal
 
 
@@ -130,6 +130,7 @@ def _writable_root(tree, mount):
     except OSError as exc:
         _refuse('effective creation permission/user xattrs unavailable: ' + str(exc),
                 'DESTINATION_NOT_WRITABLE')
+    require_no_default_acl(tree.fd)
 
 
 def _stable_attachment(evidence):

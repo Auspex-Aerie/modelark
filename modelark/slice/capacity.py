@@ -13,6 +13,7 @@ import struct
 import uuid
 
 from . import domain as d
+from .linux import require_no_default_acl
 from .transaction import DestinationBinding, TransferPlan, TransferRefusal
 
 
@@ -107,12 +108,18 @@ def layout(file_paths):
         if not d._path(path) or len(path.encode('utf-8')) >= 4096:
             _refuse('invalid or overlong path', 'DESTINATION_LAYOUT_UNSUPPORTED')
         value = PurePosixPath(path)
+        # Session._op publishes from a sibling .slice-<32 hex token> for artifacts,
+        # control and receipt alike. A short final basename does not bound that path.
+        temporary_name = '.slice-' + '0' * 32
+        temporary = str(value.parent / temporary_name)
+        if len(temporary.encode('utf-8')) >= 4096:
+            _refuse('generated temporary path exceeds ext4 byte limit', 'DESTINATION_LAYOUT_UNSUPPORTED')
         for component in value.parts:
             _record_size(component)
         for parent in value.parents:
             if str(parent) != '.':
                 directories.add(str(parent))
-        names.setdefault(str(value.parent), []).extend([value.name, '.slice-' + '0' * 32])
+        names.setdefault(str(value.parent), []).extend([value.name, temporary_name])
     for directory in directories:
         value = PurePosixPath(directory)
         names.setdefault(str(value.parent), []).append(value.name)
@@ -255,6 +262,8 @@ def verify(tree, evidence, proposal, caps, adapter=None, *, refresh_volume=True)
                         if tree.identity(marker_fd) != tree.identity(fd):
                             _refuse('object replaced during allocation proof', 'OUTPUT_COLLISION')
                         _require_unique_marker(marker_fd, info.token)
+                        if info.kind == 'directory':
+                            require_no_default_acl(marker_fd)
                     finally:
                         os.close(marker_fd)
                     if info.kind == 'directory' and os.fstat(fd).st_size > BLOCK:

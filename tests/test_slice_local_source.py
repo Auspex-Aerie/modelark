@@ -52,7 +52,7 @@ def test_raw_original_bytes_without_any_subprocess(attachment, monkeypatch):
         assert stream.read(20) == b""
 
 
-@pytest.mark.parametrize("path_kind", ["relative", "tilde"])
+@pytest.mark.parametrize("path_kind", ["relative", "relative_parent", "nested_parent", "tilde"])
 def test_explicit_attachment_paths_are_expanded_before_observation(attachment, monkeypatch, path_kind):
     from pathlib import Path
     from modelark.slice.local_source import LocalArchiveReader
@@ -60,6 +60,12 @@ def test_explicit_attachment_paths_are_expanded_before_observation(attachment, m
     if path_kind == "relative":
         monkeypatch.chdir(root.parent.parent)
         supplied = "usb/modelark"
+    elif path_kind == "relative_parent":
+        monkeypatch.chdir(root.parent)
+        supplied = "../usb/modelark"
+    elif path_kind == "nested_parent":
+        monkeypatch.chdir(root.parent.parent)
+        supplied = "unused/../usb/modelark/../modelark"
     else:
         supplied = "~/usb/modelark"
         expanduser = Path.expanduser
@@ -76,6 +82,22 @@ def test_explicit_attachment_paths_are_expanded_before_observation(attachment, m
     with LocalArchiveReader({"drive-a": supplied}, observer=observer).open(candidate) as stream:
         assert stream.read(20) == b"originaldata"
     assert observed and all(path == root for path in observed)
+
+
+def test_lexical_parent_normalization_never_resolves_remaining_attachment_symlinks(attachment, monkeypatch):
+    from pathlib import Path
+    from modelark.slice.local_source import LocalArchiveReader
+    root, candidate, observer, evidence = attachment
+    alias = root.parent.parent / "alias"
+    alias.symlink_to(root.parent, target_is_directory=True)
+    evidence.mount_path = str(alias)
+    monkeypatch.chdir(root.parent.parent)
+    monkeypatch.setattr(Path, "resolve", lambda *a, **k: pytest.fail("no symlink resolution"))
+    reader = LocalArchiveReader({"drive-a": "unused/../alias/modelark"}, observer=observer)
+    assert reader.attachments["drive-a"] == alias / "modelark"
+    with pytest.raises(TransferRefusal, match="SOURCE_PATH_UNSAFE"):
+        with reader.open(candidate):
+            pytest.fail("remaining attachment symlink followed")
 
 
 @pytest.mark.parametrize("chunk_size", [1, 6, 64])

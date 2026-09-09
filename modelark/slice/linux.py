@@ -51,12 +51,19 @@ def _result(value):
     return value
 
 
+def _required_result(value, capability):
+    if value < 0 and ctypes.get_errno() == errno.ENOSYS:
+        raise TransferRefusal('FILESYSTEM_UNSUPPORTED',
+                              f'direct delivery requires {capability}; Linux 5.8+ capabilities required')
+    return _result(value)
+
+
 def _openat2(fd, path, flags, mode=0, *, resolve=0x0D):
     # BENEATH | NO_SYMLINKS | NO_XDEV. Syscall 437 on both supported ABIs.
     how = _OpenHow(flags | os.O_CLOEXEC, mode, resolve)
-    return _result(_libc().syscall(ctypes.c_long(437), ctypes.c_int(fd),
-                                 ctypes.c_char_p(os.fsencode(path)),
-                                 ctypes.byref(how), ctypes.c_size_t(ctypes.sizeof(how))))
+    return _required_result(_libc().syscall(ctypes.c_long(437), ctypes.c_int(fd),
+                                          ctypes.c_char_p(os.fsencode(path)),
+                                          ctypes.byref(how), ctypes.c_size_t(ctypes.sizeof(how))), 'openat2')
 
 
 def _statx(fd):
@@ -64,8 +71,8 @@ def _statx(fd):
     libc = _libc()
     if not hasattr(libc, "statx"):
         raise TransferRefusal("FILESYSTEM_UNSUPPORTED", "statx unavailable")
-    _result(libc.statx(ctypes.c_int(fd), ctypes.c_char_p(b""), ctypes.c_int(0x1000),
-                       ctypes.c_uint(0x1900), ctypes.byref(result)))
+    _required_result(libc.statx(ctypes.c_int(fd), ctypes.c_char_p(b""), ctypes.c_int(0x1000),
+                              ctypes.c_uint(0x1900), ctypes.byref(result)), 'statx')
     if result.mask & 0x1900 != 0x1900:
         raise TransferRefusal("FILESYSTEM_UNSUPPORTED", "inode birth time and mount identity required")
     return result
@@ -84,8 +91,25 @@ def require_create_access(fd):
     """Kernel effective-credential/ACL check on the retained directory, without writes."""
     # faccessat2(AT_EMPTY_PATH | AT_EACCESS), syscall439 on both supported ABIs.
     # Do not fall back to older glibc faccessat mode-bit emulation (which can ignore ACLs).
-    _result(_libc().syscall(ctypes.c_long(439), ctypes.c_int(fd), ctypes.c_char_p(b""),
-                          ctypes.c_int(os.W_OK | os.X_OK), ctypes.c_int(0x1200)))
+    _required_result(_libc().syscall(ctypes.c_long(439), ctypes.c_int(fd), ctypes.c_char_p(b""),
+                                   ctypes.c_int(os.W_OK | os.X_OK), ctypes.c_int(0x1200)), 'faccessat2')
+
+
+def require_no_default_acl(fd):
+    """Keep inherited xattrs outside the bounded ownership-marker allocation profile."""
+    try:
+        os.getxattr(fd, 'system.posix_acl_default')
+    except OSError as exc:
+        if exc.errno == errno.ENODATA:
+            return
+        if exc.errno in {errno.EIO, errno.ENODEV, errno.ENXIO}:
+            # Retain media errors for the observer/adapter's backing-loss re-probe.
+            # A typed capacity refusal here would bypass its attended-unplug path.
+            raise
+        raise TransferRefusal('DESTINATION_CAPACITY_UNPROVEN',
+                              'cannot prove absence of default ACL: ' + str(exc)) from exc
+    raise TransferRefusal('DESTINATION_CAPACITY_UNPROVEN',
+                          'default ACL inheritance is unsupported by the ownership-marker profile')
 
 
 def link_fd(fd, parent_fd, name):

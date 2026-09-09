@@ -24,8 +24,14 @@ retroactively guard or stop an already running older version; deployment/restart
 
 ## Prerequisites
 
-ModelArk currently supports the supervised deployment on Linux with Python 3.10+ and systemd. Install
-the host tools separately so every privileged change remains visible:
+ModelArk currently supports the supervised deployment on Linux with Python 3.10+ and systemd.
+
+The optional attended direct-USB Slice additionally requires Linux 5.8+ capabilities on x86_64 or
+aarch64 (`openat2`, `faccessat2`, and `statx` birth/mount identity). These interfaces are checked at
+use, including on backported kernels; unavailable capabilities refuse without weakening permission
+or confinement checks. See [direct-delivery prerequisites](usable-slice-direct.md).
+
+Install the host tools separately so every privileged change remains visible:
 
 ```bash
 sudo apt-get install -y git-annex smartmontools

@@ -1,5 +1,8 @@
 """Conservative admission math and synthetic superblocks; no actual block device access."""
 import struct
+import errno
+import os
+from pathlib import PurePosixPath
 from types import SimpleNamespace
 import uuid
 
@@ -147,6 +150,96 @@ def test_path_byte_limits_are_not_character_limits():
     from modelark.slice import capacity as c
     with pytest.raises(TransferRefusal, match='DESTINATION_LAYOUT_UNSUPPORTED'):
         c.layout(['delivery/' + '\u00e9' * 128])
+
+
+def _parent_path_bytes(length):
+    """Produce an exact-length ASCII parent with individually valid ext4 components."""
+    parts = []
+    while length > 255:
+        parts.append('a' * 255)
+        length -= 256
+    parts.append('b' * length)
+    return '/'.join(parts)
+
+
+@pytest.mark.parametrize('name', ['x', '.modelark-slice-receipt.json'])
+@pytest.mark.parametrize('unicode_parent', [False, True])
+def test_short_final_basename_does_not_hide_overlong_generated_temporary_path(name, unicode_parent):
+    from modelark.slice import capacity as c
+    parent = _parent_path_bytes(4056)
+    if unicode_parent:
+        parent = '\u00e9' * 127 + 'a' + parent[255:]
+    final = parent + '/' + name
+    temporary = str(PurePosixPath(final).parent / ('.slice-' + 'a' * 32))
+    assert len(final.encode('utf-8')) < 4096
+    assert len(temporary.encode('utf-8')) == 4096
+    with pytest.raises(TransferRefusal, match='DESTINATION_LAYOUT_UNSUPPORTED'):
+        c.layout([final])
+
+
+def test_generated_temporary_path_accepts_last_valid_byte_length():
+    from modelark.slice import capacity as c
+    parent = _parent_path_bytes(4055)
+    final = parent + '/x'
+    temporary = str(PurePosixPath(final).parent / ('.slice-' + 'a' * 32))
+    assert len(temporary.encode('utf-8')) == 4095
+    directories, _ = c.layout([final])
+    assert parent in directories
+
+
+def test_capture_checks_control_and_receipt_temporary_names_too(admitted, monkeypatch):
+    c, tree, evidence, proposal, _ = admitted
+    checked = []
+    layout = c.layout
+    def observe(paths):
+        checked.extend(paths)
+        return layout(paths)
+    monkeypatch.setattr(c, 'layout', observe)
+    c.capture(tree, evidence, proposal, '/private')
+    assert '.modelark-slice-owner' in checked
+    assert str(PurePosixPath(proposal.spec.destination_root) / '.modelark-slice-receipt.json') in checked
+    assert all(len(str(PurePosixPath(path).parent / ('.slice-' + 'a' * 32)).encode('utf-8')) < 4096
+               for path in checked)
+
+
+def test_inherited_default_acl_on_legacy_owned_directory_refuses_even_after_root_acl_removed(
+        admitted, tmp_path, monkeypatch):
+    from modelark.slice.destination import OWNER_XATTR, UsbDestination, owner_marker
+    from modelark.slice.transaction import DestinationBinding
+    c, tree, evidence, proposal, caps = admitted
+    private = tmp_path / 'private-state'
+    private.mkdir(mode=0o700)
+    binding = DestinationBinding(evidence.device_id, evidence.fs_uuid, evidence.profile, evidence.available_bytes)
+    store = SimpleNamespace(root=private, load=lambda tx: SimpleNamespace(destination=binding, seal='a' * 64))
+    adapter = UsbDestination(tree, binding, store, 'b' * 32)
+    # Linux POSIX ACL xattr v2: owner, owning group and other default entries.
+    acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', tag, permissions, 0xffffffff)
+                                         for tag, permissions in [(1, 7), (4, 5), (32, 5)])
+    os.setxattr(tree.fd, 'system.posix_acl_default', acl)
+    # Reproduce a trusted pre-fix directory/certificate; do not run today's create
+    # preconditions because they now reject the root default ACL before creation.
+    os.mkdir('models', dir_fd=tree.fd)
+    child = tree.open('models', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        token = '1' * 32
+        os.setxattr(child, OWNER_XATTR, owner_marker(token))
+        os.fsync(child)
+        adapter._certify(child, 'models', token, 'directory')
+        inherited = os.getxattr(child, 'system.posix_acl_default')
+        assert inherited == acl
+        os.removexattr(tree.fd, 'system.posix_acl_default')
+        with pytest.raises(OSError) as missing:
+            os.getxattr(tree.fd, 'system.posix_acl_default')
+        assert missing.value.errno == errno.ENODATA
+        monkeypatch.setattr(c, '_free', lambda current: (evidence.available_bytes, caps['free_inodes'] - 1))
+        before = adapter._database.read_bytes()
+        with pytest.raises(TransferRefusal, match='DESTINATION_CAPACITY_UNPROVEN'):
+            c.verify(tree, evidence, proposal, caps, adapter)
+        assert os.getxattr(child, 'system.posix_acl_default') == inherited
+        assert adapter._database.read_bytes() == before
+        assert os.listdir(child) == []
+    finally:
+        os.close(child)
 
 
 def test_block_descriptor_is_verified_before_any_read(admitted, monkeypatch):

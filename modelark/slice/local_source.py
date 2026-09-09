@@ -126,9 +126,11 @@ class LocalArchiveReader:
     """Internal reader with full per-artifact and lightweight per-read attachment proofs."""
 
     def __init__(self, attachments, *, observer, max_decode_bytes=64 << 20):
-        # Expand operator spelling before observation without following symlinks;
-        # BoundTree still performs the authoritative no-symlink path resolution.
-        self.attachments = {label: Path(path).expanduser().absolute() for label, path in attachments.items()}
+        # Normalize operator spelling, including lexical '..', before observation
+        # without following symlinks. BoundTree still performs the authoritative
+        # no-symlink path resolution; Path.absolute() alone retains parent segments.
+        self.attachments = {label: Path(os.path.abspath(Path(path).expanduser()))
+                            for label, path in attachments.items()}
         self.observer = observer
         self.max_decode_bytes = max_decode_bytes
 

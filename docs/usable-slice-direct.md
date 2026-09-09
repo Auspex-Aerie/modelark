@@ -4,6 +4,14 @@ Slice 3 joins the domain preview, private transaction engine, local archive read
 adapter. It never fetches missing content, modifies archives, formats/mounts drives or deploys a
 service. The first attended real-device trial and merge remain separate operator approval gates.
 
+Direct delivery requires Linux 5.8+ capabilities on x86_64 or aarch64: `openat2` confinement,
+`faccessat2` effective-access checks, and `statx` inode/birth-time/mount identity (with libc `statx`).
+Admission probes the actual interfaces rather than trusting the kernel version string; absent
+syscalls or required identity fields refuse as `FILESYSTEM_UNSUPPORTED`. Backports may supply these
+capabilities, while syscall filters or filesystem limitations may prevent them on newer kernels.
+There is no fallback to path-based IO or older ACL-blind permission emulation. See the Linux
+[`faccessat2` contract](https://man7.org/linux/man-pages/man2/access.2.html).
+
 ## Operator workflow
 
 Stop any running ModelArk portal before invoking another CLI command (DEC-124). Each command is a
@@ -73,7 +81,8 @@ sealed key beneath the pinned object store is permitted. No annex command or ret
 bounded ZipNN 0.5 byte-format, StreamZNN and optional zstd streams yield original bytes. The default
 64-MiB limit bounds individual frames/windows, not the native codec's entire working set; oversized
 legacy whole-ZipNN blobs and unsupported modes refuse. Consumer errors are not relabeled as source IO.
-Explicit source attachments expand `~` and become absolute before observation, without following
+Explicit source attachments expand `~` and become lexically normalized absolute paths (including
+collapsing `..`) before observation, without following
 symlinks; their required location remains `<mount>/modelark`. Layout auditing is iterative, including
 valid deep paths, and still treats unowned files, directories and symlinks as collisions.
 
@@ -88,6 +97,14 @@ read-only user-xattr namespace probe. `nouser_xattr` mounts refuse before sealin
 current DAC/ACL and namespace eligibility, not success under every future LSM policy, permission
 change or media fault; runtime IO errors remain typed refusals. No permission-changing or write probe
 is performed to make a destination pass.
+Default POSIX ACLs are excluded from the initial ownership-marker profile: admission and streaming
+checks require their absence on the destination root, and allocation revalidation requires their
+absence on every authenticated owned directory, including resumed work. This prevents inherited
+ACL xattrs from competing with the ownership marker for ext4's external xattr block. Removing a
+root default ACL does not erase defaults already inherited by children; ModelArk never strips ACLs
+or modifies permissions automatically. Noninherited access ACLs remain subject to effective-access
+checks. Unknown ACL-read errors refuse rather than being treated as absence. See Linux
+[default ACL inheritance](https://man7.org/linux/man-pages/man5/acl.5.html).
 
 Require 4-KiB blocks/clusters, internal journal, supported inode/xattr capabilities and an initially
 one-block nonindexed mount root. Quotas, bigalloc, EA-inodes, inline data, encryption/casefold/verity,
@@ -105,7 +122,9 @@ required inodes = F + D
 ```
 
 The `6N` term conservatively charges data plus five extent-mapping levels; it is not expected actual
-usage. Files get one external xattr block each; new directories get one data and one xattr block.
+usage. Full-path byte limits include both final names and generated `.slice-<token>` temporary
+names, including control and receipt files. Files get one external xattr block each; new directories
+get one data and one xattr block.
 Every new directory's complete live name set must fit one block including dot entries and checksum
 tail. Names are limited by UTF-8 bytes, not characters. Root growth separately covers conversion and
 splits, without assuming preexisting dirent slots are compact. Control/receipt serialization includes

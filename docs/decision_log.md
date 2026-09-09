@@ -2795,3 +2795,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Direct adapters, read-only admission, source path normalization, iterative layout audit and deployment validation only. No schema change, live deployment or physical trial. Permission checks do not guarantee future LSM/media behavior; runtime errors still refuse.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md, docs/deployment.md
 - `related`: DEC-123, DEC-124, DEC-125
+
+### DEC-127: Admit the complete direct-delivery filesystem workload
+- `id`: DEC-127
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: PR #70 round-2 Greptile/Codex findings at 60995ca; kernel ENOSYS and real inherited-ACL admission regressions, temporary-path length and lexical parent-segment gaps.
+- `decision`: State and probe direct-delivery Linux 5.8+ interface capabilities; unavailable confinement/access syscalls refuse as unsupported, without weaker fallbacks. Exclude default ACL inheritance on the destination root and authenticated existing directories to retain the bounded ownership-marker xattr profile. Validate temporary as well as final full-path byte lengths; normalize source attachment parent segments lexically without following symlinks.
+- `rationale`: Admission must cover runtime prerequisites and intermediate filesystem objects, not only final names or writable mount flags. Default ACLs surviving in existing children matter on ordinary resume even after the root default is removed; checking them does not expand the trusted-account threat model.
+- `impact`: Direct adapter eligibility and layout validation only; no schema change, automatic ACL removal, permission change, deployment or physical trial. Existing incompatible residue remains untouched and refuses.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md, docs/deployment.md
+- `related`: DEC-125, DEC-126
