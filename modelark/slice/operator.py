@@ -11,6 +11,8 @@ from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
+from modelark.catalog_versions import SUPPORTED_CATALOG_VERSIONS
+
 from . import domain as d
 from . import state as private_state
 from . import transaction as t
@@ -48,8 +50,8 @@ def _archives(catalog_path):
         con = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, isolation_level=None)
         con.execute("PRAGMA query_only=ON")
         con.execute("BEGIN")
-        if con.execute("PRAGMA user_version").fetchone()[0] != 7:
-            raise d.SliceRefusal("CATALOG_VERSION_UNSUPPORTED", "direct delivery requires catalog v7")
+        if con.execute("PRAGMA user_version").fetchone()[0] not in SUPPORTED_CATALOG_VERSIONS:
+            raise d.SliceRefusal("CATALOG_VERSION_UNSUPPORTED", "direct delivery requires catalog v7 or v8")
         return tuple(SimpleNamespace(fs_uuid=uuid, serial=serial)
                      for uuid, serial in con.execute("SELECT fs_uuid,serial FROM drives ORDER BY drive_label"))
     except sqlite3.Error as exc:

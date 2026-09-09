@@ -149,7 +149,8 @@ mechanism: catalog PRAGMA user_version 8. This is an explicit metadata/version m
 even if no new tables/columns are needed. It is distinct from private Slice schema 8.
 
 New code supports the unchanged table layout of catalog v7 and v8; no automatic mass-upgrade on
-open. Fresh catalogs can use v8. Older provenance versions retain their existing clone-first
+open. Slice 3 keeps fresh/bootstrap catalogs at v7 as well: the schema/bootstrap ladder target
+and supported reader ceiling are separate constants. Only explicit repair stamps v8. Older provenance versions retain their existing clone-first
 upgrade requirements. Repair requires a consistent backup and clone rehearsal, then raises v7 to
 v8 inside the same transaction as the first repaired drive. A failure must leave both the old
 identity and old version intact. Repaired copies carry v8; unrepaired v7 copies remain protected
@@ -308,8 +309,8 @@ epoch-alias registry or new serialized authority format requires a separately ex
 | Slice | Scope | State |
 | --- | --- | --- |
 | 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Accepted at 9692b4c in round 3 by Greptile and Codex; all CI green |
-| 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Locally qualified; external review pending |
-| 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Pending |
+| 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
+| 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Implemented; full suite green; round 1 external review |
 | 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Pending |
 | 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Pending |
 
@@ -401,6 +402,60 @@ decoder cases (dependency absent); one is the existing acceptance fixture whose
 bytes are not on disk. No new skip or relaxed assertion was added. Isolated browser
 E2E, repository-wide Ruff and diff whitespace checks also passed. The PR remains
 draft pending this slice's external review and the remaining three safety slices.
+
+Slice 2, round 1, `4f57c2017e7fe9e97717f030a50c3f129bb9f510`: Greptile accepted
+5/5 with authenticated thumbs-up; Codex completed the exact-head review with no
+major issues and no inline findings (comment 5608996209). Python 3.10, Python
+3.12/wheel smoke and E2E CI all passed. Slice 2 is accepted; proceed to slice 3.
+
+Slice-3 compatibility implementation: the physical supported set is exactly {7,8},
+while bootstrap/provenance layout remains 7. Ordinary opens and explicit schema
+ladder calls preserve supported versions; unknown future versions refuse before
+journal-mode mutation. Clone validation uses the closed set, remigration rejects
+future snapshots, and provenance helpers cannot lower a malformed v8 to v7.
+Slice maps physical 7/8 to logical snapshot 7; its separate private store version
+and destination journal are untouched. Golden hashes, canonical plan bytes,
+approval and fenced-source tests preserve unchanged facts while changed identity,
+authority, generation and anchor evidence still invalidate the old plan.
+
+Focused qualification so far: 64 core/version/migration tests and 137 Slice tests
+passed, followed by 25 core compatibility tests including two added end-to-end
+clone rehearsal/remigration cases. These counts overlap, not a combined total.
+The actual pre-fix wheel built from `97e5066b96e7cf0824b9786a8116548810c8272d`
+passed all six isolated reader-floor cases: core read-only, core read/write and
+Slice each accept v7 and refuse v8. The script verifies all 115 packaged source
+payloads against that commit and checks imported module origins. Rejected v8
+fixtures retain exact catalog/schema/row/version/synthetic-byte state without
+sidecars. The accepted v7 writable opener legitimately enables WAL; logical
+catalog state is unchanged. This is reader-floor evidence, not a physical archive
+test or the slice-5 two-client exclusion matrix.
+
+Opener audit boundary: CLI/portal/Fill enter through core catalog validation;
+Slice has two explicit read-only adapters (snapshot and protected-fleet inventory).
+All three supplied-connection hash audit/repair entry points now check the closed
+version set before observation or writes; repair write paths recheck after BEGIN.
+Legacy-runtime migration operates on a disposable staged catalog and
+retains the core migration boundary. Benchmark/phase-3 gate scripts are offline
+evidence tooling with synthetic fixture contracts, not supported repair or live
+archive authority; their historical fixture policies are not redesigned here.
+Deployment's existing table-presence/service/API health checks are **not** evidence
+of catalog readability. The later rollout gate must validate with the installed
+build's read-only opener, after old processes are quiesced; checkout constants or
+a healthy metadata endpoint do not satisfy that gate.
+
+Hash-repair qualification: final direct compatibility/legacy repair/planner writer/
+live-session matrix passed 56 tests. An earlier explicit-guard/provenance regression
+run passed 78 tests; these are overlapping targeted suites. One current-layout
+synthetic fixture had an obsolete v2 version stamp and now uses the layout target;
+legacy hash evidence semantics and assertions are unchanged.
+
+Slice-3 full frozen-code run, without overlapping jobs: **2722 passed, 6 skipped,
+5 deprecation warnings in 818.25 seconds**. The skips remain the five unavailable
+optional zstandard decoder cases and one existing acceptance fixture with absent
+bytes. No new skips or relaxed assertions. Repository-wide Ruff and diff checks
+pass. The actual old-wheel qualification was rerun on fresh disposable fixtures
+and again passed all six cases. Submit this slice for its first external review;
+corrected archive probing and all live operations remain inactive.
 
 ## 7. Questions for Grok
 

@@ -11,6 +11,12 @@ import sqlite3
 from modelark import archive_manifest
 from .domain import AnchorFact, CatalogSnapshot, CopyFact, DriveFact, FileFact, Gap, SliceRefusal, SliceSpec
 
+# Catalog v8 raises the minimum reader version for serial-identity repair;
+# it does not alter the v7 domain record layout. Keep seals about those records,
+# not the reader-floor metadata. This is a closed mapping, never a future-version
+# fallback, and is unrelated to the private Slice transaction-store schema.
+_CATALOG_TO_SNAPSHOT_VERSION = {7: 7, 8: 7}
+
 
 def _foreign_weight(name: str, format: str | None) -> bool:
     # Legacy catalogs may predate classification. Use exact weight extensions, not
@@ -27,8 +33,9 @@ def read_catalog(path: str | Path, spec: SliceSpec) -> CatalogSnapshot:
         con.execute("PRAGMA query_only=ON")
         con.execute("BEGIN")
         version = con.execute("PRAGMA user_version").fetchone()[0]
-        if version != 7:
-            raise SliceRefusal("CATALOG_VERSION_UNSUPPORTED", f"expected 7, observed {version}")
+        if version not in _CATALOG_TO_SNAPSHOT_VERSION:
+            raise SliceRefusal("CATALOG_VERSION_UNSUPPORTED", f"expected 7 or 8, observed {version}")
+        snapshot_version = _CATALOG_TO_SNAPSHOT_VERSION[version]
         files, copies, issues = [], [], []
         # Bounded batches avoid SQLite's variable limit for large explicit subsections.
         for start in range(0, len(spec.repo_ids), 400):
@@ -78,7 +85,7 @@ def read_catalog(path: str | Path, spec: SliceSpec) -> CatalogSnapshot:
             "JOIN drives d ON d.drive_label=a.drive_label AND d.identity_epoch=a.identity_epoch "
             "AND d.write_generation=a.generation") if row[0] in labels)
         return CatalogSnapshot(catalog.as_uri(), tuple(files), tuple(copies), drives, anchors,
-                               tuple(issues), version)
+                               tuple(issues), snapshot_version)
     except sqlite3.Error as exc:
         raise SliceRefusal("CATALOG_UNAVAILABLE", str(exc)) from exc
     finally:

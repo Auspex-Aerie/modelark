@@ -312,7 +312,8 @@ def test_capacity_refusal_does_not_create_transaction(store, operator, monkeypat
     assert not list(path.iterdir())
 
 
-def test_registry_reader_uses_all_drives_and_never_creates_missing_catalog(operator, tmp_path):
+@pytest.mark.parametrize("physical_version", [7, 8])
+def test_registry_reader_uses_all_drives_and_never_creates_missing_catalog(operator, tmp_path, physical_version):
     import sqlite3
     path = tmp_path / "catalog.sqlite"
     with pytest.raises(d.SliceRefusal, match="CATALOG_UNAVAILABLE"):
@@ -322,10 +323,22 @@ def test_registry_reader_uses_all_drives_and_never_creates_missing_catalog(opera
         con.execute("CREATE TABLE drives(drive_label TEXT,fs_uuid TEXT,serial TEXT)")
         con.executemany("INSERT INTO drives VALUES(?,?,?)", [("a", "uuid-a", "serial-a"),
                                                             ("b", "uuid-b", "serial-b")])
-        con.execute("PRAGMA user_version=7")
+        con.execute(f"PRAGMA user_version={physical_version}")
     before = path.read_bytes()
     assert [(a.fs_uuid, a.serial) for a in operator._archives(path)] == [
         ("uuid-a", "serial-a"), ("uuid-b", "serial-b")]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("physical_version", [0, 6, 9, 99])
+def test_registry_reader_refuses_unknown_versions_without_mutation(operator, tmp_path, physical_version):
+    import sqlite3
+    path = tmp_path / "catalog.sqlite"
+    with sqlite3.connect(path) as con:
+        con.execute(f"PRAGMA user_version={physical_version}")
+    before = path.read_bytes()
+    with pytest.raises(d.SliceRefusal, match="CATALOG_VERSION_UNSUPPORTED"):
+        operator._archives(path)
     assert path.read_bytes() == before
 
 

@@ -19,10 +19,21 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, Iterable
 
 from modelark import archive_hash, register
+from modelark.catalog_versions import SUPPORTED_CATALOG_VERSIONS
 
 
 class HashRepairError(RuntimeError):
     """Legacy hash evidence could not be repaired safely."""
+
+
+def _require_supported_repair_catalog(con) -> None:
+    """Supplied connections must obey the same reader floor as normal catalog opens."""
+    version = con.execute("PRAGMA user_version").fetchone()[0]
+    if version not in SUPPORTED_CATALOG_VERSIONS:
+        raise HashRepairError(
+            f"unsupported catalog version {version}; hash repair requires "
+            f"one of {sorted(SUPPORTED_CATALOG_VERSIONS)}"
+        )
 
 
 def _safe_relative(value: str, description: str) -> PurePosixPath:
@@ -201,6 +212,7 @@ def audit_hashes(
     archive_resolver: Callable[[object, str], Path | None] | None = None,
 ) -> dict:
     """Return a read-only legacy-hash repair plan and its fail-closed diagnostics."""
+    _require_supported_repair_catalog(con)
     scope = list(dict.fromkeys(repo_ids or ()))
     resolver = archive_resolver or register.archive_path
     rows = _rows(con, scope)
@@ -356,6 +368,7 @@ def repair_hashes(
     a consistent SQLite backup before the first update, and never overwrites existing evidence.
     """
     from modelark.execution_session import require_no_live_session
+    _require_supported_repair_catalog(con)
     require_no_live_session(con)
     scope = list(dict.fromkeys(repo_ids or ()))
     report = audit_hashes(con, scope, archive_resolver=archive_resolver)
@@ -377,6 +390,7 @@ def repair_hashes(
     con.execute("BEGIN IMMEDIATE")
     applied = 0
     try:
+        _require_supported_repair_catalog(con)
         # Re-read both durable metadata and Git/work-tree evidence after the backup while holding
         # the catalog write lock. A stale audit can therefore never become write authority.
         rechecked = audit_hashes(con, scope, archive_resolver=archive_resolver)
@@ -501,6 +515,7 @@ def run_explicit_drive_repair(
     """
     from modelark import archive_hash
 
+    _require_supported_repair_catalog(con)
     epoch = int(identity_epoch)
     tables = {
         r[0] for r in con.execute(
@@ -538,6 +553,9 @@ def run_explicit_drive_repair(
     con.execute("BEGIN IMMEDIATE")
     applied = 0
     try:
+        # Recheck under the write lock: a supplied connection may have remained
+        # open while another client changed the catalog reader floor.
+        _require_supported_repair_catalog(con)
         # Re-read drive identity only after acquiring the write lock.
         drive = con.execute(
             "SELECT drive_label, identity_epoch, identity_fingerprint, lifecycle "

@@ -46,10 +46,12 @@ def seed(path, d):
     return con
 
 
-def test_adapter_uses_explicit_read_only_snapshot_without_global_state(api, tmp_path):
+@pytest.mark.parametrize("physical_version", [7, 8])
+def test_adapter_uses_explicit_read_only_snapshot_without_global_state(api, tmp_path, physical_version):
     d, catalog = api
     path = tmp_path / "catalog ? #.sqlite"
     con = seed(path, d)
+    con.execute(f"PRAGMA user_version={physical_version}")
     before = tuple(con.iterdump())
     configured = db.DB_PATH
     with mock.patch.object(db, "connect", side_effect=AssertionError("no global catalog")), \
@@ -59,6 +61,7 @@ def test_adapter_uses_explicit_read_only_snapshot_without_global_state(api, tmp_
         p = d.preview(spec(d), snapshot)
     assert p.source_ready and p.required_drives == ("drive-a",)
     assert db.DB_PATH == configured and tuple(con.iterdump()) == before
+    assert con.execute("PRAGMA user_version").fetchone()[0] == physical_version
     con.close()
 
 

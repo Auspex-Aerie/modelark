@@ -19,7 +19,9 @@ def _catalog(path: Path | None = None):
     con.execute("PRAGMA foreign_keys=ON")
     for statement in db._statements(db.SCHEMA_PATH.read_text()):
         con.execute(statement)
-    con.execute("PRAGMA user_version=2")
+    # Legacy hash evidence lives in the supported current table layout; this is
+    # not a frozen historical schema-v2 catalog.
+    con.execute(f"PRAGMA user_version={db._SCHEMA_VERSION}")
     return con
 
 
