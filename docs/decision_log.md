@@ -2751,3 +2751,102 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Slice Session outcome handling and six disposable stop/restart regressions only; no Fill, schema, hardware-adapter, deployment or live-service change.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-transaction.md
 - `related`: DEC-113, DEC-121
+
+### DEC-123: Refuse ambiguous pre-certificate directory residue in direct delivery
+- `id`: DEC-123
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Slice 3 architecture consultation identified the mkdir-to-certificate crash interval; operator explicitly agreed to the proposed recovery exception.
+- `decision`: A directory left without a verifiable ownership certificate after a crash is never adopted or deleted automatically. Direct delivery stops for operator intervention in that case; certified objects retain automatic recovery. The initial adapter fails closed when device, confinement, filesystem or decoding guarantees cannot be established.
+- `rationale`: Directory creation and ownership certification are separate operations. An intended name or empty directory shape cannot prove that an existing object belongs to this transaction. The prior universal crash-inside-create guarantee must not override the unknown-content boundary.
+- `impact`: Narrows only the ambiguous directory-creation recovery case in the Slice 3 contract; no automatic cleanup, formatting, takeover, archive mutation or real-device trial is authorized.
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md, docs/usable-slice-transaction.md
+- `related`: DEC-108, DEC-121, DEC-122
+
+### DEC-124: Admit only one ModelArk application instance at launch
+- `id`: DEC-124
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator corrected the proposed concurrency scope: Start means launching another ModelArk instance, not starting Fill or Slice; reject the second instance right up front.
+- `decision`: Acquire one application-wide, nonblocking kernel-held launch guard before CLI configuration/dispatch or direct portal startup, independent of catalog directory, port, destination and operation. A second launch exits clearly without startup work. Retain the existing device/attempt and archive fences as internal safeguards. The local operator account is trusted; defending against unrelated processes deliberately substituting namespace entries is not a new Slice 3 requirement.
+- `rationale`: Competing ModelArk application instances should not coexist. Operation-level exclusion alone does not implement the requested launch policy; adversarial same-account namespace isolation would add a materially different threat model.
+- `impact`: All ModelArk CLI invocations are application launches, so a separate query, status, or other CLI command also refuses while the portal or another command holds the guard. Existing in-process portal controls remain available. No service restart, deployment, legacy-process termination or real-device trial is authorized. Processes launched from older unguarded versions are not retroactively enrolled.
+- `docs_updated`: docs/decision_log.md, docs/plans/usable-slice-implementation-charter.md, docs/usable-slice-transaction.md, docs/deployment.md
+- `related`: DEC-121, DEC-123
+
+### DEC-125: Seal direct delivery admission with a conservative ext4 workload budget
+- `id`: DEC-125
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator authorized continuing the broader Slice 3 arc; architecture consultation derived a bounded initial filesystem profile instead of treating observed inode allocation as a future metadata guarantee.
+- `decision`: Join the existing Slice engine and adapters through explicit attended CLI commands. Seal the catalog/admission capsule into the destination binding, atomically stored in private schema v6. Require verified direct USB ext4 with bounded features, new-directory fanout, a conservative data/extent/xattr/root-growth budget and inode budget. Force unique ownership markers outside inode bodies to exclude shared-xattr double counting. Reconcile actual owned bytes/inodes without drift tolerance and prove disappearance separately from attached-root replacement.
+- `rationale`: Stable hardware identity, filesystem capability, current free capacity and authenticated owned consumption answer different questions. The reserve is an explicit conservative workload bound, not a generic estimate or guarantee against media faults. Unavailable read-only superblock proof means refusal, not automatic privilege escalation.
+- `impact`: Operator assembly retains existing authorities without a scheduler, retrieval, catalog-schema change, service deployment, formatting or real-device trial. Legacy private plans remain readable without invented admission. First attended physical trial and merge remain separate approval gates.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md, docs/usable-slice-transaction.md, docs/plans/usable-slice-implementation-charter.md, README.md
+- `related`: DEC-108, DEC-121, DEC-123, DEC-124
+
+### DEC-126: Separate direct attachment admission from streaming checks
+- `id`: DEC-126
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: PR #70 round-1 Greptile/Codex findings at b751cee; disposable regressions reproduced loop-mount rejection, still-mounted unplug invalidation, missing effective permission admission, per-chunk inventory scans, source-path mismatch, recursive audit failure and the remaining deployment launch probe.
+- `decision`: Retain full identity/role/filesystem admission at attempt, artifact audit, file creation and publication boundaries; stream under lightweight retained-root/mount/backing checks with exact allocation reconciliation. Topology or archive-role changes force full observation. Missing block backing latches an attended wait even when the mount ID survives. Require read-only effective DAC/ACL creation and user-xattr namespace checks before admission. Ignore explicit unrelated loops only in sibling-partition comparison; keep protected and ambiguous ancestry fail-closed. Both deployment validation paths share metadata-only inspection without a second application launch.
+- `rationale`: Mount visibility is not media presence; writable mount flags are not effective operator permission; full hardware discovery is not a practical per-megabyte lease check. These signals need distinct scopes without weakening descriptor confinement or expanding the trusted-operator threat model.
+- `impact`: Direct adapters, read-only admission, source path normalization, iterative layout audit and deployment validation only. No schema change, live deployment or physical trial. Permission checks do not guarantee future LSM/media behavior; runtime errors still refuse.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md, docs/deployment.md
+- `related`: DEC-123, DEC-124, DEC-125
+
+### DEC-127: Admit the complete direct-delivery filesystem workload
+- `id`: DEC-127
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: PR #70 round-2 Greptile/Codex findings at 60995ca; kernel ENOSYS and real inherited-ACL admission regressions, temporary-path length and lexical parent-segment gaps.
+- `decision`: State and probe direct-delivery Linux 5.8+ interface capabilities; unavailable confinement/access syscalls refuse as unsupported, without weaker fallbacks. Exclude default ACL inheritance on the destination root and authenticated existing directories to retain the bounded ownership-marker xattr profile. Validate temporary as well as final full-path byte lengths; normalize source attachment parent segments lexically without following symlinks.
+- `rationale`: Admission must cover runtime prerequisites and intermediate filesystem objects, not only final names or writable mount flags. Default ACLs surviving in existing children matter on ordinary resume even after the root default is removed; checking them does not expand the trusted-account threat model.
+- `impact`: Direct adapter eligibility and layout validation only; no schema change, automatic ACL removal, permission change, deployment or physical trial. Existing incompatible residue remains untouched and refuses.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md, docs/deployment.md
+- `related`: DEC-125, DEC-126
+
+### DEC-128: Share Slice attachment spelling and strict output-byte validation
+- `id`: DEC-128
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator approved the two residual Codex findings after PR #70's three-round review loop and the proposed narrow shared path contract.
+- `decision`: Use one lexical attachment-root normalizer across operator preview/Start, Linux observation and cached-loss recovery, descriptor binding and local source reads. Expand home and collapse parent segments without resolving symlinks. Separately share strict UTF-8 output-byte counting across final paths, generated temporary paths and directory components; unsupported encodings refuse as DESTINATION_LAYOUT_UNSUPPORTED.
+- `rationale`: Admission, successful observation and recovery must agree on path spelling. Byte admission must validate encoding before counting; surrogate-escaped Linux input must not escape as an unstructured traceback. Host attachment encodings and sealed relative-path serialization remain distinct contracts.
+- `impact`: Small Slice path helper and existing consumers, with unplug/recovery, CLI encoding and operator roundtrip regressions. No protocol/schema change, weaker descriptor confinement, new global authority, automatic ACL changes, live deployment or physical trial. The three-round review loop remains stopped; this approved correction is not a fourth review round.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md
+- `related`: DEC-125, DEC-126, DEC-127
+
+### DEC-129: Classify adapter IO from preserved evidence and resolve host roles physically
+- `id`: DEC-129
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator approved the bounded Linux/filesystem adapter refactor after PR #70 findings 3963808512, 3963808518 and 3963808522 exposed repeated evidence/representation disagreement.
+- `decision`: Preserve original probe IO failures and their fallback meaning until a shared attachment-aware classifier can apply proven loss/replacement evidence. Keep semantic policy failures distinct. Share filesystem-safe procfs decoding/parsing across observation, confinement presence and capacity consumers. Resolve protected system directories and swap files to actual descriptor-backed filesystem identities, retaining no-symlink confinement for destination/archive attachments and refreshing changed protected-role observations.
+- `rationale`: A failed metadata/ACL/marker probe is not proof of a permanently invalid destination; a lexical path is not proof of the backing filesystem's role. Independent helper interpretations and tests mocking whole helpers allowed the same contract gaps to recur. Fault injection below helpers tests the resulting durable transaction states rather than isolated exception strings.
+- `impact`: Slice hardware/Linux/capacity/destination/operator/source adapter boundaries and regression tests only. No transaction authority, Fill, launch guard, schema/seal, codec or supported-filesystem redesign; no weaker admission, permission changes, deployment or physical trial. The prior bounded review loop stays stopped; merge remains a separate operator gate.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md
+- `related`: DEC-123, DEC-125, DEC-126, DEC-127, DEC-128
+
+### DEC-130: Own a projection folder, with native resume and session-only FAT32 export
+- `id`: DEC-130
+- `date`: 2026-09-09
+- `status`: accepted
+- `triggered_by`: Operator clarified projection means a folder rather than drive ownership, requested a Grok CLI scope critique, then approved the narrowed native-ext4 plus FAT32 proposal including new-root restart after FAT32 interruption.
+- `decision`: New folder projections own one exclusively created child under an existing parent, with all destination control/staging inside it. Separate folder target identity, attachment evidence, profile and advisory capacity. Allow qualified ordinary system-backed ext4 user folders, tolerate unrelated filesystem writes, retain authenticated native resume, and qualify FAT32 as session-only: Stop/interruption leaves residue untouched and requires a new root. Keep protected system/private paths and registered archive backing devices excluded. Preserve existing sealed direct-USB transactions under their original policy; do not silently reinterpret them.
+- `rationale`: The direct adapter used exclusive filesystem identity/accounting as a proxy for output-tree ownership. Merely relaxing mount-root or ext4 admission would retain the wrong capacity and recovery assumptions. FAT32 qualification must not weaken native certificates, no-clobber publication, required flushes or truthful final hashes/layout/receipt evidence.
+- `impact`: Staged folder contract, native adapter and FAT32 profile gates in docs/plans/folder-projection-scope.md. No Fill/source authority redesign, acquisition, archive reconciliation, deployment, formatting, automatic residue cleanup or cross-host resume. XFS/exFAT and FAT32 resume are outside this first delivery. Physical trial still requires exact reviewed target/source evidence. Legacy direct-USB constraints remain valid for legacy plans.
+- `docs_updated`: docs/decision_log.md, docs/plans/folder-projection-scope.md, docs/usable-slice-folders.md, README.md
+- `related`: DEC-124, DEC-125, DEC-129
+
+### DEC-131: Dispatch native folder authority explicitly and fence older private-state readers
+- `id`: DEC-131
+- `date`: 2026-09-09
+- `status`: accepted
+- `triggered_by`: DEC-130's approved native execution gate; integration review of folder-versus-device claims and real-host ext4/LUKS/LVM observation.
+- `decision`: Store executable native plans under a closed native-transaction v1 envelope in private Slice schema 7, retaining legacy seals and explicit strict direct-USB dispatch. Compare durable canonical folder ancestry and legacy backing claims within the existing reservation transaction. Keep all native control data below the exclusively certified output child. Treat native destination capacity exhaustion as ending the attempt, recoverable only through a fresh authenticated Start. Resolve explicit kernel-name mapper aliases without discarding ancestry conflict checks; require current inode/mount evidence for protected-role classification and retain birth identity for owned-object certificates.
+- `rationale`: Reusing a device ID field without versioned dispatch would let old binaries misread folder authority. Shared capacity is not identity, and a partial space failure requires allocation reconstruction. Device-mapper PATH/PKNAME spelling and pseudo-filesystem birth-time support are representation/role distinctions, not evidence that an ordinary encrypted ext4 user folder is unsafe or that owned-object identity can be weakened.
+- `impact`: Native adapter, observer, plan/operator assembly, shared transaction/private-store dispatch and narrow Linux inventory/role helpers. Private schema upgrade only; no catalog migration, Fill/source fence changes, live deployment, USB writes or permission rewriting. FAT32 remains the separate pending session-only gate under DEC-130.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-folders.md, docs/usable-slice-direct.md, docs/usable-slice-transaction.md, docs/plans/folder-projection-scope.md, README.md
+- `related`: DEC-123, DEC-124, DEC-125, DEC-129, DEC-130

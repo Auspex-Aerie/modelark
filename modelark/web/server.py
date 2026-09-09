@@ -330,6 +330,22 @@ class Handler(BaseHTTPRequestHandler):
 
 def serve(port: int = 8077, open_browser: bool = True, resume: bool = False,
           host: str = "127.0.0.1"):
+    """Direct portal entry: acquire the same launch gate as the CLI."""
+    from modelark.instance import launch
+    with launch() as permit:
+        return _serve_in_instance(permit, port=port, open_browser=open_browser, resume=resume, host=host)
+
+
+def _serve_in_instance(permit, port=8077, open_browser=True, resume=False, host="127.0.0.1"):
+    """Explicit one-use handoff from an already guarded CLI launch."""
+    from modelark.instance import _LaunchPermit
+    if type(permit) is not _LaunchPermit:
+        raise SystemExit("invalid ModelArk launch permit")
+    permit.consume_server()
+    return _serve(port=port, open_browser=open_browser, resume=resume, host=host)
+
+
+def _serve(port=8077, open_browser=True, resume=False, host="127.0.0.1"):
     if not _is_loopback_name(host):
         raise ValueError("the operator portal has no remote authentication; refusing a non-loopback bind")
     telemetry.configure(**wishlist.logging_config())   # file + stdout; flushes per record (unlike print → journald)

@@ -72,6 +72,12 @@ def _cmd_leftovers(args: argparse.Namespace) -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from modelark.instance import launch
+    with launch():
+        return _main(argv)
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     if args.cmd == "publish" and args.confirm_stopped != _CONFIRMATION:

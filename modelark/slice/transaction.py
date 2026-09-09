@@ -27,6 +27,19 @@ class TransferRefusal(ValueError):
         super().__init__(f"{code}: {detail}")
 
 
+def decode_proposal(p):
+    """Reconstruct the shared sealed domain closure without mutating the record."""
+    closure = []
+    for item in p["closure"]:
+        fields = dict(item)
+        sources = tuple(d.SourceEvidence(d.CopyFact(**s["copy"]), d.DriveFact(**s["drive"]),
+                                         d.AnchorFact(**s["anchor"]), s["digest_provenance"])
+                        for s in fields.pop("sources"))
+        closure.append(d.Artifact(**fields, sources=sources))
+    return d.SlicePreview(d.SliceSpec(**p["spec"]), p["snapshot_id"], tuple(closure),
+                          tuple(d.Gap(**g) for g in p["gaps"]), p["seal"], p["version"])
+
+
 @dataclass(frozen=True)
 class DestinationBinding:
     device_id: str
@@ -72,6 +85,14 @@ class TransferPlan:
     def seal(self):
         return hashlib.sha256(self.to_json().encode()).hexdigest()
 
+    @property
+    def control_path(self):
+        return ".modelark-slice-owner"
+
+    @property
+    def is_folder(self):
+        return False
+
     def to_json(self):
         payload = asdict(self)
         if self.version != "modelark.slice.transaction.v3":
@@ -108,15 +129,18 @@ class TransferPlan:
     def from_json(cls, payload):
         try:
             obj = json.loads(payload)
-            p = obj["proposal"]
-            closure = []
-            for item in p["closure"]:
-                sources = tuple(d.SourceEvidence(d.CopyFact(**s["copy"]), d.DriveFact(**s["drive"]),
-                                                 d.AnchorFact(**s["anchor"]), s["digest_provenance"])
-                                for s in item.pop("sources"))
-                closure.append(d.Artifact(**item, sources=sources))
-            proposal = d.SlicePreview(d.SliceSpec(**p["spec"]), p["snapshot_id"], tuple(closure),
-                                      tuple(d.Gap(**g) for g in p["gaps"]), p["seal"], p["version"])
+            # This decoder is legacy-USB-only. A folder envelope must never be
+            # duck-typed into a USB plan, even when it also supplies legacy fields.
+            if type(obj) is not dict or obj.get("version") not in {
+                    "modelark.slice.transaction.v1", "modelark.slice.transaction.v2",
+                    "modelark.slice.transaction.v3"}:
+                raise ValueError("unsupported legacy transaction envelope")
+            fields = {"proposal", "destination", "version"}
+            if obj["version"] == "modelark.slice.transaction.v3":
+                fields.add("metadata_reserve_bytes")
+            if set(obj) != fields:
+                raise ValueError("mixed or malformed legacy transaction envelope")
+            proposal = decode_proposal(obj["proposal"])
             return cls(proposal, DestinationBinding(**obj["destination"]), obj["version"],
                        obj.get("metadata_reserve_bytes"))
         except (KeyError, TypeError, ValueError) as exc:
@@ -193,6 +217,18 @@ def _same_source(artifact, candidate, snapshot):
     return expected == actual
 
 
+def _close_fat_abort(authority, destination, error):
+    """Publish a caught abort while authority is retained, then revoke every descriptor."""
+    try:
+        if isinstance(error, KeyboardInterrupt):
+            authority.store.request_stop(authority.tx)
+    finally:
+        try:
+            authority.close()
+        finally:
+            destination.end_session()
+
+
 def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault=None):
     plan = store.load(tx)
     status = store.status(tx)
@@ -209,11 +245,15 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
     if isinstance(authority, Status):
         return authority
     try:
+        if getattr(plan, "session_only", False):
+            destination.begin_session(authority)
         destination.check(plan.destination, 0 if not store.events(tx) else _allocated(store, tx, destination), required)
         authority.activate()
         session = Session(store, tx, plan, destination, sources, authority, fault)
         session._fault("reserved")
         session._audit_layout()
+        if plan.is_folder:
+            session._directory(plan.proposal.spec.destination_root)
         session._control()
         return session
     except TransferRefusal as exc:
@@ -222,9 +262,14 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
                 authority.refuse(exc)
         finally:
             authority.lease.close()
+            if getattr(plan, "session_only", False):
+                destination.end_session()
         raise
-    except BaseException:
-        authority.lease.close()
+    except BaseException as exc:
+        if getattr(plan, "session_only", False):
+            _close_fat_abort(authority, destination, exc)
+        else:
+            authority.lease.close()
         raise
 
 
@@ -264,7 +309,7 @@ def _operations(store, tx):
                 elif payload["state"] != "intent":
                     raise TransferRefusal("JOURNAL_CORRUPT", "prepared file lacks source proof")
             elif not ((kind == "directory" and path in directories)
-                      or (kind == "control" and path == ".modelark-slice-owner")
+                      or (kind == "control" and path == plan.control_path)
                       or (kind == "receipt" and path == receipt_path)):
                 raise TransferRefusal("JOURNAL_CORRUPT", path)
             temporary = payload.get("temporary")
@@ -334,7 +379,11 @@ class Session:
         self.close()
 
     def close(self):
-        self.authority.close()
+        try:
+            self.authority.close()
+        finally:
+            if getattr(self.plan, "session_only", False):
+                self.destination.end_session()
 
     def _boundary(self):
         head = self.authority.boundary()
@@ -347,7 +396,7 @@ class Session:
         self._verify_control()
 
     def _verify_control(self, *, required=False):
-        op = self.ops.get(".modelark-slice-owner")
+        op = self.ops.get(self.plan.control_path)
         if op is None or op["state"] != "complete":
             if required:
                 raise TransferRefusal("CONTROL_CORRUPT", "ownership record is not complete")
@@ -429,7 +478,7 @@ class Session:
                 raise TransferRefusal("OUTPUT_COLLISION", path)
 
     def _control(self):
-        path = ".modelark-slice-owner"
+        path = self.plan.control_path
         data = d._json({"transaction": self.transaction_id, "seal": self.plan.seal,
                         "store": str(self.store.root), "destination": asdict(self.plan.destination)})
         op = self._op(path, "control", size=len(data), sha=hashlib.sha256(data).hexdigest())
@@ -586,9 +635,28 @@ class Session:
         else:
             self._write(op, io.BytesIO(data))
         self.head = self.authority.append("receipt", receipt, expected_head=self.head)
+        if getattr(self.plan, "session_only", False):
+            # All destination IO, including retained-descriptor close errors,
+            # must settle before the authoritative host completion commit.
+            self.destination.end_session()
         self.authority.complete()
 
     def step(self):
+        if not getattr(self.plan, "session_only", False):
+            return self._step()
+        try:
+            result = self._step()
+        except BaseException as exc:
+            self._terminal = True
+            _close_fat_abort(self.authority, self.destination, exc)
+            raise
+        if result.state not in {"transferring", "verifying"}:
+            self._terminal = True
+            self.lease.close()
+            self.destination.end_session()
+        return result
+
+    def _step(self):
         if self._terminal:
             raise TransferRefusal("NOT_RESUMABLE", "session encountered a terminal refusal")
         try:
@@ -631,10 +699,11 @@ class Session:
                 self.lease.close()
                 raise
             states = {"STOPPED": "stopped", "WAITING_SOURCE": "waiting_source",
-                      "WAITING_DESTINATION": "waiting_destination", "SOURCE_BLOCKED": "blocked_source"}
+                      "WAITING_DESTINATION": "waiting_destination", "SOURCE_BLOCKED": "blocked_source",
+                      "DESTINATION_CAPACITY_WAIT": "waiting_destination"}
             state = _refusal_state(exc.code)
             # Stop ends this attempt; attended source/destination waits may retain it.
-            self._terminal = exc.code == "STOPPED" or exc.code not in states
+            self._terminal = exc.code in {"STOPPED", "DESTINATION_CAPACITY_WAIT"} or exc.code not in states
             try:
                 outcome = self.authority.transition(state, str(exc))
             except TransferRefusal as transition_error:

@@ -1,12 +1,19 @@
 # Usable Slice transaction core
 
 Slice 2 adds private durable approval, device ownership, source-use gates, and recoverable
-publication orchestration. It remains an **internal API with no hardware adapter or CLI/portal
-entry point**. Do not use the test destination as a real USB adapter. Slice 1's domain approval
+publication orchestration. The core remains an internal port-based API; Slice 3's
+[attended direct-USB assembly](usable-slice-direct.md) supplies real adapters and CLI entry points.
+Do not use the test destination as a real USB adapter. Slice 1's domain approval
 still has no execution authority; a separately reviewed transaction seal binds destination
 evidence, and the destination port must validate that evidence before any writes.
 
 ## Authority and lifetime
+
+Direct admission retains private schema v6's optional sealed capsule (DEC-125), now in schema v8.
+The [native folder profile](usable-slice-folders.md) uses a separate tagged executable envelope,
+folder-scoped ownership and shared capacity. The direct-device behavior described below remains
+the legacy profile's policy, not a requirement that a native folder own its drive. Older internal plans
+retain their semantics without invented hardware evidence; the attempt contract below is unchanged.
 
 `TransferPlan(proposal, destination_binding, metadata_reserve_bytes=...)` freezes the domain
 proposal, destination binding and explicit metadata capacity reservation
@@ -44,8 +51,11 @@ Reader operations use deferred transactions rather than requesting the writer re
 writers have a bounded SQLite busy wait and return typed `STATE_BUSY` on exhaustion. The private
 database handle retains SQLite rollback-recovery capability even for reader operations, so a hot
 journal from a dead writer is recovered rather than exposed as a read-only-database error.
-Private schema version 5 transactionally upgrades development version-1/2/3/4 databases while
-preserving plans, pending stops, reservations and journal heads. It adds a nullable live-attempt
+Private schema version 8 transactionally upgrades development version-1/2/3/4/5/6/7 databases while
+preserving plans, pending stops, reservations and journal heads. Version 7 fences older binaries
+from executable folder plans and cross-profile claims; it does not change legacy seals or add
+catalog columns. Version 8 adds FAT's irrevocable consumed-attempt field; native/legacy plans do
+not consume it. The earlier authority migration adds a nullable live-attempt
 token and an acknowledged-stop serial; every pending legacy request remains unacknowledged,
 including on stopped rows which may contain a newer request. Legacy `process_seen` and `activation_serial`
 columns are retained for compatibility but are never read as execution authority. Older owners
@@ -196,6 +206,17 @@ implemented by arbitrary callbacks. Slice 3 must supply and test:
 - Exclusive recoverable creation with authenticated object certificates, including crashes *inside*
   adapter calls; device-bound reads/writes and atomic no-replace publication.
 - Actual device disappearance/replacement handling and the operator entry point.
+
+DEC-123 qualifies the crash-inside-create contract for directories: creation and certification are
+separate operations. An uncertified directory left in that interval requires operator intervention;
+the adapter must neither adopt nor delete it. Certified-object recovery remains automatic. This
+exception does not authorize cleanup, takeover, formatting, or an unattended real-device trial.
+
+DEC-124 additionally requires application-wide exclusion at launch, before CLI configuration or
+portal startup. It is not a replacement for these internal transaction/device/archive fences.
+Every separate CLI invocation is a launch and refuses while another instance runs, even for query
+or status; controls within the running portal remain available. The operator account is trusted,
+without adding protection against unrelated processes deliberately mutating delivery paths.
 
 The test adapter uses temporary files and simulated device/ownership evidence (test-only xattrs).
 It proves the orchestration's protocol ordering and recovery across port boundaries, not a real

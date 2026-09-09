@@ -11,9 +11,84 @@ import tempfile
 from pathlib import Path
 from unittest import SkipTest, mock
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from scripts import deploy
+
+
+def test_health_check_does_not_launch_a_second_application(tmp_path, monkeypatch):
+    source, venv = tmp_path / "source", tmp_path / "venv"
+    executable = venv / "bin/modelark"
+    executable.parent.mkdir(parents=True)
+    executable.touch()
+    unit = tmp_path / "modelark.service"
+    data, state = tmp_path / "data", tmp_path / "state"
+    unit.write_text(deploy.render_unit(source, executable, data, state, None, 8077, False))
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda args, **kwargs: calls.append(args))
+    class Response:
+        status = 200
+        def read(self):
+            return b'{"os":"linux"}'
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+    monkeypatch.setattr(deploy.urllib.request, "urlopen", lambda *a, **k: Response())
+    deploy._check(source, venv, unit, data, state, None, 8077)
+    assert all(str(executable) != call[0] for call in calls)
+    assert any(call[:4] == ["systemctl", "--user", "is-active", "--quiet"] for call in calls)
+    assert calls[0][0] == str(venv / "bin/python")
+    assert "importlib.metadata" in calls[0][3]
+    assert calls[0] == deploy._installed_metadata_argv(venv)
+
+
+def test_update_validates_metadata_and_restarts_without_launching_another_instance(tmp_path, monkeypatch):
+    import uuid
+    from modelark import instance
+
+    source, venv = tmp_path / "source", tmp_path / "venv"
+    source.mkdir()
+    (source / "pyproject.toml").touch()
+    (venv / "bin").mkdir(parents=True)
+    (venv / "bin/python").touch()
+    executable = venv / "bin/modelark"
+    executable.touch()
+    data, state = tmp_path / "data", tmp_path / "state"
+    monkeypatch.setattr(instance, "_ADDRESS", "\0modelark-deploy-test-" + uuid.uuid4().hex)
+    monkeypatch.setattr(deploy.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(deploy.shutil, "which", lambda command: "/mock/systemctl")
+    monkeypatch.setattr(deploy, "_xdg_path", lambda name, fallback: tmp_path / name.lower())
+    directories, units, calls = [], [], []
+    monkeypatch.setattr(deploy, "_mkdir_private", lambda path, dry_run: directories.append(path))
+    monkeypatch.setattr(deploy, "_write_unit", lambda *args: units.append(args))
+
+    def run(argv, **kwargs):
+        assert kwargs["check"] is True
+        calls.append(argv)
+        if argv[0] == str(executable):
+            # Model the actual executable's first action. Help is deliberately NOT
+            # exempt from singleton exclusion, so the old postinstall probe fails.
+            with instance.launch():
+                pytest.fail("deployment launched another ModelArk application")
+
+    monkeypatch.setattr(deploy.subprocess, "run", run)
+    with instance.launch():
+        with pytest.raises(SystemExit, match="already running"):
+            with instance.launch():
+                pytest.fail("fixture must retain the application's launch guard")
+        deploy.main(["--source", str(source), "--venv", str(venv),
+                     "--data-dir", str(data), "--state-dir", str(state), "--start"])
+    assert calls[0] == [str(venv / "bin/python"), "-m", "pip", "install", str(source)]
+    assert calls[1][0:3] == [str(venv / "bin/python"), "-I", "-c"]
+    assert "importlib.metadata" in calls[1][3]
+    assert calls[1] == deploy._installed_metadata_argv(venv)
+    assert all(str(executable) != call[0] for call in calls)
+    assert calls[-1] == ["systemctl", "--user", "restart", deploy.UNIT_NAME]
+    assert directories == [data, state] and len(units) == 1
+    assert not data.exists() and not state.exists()
 
 def test_unit_is_unprivileged_explicit_and_resume_is_opt_in(tmp_path):
     source = tmp_path / "source with space"

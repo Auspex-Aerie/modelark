@@ -171,7 +171,11 @@ def cmd_recompute(args):
 
 def cmd_serve(args):
     from modelark.web import server
-    server.serve(port=args.port, open_browser=not args.no_open, resume=args.resume)
+    permit = getattr(args, "_instance_permit", None)
+    if permit is None:
+        server.serve(port=args.port, open_browser=not args.no_open, resume=args.resume)
+    else:
+        server._serve_in_instance(permit, port=args.port, open_browser=not args.no_open, resume=args.resume)
 
 
 def cmd_fetch(args):
@@ -623,6 +627,12 @@ def cmd_drive_reconcile(args):
 
 
 def main(argv=None):
+    from modelark.instance import launch
+    with launch() as permit:
+        return _main(argv, permit)
+
+
+def _main(argv, permit):
     p = argparse.ArgumentParser(prog="modelark", description="Catalog & verify open model weights.")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--data-dir", type=Path,
@@ -632,6 +642,8 @@ def main(argv=None):
     p.add_argument("--config", type=Path,
                    help="wishlist/config YAML (default: user config, source checkout, packaged default)")
     sub = p.add_subparsers(dest="cmd", required=True)
+    from modelark.slice.cli import add_subparser
+    add_subparser(sub)
 
     d = sub.add_parser("discover", help="record HF model metadata in the catalog")
     d.add_argument("--repo", action="append", help="explicit repo id (repeatable)")
@@ -821,6 +833,9 @@ def main(argv=None):
     rec.set_defaults(func=cmd_drive_reconcile)
 
     args = p.parse_args(argv)
+    args._instance_permit = permit
+    if args.cmd == "slice" and any(value is not None for value in (args.data_dir, args.state_dir, args.config)):
+        p.error("slice commands use explicit/sealed inputs; --data-dir, --state-dir and --config do not apply")
     if args.data_dir is not None or args.state_dir is not None:
         db.configure(args.data_dir, args.state_dir)
     if args.config is not None:

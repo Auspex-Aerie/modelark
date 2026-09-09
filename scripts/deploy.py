@@ -176,6 +176,17 @@ def _validate_unit(
             "installed unit does not match the requested deployment: " + ", ".join(missing))
 
 
+def _installed_metadata_argv(venv: Path) -> list[str]:
+    """Validate installation metadata without entering the single-instance application."""
+    return [
+        str(venv / "bin" / "python"), "-I", "-c",
+        "import importlib.metadata as m; "
+        "d=m.distribution('modelark'); "
+        "assert any(e.group=='console_scripts' and e.name=='modelark' "
+        "and e.value=='modelark.cli:main' for e in d.entry_points), 'missing ModelArk entry point'",
+    ]
+
+
 def _check(
     source: Path,
     venv: Path,
@@ -191,7 +202,9 @@ def _check(
     if not unit_path.is_file():
         raise RuntimeError(f"systemd user unit is missing: {unit_path}")
     _validate_unit(unit_path, source, executable, data_dir, state_dir, config, port)
-    subprocess.run([str(executable), "--help"], check=True, stdout=subprocess.DEVNULL)
+    # Inspect the installed distribution without launching another ModelArk instance.
+    # The active service owns application-wide launch exclusion (DEC-124).
+    subprocess.run(_installed_metadata_argv(venv), check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["systemctl", "--user", "is-active", "--quiet", UNIT_NAME], check=True)
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/api/meta",
@@ -292,7 +305,7 @@ def main(argv: list[str] | None = None) -> None:
         if not (venv / "bin" / "python").is_file():
             _run([sys.executable, "-m", "venv", venv], args.dry_run)
         _run([venv / "bin" / "python", "-m", "pip", "install", source], args.dry_run)
-        _run([executable, "--help"], args.dry_run)
+        _run(_installed_metadata_argv(venv), args.dry_run)
     elif not args.dry_run and not executable.is_file():
         parser.error(f"--skip-install requested but {executable} does not exist")
 

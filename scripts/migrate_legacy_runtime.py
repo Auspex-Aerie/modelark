@@ -351,6 +351,12 @@ def execute(source_data_dir: Path, destination_data_dir: Path, backup_root: Path
 
 
 def main(argv: list[str] | None = None) -> int:
+    from modelark.instance import launch
+    with launch():
+        return _main(argv)
+
+
+def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-data-dir", type=Path, required=True)
     parser.add_argument("--destination-data-dir", type=Path, required=True)

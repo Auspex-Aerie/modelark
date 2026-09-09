@@ -1,8 +1,8 @@
 # Usable Slice implementation charter
 
-Status: Slice 1 merged; Slice 2 transaction implementation in progress
+Status: Slices 1 and 2 merged; Slice 3 direct-USB implementation in progress
 
-Updated: 2026-09-07
+Updated: 2026-09-08
 
 Decision anchors: DEC-081, DEC-098, BOT-006, DEC-101, DEC-102, DEC-103, DEC-104, DEF-041, DEF-043
 
@@ -190,6 +190,29 @@ retains its original seal and progress; changing the approved source set require
 approved transaction on an empty destination root, leaving earlier output intact. Other seal
 invalidations likewise preserve evidence without promising automatic successor resume.
 
+DEC-123 qualifies automatic directory recovery: a crash between directory creation and durable
+ownership certification can leave ambiguous residue. Such a directory is never adopted or deleted
+automatically, even if empty or at an intended name. Execution refuses for operator intervention.
+Certified objects retain automatic recovery; this exception grants no cleanup or takeover authority.
+
+### Slice 3 implementation gates (2026-09-08)
+
+The [direct-USB operator assembly](../usable-slice-direct.md) joins the concrete Linux components.
+Disposable tests do not establish a completed physical-device trial. DEC-125 adds the initial
+supported capacity profile without weakening DEC-123:
+
+- Launch exclusion (DEC-124): admit only one ModelArk application instance before configuration
+  or startup, regardless of catalog path, port or operation. A competing launch exits immediately;
+  internal attempt/device/archive fences remain. The operator account is trusted, and unrelated
+  processes deliberately substituting destination entries are outside the threat model. This does
+  not relax collision detection, unknown-content preservation, descriptor confinement or DEC-123.
+- Capacity admission: a verified 4-KiB ext4 feature profile, bounded new-directory fanout, conservative
+  data/extent/xattr/root-growth charge and free-inode budget justify the sealed reserve. Actual owned
+  allocation is reconciled separately; unique external ownership markers avoid xattr sharing errors.
+- Physical identity/system-role exclusion, source observation and the operator CLI are integrated.
+  Installed-wheel qualification and PR review track the current code head; neither substitutes for
+  the separately approved first attended USB trial. No trial is authorized by this coding work.
+
 ## Transaction and state model
 
 The workflow is one resumable transaction with an immutable approved core:
@@ -357,11 +380,11 @@ the delivery contract or making the first slice depend on content ModelArk does 
 - multiple consumer profiles and automatic destination preparation;
 - treating any delivery or scratch copy as archive durability evidence.
 
-## Safe stopping point
+## Original charter stopping point
 
-This charter and its ledger decisions are the stopping point. No implementation, live deployment,
+At charter approval, this document and its ledger decisions were the stopping point. No implementation, live deployment,
 service restart, Fill action, catalog expansion, or archive/destination byte movement is part of
-this change. The next implementation session starts with domain contracts and expected-red tests
+that change. Implementation subsequently proceeded through the slices below, starting with domain contracts and expected-red tests
 for eligibility, exact gap reporting, and the sealed direct-USB transaction.
 
 ## Development entry and review slices
@@ -374,10 +397,11 @@ Slice 2's private state, process fencing, journal, and trusted adapter boundary 
 [Usable Slice transaction](../usable-slice-transaction.md). Hardware adapters and real-device
 proof remain Slice 3 work; temporary-fixture success does not grant real-device execution authority.
 
-Finish PR #67's renewed bounded review (up to three iterations) at its exact pushed head and let the
-operator merge it. Then branch from that merged charter for implementation. The first test commit
-defines expected-red domain contracts; failures must identify missing behavior rather than broken
-fixtures. Preserve separate test and implementation commits so the contracts remain reviewable.
+PR #67's charter review and Slices 1/2 (PRs #68/#69) are merged. Slice 3 now supplies the direct-USB
+operator assembly; its current-head regression, installed-wheel qualification and bounded PR review
+must finish before the operator's merge decision. The later attended physical trial remains a
+separate authorization gate. Initial domain tests were expected-red contracts: failures had to
+identify missing behavior rather than broken fixtures.
 
 | Slice | Deliverable | Required evidence before advancing |
 |------|-------------|------------------------------------|
