@@ -81,7 +81,7 @@ def _swap_records(swaps):
 def _inventory():
     result = subprocess.run(
         ["lsblk", "--json", "--bytes", "--paths", "--output",
-         "NAME,PATH,TYPE,PKNAME,MAJ:MIN,SIZE,FSTYPE,UUID,SERIAL,WWN,TRAN,RO"],
+         "NAME,PATH,KNAME,TYPE,PKNAME,MAJ:MIN,SIZE,FSTYPE,UUID,SERIAL,WWN,TRAN,RO"],
         check=True, capture_output=True, text=True)
     return json.loads(result.stdout)
 
@@ -141,6 +141,16 @@ class _Inventory:
                     or not path or not path.startswith("/dev/") or key in self.nodes or path in self.paths):
                 _refuse("ambiguous block-device inventory")
             self.nodes[key], self.parents[key], self.paths[path] = node, parent, key
+            # lsblk may spell a mapper node as /dev/mapper/name while a child's
+            # PKNAME uses /dev/dm-N. KNAME is explicit inventory evidence for that
+            # alias; do not infer ancestry from names or ignore a disagreement.
+            kernel_path = _nonempty(node.get("kname"))
+            if kernel_path:
+                if not kernel_path.startswith("/"):
+                    kernel_path = "/dev/" + kernel_path
+                if not kernel_path.startswith("/dev/") or self.paths.get(kernel_path, key) != key:
+                    _refuse("ambiguous kernel block-device alias")
+                self.paths[kernel_path] = key
             for child in node.get("children") or ():
                 visit(child, key)
         if not isinstance(payload, dict) or not isinstance(payload.get("blockdevices"), list):

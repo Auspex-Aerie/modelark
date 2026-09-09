@@ -14,6 +14,26 @@ def test_statx_buffer_matches_kernel_abi():
     assert _Statx.mount_id.offset == 144
 
 
+def test_role_mount_probe_does_not_weaken_owned_birth_requirement(monkeypatch):
+    from types import SimpleNamespace
+    from modelark.slice import linux
+    def statx(fd, path, flags, mask, output):
+        output._obj.mask = 0x1100
+        output._obj.ino = 1
+        output._obj.mount_id = 2
+        return 0
+    monkeypatch.setattr(linux, '_libc', lambda: SimpleNamespace(statx=statx))
+    assert linux._statx(3, require_birth=False).mount_id == 2
+    with pytest.raises(TransferRefusal, match='birth time'):
+        linux._statx(3)
+
+
+def test_protected_proc_role_can_be_classified_without_birth_evidence():
+    from modelark.slice.host_observation import resolve_protected
+    target = resolve_protected('/proc')
+    assert target.path == '/proc' and target.mount_id > 0 and target.inode > 0
+
+
 @pytest.mark.parametrize('original_kind', ['io', 'policy'])
 def test_failed_followup_mount_probe_preserves_original_error(tmp_path, monkeypatch, original_kind):
     from modelark.slice import linux

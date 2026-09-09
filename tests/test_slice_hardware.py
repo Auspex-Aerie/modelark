@@ -419,7 +419,7 @@ def test_lsblk_uses_explicit_read_only_json_columns(monkeypatch, hardware):
     *_, module = hardware
     def run(command, **kwargs):
         assert command == ["lsblk", "--json", "--bytes", "--paths", "--output",
-                           "NAME,PATH,TYPE,PKNAME,MAJ:MIN,SIZE,FSTYPE,UUID,SERIAL,WWN,TRAN,RO"]
+                           "NAME,PATH,KNAME,TYPE,PKNAME,MAJ:MIN,SIZE,FSTYPE,UUID,SERIAL,WWN,TRAN,RO"]
         assert kwargs == {"check": True, "capture_output": True, "text": True}
         return SimpleNamespace(stdout='{"blockdevices": []}')
     monkeypatch.setattr(module.subprocess, "run", run)

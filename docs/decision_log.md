@@ -2828,3 +2828,25 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Slice hardware/Linux/capacity/destination/operator/source adapter boundaries and regression tests only. No transaction authority, Fill, launch guard, schema/seal, codec or supported-filesystem redesign; no weaker admission, permission changes, deployment or physical trial. The prior bounded review loop stays stopped; merge remains a separate operator gate.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md
 - `related`: DEC-123, DEC-125, DEC-126, DEC-127, DEC-128
+
+### DEC-130: Own a projection folder, with native resume and session-only FAT32 export
+- `id`: DEC-130
+- `date`: 2026-09-09
+- `status`: accepted
+- `triggered_by`: Operator clarified projection means a folder rather than drive ownership, requested a Grok CLI scope critique, then approved the narrowed native-ext4 plus FAT32 proposal including new-root restart after FAT32 interruption.
+- `decision`: New folder projections own one exclusively created child under an existing parent, with all destination control/staging inside it. Separate folder target identity, attachment evidence, profile and advisory capacity. Allow qualified ordinary system-backed ext4 user folders, tolerate unrelated filesystem writes, retain authenticated native resume, and qualify FAT32 as session-only: Stop/interruption leaves residue untouched and requires a new root. Keep protected system/private paths and registered archive backing devices excluded. Preserve existing sealed direct-USB transactions under their original policy; do not silently reinterpret them.
+- `rationale`: The direct adapter used exclusive filesystem identity/accounting as a proxy for output-tree ownership. Merely relaxing mount-root or ext4 admission would retain the wrong capacity and recovery assumptions. FAT32 qualification must not weaken native certificates, no-clobber publication, required flushes or truthful final hashes/layout/receipt evidence.
+- `impact`: Staged folder contract, native adapter and FAT32 profile gates in docs/plans/folder-projection-scope.md. No Fill/source authority redesign, acquisition, archive reconciliation, deployment, formatting, automatic residue cleanup or cross-host resume. XFS/exFAT and FAT32 resume are outside this first delivery. Physical trial still requires exact reviewed target/source evidence. Legacy direct-USB constraints remain valid for legacy plans.
+- `docs_updated`: docs/decision_log.md, docs/plans/folder-projection-scope.md, docs/usable-slice-folders.md, README.md
+- `related`: DEC-124, DEC-125, DEC-129
+
+### DEC-131: Dispatch native folder authority explicitly and fence older private-state readers
+- `id`: DEC-131
+- `date`: 2026-09-09
+- `status`: accepted
+- `triggered_by`: DEC-130's approved native execution gate; integration review of folder-versus-device claims and real-host ext4/LUKS/LVM observation.
+- `decision`: Store executable native plans under a closed native-transaction v1 envelope in private Slice schema 7, retaining legacy seals and explicit strict direct-USB dispatch. Compare durable canonical folder ancestry and legacy backing claims within the existing reservation transaction. Keep all native control data below the exclusively certified output child. Treat native destination capacity exhaustion as ending the attempt, recoverable only through a fresh authenticated Start. Resolve explicit kernel-name mapper aliases without discarding ancestry conflict checks; require current inode/mount evidence for protected-role classification and retain birth identity for owned-object certificates.
+- `rationale`: Reusing a device ID field without versioned dispatch would let old binaries misread folder authority. Shared capacity is not identity, and a partial space failure requires allocation reconstruction. Device-mapper PATH/PKNAME spelling and pseudo-filesystem birth-time support are representation/role distinctions, not evidence that an ordinary encrypted ext4 user folder is unsafe or that owned-object identity can be weakened.
+- `impact`: Native adapter, observer, plan/operator assembly, shared transaction/private-store dispatch and narrow Linux inventory/role helpers. Private schema upgrade only; no catalog migration, Fill/source fence changes, live deployment, USB writes or permission rewriting. FAT32 remains the separate pending session-only gate under DEC-130.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-folders.md, docs/usable-slice-direct.md, docs/usable-slice-transaction.md, docs/plans/folder-projection-scope.md, README.md
+- `related`: DEC-123, DEC-124, DEC-125, DEC-129, DEC-130

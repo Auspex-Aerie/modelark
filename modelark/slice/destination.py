@@ -286,6 +286,22 @@ class UsbDestination:
             raise TransferRefusal("DESTINATION_CHANGED")
         if any(isinstance(n, bool) or not isinstance(n, int) or n < 0 for n in (allocated, required_bytes)):
             raise TransferRefusal("DESTINATION_ALLOCATION_UNPROVEN")
+        actual = self._audit_allocated()
+        root_delta = self._blocks(os.fstat(self.tree.fd)) - self._root_blocks
+        if actual != allocated or root_delta < 0:
+            raise TransferRefusal("DESTINATION_ALLOCATION_UNPROVEN", "owned allocation differs")
+        available = self._available()
+        if available + actual + root_delta != binding.available_bytes:
+            raise TransferRefusal("DESTINATION_CAPACITY_CHANGED", "unexplained free-space change")
+        if (required_bytes > binding.available_bytes or actual + root_delta > required_bytes
+                or available < required_bytes - actual - root_delta):
+            raise TransferRefusal("DESTINATION_CAPACITY_INSUFFICIENT")
+
+    def _audit_allocated(self):
+        return self._audit_allocation()[0]
+
+    def _audit_allocation(self):
+        """Authenticate owned allocation/link counts independently of capacity policy."""
         seen, links, actual = set(), {}, 0
         with self._connection() as con:
             paths = con.execute("SELECT DISTINCT path FROM certificates WHERE tx=? AND seal=? AND device=?"
@@ -307,15 +323,7 @@ class UsbDestination:
                 continue
         if any(count != total for count, total in links.values()):
             raise TransferRefusal("OUTPUT_COLLISION", "unexplained hardlinks to delivery objects")
-        root_delta = self._blocks(os.fstat(self.tree.fd)) - self._root_blocks
-        if actual != allocated or root_delta < 0:
-            raise TransferRefusal("DESTINATION_ALLOCATION_UNPROVEN", "owned allocation differs")
-        available = self._available()
-        if available + actual + root_delta != binding.available_bytes:
-            raise TransferRefusal("DESTINATION_CAPACITY_CHANGED", "unexplained free-space change")
-        if (required_bytes > binding.available_bytes or actual + root_delta > required_bytes
-                or available < required_bytes - actual - root_delta):
-            raise TransferRefusal("DESTINATION_CAPACITY_INSUFFICIENT")
+        return actual, len(seen)
 
     @_port_io
     def inspect(self, path):

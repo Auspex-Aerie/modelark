@@ -23,19 +23,20 @@ class _Attachments(argparse.Action):
 
 
 def add_subparser(subparsers):
-    parser = subparsers.add_parser("slice", help="preview and execute attended direct Slice delivery")
+    parser = subparsers.add_parser("slice", help="preview and execute attended Slice delivery")
     commands = parser.add_subparsers(dest="slice_command", required=True)
-    preview = commands.add_parser("preview", help="review explicit catalog, repositories and USB destination")
+    preview = commands.add_parser("preview", help="review explicit catalog, repositories and output folder")
     preview.add_argument("--catalog", required=True, help="explicit source catalog path (read-only)")
-    preview.add_argument("--destination", required=True, help="attached destination mount root")
+    preview.add_argument("--destination", required=True,
+                         help="exact new ext4 or FAT32 output folder (FAT32: one attempt, no resume)")
     preview.add_argument("--repo", required=True, action="append", help="repository ID (repeatable)")
-    preview.add_argument("--root", required=True, help="new relative destination delivery root")
+    preview.add_argument("--root", help="legacy direct-USB mode: --destination is mount root, --root is new relative delivery root")
     approval = commands.add_parser("approve", help="approve the exact reviewed transaction seal")
     approval.add_argument("transaction")
     approval.add_argument("--seal", required=True)
     start = commands.add_parser("start", help="run synchronously until completion or an attended wait/refusal")
     start.add_argument("transaction")
-    start.add_argument("--destination", required=True, help="attached destination mount root")
+    start.add_argument("--destination", required=True, help="approved output folder (legacy USB plan: mount root)")
     start.add_argument("--source", action=_Attachments, default=None, metavar="LABEL=ARCHIVE",
                        help="explicit archive attachment (repeatable; no retrieval)")
     for name in ("status", "stop"):

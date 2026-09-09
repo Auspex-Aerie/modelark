@@ -121,14 +121,16 @@ def resolve_protected(path, *, directory=True, optional=False):
         info = os.fstat(fd)
         if not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)):
             raise TransferRefusal('DESTINATION_UNPROVEN', 'protected role has unexpected file type')
-        mount_id = _statx(fd).mount_id
+        # Host-role classification needs current inode/mount equality, not durable
+        # owned-object birth identity (procfs/sysfs do not provide the latter).
+        mount_id = _statx(fd, require_birth=False).mount_id
         identity = info.st_dev, info.st_ino, mount_id
         resolved = os.path.realpath(requested, strict=True)
         for current in (resolved, requested):
             other = os.open(current, os.O_PATH | os.O_CLOEXEC)
             try:
                 observed = os.fstat(other)
-                if (observed.st_dev, observed.st_ino, _statx(other).mount_id) != identity:
+                if (observed.st_dev, observed.st_ino, _statx(other, require_birth=False).mount_id) != identity:
                     raise TransferRefusal('DESTINATION_UNPROVEN', 'protected role changed while resolving')
             finally:
                 os.close(other)

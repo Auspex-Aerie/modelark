@@ -26,7 +26,8 @@ TRANSITIONS = {
 
 def refusal_state(code):
     return {"STOPPED": "stopped", "WAITING_SOURCE": "waiting_source",
-            "WAITING_DESTINATION": "waiting_destination", "SOURCE_BLOCKED": "blocked_source"}.get(
+            "WAITING_DESTINATION": "waiting_destination", "SOURCE_BLOCKED": "blocked_source",
+            "DESTINATION_CAPACITY_WAIT": "waiting_destination"}.get(
                 code, "invalidated" if code.startswith("DESTINATION_") else "failed")
 
 

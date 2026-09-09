@@ -68,6 +68,9 @@ def _result(outcome, *, stop_requested=False):
 
 
 def preview(catalog_path, destination_path, repo_ids, root):
+    if root is None:
+        from .folder_operator import preview as folder_preview
+        return folder_preview(catalog_path, destination_path, repo_ids)
     catalog_path = str(Path(catalog_path).expanduser().resolve())
     spec = d.SliceSpec(tuple(repo_ids), "pending-device-observation", root)
     snapshot = read_catalog(catalog_path, spec)
@@ -191,8 +194,14 @@ def start(tx, destination_path, attachments):
         return _result(current)
     if current.state == "ready":
         raise t.TransferRefusal("APPROVAL_MISSING")
+    if getattr(plan, "session_only", False):
+        from .fat32_operator import start as fat32_start
+        return fat32_start(store, tx, plan, destination_path, attachments)
     if current.state not in RESUMABLE_STATES:
         raise t.TransferRefusal("NOT_RESUMABLE", current.state)
+    if plan.is_folder:
+        from .folder_operator import start as folder_start
+        return folder_start(store, tx, plan, destination_path, attachments)
     admission = store.load_admission(tx)
     allowed = {source.drive.drive_label for artifact in plan.proposal.closure for source in artifact.sources}
     if not isinstance(attachments, dict) or set(attachments) - allowed:

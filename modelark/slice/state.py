@@ -22,6 +22,49 @@ from .domain import _json, validate_approval
 HOST_STATE_DIR = Path.home() / ".local" / "state" / "modelark" / "slice"
 
 
+def _load_plan(payload):
+    """Tagged dispatch; never reinterpret a folder record as legacy USB authority."""
+    from .transaction import TransferPlan, TransferRefusal
+    from .folder_contract import _decode
+    from .folder_plan import NativePlan
+    from .fat32_plan import Fat32Plan
+    try:
+        record = _decode(payload)
+        if type(record) is not dict:
+            raise ValueError("plan envelope required")
+        if record.get("version") == "modelark.slice.native-transaction.v1":
+            return NativePlan.from_json(payload)
+        if record.get("version") == "modelark.slice.fat32-transaction.v1":
+            return Fat32Plan.from_json(payload)
+        return TransferPlan.from_json(payload)
+    except (ValueError, TypeError) as exc:
+        raise TransferRefusal("STATE_CORRUPT", str(exc)) from exc
+
+
+def _claims_overlap(first, second):
+    from .folder_contract import overlaps
+    if first.is_folder and second.is_folder:
+        if getattr(first, "session_only", False) or getattr(second, "session_only", False):
+            a, b = first.destination.target, second.destination.target
+            if a.filesystem_scope != b.filesystem_scope:
+                return False
+            if a.profile != b.profile:
+                from .transaction import TransferRefusal
+                raise TransferRefusal("DESTINATION_UNPROVEN", "mixed filesystem profiles")
+            # FAT observation requires exact enumerated parent spelling, rejects
+            # requested short aliases, and qualifies numbered short-name creation.
+            left, right = tuple(p.lower() for p in a.parts), tuple(p.lower() for p in b.parts)
+            common = min(len(left), len(right))
+            return left[:common] == right[:common]
+        return overlaps(first.destination.target, second.destination.target)
+    if not first.is_folder and not second.is_folder:
+        return first.destination.device_id == second.destination.device_id
+    folder, legacy = (first, second) if first.is_folder else (second, first)
+    keys = {key.casefold() for key in folder.backing_ids}
+    return (legacy.destination.device_id.casefold() in keys
+            or ("filesystem:" + legacy.destination.filesystem_id).casefold() in keys)
+
+
 class Reservation(NamedTuple):
     state: str
     stop_serial: int
@@ -89,7 +132,7 @@ class Store:
             raise ValueError("unsafe slice state database")
         with self._connection() as con:
             version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4, 5, 6):
+            if version not in (0, 1, 2, 3, 4, 5, 6, 7, 8):
                 raise ValueError("unsupported slice state version")
             con.execute("CREATE TABLE IF NOT EXISTS transactions ("
                         "id TEXT PRIMARY KEY, plan TEXT NOT NULL, seal TEXT NOT NULL,"
@@ -131,7 +174,10 @@ class Store:
             con.execute("CREATE TABLE IF NOT EXISTS journal (tx TEXT NOT NULL REFERENCES transactions(id),"
                         "seq INTEGER NOT NULL, event TEXT NOT NULL, payload TEXT NOT NULL, digest TEXT NOT NULL,"
                         "PRIMARY KEY(tx,seq))")
-            con.execute("PRAGMA user_version=6")
+            if "consumed_attempt" not in {row[1] for row in con.execute("PRAGMA table_info(transactions)")}:
+                con.execute("ALTER TABLE transactions ADD COLUMN consumed_attempt TEXT")
+            # v8 fences binaries unaware of FAT's irrevocable single-attempt rule.
+            con.execute("PRAGMA user_version=8")
 
     @contextmanager
     def _connection(self, *, write=True):
@@ -159,9 +205,14 @@ class Store:
             con.close()
 
     def create(self, plan, approval, *, admission=None):
-        if plan.version != "modelark.slice.transaction.v3":
-            from .transaction import TransferRefusal
+        from .transaction import TransferRefusal, TransferPlan
+        from .folder_plan import NativePlan
+        from .fat32_plan import Fat32Plan
+        native = isinstance(plan, (NativePlan, Fat32Plan))
+        if not native and (not isinstance(plan, TransferPlan) or plan.version != "modelark.slice.transaction.v3"):
             raise TransferRefusal("LEGACY_PLAN", "new transactions require protocol v3")
+        if native and admission is not None:
+            raise TransferRefusal("ADMISSION_CORRUPT", "native admission is part of the plan")
         validate_approval(plan.proposal, approval)
         plan.required_bytes(self.root)
         encoded = None
@@ -193,6 +244,8 @@ class Store:
     def load_admission(self, tx):
         from .transaction import TransferRefusal
         plan = self.load(tx)
+        if plan.is_folder:
+            return {"version": plan.version, "catalog": plan.catalog}
         with self._connection(write=False) as con:
             row = con.execute("SELECT admission FROM transactions WHERE id=?", (tx,)).fetchone()
         if row is None:
@@ -207,12 +260,12 @@ class Store:
         return admission
 
     def load(self, tx):
-        from .transaction import TransferPlan, TransferRefusal
+        from .transaction import TransferRefusal
         with self._connection(write=False) as con:
             row = con.execute("SELECT plan,seal FROM transactions WHERE id=?", (tx,)).fetchone()
         if row is None:
             raise TransferRefusal("TRANSACTION_MISSING", tx)
-        plan = TransferPlan.from_json(row[0])
+        plan = _load_plan(row[0])
         if plan.seal != row[1]:
             raise TransferRefusal("STATE_CORRUPT", "plan seal differs")
         return plan
@@ -244,10 +297,24 @@ class Store:
     def reserve(self, tx, device):
         from .transaction import TransferRefusal, Status
         def inspect(con):
+            encoded, seal = con.execute("SELECT plan,seal FROM transactions WHERE id=?", (tx,)).fetchone()
+            plan = _load_plan(encoded)
+            if plan.seal != seal or plan.destination.device_id != device:
+                raise TransferRefusal("STATE_CORRUPT", "reservation differs from sealed plan")
             state, serial, acknowledged = con.execute(
                 "SELECT state,stop_serial,acknowledged_stop_serial FROM transactions WHERE id=?", (tx,)).fetchone()
             if state == "complete":
                 return None, Status(tx, state)
+            # Check durable namespace claims in the same snapshot/commit as reserve.
+            # A stopped owner still owns its output. A dead kernel lease is not
+            # permission to adopt its tree or acquire an overlapping legacy drive.
+            for other_tx, other_payload, other_seal in con.execute(
+                    "SELECT o.tx,t.plan,t.seal FROM owners o JOIN transactions t ON t.id=o.tx WHERE o.tx!=?", (tx,)):
+                other = _load_plan(other_payload)
+                if other.seal != other_seal:
+                    raise TransferRefusal("STATE_CORRUPT", "existing claim has a corrupt plan")
+                if _claims_overlap(plan, other):
+                    raise TransferRefusal("DESTINATION_BUSY", other_tx)
             owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
             if owner and owner[0] != tx:
                 raise TransferRefusal("DESTINATION_BUSY", owner[0])
@@ -276,6 +343,11 @@ class Store:
             row = con.execute("SELECT tx,attempt FROM owners WHERE device=?", (device,)).fetchone()
         return Attempt(*row) if row and row[1] is not None else None
 
+    def attempt_consumed(self, tx):
+        with self._connection(write=False) as con:
+            row = con.execute("SELECT consumed_attempt FROM transactions WHERE id=?", (tx,)).fetchone()
+        return bool(row and row[0] is not None)
+
     def claim(self, tx, device, attempt, reservation):
         """Publish an attempt only while its caller holds exclusion and its live marker."""
         from .transaction import TransferRefusal, Status
@@ -289,6 +361,15 @@ class Store:
             owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
             if not owner or owner[0] != tx or attempt.owner != tx:
                 raise TransferRefusal("EXECUTION_FENCE_LOST")
+            encoded, seal, consumed = con.execute(
+                "SELECT plan,seal,consumed_attempt FROM transactions WHERE id=?", (tx,)).fetchone()
+            plan = _load_plan(encoded)
+            if plan.seal != seal or plan.destination.device_id != device:
+                raise TransferRefusal("STATE_CORRUPT", "claim differs from sealed intent")
+            if getattr(plan, "session_only", False):
+                if consumed is not None:
+                    raise TransferRefusal("FAT32_NEW_ROOT_REQUIRED", "this intent has spent its only attempt")
+                con.execute("UPDATE transactions SET consumed_attempt=? WHERE id=?", (attempt.token, tx))
             con.execute("UPDATE owners SET attempt=? WHERE device=? AND tx=?", (attempt.token, device, tx))
             # Only a Start issued AFTER this exact stop was acknowledged may clear it.
             resume = (reservation.state == state == "stopped"

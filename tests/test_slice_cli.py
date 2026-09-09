@@ -27,6 +27,9 @@ def operator(monkeypatch):
 
 
 @pytest.mark.parametrize("argv,name,expected", [
+    (["preview", "--catalog", "/explicit/catalog.sqlite", "--destination", "/exports/delivery",
+      "--repo", "org/a"], "preview",
+     ("/explicit/catalog.sqlite", "/exports/delivery", ("org/a",), None)),
     (["preview", "--catalog", "/explicit/catalog.sqlite", "--destination", "/usb",
       "--repo", "org/a", "--repo", "org/b", "--root", "delivery"], "preview",
      ("/explicit/catalog.sqlite", "/usb", ("org/a", "org/b"), "delivery")),

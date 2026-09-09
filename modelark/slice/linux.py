@@ -68,15 +68,17 @@ def _openat2(fd, path, flags, mode=0, *, resolve=0x0D):
                                           ctypes.byref(how), ctypes.c_size_t(ctypes.sizeof(how))), 'openat2')
 
 
-def _statx(fd):
+def _statx(fd, *, require_birth=True):
     result = _Statx()
     libc = _libc()
     if not hasattr(libc, "statx"):
         raise TransferRefusal("FILESYSTEM_UNSUPPORTED", "statx unavailable")
+    required = 0x1900 if require_birth else 0x1100
     _required_result(libc.statx(ctypes.c_int(fd), ctypes.c_char_p(b""), ctypes.c_int(0x1000),
-                              ctypes.c_uint(0x1900), ctypes.byref(result)), 'statx')
-    if result.mask & 0x1900 != 0x1900:
-        raise TransferRefusal("FILESYSTEM_UNSUPPORTED", "inode birth time and mount identity required")
+                              ctypes.c_uint(required), ctypes.byref(result)), 'statx')
+    if result.mask & required != required:
+        detail = "inode birth time and mount identity required" if require_birth else "inode and mount identity required"
+        raise TransferRefusal("FILESYSTEM_UNSUPPORTED", detail)
     return result
 
 
@@ -160,13 +162,19 @@ class BoundTree:
             self.fd = _openat2(root, str(self.path).lstrip("/") or ".",
                                os.O_RDONLY | os.O_DIRECTORY, resolve=0x0C)
             self._identity = self.identity(self.fd)
-            self.mount_id = _statx(self.fd).mount_id
+            self.mount_id = self._statx(self.fd).mount_id
             self.check()
         except BaseException:
             self.close()
             raise
         finally:
             os.close(root)
+
+    @staticmethod
+    def _statx(fd):
+        # Native/legacy callers keep the birth requirement. Live-only adapters may
+        # override observation without changing any existing default capability.
+        return _statx(fd)
 
     @staticmethod
     def identity(fd):
@@ -184,7 +192,7 @@ class BoundTree:
             current = _openat2(root, str(self.path).lstrip("/") or ".",
                               os.O_RDONLY | os.O_DIRECTORY, resolve=0x0C)
             if (self.identity(current) != self._identity or
-                    _statx(current).mount_id != self.mount_id):
+                    self._statx(current).mount_id != self.mount_id):
                 # An unmount can expose a perfectly ordinary host directory at the
                 # same pathname. Never treat that directory as a replacement writer.
                 self._check_attachment()

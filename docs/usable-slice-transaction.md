@@ -9,7 +9,10 @@ evidence, and the destination port must validate that evidence before any writes
 
 ## Authority and lifetime
 
-Direct admission uses private schema v6's optional sealed capsule (DEC-125). Older internal plans
+Direct admission retains private schema v6's optional sealed capsule (DEC-125), now in schema v8.
+The [native folder profile](usable-slice-folders.md) uses a separate tagged executable envelope,
+folder-scoped ownership and shared capacity. The direct-device behavior described below remains
+the legacy profile's policy, not a requirement that a native folder own its drive. Older internal plans
 retain their semantics without invented hardware evidence; the attempt contract below is unchanged.
 
 `TransferPlan(proposal, destination_binding, metadata_reserve_bytes=...)` freezes the domain
@@ -48,8 +51,11 @@ Reader operations use deferred transactions rather than requesting the writer re
 writers have a bounded SQLite busy wait and return typed `STATE_BUSY` on exhaustion. The private
 database handle retains SQLite rollback-recovery capability even for reader operations, so a hot
 journal from a dead writer is recovered rather than exposed as a read-only-database error.
-Private schema version 6 transactionally upgrades development version-1/2/3/4/5 databases while
-preserving plans, pending stops, reservations and journal heads. It adds a nullable live-attempt
+Private schema version 8 transactionally upgrades development version-1/2/3/4/5/6/7 databases while
+preserving plans, pending stops, reservations and journal heads. Version 7 fences older binaries
+from executable folder plans and cross-profile claims; it does not change legacy seals or add
+catalog columns. Version 8 adds FAT's irrevocable consumed-attempt field; native/legacy plans do
+not consume it. The earlier authority migration adds a nullable live-attempt
 token and an acknowledged-stop serial; every pending legacy request remains unacknowledged,
 including on stopped rows which may contain a newer request. Legacy `process_seen` and `activation_serial`
 columns are retained for compatibility but are never read as execution authority. Older owners

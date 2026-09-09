@@ -14,6 +14,11 @@ There is no fallback to path-based IO or older ACL-blind permission emulation. S
 
 ## Operator workflow
 
+This is the retained strict direct-USB interface, selected by preview's explicit `--root`.
+Without `--root`, new previews use the [native folder interface](usable-slice-folders.md):
+`--destination` names the exact new folder, not a mount root. Old approved plans retain their
+sealed policy; Start dispatches by plan version, not by the current destination's filesystem.
+
 Stop any running ModelArk portal before invoking another CLI command (DEC-124). Each command is a
 separate guarded application launch. These examples explain the interface; they do not authorize
 writing an unreviewed physical drive.
@@ -176,7 +181,7 @@ Media, fragmentation and IO faults may still stop execution; none authorizes a s
 
 ## Private state and qualification
 
-Private schema v6 atomically stores each plan with its direct-admission capsule. Catalog path,
+Private schema v8 retains the v6 atomic plan/direct-admission capsule protocol. Catalog path,
 filesystem policy, root evidence and budgets are hashed into the sealed destination binding. Legacy
 internal plans remain readable without invented direct-admission evidence. No catalog migration occurs.
 The separate certificate registry uses schema v2: durable identities retain inode number and birth

@@ -63,7 +63,7 @@ def test_v5_migration_preserves_legacy_transaction_without_inventing_admission(s
     with pytest.raises(t.TransferRefusal, match="ADMISSION_MISSING"):
         upgraded.load_admission(tx)
     with upgraded._connection(write=False) as con:
-        assert con.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 8
 
 
 @pytest.fixture
