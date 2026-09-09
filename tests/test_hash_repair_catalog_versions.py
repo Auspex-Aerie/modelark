@@ -1,5 +1,6 @@
 """Public supplied-connection hash repair cannot bypass catalog compatibility."""
 from unittest import mock
+import sqlite3
 
 import pytest
 
@@ -106,3 +107,65 @@ def test_version_change_before_write_lock_refuses_without_repair_state(tmp_path)
         assert con.execute('SELECT * FROM drive_hash_repair_state').fetchall() == []
         assert con.execute('PRAGMA user_version').fetchone() == (9,)
         assert not con.in_transaction
+
+
+@pytest.mark.parametrize('entry', ['audit', 'dry_run'])
+@pytest.mark.parametrize('race_at', ['rows', 'resolver'])
+def test_audit_pins_version_and_rows_across_concurrent_commit(tmp_path, monkeypatch, entry, race_at):
+    with _catalog(tmp_path) as con:
+        _proven_drive(con)
+        con.execute('PRAGMA journal_mode=WAL')
+        con.execute("INSERT INTO models(repo_id) VALUES('old/model')")
+        con.execute("INSERT INTO files(repo_id,rfilename) VALUES('old/model','config.json')")
+        con.execute("INSERT INTO archived(repo_id,rfilename,drive_label,stored_name,compressed) "
+                    "VALUES('old/model','config.json','drive-00','config.json',0)")
+        path = con.execute('PRAGMA database_list').fetchone()[2]
+        writer = sqlite3.connect(path, isolation_level=None)
+        seen = []
+
+        def commit_future():
+            writer.execute('BEGIN IMMEDIATE')
+            writer.execute('PRAGMA user_version=9')
+            writer.execute("UPDATE drives SET serial='future-serial'")
+            writer.execute('COMMIT')
+
+        original_rows = hash_repair._rows
+
+        def rows(connection, scope):
+            if race_at == 'rows':
+                commit_future()
+            seen.append(connection.execute('PRAGMA user_version').fetchone()[0])
+            return original_rows(connection, scope)
+
+        def resolver(connection, label):
+            if race_at == 'resolver':
+                commit_future()
+            seen.append(connection.execute('PRAGMA user_version').fetchone()[0])
+            assert connection.execute('SELECT serial FROM drives').fetchone()[0] != 'future-serial'
+            return None
+
+        monkeypatch.setattr(hash_repair, '_rows', rows)
+        try:
+            call = hash_repair.audit_hashes if entry == 'audit' else hash_repair.repair_hashes
+            report = call(con, archive_resolver=resolver)
+            assert report['archived_rows'] == 1
+            assert seen == [7, 7]
+            assert not con.in_transaction
+            assert con.execute('PRAGMA user_version').fetchone() == (9,)
+        finally:
+            writer.close()
+
+
+@pytest.mark.parametrize('caller_transaction', [False, True])
+def test_audit_preserves_transaction_ownership_on_error(tmp_path, monkeypatch, caller_transaction):
+    with _catalog(tmp_path) as con:
+        if caller_transaction:
+            con.execute('BEGIN IMMEDIATE')
+            con.execute("INSERT INTO models(repo_id) VALUES('caller/pending')")
+        monkeypatch.setattr(hash_repair, '_rows', mock.Mock(side_effect=ValueError('audit failed')))
+        with pytest.raises(ValueError, match='audit failed'):
+            hash_repair.audit_hashes(con)
+        assert con.in_transaction is caller_transaction
+        if caller_transaction:
+            assert con.execute('SELECT repo_id FROM models').fetchall() == [('caller/pending',)]
+            con.execute('ROLLBACK')

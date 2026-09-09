@@ -310,7 +310,7 @@ epoch-alias registry or new serialized authority format requires a separately ex
 | --- | --- | --- |
 | 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Accepted at 9692b4c in round 3 by Greptile and Codex; all CI green |
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
-| 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Implemented; full suite green; round 1 external review |
+| 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Round 1: Greptile/CI passed; fixing Codex audit-snapshot P2 for round 2 |
 | 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Pending |
 | 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Pending |
 
@@ -456,6 +456,21 @@ bytes. No new skips or relaxed assertions. Repository-wide Ruff and diff checks
 pass. The actual old-wheel qualification was rerun on fresh disposable fixtures
 and again passed all six cases. Submit this slice for its first external review;
 corrected archive probing and all live operations remain inactive.
+
+Slice 3, round 1, `e322ab48b078665dd5f025b510f8cdd91cc5ae95`: Greptile accepted
+5/5 with authenticated thumbs-up 414193622; all Python/wheel and browser CI passed
+(run 34409943761). Codex found P2 3973451726: a supplied-connection audit checked
+the reader floor without holding a snapshot through row/resolver reads, allowing
+a concurrent future-version commit to be interpreted after the check. Four real
+two-connection WAL regressions reproduced the race before correction. The audit
+now owns a read snapshot when needed, validates within it and reuses caller-owned
+transactions without ending them. Repair's post-BEGIN audit remains within its
+existing write transaction. This is a version-check lifetime omission, not a need
+for a new catalog layout or identity policy. Round-2 correction qualification:
+73 hash-repair/snapshot/provenance-remediation/CLI cases and 51 planner-writer/
+live-session/provenance-contract cases passed (124 total). All-source Ruff and
+diff checks passed. No test assertion was relaxed. The preceding 2722-pass full
+run is the round-1 baseline; require fresh full CI at the corrected round-2 head.
 
 ## 7. Questions for Grok
 

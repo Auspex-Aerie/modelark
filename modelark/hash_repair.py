@@ -211,7 +211,24 @@ def audit_hashes(
     *,
     archive_resolver: Callable[[object, str], Path | None] | None = None,
 ) -> dict:
-    """Return a read-only legacy-hash repair plan and its fail-closed diagnostics."""
+    """Read version, rows and resolver metadata from one supported snapshot.
+
+    Reuse caller-owned transactions (including repair's write transaction) without
+    committing or rolling them back. Standalone audits own only a read snapshot.
+    """
+    _require_supported_repair_catalog(con)
+    owned_snapshot = not con.in_transaction
+    if owned_snapshot:
+        con.execute("BEGIN")
+    try:
+        return _audit_hashes_snapshot(con, repo_ids, archive_resolver=archive_resolver)
+    finally:
+        if owned_snapshot:
+            con.execute("ROLLBACK")
+
+
+def _audit_hashes_snapshot(con, repo_ids, *, archive_resolver) -> dict:
+    # This read establishes the snapshot before any rows or resolver observations.
     _require_supported_repair_catalog(con)
     scope = list(dict.fromkeys(repo_ids or ()))
     resolver = archive_resolver or register.archive_path
