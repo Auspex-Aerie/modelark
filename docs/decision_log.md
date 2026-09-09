@@ -2817,3 +2817,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Small Slice path helper and existing consumers, with unplug/recovery, CLI encoding and operator roundtrip regressions. No protocol/schema change, weaker descriptor confinement, new global authority, automatic ACL changes, live deployment or physical trial. The three-round review loop remains stopped; this approved correction is not a fourth review round.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md
 - `related`: DEC-125, DEC-126, DEC-127
+
+### DEC-129: Classify adapter IO from preserved evidence and resolve host roles physically
+- `id`: DEC-129
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator approved the bounded Linux/filesystem adapter refactor after PR #70 findings 3963808512, 3963808518 and 3963808522 exposed repeated evidence/representation disagreement.
+- `decision`: Preserve original probe IO failures and their fallback meaning until a shared attachment-aware classifier can apply proven loss/replacement evidence. Keep semantic policy failures distinct. Share filesystem-safe procfs decoding/parsing across observation, confinement presence and capacity consumers. Resolve protected system directories and swap files to actual descriptor-backed filesystem identities, retaining no-symlink confinement for destination/archive attachments and refreshing changed protected-role observations.
+- `rationale`: A failed metadata/ACL/marker probe is not proof of a permanently invalid destination; a lexical path is not proof of the backing filesystem's role. Independent helper interpretations and tests mocking whole helpers allowed the same contract gaps to recur. Fault injection below helpers tests the resulting durable transaction states rather than isolated exception strings.
+- `impact`: Slice hardware/Linux/capacity/destination/operator/source adapter boundaries and regression tests only. No transaction authority, Fill, launch guard, schema/seal, codec or supported-filesystem redesign; no weaker admission, permission changes, deployment or physical trial. The prior bounded review loop stays stopped; merge remains a separate operator gate.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md
+- `related`: DEC-123, DEC-125, DEC-126, DEC-127, DEC-128

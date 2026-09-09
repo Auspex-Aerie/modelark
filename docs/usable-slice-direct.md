@@ -69,6 +69,34 @@ mount and backing-device checks, effective destination permissions, and exact al
 Changed mount/swap topology or archive-role inputs trigger a fresh full observation immediately.
 No complete `lsblk` scan or archive-config parsing occurs for each megabyte of ordinary streaming.
 
+### Shared adapter evidence boundary (DEC-129)
+
+Filesystem probes preserve their original `OSError` and operation-specific fallback meaning until
+an attachment-aware boundary classifies the failure. Only a proven lost attachment or changed
+identity overrides that fallback. `EIO`, `ENODEV` and `ENXIO` alone are not disappearance proof;
+an inaccessible re-probe cannot turn an unknown failure into a resumable wait. Known policy failures
+(present default ACL, mismatched ownership marker, unsupported features) remain policy refusals.
+Private-state/database failures are not reclassified as USB failures.
+
+| Consumer | Shared contract |
+| --- | --- |
+| Root metadata, superblock, ACL, ownership marker and creation-capability probes | Preserve errno/cause and the specific fallback; classify before a port returns a transaction outcome |
+| Preview capture/verification | Classify while its retained descriptor is alive; failed preview creates no transaction |
+| Source setup and stream reads | Re-probe only the source attachment, then translate into source-side outcomes; never catch consumer work across a yielded stream |
+| Observer, mount-presence checks and capacity mount checks | Read procfs with filesystem byte semantics and a common parser, not default UTF-8 or Unicode whitespace splitting |
+| Protected system directories and swap files | Follow their host-role symlinks to descriptor-backed device/mount identity; attachment roots still reject symlinks |
+
+Protected-role observations must agree with the mount inventory and remain stable across admission.
+Resolved nested system mounts are excluded too. Changes to protected-role targets trigger fresh
+admission during retained checks even if mountinfo itself is unchanged. Genuinely absent optional
+system directories are distinct from dangling or unresolvable symlinks, which refuse. Namespace
+filesystem mount roots may be opaque kernel identities; parsing those unrelated records does not
+make them eligible delivery devices.
+
+Regression coverage injects failures below the probe helpers and checks wait/invalidated outcomes,
+source attribution, no-write preview refusal, and fresh-Start recovery of certified partial work.
+Synthetic device topology plus real disposable IO is still not a physical USB qualification.
+
 Host certificates bind transaction, seal, filesystem, path, token and inode birth identity. Files
 are certified while unnamed, then linked without replacement using the retained inode. Directories
 cannot be created and certified atomically: DEC-123 requires operator intervention for uncertified

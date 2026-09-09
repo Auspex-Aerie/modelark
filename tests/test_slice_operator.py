@@ -12,6 +12,7 @@ from modelark.slice import domain as d
 from modelark.slice import state as s
 from modelark.slice import transaction as t
 from modelark.slice.linux import BoundTree
+from modelark.slice.capacity import _root_metadata as PRODUCTION_ROOT_METADATA
 from test_slice_transaction import Destination, Sources, proposal
 
 
@@ -276,20 +277,35 @@ def test_ready_preview_persists_admission_without_output_writes(store, operator,
     assert not list(path.iterdir())
 
 
-def test_capacity_refusal_does_not_create_transaction(store, operator, monkeypatch, tmp_path):
+@pytest.mark.parametrize('failure', ['policy', 'io', 'absent', 'replaced', 'unknown'])
+def test_capacity_refusal_does_not_create_transaction(store, operator, monkeypatch, tmp_path, failure):
     _, _, snapshot = proposal()
     path = tmp_path / "destination"
     path.mkdir()
     monkeypatch.setattr(operator, "read_catalog", lambda *a: snapshot)
     monkeypatch.setattr(operator, "_archives", lambda path: ())
     evidence = SimpleNamespace(device_id="test-device", fs_uuid="test-filesystem", available_bytes=1_000_000)
-    monkeypatch.setattr(operator, "LinuxObserver", lambda: SimpleNamespace(observe=lambda *a, **k: evidence))
+    def recheck(tree, observed):
+        tree.check()
+        if failure in {'absent', 'replaced'}:
+            raise t.TransferRefusal('WAITING_DESTINATION' if failure == 'absent' else 'DESTINATION_CHANGED')
+        if failure == 'unknown':
+            raise OSError('reprobe unavailable')
+    monkeypatch.setattr(operator, "LinuxObserver", lambda: SimpleNamespace(
+        observe=lambda *a, **k: evidence, recheck_attachment=recheck))
 
     def refuse(*args):
+        if failure != 'policy':
+            import errno
+            from modelark.slice.io_errors import ProbeFailure
+            raise ProbeFailure(OSError(errno.EIO, 'capture ioctl failed'),
+                               'DESTINATION_CAPACITY_UNPROVEN', 'capacity capture')
         raise t.TransferRefusal("DESTINATION_CAPACITY_UNPROVEN")
 
     monkeypatch.setattr(operator, "_capacity", lambda: SimpleNamespace(capture=refuse))
-    with pytest.raises(t.TransferRefusal, match="DESTINATION_CAPACITY_UNPROVEN"):
+    expected = {'absent': 'WAITING_DESTINATION', 'replaced': 'DESTINATION_CHANGED'}.get(
+        failure, 'DESTINATION_CAPACITY_UNPROVEN')
+    with pytest.raises(t.TransferRefusal, match=expected):
         operator.preview(tmp_path / "explicit-catalog", path, ["org/model"], "delivery")
     with store._connection(write=False) as con:
         assert con.execute("SELECT COUNT(*) FROM transactions").fetchone()[0] == 0
@@ -373,7 +389,7 @@ def test_already_typed_bootstrap_refusal_is_preserved(operator, monkeypatch):
     assert caught.value.code == "STATE_BUSY"
 
 
-@pytest.mark.parametrize('mode', ['small', 'parent', 'large', 'unplug', 'acl-unplug'])
+@pytest.mark.parametrize('mode', ['small', 'parent', 'large', 'unplug', 'acl-unplug', 'metadata-unplug'])
 def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, monkeypatch, tmp_path, mode):
     """Only hardware/free-space observations are fake; all assembly and IO are real."""
     import os
@@ -410,6 +426,7 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
     device = "operator-integration-" + uuid.uuid4().hex
     observations = []
     connected = [True]
+    payload_written = [False]
 
     def availability(tree):
         identities = set()
@@ -422,6 +439,9 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
                 initial_inodes - len(identities))
 
     class Observer:
+        def recheck_attachment(self, tree, evidence):
+            self.check_attachment(tree, evidence)
+
         def check_attachment(self, tree, evidence, **kwargs):
             if tree.path == destination and not connected[0]:
                 # Model physical backing disappearance while the mount ID remains present.
@@ -461,6 +481,13 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
         return result
     if mode == 'unplug':
         monkeypatch.setattr(operator.UsbDestination, 'append', unplug_after_payload)
+    if mode == 'metadata-unplug':
+        def arm_metadata_fault(self, path, token, data):
+            result = original_write(self, path, token, data)
+            if data == DATA[:len(data)]:
+                payload_written[0] = True
+            return result
+        monkeypatch.setattr(operator.UsbDestination, 'append', arm_metadata_fault)
     original_getxattr = os.getxattr
     def unplug_during_owned_directory_acl(fd, name, *args, **kwargs):
         import errno
@@ -477,12 +504,24 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
     tx = reviewed["transaction_id"]
     assert reviewed["state"] == "ready" and not list(destination.iterdir())
     assert operator.approve(tx, reviewed["seal"])["state"] == "approved"
+    if mode == 'metadata-unplug':
+        # Retain the production metadata helper; inject below it at the actual
+        # ioctl boundary after payload has already been written/certified.
+        def ioctl(fd, command, flags, mutate=True):
+            import errno
+            if payload_written[0]:
+                connected[0] = False
+                raise OSError(errno.EIO, 'unplug during root metadata ioctl')
+            flags[0] = 0
+        monkeypatch.setattr(capacity.fcntl, 'ioctl', ioctl)
+        monkeypatch.setattr(capacity, '_root_metadata', PRODUCTION_ROOT_METADATA)
     result = operator.start(tx, supplied_destination, {"drive-a": archive})
-    if mode in {'unplug', 'acl-unplug'}:
+    if mode in {'unplug', 'acl-unplug', 'metadata-unplug'}:
         assert result['state'] == 'waiting_destination'
         assert store.status(tx).state == 'waiting_destination'
         assert not (destination / 'delivery/.modelark-slice-receipt.json').exists()
         connected[0] = True
+        payload_written[0] = False
         monkeypatch.setattr(operator.UsbDestination, 'append', original_write)
         monkeypatch.setattr(os, 'getxattr', original_getxattr)
         result = operator.start(tx, destination, {'drive-a': archive})
@@ -492,7 +531,7 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
     assert receipt["status"] == "complete" and receipt["transaction"] == tx
     assert receipt["seal"] == reviewed["seal"]
     assert all(set(uuids) == {"fs-a", "other-fs"} for uuids in observations)
-    assert len(observations) <= (30 if mode in {'unplug', 'acl-unplug'} else 16)
+    assert len(observations) <= (30 if mode in {'unplug', 'acl-unplug', 'metadata-unplug'} else 16)
     assert not tuple(destination.rglob(".slice-*"))
     import sqlite3
     with sqlite3.connect(catalog.as_uri() + "?mode=ro", uri=True) as con:

@@ -21,6 +21,7 @@ from .hardware import LinuxObserver
 from .linux import BoundTree
 from .local_source import LocalArchiveReader
 from .paths import canonical_attachment
+from .io_errors import classify_io, io_boundary
 from .sources import FencedSources
 from .state import Store
 
@@ -80,7 +81,10 @@ def preview(catalog_path, destination_path, repo_ids, root):
     evidence = observer.observe(path, writable=True, archives=archives)
     proposal = d.preview(replace(spec, destination_id=evidence.device_id), snapshot)
     capacity = _capacity()
-    with BoundTree(path, writable=True) as tree:
+    with io_boundary(None, 'DESTINATION_UNPROVEN', 'destination preview setup/teardown failed'), \
+            BoundTree(path, writable=True) as tree, io_boundary(
+            lambda: observer.recheck_attachment(tree, evidence),
+            'DESTINATION_UNPROVEN', 'destination preview failed'):
         caps = capacity.capture(tree, evidence, proposal, private_state.HOST_STATE_DIR.absolute())
         admission = {"version": "modelark.slice.direct.v1", "catalog": catalog_path, "capacity": caps}
         binding = t.DestinationBinding(evidence.device_id, evidence.fs_uuid,
@@ -156,12 +160,8 @@ class _CheckedDestination(UsbDestination):
         self._validate(refresh=True, reconcile=False)
         return super().list_paths(root)
 
-    def _io_refusal(self, exc):
-        try:
-            self._observer.check_attachment(self.tree, self._evidence)
-        except t.TransferRefusal as refusal:
-            return refusal
-        return super()._io_refusal(exc)
+    def _recheck_attachment(self):
+        self._observer.recheck_attachment(self.tree, self._evidence)
 
 
 def _acknowledge_interrupt(store, tx, destination, sources, session=None):
@@ -200,8 +200,10 @@ def start(tx, destination_path, attachments):
     archives = _archives(admission["catalog"])
     observer = LinuxObserver()
     path = canonical_attachment(destination_path)
+    bound = False
     try:
         with BoundTree(path, writable=True) as tree:
+            bound = True
             evidence = observer.observe(path, writable=True, archives=archives)
             if (evidence.device_id, evidence.fs_uuid) != (plan.destination.device_id, plan.destination.filesystem_id):
                 raise t.TransferRefusal("DESTINATION_CHANGED", "destination differs from reviewed device")
@@ -223,7 +225,15 @@ def start(tx, destination_path, attachments):
                     return _result(_acknowledge_interrupt(store, tx, destination, sources, session),
                                    stop_requested=True)
     except FileNotFoundError as exc:
+        if bound:
+            raise t.TransferRefusal('DESTINATION_IO_FAILED',
+                                    'destination setup/teardown failed: ' + str(exc)) from exc
         raise t.TransferRefusal("WAITING_DESTINATION", "destination attachment is absent; no new attempt retained") from exc
+    except OSError as exc:
+        # Port operations classify while their descriptors are alive. This is only
+        # bootstrap/teardown IO, without trustworthy retained evidence for a wait.
+        raise classify_io(exc, None, t.TransferRefusal(
+            'DESTINATION_IO_FAILED', 'destination setup/teardown failed: ' + str(exc))) from exc
 
 
 def status(tx):

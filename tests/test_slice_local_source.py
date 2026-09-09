@@ -4,6 +4,26 @@ from types import SimpleNamespace
 
 import pytest
 
+
+@pytest.mark.parametrize('consumer_error', [False, True])
+def test_source_cleanup_failure_never_masks_or_blames_consumer(consumer_error):
+    import errno
+    from modelark.slice.local_source import _SourceStack
+    from modelark.slice.transaction import TransferRefusal
+    original = OSError(errno.ENOSPC, 'destination consumer failure')
+    def close_source():
+        raise OSError(errno.EIO, 'source close failed')
+    expected = OSError if consumer_error else TransferRefusal
+    with pytest.raises(expected) as caught:
+        with _SourceStack('archive') as stack:
+            stack.callback(close_source)
+            if consumer_error:
+                raise original
+    if consumer_error:
+        assert caught.value is original
+    else:
+        assert caught.value.code == 'SOURCE_READ_FAILED'
+
 from modelark.slice import domain as d
 from modelark.slice.transaction import TransferRefusal
 from test_slice_domain import facts
@@ -39,6 +59,9 @@ def attachment(tmp_path):
             tree.check()
             if _identity(evidence) != self.identity:
                 raise TransferRefusal("SOURCE_CHANGED", "synthetic attachment proof changed")
+
+        def recheck_attachment(self, tree, observed):
+            tree.check()
 
     return root, candidate, Observer(), evidence
 

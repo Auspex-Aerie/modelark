@@ -7,11 +7,12 @@ from contextlib import contextmanager
 import ctypes
 import errno
 import os
-from pathlib import Path
 import platform
 
 from .transaction import TransferRefusal
 from .paths import canonical_attachment
+from .io_errors import attachment_refusal, probe_io
+from .host_observation import parse_mounts, read_fs_text
 
 
 class _Timestamp(ctypes.Structure):
@@ -96,6 +97,7 @@ def require_create_access(fd):
                                    ctypes.c_int(os.W_OK | os.X_OK), ctypes.c_int(0x1200)), 'faccessat2')
 
 
+@probe_io('DESTINATION_CAPACITY_UNPROVEN', 'cannot prove absence of default ACL')
 def require_no_default_acl(fd):
     """Keep inherited xattrs outside the bounded ownership-marker allocation profile."""
     try:
@@ -103,12 +105,7 @@ def require_no_default_acl(fd):
     except OSError as exc:
         if exc.errno == errno.ENODATA:
             return
-        if exc.errno in {errno.EIO, errno.ENODEV, errno.ENXIO}:
-            # Retain media errors for the observer/adapter's backing-loss re-probe.
-            # A typed capacity refusal here would bypass its attended-unplug path.
-            raise
-        raise TransferRefusal('DESTINATION_CAPACITY_UNPROVEN',
-                              'cannot prove absence of default ACL: ' + str(exc)) from exc
+        raise
     raise TransferRefusal('DESTINATION_CAPACITY_UNPROVEN',
                           'default ACL inheritance is unsupported by the ownership-marker profile')
 
@@ -141,24 +138,10 @@ def rename_noreplace(src_dirfd, src, dst_dirfd, dst):
                           ctypes.c_uint(1)))
 
 
+@probe_io('DESTINATION_UNPROVEN', 'attachment inventory unavailable')
 def _mount_ids():
     """Read attachment presence only; no device discovery or mount actions."""
-    try:
-        rows = Path("/proc/self/mountinfo").read_text().splitlines()
-        ids = []
-        for row in rows:
-            fields = row.split()
-            if len(fields) < 10 or " - " not in row:
-                raise ValueError("invalid mountinfo row")
-            value = int(fields[0])
-            if value <= 0:
-                raise ValueError("invalid mount ID")
-            ids.append(value)
-        if not ids or len(set(ids)) != len(ids):
-            raise ValueError("missing or ambiguous mountinfo")
-        return frozenset(ids)
-    except (OSError, ValueError) as exc:
-        raise TransferRefusal("DESTINATION_UNPROVEN", "attachment inventory unavailable") from exc
+    return frozenset(mount.mount_id for mount in parse_mounts(read_fs_text('/proc/self/mountinfo')))
 
 
 class BoundTree:
@@ -212,7 +195,9 @@ class BoundTree:
         except (OSError, TransferRefusal) as exc:
             # Re-probe after errors: disappearing media can race the initial presence
             # check or the higher-level identity observer. Only absence proof is a wait.
-            self._check_attachment()
+            refusal = attachment_refusal(self._check_attachment)
+            if refusal is not None:
+                raise refusal from exc
             if isinstance(exc, FileNotFoundError):
                 raise TransferRefusal("DESTINATION_CHANGED", "bound root disappeared on attached filesystem") from exc
             raise

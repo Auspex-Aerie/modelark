@@ -23,6 +23,7 @@ import sqlite3
 import stat
 
 from . import linux
+from .io_errors import ProbeFailure, classify_io
 from .transaction import ObjectInfo, TransferRefusal
 
 
@@ -168,18 +169,13 @@ class UsbDestination:
                     raise TransferRefusal("DESTINATION_CHANGED", "certificate root differs")
                 self._root_blocks = row[5]
 
+    def _recheck_attachment(self):
+        self.tree.check()
+
     def _io_refusal(self, exc):
-        # Re-observe the pinned attachment before classifying an IO failure. A proven
-        # unplug is an attended wait; an attached-but-replaced root remains changed.
-        try:
-            self.tree.check()
-        except TransferRefusal as refusal:
-            return refusal
-        except OSError:
-            pass  # Without absence proof, preserve the original failure as terminal IO.
         code = "OUTPUT_COLLISION" if isinstance(exc, FileExistsError) or exc.errno in {
             errno.ELOOP, errno.EXDEV, errno.ENOTDIR} else "DESTINATION_IO_FAILED"
-        return TransferRefusal(code, str(exc))
+        return classify_io(exc, self._recheck_attachment, TransferRefusal(code, str(exc)))
 
     @contextmanager
     def _connection(self, *, write=False):
@@ -223,7 +219,7 @@ class UsbDestination:
         try:
             token = decode_owner_marker(os.getxattr(fd, OWNER_XATTR))
         except OSError as exc:
-            if exc.errno in {errno.ENODATA, errno.EOPNOTSUPP}:
+            if exc.errno == errno.ENODATA:
                 return None
             raise
         if token is None:
@@ -377,7 +373,7 @@ class UsbDestination:
                 fd = os.open(".", os.O_TMPFILE | os.O_RDWR | os.O_CLOEXEC, 0o600, dir_fd=parent)
             except OSError as exc:
                 if exc.errno in {errno.EOPNOTSUPP, errno.EINVAL, errno.EISDIR, errno.ENOSYS}:
-                    raise TransferRefusal("DESTINATION_UNPROVEN", "O_TMPFILE is required") from exc
+                    raise ProbeFailure(exc, "DESTINATION_UNPROVEN", "O_TMPFILE is required") from exc
                 raise
             try:
                 os.setxattr(fd, OWNER_XATTR, owner_marker(token), os.XATTR_CREATE)

@@ -20,6 +20,7 @@ from modelark.capacity_evidence import identity_fingerprint_v1
 from . import domain as d
 from .decoding import original_stream
 from .paths import canonical_attachment
+from .io_errors import classify_io
 from .transaction import TransferRefusal
 
 
@@ -51,19 +52,37 @@ def _translate_confinement(exc):
 
 
 class _SourceErrors:
-    def __init__(self, stream, label):
-        self.stream, self.label = stream, label
+    def __init__(self, stream, label, check=None):
+        self.stream, self.label, self.check = stream, label, check
 
     def read(self, size=-1):
         try:
             return self.stream.read(size)
         except OSError as exc:
-            raise _translate_io(exc, self.label) from exc
+            raise _translate_confinement(classify_io(
+                exc, self.check, _translate_io(exc, self.label))) from exc
         except TransferRefusal as exc:
             translated = _translate_confinement(exc)
             if translated is exc:
                 raise
             raise translated from exc
+
+
+class _SourceStack(ExitStack):
+    """Translate only source-owned cleanup, without masking a consumer exception."""
+    def __init__(self, label):
+        super().__init__()
+        self.label = label
+
+    def __exit__(self, exc_type, exc, traceback):
+        try:
+            return super().__exit__(exc_type, exc, traceback)
+        except OSError as cleanup:
+            if exc_type is not None:
+                return False  # Preserve the original failure already being unwound.
+            # The retained tree may already be closed: no fresh absence inference.
+            raise _translate_confinement(classify_io(
+                cleanup, None, _translate_io(cleanup, self.label))) from cleanup
 
 
 def _annex_uuid(tree):
@@ -139,7 +158,13 @@ class LocalArchiveReader:
         if label not in self.attachments:
             raise TransferRefusal("WAITING_SOURCE", f"attach archive {label}")
         path = self.attachments[label]
-        with ExitStack() as stack:
+        with _SourceStack(label) as stack:
+            tree = observed = None
+
+            def recheck():
+                if tree is not None and observed is not None:
+                    self.observer.recheck_attachment(tree, observed)
+
             try:
                 observed = self.observer.observe(path)
                 expected = _identity(observed)
@@ -174,7 +199,7 @@ class LocalArchiveReader:
                                           expected_bytes=candidate.copy.orig_bytes,
                                           max_decode_bytes=self.max_decode_bytes, check=check)
             except OSError as exc:
-                raise _translate_io(exc, label) from exc
+                raise _translate_confinement(classify_io(exc, recheck, _translate_io(exc, label))) from exc
             except TransferRefusal as exc:
                 translated = _translate_confinement(exc)
                 if translated is exc:
@@ -182,4 +207,4 @@ class LocalArchiveReader:
                 raise translated from exc
             # Consumer exceptions (particularly destination ENOSPC/EIO) must
             # never be attributed to the source by this context manager.
-            yield _SourceErrors(decoded, label)
+            yield _SourceErrors(decoded, label, recheck)

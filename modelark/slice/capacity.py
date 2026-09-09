@@ -5,14 +5,17 @@ Only read-only probes are used; there is no sudo, formatting, or probing by writ
 """
 from dataclasses import asdict
 import array
+import errno
 import fcntl
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 import stat
 import struct
 import uuid
 
 from . import domain as d
+from .io_errors import probe_io
+from .host_observation import parse_mounts, read_fs_text
 from .linux import require_no_default_acl
 from .paths import utf8_size
 from .transaction import DestinationBinding, TransferPlan, TransferRefusal
@@ -46,6 +49,7 @@ def parse_superblock(data, expected_uuid):
             'journal_inode': u32(0xe0)}
 
 
+@probe_io('DESTINATION_CAPACITY_UNPROVEN', 'read-only volume feature proof unavailable')
 def _volume(tree, evidence):
     device = os.fstat(tree.fd).st_dev
     path = f'/dev/block/{os.major(device)}:{os.minor(device)}'
@@ -60,27 +64,26 @@ def _volume(tree, evidence):
             result = parse_superblock(os.pread(fd, 1024, 1024), evidence.fs_uuid)
         finally:
             os.close(fd)
-        matching = [line for line in Path('/proc/self/mountinfo').read_text().splitlines()
-                    if line.split()[0] == str(tree.mount_id)]
+        matching = [mount for mount in parse_mounts(read_fs_text('/proc/self/mountinfo'))
+                    if mount.mount_id == tree.mount_id]
         if len(matching) != 1:
             _refuse('mounted feature evidence unavailable')
-        left, right = matching[0].split(' - ', 1)
-        options = left.split()[5].split(',') + right.split()[2].split(',')
+        options = matching[0].options
         if any('quota' in option or option.startswith('jqfmt=') for option in options):
             _refuse('quota-enabled mounts are outside the supported profile')
         if 'ro' in options:
             _refuse('read-only destination')
         return result
-    except (OSError, ValueError, IndexError) as exc:
+    except TransferRefusal:
+        raise
+    except (ValueError, IndexError) as exc:
         _refuse('read-only volume feature proof unavailable (no privilege escalation): ' + str(exc))
 
 
+@probe_io('DESTINATION_CAPACITY_UNPROVEN', 'root inode feature proof unavailable')
 def _root_metadata(tree):
     flags = array.array('l', [0])
-    try:
-        fcntl.ioctl(tree.fd, 0x80086601, flags, True)  # FS_IOC_GETFLAGS on supported 64-bit ABIs
-    except OSError as exc:
-        _refuse('root inode feature proof unavailable: ' + str(exc))
+    fcntl.ioctl(tree.fd, 0x80086601, flags, True)  # FS_IOC_GETFLAGS on supported 64-bit ABIs
     return os.fstat(tree.fd).st_size, flags[0]
 
 
@@ -209,11 +212,14 @@ def metadata_reserve_bytes(proposal, binding, caps, store_root):
     return caps['reserve_bytes']
 
 
+@probe_io('DESTINATION_ALLOCATION_UNPROVEN', 'ownership marker proof unavailable')
 def _require_unique_marker(fd, token):
     from .destination import OWNER_XATTR, owner_marker
     try:
         valid = os.getxattr(fd, OWNER_XATTR) == owner_marker(token)
-    except OSError:
+    except OSError as exc:
+        if exc.errno != errno.ENODATA:
+            raise
         valid = False
     if not valid:
         _refuse('external unique ownership marker required', 'DESTINATION_ALLOCATION_UNPROVEN')

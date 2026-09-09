@@ -14,6 +14,27 @@ def test_statx_buffer_matches_kernel_abi():
     assert _Statx.mount_id.offset == 144
 
 
+@pytest.mark.parametrize('original_kind', ['io', 'policy'])
+def test_failed_followup_mount_probe_preserves_original_error(tmp_path, monkeypatch, original_kind):
+    from modelark.slice import linux
+    original = (OSError(errno.EIO, 'original root IO') if original_kind == 'io'
+                else TransferRefusal('DESTINATION_CHANGED', 'root was replaced'))
+    with BoundTree(tmp_path) as tree:
+        checks = []
+        def mounts():
+            checks.append(True)
+            if len(checks) > 1:
+                raise OSError(errno.EACCES, 'follow-up inventory denied')
+            return {tree.mount_id}
+        tree._mount_ids = mounts
+        def open_root(*args, **kwargs):
+            raise original
+        monkeypatch.setattr(linux, '_openat2', open_root)
+        with pytest.raises(type(original)) as caught:
+            tree.check()
+        assert caught.value is original
+
+
 def test_confined_read_and_stable_birth_identity(tmp_path):
     (tmp_path / "file").write_bytes(b"original")
     with BoundTree(tmp_path) as tree:

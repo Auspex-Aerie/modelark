@@ -16,6 +16,9 @@ import subprocess
 
 from .linux import BoundTree, require_create_access, require_no_default_acl
 from .paths import canonical_attachment
+from .io_errors import attachment_refusal, classify_io, probe_io
+from .host_observation import (ProtectedTarget, decode_proc_path, parse_mounts, proc_fields,
+                               proc_lines, read_fs_text, resolve_protected)
 from .transaction import DestinationBinding, TransferRefusal
 
 
@@ -44,48 +47,34 @@ class DeviceEvidence:
         return DestinationBinding(self.device_id, self.fs_uuid, self.profile, self.available_bytes)
 
 
-@dataclass(frozen=True)
-class Mount:
-    mount_id: int
-    major_minor: str
-    root: str
-    path: str
-    options: frozenset[str]
-    fs_type: str
-    source: str
-
-
 def _refuse(detail, code="DESTINATION_UNPROVEN"):
     raise TransferRefusal(code, detail)
 
 
 def _decode(value):
-    # proc mountinfo and swaps encode whitespace/backslash using octal escapes.
-    if re.search(r"\\(?![0-7]{3})", value):
-        _refuse("invalid procfs path encoding")
-    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), value)
+    return decode_proc_path(value)
 
 
 def _mounts(text):
+    return parse_mounts(text)
+
+
+_SYSTEM_PATHS = ('/', '/boot', '/home', '/var', '/usr', '/etc', '/bin', '/sbin', '/lib', '/lib64')
+
+
+def _swap_records(swaps):
+    rows = proc_lines(swaps)
+    if not rows or not proc_fields(rows[0]) or proc_fields(rows[0])[0] != 'Filename':
+        _refuse('active swap inventory unavailable')
     result = []
-    try:
-        for line in text.splitlines():
-            if not line:
-                continue
-            left, right = line.split(" - ", 1)
-            fields, filesystem = left.split(), right.split()
-            if len(fields) < 6 or len(filesystem) < 3:
-                raise ValueError("short mountinfo row")
-            path, root = _decode(fields[4]), _decode(fields[3])
-            if not path.startswith("/") or not root.startswith("/"):
-                raise ValueError("nonabsolute mountinfo path")
-            result.append(Mount(int(fields[0]), fields[2], root, path,
-                                frozenset(fields[5].split(",") + filesystem[2].split(",")),
-                                filesystem[0], _decode(filesystem[1])))
-    except (ValueError, TypeError) as exc:
-        _refuse("invalid mount inventory: " + str(exc))
-    if not result or len({m.mount_id for m in result}) != len(result):
-        _refuse("missing or ambiguous mount inventory")
+    for row in rows[1:]:
+        fields = proc_fields(row)
+        if len(fields) != 5 or fields[1] not in {'file', 'partition'}:
+            _refuse('invalid active swap inventory')
+        name = _decode(fields[0])
+        if not name.startswith('/'):
+            _refuse('nonabsolute active swap path')
+        result.append((name, fields[1]))
     return tuple(result)
 
 
@@ -116,21 +105,18 @@ def _backing_identity(major_minor):
     return info.st_dev, info.st_ino
 
 
+@probe_io('DESTINATION_NOT_WRITABLE', 'effective creation permission/user xattrs unavailable')
 def _writable_root(tree, mount):
     if 'rw' not in mount.options or {'ro', 'nouser_xattr'} & mount.options:
         _refuse('writable mount and user xattrs required', 'DESTINATION_NOT_WRITABLE')
     if any('quota' in option or option.startswith('jqfmt=') for option in mount.options):
         _refuse('quota-enabled mounts are unsupported', 'FILESYSTEM_UNSUPPORTED')
+    require_create_access(tree.fd)
     try:
-        require_create_access(tree.fd)
-        try:
-            os.getxattr(tree.fd, 'user.modelark.slice-capability-probe')
-        except OSError as exc:
-            if exc.errno != errno.ENODATA:
-                raise
+        os.getxattr(tree.fd, 'user.modelark.slice-capability-probe')
     except OSError as exc:
-        _refuse('effective creation permission/user xattrs unavailable: ' + str(exc),
-                'DESTINATION_NOT_WRITABLE')
+        if exc.errno != errno.ENODATA:
+            raise
     require_no_default_acl(tree.fd)
 
 
@@ -208,13 +194,33 @@ class _Inventory:
 class LinuxObserver:
     """Read-only observer with injectable inventory providers; no implicit live discovery."""
 
-    def __init__(self, *, inventory=None, mounts=None, swaps=None, tree_factory=BoundTree, backing=None):
+    def __init__(self, *, inventory=None, mounts=None, swaps=None, tree_factory=BoundTree, backing=None, resolver=None):
         self._inventory = inventory or _inventory
-        self._mounts = mounts or (lambda: Path("/proc/self/mountinfo").read_text())
-        self._swaps = swaps or (lambda: Path("/proc/swaps").read_text())
+        self._mounts = mounts or (lambda: read_fs_text('/proc/self/mountinfo'))
+        self._swaps = swaps or (lambda: read_fs_text('/proc/swaps'))
         self._tree_factory = tree_factory
         self._backing = backing or _backing_identity
+        self._resolver = resolver or resolve_protected
         self._observed = {}
+
+    def _protected_snapshot(self, mounts, swaps):
+        requests = [(path, True, path != '/') for path in _SYSTEM_PATHS]
+        requests.extend((name, False, False) for name, kind in _swap_records(swaps) if kind == 'file')
+        snapshot = []
+        for requested, directory, optional in requests:
+            target = self._resolver(requested, directory=directory, optional=optional)
+            if target is None:
+                if not optional:
+                    _refuse('required protected role is unavailable')
+            else:
+                target = ProtectedTarget(str(requested), target.path, target.major_minor, target.mount_id, target.inode)
+                matching = [mount for mount in mounts if mount.mount_id == target.mount_id]
+                if (len(matching) != 1 or matching[0].major_minor != target.major_minor
+                        or not (target.path == matching[0].path
+                                or target.path.startswith(matching[0].path.rstrip('/') + '/'))):
+                    _refuse('protected descriptor differs from mount inventory')
+            snapshot.append((directory, requested, target))
+        return tuple(snapshot)
 
     def check_attachment(self, tree, evidence, *, archives=None):
         """No subprocess on unchanged topology; cached proof belongs to this attachment only."""
@@ -228,7 +234,10 @@ class LinuxObserver:
             self._check_backing(tree, proof)
             tree.check()
             roles = proof['archives'] if archives is None else tuple(archives)
-            if (_mounts(self._mounts()) != proof['mounts'] or self._swaps() != proof['swaps']
+            current_mounts, current_swaps = _mounts(self._mounts()), self._swaps()
+            current_protected = self._protected_snapshot(current_mounts, current_swaps)
+            if (current_mounts != proof['mounts'] or current_swaps != proof['swaps']
+                    or current_protected != proof['protected']
                     or _archive_roles(roles) != _archive_roles(proof['archives'])):
                 fresh = self.observe(tree.path, writable=proof['writable'], archives=roles)
                 if _stable_attachment(fresh) != _stable_attachment(evidence):
@@ -237,14 +246,24 @@ class LinuxObserver:
                 _writable_root(tree, proof['mount'])
             tree.check()
             self._check_backing(tree, proof)
+        except OSError as exc:
+            raise classify_io(exc, lambda: self.recheck_attachment(tree, evidence), TransferRefusal(
+                'DESTINATION_UNPROVEN', 'attachment check failed: ' + str(exc))) from exc
+
+    def recheck_attachment(self, tree, evidence):
+        """Raw failure-time proof; no discovery, policy admission or recursive classifier."""
+        proof = self._observed.get((str(tree.path), tree.mount_id))
+        if proof is None or _stable_attachment(proof['evidence']) != _stable_attachment(evidence):
+            _refuse('no matching retained attachment evidence')
+        self._check_backing(tree, proof)
+        try:
+            tree.check()
         except (OSError, TransferRefusal) as exc:
-            try:
-                self._check_backing(tree, proof)
-            except OSError:
-                pass  # Unknown probe failure is not disappearance evidence.
-            if isinstance(exc, TransferRefusal):
-                raise
-            raise TransferRefusal('DESTINATION_UNPROVEN', 'attachment check failed: ' + str(exc)) from exc
+            refusal = attachment_refusal(lambda: self._check_backing(tree, proof))
+            if refusal is not None:
+                raise refusal from exc
+            raise
+        self._check_backing(tree, proof)
 
     def _check_backing(self, tree, proof):
         if tree._attachment_lost:
@@ -261,19 +280,24 @@ class LinuxObserver:
         path = canonical_attachment(path)
         try:
             return self._observe(path, writable, tuple(archives))
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TransferRefusal) as exc:
-            target = str(path)
-            for (observed_path, _), proof in self._observed.items():
-                if observed_path == target:
-                    try:
-                        self._backing(proof['device'])
-                    except FileNotFoundError:
-                        _refuse('previously observed block backing disappeared', 'WAITING_DESTINATION')
-                    except OSError:
-                        pass
-            if isinstance(exc, TransferRefusal):
-                raise
-            raise TransferRefusal("DESTINATION_UNPROVEN", "device observation failed: " + str(exc)) from exc
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            fallback = TransferRefusal("DESTINATION_UNPROVEN", "device observation failed: " + str(exc))
+            if isinstance(exc, OSError):
+                raise classify_io(exc, lambda: self._recheck_observed(path), fallback) from exc
+            raise fallback from exc
+
+    def _recheck_observed(self, path):
+        # Only the latest full proof for this spelling is relevant. This callback
+        # is raw evidence, never policy evaluation or another IO classifier.
+        for (observed_path, _), proof in reversed(tuple(self._observed.items())):
+            if observed_path == str(path):
+                try:
+                    backing = self._backing(proof['device'])
+                except FileNotFoundError:
+                    _refuse('previously observed block backing disappeared', 'WAITING_DESTINATION')
+                if backing != proof['backing']:
+                    _refuse('previously observed block backing was replaced', 'DESTINATION_CHANGED')
+                return
 
     def _observe(self, path, writable, archives):
         inventory_snapshot = json.dumps(self._inventory(), sort_keys=True)
@@ -324,41 +348,26 @@ class LinuxObserver:
             if writable:
                 _writable_root(tree, mount)
 
-            def covering(value):
-                candidates = [m for m in mounts if value == m.path or value.startswith(m.path.rstrip("/") + "/")]
-                if not candidates:
-                    _refuse("cannot determine protected path backing device")
-                longest = max(len(m.path) for m in candidates)
-                result = [m for m in candidates if len(m.path) == longest]
-                if len(result) != 1:
-                    _refuse("ambiguous protected mount")
-                return result[0]
-
+            protected_snapshot = self._protected_snapshot(mounts, swaps)
             protected = set()
-            system_paths = ("/boot", "/home", "/var", "/usr", "/etc", "/bin", "/sbin", "/lib", "/lib64")
-            for value in ("/", *system_paths):
-                protected.add(inventory.disk(covering(value).major_minor))
-            for other in mounts:
-                if any(other.path.startswith(value + "/") for value in system_paths):
-                    # Pseudo mounts (e.g. /var/lib/docker/.../proc) cannot hide a block
-                    # device, but every listed block-backed nested system mount counts.
-                    if other.major_minor in inventory.nodes:
-                        protected.add(inventory.disk(other.major_minor))
-            swap_rows = swaps.splitlines()
-            if not swap_rows or not swap_rows[0].split() or swap_rows[0].split()[0] != "Filename":
-                _refuse("active swap inventory unavailable")
-            for row in swap_rows[1:]:
-                fields = row.split()
-                if len(fields) < 5:
-                    _refuse("invalid active swap inventory")
-                name = _decode(fields[0])
-                if name in inventory.paths:
-                    key = inventory.paths[name]
-                elif fields[1] == "file" and name.startswith("/"):
-                    key = covering(name).major_minor
-                else:
+            for directory, requested, protected_target in protected_snapshot:
+                if protected_target is None:
+                    continue
+                protected.add(inventory.disk(protected_target.major_minor))
+                if directory and requested != '/':
+                    for other in mounts:
+                        if (other.path.startswith(protected_target.path.rstrip('/') + '/')
+                                or other.path.startswith(requested.rstrip('/') + '/')):
+                            if other.major_minor in inventory.nodes:
+                                protected.add(inventory.disk(other.major_minor))
+                            elif other.source.startswith('/dev/'):
+                                _refuse('nested protected block mount has unknown ancestry')
+            for name, kind in _swap_records(swaps):
+                if kind == 'file':
+                    continue  # Descriptor-backed target was included in the snapshot.
+                if name not in inventory.paths:
                     _refuse("cannot resolve active swap parent disk")
-                protected.add(inventory.disk(key))
+                protected.add(inventory.disk(inventory.paths[name]))
             if disk_key in protected:
                 _refuse("system or swap disk and all siblings are excluded")
             if writable:
@@ -400,7 +409,8 @@ class LinuxObserver:
                 profile_fields, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             tree.check()
             if (json.dumps(self._inventory(), sort_keys=True) != inventory_snapshot
-                    or _mounts(self._mounts()) != mounts or self._swaps() != swaps):
+                    or _mounts(self._mounts()) != mounts or self._swaps() != swaps
+                    or self._protected_snapshot(mounts, swaps) != protected_snapshot):
                 _refuse("hardware inventory changed during descriptor observation")
             try:
                 final_backing = self._backing(major_minor)
@@ -412,5 +422,6 @@ class LinuxObserver:
                                       available, block_size, name_max, device_size, profile)
             self._observed[(target, tree.mount_id)] = {
                 'evidence': evidence, 'device': major_minor, 'backing': backing, 'mounts': mounts,
-                'mount': mount, 'swaps': swaps, 'writable': writable, 'archives': archives}
+                'mount': mount, 'swaps': swaps, 'writable': writable, 'archives': archives,
+                'protected': protected_snapshot}
             return evidence

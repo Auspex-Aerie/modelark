@@ -32,6 +32,19 @@ def hardware(tmp_path, monkeypatch):
     mounts = ["1 0 241:1 / / rw,relatime - ext4 /dev/testhost1 rw",
               f"{mount_id} 1 {major_minor} / {root} rw,relatime - ext4 /dev/testusb1 rw"]
     state = {"inventory": inventory, "mounts": mounts, "swaps": "Filename\tType\tSize\tUsed\tPriority\n"}
+    def protected(path, *, directory=True, optional=False):
+        requested = str(path)
+        target = state.get('protected_targets', {}).get(requested, requested)
+        if target is None:
+            return None
+        covering = [mount for mount in module._mounts('\n'.join(state['mounts']))
+                    if target == mount.path or target.startswith(mount.path.rstrip('/') + '/')]
+        longest = max(len(mount.path) for mount in covering)
+        matching = [mount for mount in covering if len(mount.path) == longest]
+        assert len(matching) == 1, 'ambiguous synthetic protected fixture'
+        mount = matching[0]
+        return module.ProtectedTarget(requested, target, mount.major_minor, mount.mount_id, 1)
+    monkeypatch.setattr(module, 'resolve_protected', protected)
     observer = module.LinuxObserver(inventory=lambda: state["inventory"], mounts=lambda: "\n".join(state["mounts"]),
                                     swaps=lambda: state["swaps"])
     return observer, root, state, usb, leaf, module
@@ -54,6 +67,115 @@ def test_direct_usb_evidence_binds_whole_disk_and_stable_capability_profile(hard
     assert value.binding().filesystem_id == "USB-FS"
     assert value.binding().mount_id != str(value.mount_id)
     assert value.device_id != value.fs_uuid
+
+
+def test_resolved_home_target_on_destination_disk_is_excluded(hardware):
+    from types import SimpleNamespace
+    observer, root, _, _, leaf, _ = hardware
+    with BoundTree(root) as tree:
+        mount_id = tree.mount_id
+    def resolve(path, **kwargs):
+        if str(path) == '/home':
+            return SimpleNamespace(requested='/home', path=str(root), major_minor=leaf['maj:min'],
+                                   mount_id=mount_id, inode=1)
+        return SimpleNamespace(requested=str(path), path=str(path), major_minor='241:1', mount_id=1, inode=1)
+    observer._resolver = resolve
+    with pytest.raises(TransferRefusal, match='system or swap'):
+        observer.observe(root, writable=True)
+
+
+def test_hardware_mount_parser_preserves_unicode_whitespace_filename():
+    from modelark.slice.hardware import _mounts
+    mount = _mounts('1 0 8:1 / /media/a\u00a0b\u2028c rw - ext4 /dev/test rw\n')[0]
+    assert mount.path == '/media/a\u00a0b\u2028c'
+
+
+def test_resolved_protected_directory_excludes_nested_mounted_disk(hardware):
+    observer, root, state, disk, _, _ = hardware
+    state['protected_targets'] = {'/home': '/data/users'}
+    disk['children'].append({'name': '/dev/testusb2', 'path': '/dev/testusb2', 'type': 'part',
+                            'pkname': '/dev/testusb', 'maj:min': '240:2', 'size': 10**14,
+                            'fstype': 'ext4', 'uuid': 'NESTED-HOME-FS', 'ro': False})
+    state['mounts'].append('912 1 240:2 / /data/users/nested rw - ext4 /dev/testusb2 rw')
+    # Read-only eligibility has no blanket writable sibling exclusion: this
+    # rejection must come from the resolved protected directory's nested mount.
+    with pytest.raises(TransferRefusal, match='system or swap'):
+        observer.observe(root)
+
+
+def test_swapfile_symlink_target_excludes_its_actual_disk(hardware):
+    observer, root, state, *_ = hardware
+    name = '/swap\u00a0alias\u2028file'
+    state['swaps'] += name + '\tfile\t4096\t0\t-2\n'
+    state['protected_targets'] = {name: str(root / 'actual-swap')}
+    with pytest.raises(TransferRefusal, match='system or swap'):
+        observer.observe(root, writable=True)
+
+
+def test_optional_missing_protected_directory_is_recorded_and_revalidated(hardware):
+    observer, root, state, *_ = hardware
+    state['protected_targets'] = {'/home': None}
+    evidence = observer.observe(root, writable=True)
+    state['protected_targets']['/home'] = str(root)
+    with BoundTree(root, writable=True) as tree:
+        with pytest.raises(TransferRefusal, match='system or swap'):
+            observer.check_attachment(tree, evidence)
+
+
+def test_hot_check_revalidates_symlink_target_without_mount_inventory_change(hardware):
+    observer, root, state, *_ = hardware
+    state['protected_targets'] = {'/home': '/data/users'}
+    evidence = observer.observe(root, writable=True)
+    before = tuple(state['mounts'])
+    state['protected_targets']['/home'] = str(root)
+    with BoundTree(root, writable=True) as tree:
+        with pytest.raises(TransferRefusal, match='system or swap'):
+            observer.check_attachment(tree, evidence)
+    assert tuple(state['mounts']) == before
+
+
+@pytest.mark.parametrize('change', ['mount_id', 'major_minor'])
+def test_protected_descriptor_must_match_mount_snapshot(hardware, change):
+    from dataclasses import replace
+    observer, root, _, _, _, _ = hardware
+    original = observer._resolver
+    def resolve(path, **kwargs):
+        target = original(path, **kwargs)
+        if str(path) == '/home':
+            return replace(target, **{change: 991 if change == 'mount_id' else '999:9'})
+        return target
+    observer._resolver = resolve
+    with pytest.raises(TransferRefusal, match='protected descriptor'):
+        observer.observe(root, writable=True)
+
+
+def test_observation_revalidates_protected_target_before_caching(hardware):
+    observer, root, state, *_ = hardware
+    original = observer._resolver
+    calls = 0
+    def resolve(path, **kwargs):
+        nonlocal calls
+        if str(path) == '/home':
+            calls += 1
+            if calls == 2:
+                state['protected_targets'] = {'/home': str(root)}
+        return original(path, **kwargs)
+    observer._resolver = resolve
+    with pytest.raises(TransferRefusal, match='inventory changed'):
+        observer.observe(root, writable=True)
+    assert not observer._observed
+
+
+def test_dangling_protected_role_does_not_become_optional_absence(hardware):
+    observer, root, *_ = hardware
+    original = observer._resolver
+    def resolve(path, **kwargs):
+        if str(path) == '/home':
+            raise FileNotFoundError('dangling protected home')
+        return original(path, **kwargs)
+    observer._resolver = resolve
+    with pytest.raises(TransferRefusal, match='DESTINATION_UNPROVEN.*dangling'):
+        observer.observe(root, writable=True)
 
 
 @pytest.mark.parametrize("field,value", [("tran", "sata"), ("serial", None), ("ro", True)])
@@ -499,7 +621,7 @@ def test_unknown_default_acl_probe_failure_is_not_absence(hardware, monkeypatch,
             raise OSError(number, 'default ACL cannot be inspected')
         return original(fd, name)
     monkeypatch.setattr(module.os, 'getxattr', uncertain)
-    code = 'DESTINATION_UNPROVEN' if number == 5 else 'DESTINATION_CAPACITY_UNPROVEN'
+    code = 'DESTINATION_CAPACITY_UNPROVEN'
     with pytest.raises(TransferRefusal, match=code + '.*default ACL'):
         observer.observe(root, writable=True)
     assert not list(root.iterdir())
