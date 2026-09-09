@@ -1,4 +1,4 @@
-"""Drive identity bootstrap + first clean anchor + sessionless dirty recovery (RFC-002 / DEC-049 #35-B,
+"""Drive identity bootstrap + first clean anchor + fenced dirty recovery (RFC-002 / DEC-049 #35-B,
 PR-03c1) — the smallest usable predecessor to the #35-C admission-authority cutover.
 
 A neutral module: it depends only on the low-level catalog-v3 primitives (``drive_fence``,
@@ -25,7 +25,9 @@ a resize changes the fingerprint):
 generation + clean anchor + authority in ONE short transaction (a crash before it leaves the drive
 unknown and anchorless). ``dedicated_local`` is an explicit operator assertion (``dedicated=True``),
 never a probe result; ``dedicated=False`` persists nothing and refuses to downgrade an authoritative
-drive. Session-attributed recovery and label reuse/retirement are out of scope (#39, DEF-029).
+drive. Ended-session recovery preserves its owner/history and republishes only the existing
+generation after fenced inventory and transactional owner validation. Label reuse/retirement
+remains out of scope (DEF-029).
 """
 from __future__ import annotations
 
@@ -38,6 +40,7 @@ from typing import Callable
 
 from modelark import capacity_evidence, drive_fence, register
 from modelark import drive_mutation as dm
+from modelark import execution_authority as authority
 from modelark.core import db
 
 # Re-export the typed refusal so operator entry points (the `drive reconcile` CLI) can translate it to a
@@ -278,6 +281,82 @@ def _stable_identity_matches(ev: _LiveEvidence, persisted_fs, persisted_annex) -
     return True
 
 
+_ENDED_STATES = frozenset({"paused", "blocked", "stopped", "failed", "done"})
+
+
+@dataclass(frozen=True)
+class _RecoveryOwner:
+    attempt: authority.Attempt
+    state: str
+
+
+def _dirty_owner(con, label, facts):
+    epoch, gen, fp, cap, auth, _, _ = facts
+    if dm._generation_is_clean(con, label, epoch, gen, fp, cap, auth):
+        return None
+    row = con.execute(
+        "SELECT owner_session_id,owner_fencing_token FROM drive_dirty_generations "
+        "WHERE drive_label=? AND identity_epoch=? AND generation=?", [label, epoch, gen]
+    ).fetchone()
+    return None if row is None or row == (None, None) else row
+
+
+def _capture_recovery_owner(con, label, facts, *, expected=None):
+    """Validate durable identity; callers separately retain the physical exclusion fences."""
+    code = "DRIVE_RECOVERY_OWNER_CHANGED" if expected is not None else "DRIVE_RECOVERY_OWNER_UNPROVEN"
+    row = _dirty_owner(con, label, facts)
+    if row is None and expected is None:
+        return None
+    try:
+        if (row is None or not isinstance(row[0], str) or not row[0].strip()
+                or type(row[1]) is not int or row[1] < 1):
+            raise authority.AuthorityLost("incomplete dirty owner")
+        attempt = authority.Attempt(row[0], int(row[1]))
+        session = con.execute(
+            "SELECT fencing_token,state FROM execution_sessions WHERE session_id=?", [attempt.owner]
+        ).fetchone()
+        if session is None or type(session[0]) is not int:
+            raise authority.AuthorityLost("missing owner session/token")
+        captured = _RecoveryOwner(attempt, session[1])
+        if expected is not None and captured != expected:
+            raise authority.AuthorityLost("dirty owner or state changed")
+        authority.require_current(
+            attempt, authority.Attempt(attempt.owner, int(session[0])), session[1],
+            {expected.state} if expected is not None else _ENDED_STATES,
+        )
+    except authority.AuthorityLost as exc:
+        raise dm.DriveMutationRefused(code, drive=label) from exc
+    from modelark.execution_recovery import child_fence_still_held
+    try:
+        held = child_fence_still_held(session_id=attempt.owner)
+    except OSError as exc:
+        raise dm.DriveMutationRefused("DRIVE_RECOVERY_CHILD_UNPROVEN", drive=label) from exc
+    if held:
+        raise dm.DriveMutationRefused("DRIVE_RECOVERY_CHILD_UNPROVEN", drive=label)
+    return captured
+
+
+def _recover_owned_generation(con, label, dest, facts, owner, ev, now, progress):
+    """Inventory outside SQLite's write transaction, then CAS + anchor in one short commit."""
+    from modelark.execution_session import require_no_live_session
+    from modelark.proposal import bump_revision
+
+    inventory = _require_complete_inventory(con, label, dest, progress=progress)
+    final = _final_observation(con, label, ev)
+    epoch, gen = facts[:2]
+
+    def publish():
+        require_no_live_session(con)
+        if _persisted(con, label) != facts:
+            raise dm.DriveMutationRefused("DRIVE_RECOVERY_OWNER_CHANGED", drive=label)
+        _capture_recovery_owner(con, label, facts, expected=owner)
+        dm._publish_anchor_locked(con, label, epoch, gen, final.observation(), now)
+        bump_revision(con)
+
+    dm._immediate(con, publish)
+    return Reconciliation("recovered", epoch, gen, final.free, inventory=inventory)
+
+
 def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_drift: bool = False,
                     blocking: bool = True,
                     progress: ProgressCallback | None = None) -> Reconciliation:
@@ -286,9 +365,14 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
     for the full contract; raises a typed ``dm.DriveMutationRefused`` for every fail-closed path."""
     from modelark.execution_session import require_no_live_session
     require_no_live_session(con)
+    # Early diagnostic only: capture again after both fences, before the inventory.
+    _capture_recovery_owner(con, label, _persisted(con, label))
     try:
         with drive_fence.hold_controller(db.DB_PATH, blocking=blocking):
-            p_epoch, p_gen, p_fp, p_cap, p_auth, p_fs, p_annex = _persisted(con, label)   # facts UNDER controller
+            require_no_live_session(con)
+            facts = _persisted(con, label)
+            p_epoch, p_gen, p_fp, p_cap, p_auth, p_fs, p_annex = facts
+            owner = _capture_recovery_owner(con, label, facts)
             ev = _live_evidence(con, label)
             if not ev.proven:
                 raise dm.DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
@@ -302,10 +386,22 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
             # A capacity change on the same stable identity transitions the epoch and changes the
             # fingerprint, so hold BOTH the old and the prospective new (fingerprint, epoch) drive fences.
             transition = p_fp is not None and ev.capacity != p_cap
+            if owner is not None and (p_gen <= 0 or p_fp != ev.fingerprint or p_cap != ev.capacity
+                                      or p_auth != "dedicated_local"):
+                raise dm.DriveMutationRefused("DRIVE_RECOVERY_IDENTITY_CHANGED", drive=label)
             keyed = ([(p_fp, p_epoch), (ev.fingerprint, p_epoch + 1)] if transition
                      else [(ev.fingerprint, p_epoch)])
             with drive_fence.hold_drives_sorted(keyed, blocking=blocking):
+                require_no_live_session(con)
+                if _persisted(con, label) != facts:
+                    raise dm.DriveMutationRefused("DRIVE_RECOVERY_OWNER_CHANGED", drive=label)
+                fenced_owner = _capture_recovery_owner(con, label, facts, expected=owner)
+                if fenced_owner != owner:
+                    raise dm.DriveMutationRefused("DRIVE_RECOVERY_OWNER_CHANGED", drive=label)
+                owner = fenced_owner
                 dest = register.archive_path(con, label)
+                if owner is not None:
+                    return _recover_owned_generation(con, label, dest, facts, owner, ev, now, progress)
                 return _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now,
                                           accept_drift, transition, progress)
     except drive_fence.FenceUnavailable as exc:
@@ -402,7 +498,7 @@ def _decide_and_commit(
         )
 
     if not dm._generation_is_clean(con, label, p_epoch, p_gen, p_fp, p_cap, "dedicated_local"):
-        # (B) sessionless dirty recovery — republish THIS generation's anchor (session-attributed = #39)
+        # (B) sessionless recovery; validated ended owners use the guarded path above.
         owner = con.execute("SELECT owner_session_id FROM drive_dirty_generations "
                             "WHERE drive_label=? AND identity_epoch=? AND generation=?",
                             [label, p_epoch, p_gen]).fetchone()

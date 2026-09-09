@@ -159,6 +159,24 @@ Its `present / missing / debris / extra` counts are evidence, not a cleanup requ
 remain on disk, are not adopted into catalogued residency, and are never deleted automatically. Do
 not use `--dedicated` to promote shared or otherwise unfenceable storage.
 
+A dirty generation may still name a Fill session that has paused, blocked, stopped, failed or
+finished. Reconciliation now supports that case without clearing its owner or changing the session:
+it inventories under controller/physical-drive locks, rechecks the exact owner/token/state in the
+publication transaction, and anchors the **existing** generation. A paused session needs no expired
+lease. This restores drive admission evidence; it does not resume the Fill or assert that it completed.
+
+Stop the portal/other ModelArk instance before launching the CLI against its catalog. Any live Fill
+session refuses with `FILL_SESSION_ACTIVE`. Missing/mismatched owner evidence refuses with
+`DRIVE_RECOVERY_OWNER_UNPROVEN`; a held or uninspectable owner child marker refuses with
+`DRIVE_RECOVERY_CHILD_UNPROVEN`. Missing markers are normal after pause, but physical-drive locks
+still exclude surviving transport children. The command may wait for those locks. Changes to the
+captured owner or drive facts during the scan refuse with `DRIVE_RECOVERY_OWNER_CHANGED`.
+An owned dirty generation with changed capacity/fingerprint/authority refuses with
+`DRIVE_RECOVERY_IDENTITY_CHANGED`; it cannot bypass recovery by opening a new epoch.
+
+No refusal publishes a clean anchor. Inventory establishes the existing catalog/location evidence,
+not a fresh full-byte hash verification; use physical verification for that separate evidence level.
+
 ## Verify archive copies
 
 Remote-header verification and physical archive verification are different operations. Tier A

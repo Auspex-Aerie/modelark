@@ -575,9 +575,8 @@ def test_reconcile_recovers_sessionless_dirty_generation(tmp_path):
         assert report.outcome == "recovered", report
 
 
-def test_reconcile_refuses_a_live_session_dirty_generation(tmp_path):
-    """A dirty generation attributed to a live session (owner fields set) is NOT recovered here —
-    sessionless recovery refuses and defers session-attributed recovery to #39."""
+def test_reconcile_refuses_a_missing_session_dirty_owner(tmp_path):
+    """An owner pair without the corresponding session is not recovery authority."""
     with _catalog(tmp_path) as con:
         _proven_drive(con, "drive-00", fp=_FP, epoch=1, generation=1, fscap=1000)
         _dirty_gen(con, "drive-00", epoch=1, gen=1, owner="sess-1", token=1)
@@ -587,9 +586,9 @@ def test_reconcile_refuses_a_live_session_dirty_generation(tmp_path):
              mock.patch.object(register, "archive_path", return_value=tmp_path / "mount"):
             try:
                 bs.reconcile_drive(con, "drive-00", now="2026-07-23 12:00:00", dedicated=True)
-                raise AssertionError("a session-attributed dirty generation must not be recovered here (#39)")
+                raise AssertionError("an unproven owner must not be recovered")
             except dm.DriveMutationRefused as exc:
-                assert exc.code == "DRIVE_RECOVERY_SESSION_ACTIVE", exc.code
+                assert exc.code == "DRIVE_RECOVERY_OWNER_UNPROVEN", exc.code
         assert con.execute("SELECT count(*) FROM drive_clean_anchors").fetchone()[0] == 0
 
 

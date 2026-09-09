@@ -559,6 +559,7 @@ def cmd_drive_reconcile(args):
     from datetime import datetime, timezone
 
     from modelark import drive_bootstrap
+    from modelark.proposal import Refusal
 
     def progress(event):
         if event.phase == "inventory_started":
@@ -599,7 +600,7 @@ def cmd_drive_reconcile(args):
         r = drive_bootstrap.reconcile_drive(
             con, args.label, now=datetime.now(timezone.utc).isoformat(sep=" "),
             dedicated=args.dedicated, accept_drift=args.accept_drift, progress=progress)
-    except drive_bootstrap.DriveMutationRefused as exc:
+    except (drive_bootstrap.DriveMutationRefused, Refusal) as exc:
         # an offline/failed/unproven drive is an EXPECTED reconciliation outcome, not a crash: surface the
         # typed refusal as a clean operator message (the restore/hash-repair convention), not a traceback.
         raise SystemExit(f"drive reconcile failed: {exc.code}") from exc
@@ -823,7 +824,10 @@ def _main(argv, permit):
     dl = drsub.add_parser("list", help="list registered drives")
     dl.set_defaults(func=cmd_drive_list)
     rec = drsub.add_parser("reconcile",
-                           help="bootstrap identity + first clean anchor, or recover a dirty generation")
+                           help="bootstrap identity + first clean anchor, or recover a dirty generation",
+                           description="Reconcile a drive, including dirty generations owned by ended "
+                                       "Fill sessions. Live sessions/children or unproven ownership refuse; "
+                                       "recovery does not resume or complete the prior Fill.")
     rec.add_argument("label", help="the registered drive label to reconcile")
     rec.add_argument("--dedicated", action="store_true",
                      help="assert dedicated local storage no unsupported writer may modify (grants "
