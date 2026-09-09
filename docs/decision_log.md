@@ -2850,3 +2850,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Native adapter, observer, plan/operator assembly, shared transaction/private-store dispatch and narrow Linux inventory/role helpers. Private schema upgrade only; no catalog migration, Fill/source fence changes, live deployment, USB writes or permission rewriting. FAT32 remains the separate pending session-only gate under DEC-130.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-folders.md, docs/usable-slice-direct.md, docs/usable-slice-transaction.md, docs/plans/folder-projection-scope.md, README.md
 - `related`: DEC-123, DEC-124, DEC-125, DEC-129, DEC-130
+
+### DEC-132: Reconcile ended Fill-owned dirty generations without rewriting execution history
+- `id`: DEC-132
+- `date`: 2026-09-09
+- `status`: accepted
+- `triggered_by`: Operator authorized a new recovery PR after physical-projection preflight found drive-07's dirty generation owned by a paused Fill; local Grok CLI accepted the corrected scope in pass 2.
+- `decision`: Extend the existing operator reconciliation path to recognized ended Fill owners with matching durable session/token evidence. Retain controller and physical-drive fences through full report-only inventory and final observation; compare the captured owner/token/exact state and drive facts inside the same immediate transaction that publishes the existing generation's anchor and planner revision. Refuse live sessions, held/unprovable child markers, changed ownership and owned-dirty capacity/identity transitions.
+- `rationale`: A recorded owner does not imply a live writer, and pause normally removes its child marker. Neither terminal state nor marker absence proves physical exclusion. Expired-live-session recovery cannot repair a paused generation's admission evidence; erasing ownership or opening a new epoch would lose the relevant history.
+- `impact`: Drive-bootstrap adapter, existing CLI refusal translation and focused regressions only. No schema change, auto-resume/completion, destructive cleanup, full-byte verification claim, deployment or live catalog/device mutation. A subsequent clean reconciliation keeps ordinary refresh semantics.
+- `docs_updated`: docs/decision_log.md, docs/operations.md, docs/plans/terminal-session-reconciliation.md
+- `related`: modelark/execution_authority.py, modelark/execution_recovery.py, modelark/drive_bootstrap.py
