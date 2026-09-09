@@ -81,9 +81,10 @@ sealed key beneath the pinned object store is permitted. No annex command or ret
 bounded ZipNN 0.5 byte-format, StreamZNN and optional zstd streams yield original bytes. The default
 64-MiB limit bounds individual frames/windows, not the native codec's entire working set; oversized
 legacy whole-ZipNN blobs and unsupported modes refuse. Consumer errors are not relabeled as source IO.
-Explicit source attachments expand `~` and become lexically normalized absolute paths (including
-collapsing `..`) before observation, without following
-symlinks; their required location remains `<mount>/modelark`. Layout auditing is iterative, including
+Source and destination attachments share lexical absolute-path normalization, expanding `~` and
+collapsing `..` without following symlinks. Operator preview/Start, observation and cached-loss
+recovery, descriptor binding and source reads use the same spelling. Descriptor opening still
+enforces no-symlink confinement; source locations remain `<mount>/modelark`. Layout auditing is iterative, including
 valid deep paths, and still treats unowned files, directories and symlinks as collisions.
 
 ## Initial ext4 capacity profile
@@ -126,7 +127,9 @@ usage. Full-path byte limits include both final names and generated `.slice-<tok
 names, including control and receipt files. Files get one external xattr block each; new directories
 get one data and one xattr block.
 Every new directory's complete live name set must fit one block including dot entries and checksum
-tail. Names are limited by UTF-8 bytes, not characters. Root growth separately covers conversion and
+tail. Names are limited by strict UTF-8 bytes, not characters; unsupported encodings in final paths,
+temporary paths or components return `DESTINATION_LAYOUT_UNSUPPORTED`. This output rule does not
+change host attachment encoding or sealed relative-path serialization. Root growth separately covers conversion and
 splits, without assuming preexisting dirent slots are compact. Control/receipt serialization includes
 the full sealed plan and largest eligible source records, bounding reserve-number width before seal.
 Thus required capacity can substantially exceed model payload sizes.

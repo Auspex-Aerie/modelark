@@ -20,6 +20,7 @@ from .destination import UsbDestination, _port_io
 from .hardware import LinuxObserver
 from .linux import BoundTree
 from .local_source import LocalArchiveReader
+from .paths import canonical_attachment
 from .sources import FencedSources
 from .state import Store
 
@@ -75,7 +76,7 @@ def preview(catalog_path, destination_path, repo_ids, root):
                 "gaps": [asdict(gap) for gap in proposal.gaps], "preview": asdict(proposal)}
     archives = _archives(catalog_path)
     observer = LinuxObserver()
-    path = Path(destination_path).expanduser().absolute()
+    path = canonical_attachment(destination_path)
     evidence = observer.observe(path, writable=True, archives=archives)
     proposal = d.preview(replace(spec, destination_id=evidence.device_id), snapshot)
     capacity = _capacity()
@@ -198,7 +199,7 @@ def start(tx, destination_path, attachments):
         raise t.TransferRefusal("SOURCE_ATTACHMENT_UNSEALED", "attachment label is not a reviewed source")
     archives = _archives(admission["catalog"])
     observer = LinuxObserver()
-    path = Path(destination_path).expanduser().absolute()
+    path = canonical_attachment(destination_path)
     try:
         with BoundTree(path, writable=True) as tree:
             evidence = observer.observe(path, writable=True, archives=archives)

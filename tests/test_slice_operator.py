@@ -373,7 +373,7 @@ def test_already_typed_bootstrap_refusal_is_preserved(operator, monkeypatch):
     assert caught.value.code == "STATE_BUSY"
 
 
-@pytest.mark.parametrize('mode', ['small', 'large', 'unplug', 'acl-unplug'])
+@pytest.mark.parametrize('mode', ['small', 'parent', 'large', 'unplug', 'acl-unplug'])
 def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, monkeypatch, tmp_path, mode):
     """Only hardware/free-space observations are fake; all assembly and IO are real."""
     import os
@@ -384,7 +384,7 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
     from test_slice_catalog import seed
     from test_slice_direct_integration import physical_descendants
     from test_slice_transaction import DATA
-    if mode != 'small':
+    if mode not in {'small', 'parent'}:
         DATA = b'x' * (2 * 1024 * 1024 + 17)
 
     catalog = tmp_path / "explicit-catalog.sqlite"
@@ -472,11 +472,12 @@ def test_actual_operator_catalog_reader_capacity_and_delivery_roundtrip(store, m
     if mode == 'acl-unplug':
         monkeypatch.setattr(os, 'getxattr', unplug_during_owned_directory_acl)
 
-    reviewed = operator.preview(catalog, destination, ["org/model"], "delivery")
+    supplied_destination = destination / '..' / destination.name if mode == 'parent' else destination
+    reviewed = operator.preview(catalog, supplied_destination, ["org/model"], "delivery")
     tx = reviewed["transaction_id"]
     assert reviewed["state"] == "ready" and not list(destination.iterdir())
     assert operator.approve(tx, reviewed["seal"])["state"] == "approved"
-    result = operator.start(tx, destination, {"drive-a": archive})
+    result = operator.start(tx, supplied_destination, {"drive-a": archive})
     if mode in {'unplug', 'acl-unplug'}:
         assert result['state'] == 'waiting_destination'
         assert store.status(tx).state == 'waiting_destination'

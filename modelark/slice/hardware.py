@@ -15,6 +15,7 @@ import re
 import subprocess
 
 from .linux import BoundTree, require_create_access, require_no_default_acl
+from .paths import canonical_attachment
 from .transaction import DestinationBinding, TransferRefusal
 
 
@@ -257,10 +258,11 @@ class LinuxObserver:
             _refuse('block backing was replaced', 'DESTINATION_CHANGED')
 
     def observe(self, path, writable=False, archives=()):
+        path = canonical_attachment(path)
         try:
             return self._observe(path, writable, tuple(archives))
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TransferRefusal) as exc:
-            target = str(Path(path).expanduser().absolute())
+            target = str(path)
             for (observed_path, _), proof in self._observed.items():
                 if observed_path == target:
                     try:

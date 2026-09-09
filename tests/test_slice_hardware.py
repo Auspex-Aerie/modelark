@@ -521,10 +521,15 @@ def test_unplug_between_backing_probe_and_descriptor_check_remains_waiting(hardw
         assert tree._attachment_lost
 
 
-def test_unplug_during_full_refresh_io_remains_waiting(hardware):
+@pytest.mark.parametrize('spelling', ['canonical', 'parent', 'relative-parent'])
+def test_unplug_during_full_refresh_io_remains_waiting(hardware, monkeypatch, spelling):
     import errno
     observer, root, *_ = hardware
     observer.observe(root, writable=True)
+    supplied = root if spelling == 'canonical' else root / '..' / root.name
+    if spelling == 'relative-parent':
+        monkeypatch.chdir(root.parent)
+        supplied = root.name + '/../' + root.name
     def absent(key):
         raise FileNotFoundError(key)
     def unplug_during_bind(*args, **kwargs):
@@ -532,13 +537,18 @@ def test_unplug_during_full_refresh_io_remains_waiting(hardware):
         raise OSError(errno.EIO, 'device unplugged during full observation')
     observer._tree_factory = unplug_during_bind
     with pytest.raises(TransferRefusal, match='WAITING_DESTINATION'):
-        observer.observe(root, writable=True)
+        observer.observe(supplied, writable=True)
 
 
-def test_unplug_during_full_refresh_xattr_proof_remains_waiting(hardware, monkeypatch):
+@pytest.mark.parametrize('spelling', ['canonical', 'parent', 'relative-parent'])
+def test_unplug_during_full_refresh_xattr_proof_remains_waiting(hardware, monkeypatch, spelling):
     import errno
     observer, root, _, _, _, module = hardware
     observer.observe(root, writable=True)
+    supplied = root if spelling == 'canonical' else root / '..' / root.name
+    if spelling == 'relative-parent':
+        monkeypatch.chdir(root.parent)
+        supplied = root.name + '/../' + root.name
     def absent(key):
         raise FileNotFoundError(key)
     def unplug_during_xattr(*args):
@@ -546,4 +556,4 @@ def test_unplug_during_full_refresh_xattr_proof_remains_waiting(hardware, monkey
         raise OSError(errno.EIO, 'device unplugged during namespace probe')
     monkeypatch.setattr(module.os, 'getxattr', unplug_during_xattr)
     with pytest.raises(TransferRefusal, match='WAITING_DESTINATION'):
-        observer.observe(root, writable=True)
+        observer.observe(supplied, writable=True)

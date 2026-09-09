@@ -19,6 +19,7 @@ import stat
 from modelark.capacity_evidence import identity_fingerprint_v1
 from . import domain as d
 from .decoding import original_stream
+from .paths import canonical_attachment
 from .transaction import TransferRefusal
 
 
@@ -126,10 +127,7 @@ class LocalArchiveReader:
     """Internal reader with full per-artifact and lightweight per-read attachment proofs."""
 
     def __init__(self, attachments, *, observer, max_decode_bytes=64 << 20):
-        # Normalize operator spelling, including lexical '..', before observation
-        # without following symlinks. BoundTree still performs the authoritative
-        # no-symlink path resolution; Path.absolute() alone retains parent segments.
-        self.attachments = {label: Path(os.path.abspath(Path(path).expanduser()))
+        self.attachments = {label: canonical_attachment(path)
                             for label, path in attachments.items()}
         self.observer = observer
         self.max_decode_bytes = max_decode_bytes

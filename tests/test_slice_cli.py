@@ -121,3 +121,18 @@ def test_operator_refusal_result_is_nonzero(operator, capsys):
         cli.main(["slice", "start", "tx", "--destination", "/usb"])
     assert caught.value.code == 1
     assert json.loads(capsys.readouterr().out) == {"ok": False, "state": "waiting_source"}
+
+
+def test_surrogate_escaped_root_returns_json_layout_refusal(operator, capsys):
+    import os
+    from modelark import cli
+    from modelark.slice.capacity import layout
+    fake, _ = operator
+    fake.preview = lambda catalog, destination, repos, root: layout([root + '/org/model/file'])
+    with pytest.raises(SystemExit) as caught:
+        cli.main(['slice', 'preview', '--catalog', '/unused', '--destination', '/usb',
+                  '--repo', 'org/model', '--root', os.fsdecode(b'delivery-\xff')])
+    assert caught.value.code == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)['code'] == 'DESTINATION_LAYOUT_UNSUPPORTED'
+    assert captured.err == ''

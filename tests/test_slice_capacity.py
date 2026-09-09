@@ -152,6 +152,13 @@ def test_path_byte_limits_are_not_character_limits():
         c.layout(['delivery/' + '\u00e9' * 128])
 
 
+@pytest.mark.parametrize('path', ['delivery-\udcff/file', 'delivery/\udcff', 'delivery/\ud800'])
+def test_non_utf8_full_paths_refuse_before_encoding(path):
+    from modelark.slice import capacity as c
+    with pytest.raises(TransferRefusal, match='DESTINATION_LAYOUT_UNSUPPORTED'):
+        c.layout([path])
+
+
 def _parent_path_bytes(length):
     """Produce an exact-length ASCII parent with individually valid ext4 components."""
     parts = []

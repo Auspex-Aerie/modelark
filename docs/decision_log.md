@@ -2806,3 +2806,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Direct adapter eligibility and layout validation only; no schema change, automatic ACL removal, permission change, deployment or physical trial. Existing incompatible residue remains untouched and refuses.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md, docs/deployment.md
 - `related`: DEC-125, DEC-126
+
+### DEC-128: Share Slice attachment spelling and strict output-byte validation
+- `id`: DEC-128
+- `date`: 2026-09-08
+- `status`: accepted
+- `triggered_by`: Operator approved the two residual Codex findings after PR #70's three-round review loop and the proposed narrow shared path contract.
+- `decision`: Use one lexical attachment-root normalizer across operator preview/Start, Linux observation and cached-loss recovery, descriptor binding and local source reads. Expand home and collapse parent segments without resolving symlinks. Separately share strict UTF-8 output-byte counting across final paths, generated temporary paths and directory components; unsupported encodings refuse as DESTINATION_LAYOUT_UNSUPPORTED.
+- `rationale`: Admission, successful observation and recovery must agree on path spelling. Byte admission must validate encoding before counting; surrogate-escaped Linux input must not escape as an unstructured traceback. Host attachment encodings and sealed relative-path serialization remain distinct contracts.
+- `impact`: Small Slice path helper and existing consumers, with unplug/recovery, CLI encoding and operator roundtrip regressions. No protocol/schema change, weaker descriptor confinement, new global authority, automatic ACL changes, live deployment or physical trial. The three-round review loop remains stopped; this approved correction is not a fourth review round.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-direct.md
+- `related`: DEC-125, DEC-126, DEC-127

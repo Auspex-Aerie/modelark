@@ -11,6 +11,7 @@ from pathlib import Path
 import platform
 
 from .transaction import TransferRefusal
+from .paths import canonical_attachment
 
 
 class _Timestamp(ctypes.Structure):
@@ -164,7 +165,7 @@ class BoundTree:
     """Retained root fd; each descendant resolution rejects symlinks and mount crossings."""
 
     def __init__(self, path, verify=None, writable=False, *, mount_ids=None):
-        self.path = Path(os.path.abspath(path))
+        self.path = canonical_attachment(path)
         self.verify = verify
         self.writable = writable
         self._mount_ids = mount_ids or _mount_ids

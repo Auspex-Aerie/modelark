@@ -14,6 +14,7 @@ import uuid
 
 from . import domain as d
 from .linux import require_no_default_acl
+from .paths import utf8_size
 from .transaction import DestinationBinding, TransferPlan, TransferRefusal
 
 
@@ -92,10 +93,7 @@ def _free(tree):
 
 
 def _record_size(name):
-    try:
-        size = len(name.encode('utf-8'))
-    except UnicodeError:
-        _refuse('non-UTF-8 directory name', 'DESTINATION_LAYOUT_UNSUPPORTED')
+    size = utf8_size(name)
     if size > 255:
         _refuse('component exceeds ext4 byte limit', 'DESTINATION_LAYOUT_UNSUPPORTED')
     return (8 + size + 3) // 4 * 4
@@ -105,14 +103,14 @@ def layout(file_paths):
     """Bound every new directory's complete live namespace, including dual publication links."""
     directories, names = set(), {}
     for path in file_paths:
-        if not d._path(path) or len(path.encode('utf-8')) >= 4096:
+        if not d._path(path) or utf8_size(path) >= 4096:
             _refuse('invalid or overlong path', 'DESTINATION_LAYOUT_UNSUPPORTED')
         value = PurePosixPath(path)
         # Session._op publishes from a sibling .slice-<32 hex token> for artifacts,
         # control and receipt alike. A short final basename does not bound that path.
         temporary_name = '.slice-' + '0' * 32
         temporary = str(value.parent / temporary_name)
-        if len(temporary.encode('utf-8')) >= 4096:
+        if utf8_size(temporary) >= 4096:
             _refuse('generated temporary path exceeds ext4 byte limit', 'DESTINATION_LAYOUT_UNSUPPORTED')
         for component in value.parts:
             _record_size(component)
