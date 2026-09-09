@@ -183,6 +183,22 @@ def test_serial_uniqueness_uses_same_normalization_as_observation(observed, firs
         observe()
 
 
+@pytest.mark.parametrize("kind", [None, False, 1, [], {}, "", " ", " disk "])
+def test_off_ancestry_malformed_type_cannot_hide_duplicate_serial(observed, kind):
+    state, disk, _ = observed
+    state["payload"]["blockdevices"].append(
+        {"path": "/dev/sdb", "type": kind, "maj:min": "8:16", "serial": disk["serial"]})
+    with pytest.raises(bi.BlockObservationError, match="type"):
+        observe()
+
+
+def test_off_ancestry_missing_type_refuses_even_without_serial(observed):
+    state, _, _ = observed
+    state["payload"]["blockdevices"].append({"path": "/dev/sdb", "maj:min": "8:16"})
+    with pytest.raises(bi.BlockObservationError, match="type"):
+        observe()
+
+
 @pytest.mark.parametrize("value", [False, 1, [], {}, " /dev/sda "])
 def test_nested_malformed_parent_is_not_overridden_by_tree(observed, value):
     _, _, part = observed

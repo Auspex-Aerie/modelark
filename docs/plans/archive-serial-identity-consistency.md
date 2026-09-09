@@ -301,7 +301,7 @@ epoch-alias registry or new serialized authority format requires a separately ex
 
 | Slice | Scope | State |
 | --- | --- | --- |
-| 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Round-1 findings fixed; 379 targeted tests and isolated browser E2E passed; round-2 review pending |
+| 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Round-2 finding fixed; 388 targeted tests passed; final round-3 review pending |
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Pending |
 | 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Pending |
 | 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Pending |
@@ -339,6 +339,20 @@ make this PR green; require fresh CI at the revised head before closing the gate
 Round-1 correction validation: 379 targeted tests passed (82 neutral observation
 cases), two upstream Torch deprecation warnings; isolated browser E2E and all-source
 Ruff passed. No UI/test assertion change was needed for the local browser pass.
+
+Slice 1, round 2, `def4304d2d7bcacc4ed274e2af0163b180c7c33d`: Greptile accepted
+5/5 with no outstanding findings; Python 3.10, Python 3.12/wheel smoke and E2E CI
+all passed. Codex found one P2 (3972640139): malformed or missing type on an
+off-ancestry node bypassed global duplicate-serial filtering because type validation
+only ran along the selected path. Nine new cases reproduced this before correction.
+Require a nonempty well-formed type for every node during construction, before
+global filtering. Round 3 is the final review round in this cycle; remaining findings
+after that require a stop-and-summarize rather than a fourth iteration.
+
+Round-2 correction validation: 388 targeted tests passed (91 neutral observation
+cases), two upstream Torch warnings, all-source Ruff and diff whitespace checks
+passed. Production change is the constructor-wide required type validation; no
+normal archive probe activation, schema/lock change, UI edit or live mutation.
 
 ## 7. Questions for Grok
 

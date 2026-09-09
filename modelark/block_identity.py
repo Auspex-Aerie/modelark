@@ -58,6 +58,10 @@ class BlockInventory:
         def visit(node, parent=None):
             if not isinstance(node, dict):
                 _refuse("invalid block-device inventory")
+            # Validate every node before any global disk/UUID filtering, not
+            # only the path eventually selected by disk().
+            if _nonempty(node.get("type")) is None:
+                _refuse("invalid block-device type")
             key = node.get("maj:min")
             path, name = _ancestry_string(node, "path"), _ancestry_string(node, "name")
             path = path or name
