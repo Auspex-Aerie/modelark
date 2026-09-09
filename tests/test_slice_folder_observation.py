@@ -198,6 +198,40 @@ def test_descriptor_acl_access_error_preserves_permission_meaning(native, monkey
     assert raised.value.code == 'DESTINATION_NOT_WRITABLE'
 
 
+def test_large_inherited_acl_refuses_before_creating_output(native):
+    observer, parent, state, *_ = native
+    entries = [(1, 7, 0xffffffff)] + [(2, 7, uid) for uid in range(100000, 100200)]
+    entries += [(4, 7, 0xffffffff), (16, 7, 0xffffffff), (32, 7, 0xffffffff)]
+    state['acl'] = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in entries)
+    with pytest.raises(TransferRefusal, match='xattr') as raised:
+        observer.observe(parent / 'demo', archives=())
+    assert raised.value.code == 'DESTINATION_NOT_WRITABLE'
+    assert not (parent / 'demo').exists()
+
+
+@pytest.mark.parametrize('block_size,named_users,allowed', [
+    (1024, 0, False), (2048, 1, True), (2048, 100, False), (4096, 100, True)])
+def test_marker_and_acl_budget_uses_filesystem_block_size(native, monkeypatch,
+                                                        block_size, named_users, allowed):
+    observer, parent, state, *_ = native
+    if named_users:
+        entries = [(1, 7, 0xffffffff)] + [(2, 7, uid) for uid in range(100000, 100000 + named_users)]
+        entries += [(4, 7, 0xffffffff), (16, 7, 0xffffffff), (32, 7, 0xffffffff)]
+        state['acl'] = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in entries)
+    original = os.fstatvfs
+    def observed(fd):
+        value = original(fd)
+        return SimpleNamespace(f_bsize=block_size, f_frsize=block_size, f_blocks=value.f_blocks,
+                               f_bavail=value.f_bavail, f_favail=value.f_favail, f_ffree=value.f_ffree)
+    monkeypatch.setattr(os, 'fstatvfs', observed)
+    if allowed:
+        observer.observe(parent / 'demo', archives=())
+    else:
+        with pytest.raises(TransferRefusal, match='xattr'):
+            observer.observe(parent / 'demo', archives=())
+    assert not (parent / 'demo').exists()
+
+
 def test_mapped_single_parent_storage_allowed(native):
     observer, parent, state, disk, leaf = native
     leaf['type'] = 'lvm'

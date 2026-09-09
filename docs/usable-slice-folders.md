@@ -61,7 +61,10 @@ require birth identity.
 
 The parent must be owned by the operator or root. Non-owner-writable parents require sticky-bit
 protection. A default ACL must preserve owner rwx; creating the owned root with mode 0700 masks
-inherited non-owner permissions. The implementation never changes existing ownership, modes or
+inherited non-owner permissions. Both inherited ACL values plus the ownership marker and overhead
+must fit a conservative single-block xattr budget; oversized ACLs and 1 KiB blocks refuse before
+root creation. This check does not reserve space against quota or other security attributes.
+The implementation never changes existing ownership, modes or
 ACLs to force admission. This assumes a trusted operator account, not protection from malicious
 code running as that same UID or root.
 
@@ -125,7 +128,8 @@ Start retains fresh live parent/object descriptors and exclusively creates the n
 
 Only direct USB with explicit FAT32 evidence and the tested name settings is admitted:
 `codepage=437,iocharset=iso8859-1,utf8,shortname=mixed`, current-user ownership, and masks excluding
-non-owner writes. Non-ASCII/short-alias spellings and unsupported full layouts refuse. Each file
+non-owner writes while preserving owner directory rwx and file rw. Non-ASCII/short-alias spellings
+and unsupported full layouts refuse. Each file
 must fit FAT32's 2^32−1-byte limit. The application does not remount or change permissions.
 Protected paths still include all of `/run`, so `/run/media/...` is currently refused too.
 

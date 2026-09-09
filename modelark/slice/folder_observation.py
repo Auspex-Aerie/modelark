@@ -4,8 +4,9 @@ The writer must exclusively create a 0700 root, authenticate any resumed child,
 and retain/recheck the observed parent. No probe creates files, reads raw block
 devices, or changes permissions. Non-owner-writable parents need sticky protection;
 root/current-user ownership prevents another directory owner removing the child.
-Ordinary default ACLs are allowed only when their owner entry preserves rwx:
-the required 0700 creation mode masks all inherited non-owner permissions.
+Ordinary default ACLs are allowed only when their owner entry preserves rwx and
+both inherited ACLs leave room for the ownership marker in one xattr block. The
+required 0700 creation mode masks all inherited non-owner permissions.
 """
 from dataclasses import dataclass
 import errno
@@ -19,6 +20,7 @@ import struct
 import subprocess
 
 from .folder_contract import CapacityObservation, FolderProfile, FolderTarget
+from .destination import owner_marker
 from .hardware import _Inventory, _backing_identity, _inventory, _nonempty
 from .host_observation import parse_mounts, read_fs_text, resolve_protected
 from .io_errors import classify_io, probe_io
@@ -64,6 +66,20 @@ def _directory_flags(fd):
     return struct.unpack('=L', fcntl.ioctl(fd, 0x80086601, bytes(8))[:4])[0]
 
 
+def _marker_space(fd, acl_size):
+    # A new directory inherits access AND default ACLs. Charge their full Linux
+    # xattr sizes (larger than ext4's compact format), the padded owner marker,
+    # and 256 bytes for the block header, entries/names, alignment and slack.
+    # Do not credit in-inode storage, ACL sharing or EA-inode support. This is
+    # an ACL/marker compatibility bound, not a reservation against quota, other
+    # security xattrs or concurrent allocation. Rechecked before every mkdir.
+    value = os.fstatvfs(fd)
+    block_size = min(value.f_bsize, value.f_frsize)
+    if block_size < len(owner_marker('0' * 32)) + 2 * acl_size + 256:
+        _refuse('inherited ACL and ownership marker exceed the native xattr budget',
+                'DESTINATION_NOT_WRITABLE')
+
+
 @probe_io('DESTINATION_NOT_WRITABLE', 'native parent permissions or xattrs unavailable')
 def _permissions(fd):
     require_create_access(fd)
@@ -81,6 +97,7 @@ def _permissions(fd):
         acl = os.getxattr(fd, 'system.posix_acl_default')
     except OSError as exc:
         if exc.errno == errno.ENODATA:
+            _marker_space(fd, 0)
             return
         raise
     if len(acl) < 4 or (len(acl) - 4) % 8 or struct.unpack('<I', acl[:4])[0] != 2:
@@ -90,6 +107,7 @@ def _permissions(fd):
     if owners != [7] or any(permissions & ~7 for _, permissions, _ in entries):
         _refuse('inherited ACL must preserve owner rwx for a 0700 output root',
                 'DESTINATION_NOT_WRITABLE')
+    _marker_space(fd, len(acl))
 
 
 @probe_io('DESTINATION_CAPACITY_UNPROVEN', 'shared-space observation unavailable')

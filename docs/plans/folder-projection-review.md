@@ -71,6 +71,40 @@ classification corrections; no additional physical-media result is claimed.
 
 ## Web review rounds
 
+Round 1 reviewed `163f60bf14df9e120fd23827a3e36c8c0db200c5`, requested in
+[comment 5599186847](https://github.com/Auspex-Aerie/modelark/pull/70#issuecomment-5599186847).
+Greptile completed with 5/5 and a trigger thumbs-up; Codex completed with two P2s.
+All three CI jobs passed on that head. Both findings were independently confirmed:
+
+- **Native inherited ACL/marker footprint:** a real disposable ext4 parent with 200 named-user
+  default ACL entries admitted successfully, then directory ownership-marker publication failed
+  with ENOSPC. The pre-mkdir check now budgets two full inherited ACL values, the actual marker
+  length and 256 bytes of xattr headers/entries/alignment/slack against one filesystem block.
+  It credits neither in-inode space nor ACL sharing/EA-inode support. Preview and each runtime
+  parent check enforce it. Ordinary small ACLs still complete real local transfers; large ACLs
+  refuse before creating the root, with parent ACL and sibling bytes unchanged. The same bound
+  refuses 1 KiB blocks even without ACLs because they cannot hold the padded marker. This remains
+  a conservative compatibility bound, not a promise against quota, concurrent allocation or
+  other security attributes. Ext4 layout basis: [kernel xattr documentation](https://www.kernel.org/doc/html/latest/filesystems/ext4/attributes.html).
+- **FAT owner masks:** fmask must preserve owner read/write and dmask owner read/write/search,
+  in addition to excluding group/other writes. Five newly added bad-mask cases reproduced prior
+  admission, including Codex's fmask=0477. Good 0077 and file-only 0177 masks remain admitted;
+  live recheck rejects a newly incompatible file mask. These are synthetic mount-observation
+  tests, not new mounted-vfat or physical-USB qualification. Mount-mask basis:
+  [kernel VFAT documentation](https://www.kernel.org/doc/html/latest/filesystems/vfat.html).
+
+The common cause is incomplete admission of the writer's **whole operation sequence**: creation
+permission alone did not establish later certification/read-back capability. The corrections
+extend existing shared Preview/runtime admission functions; they do not introduce a new adapter,
+permission rewriting, rollback/adoption policy, schema, seal version or archive behavior.
+
+Post-fix installed wheel `/tmp/modelark-web-round1-wheel.F5Tdqa/package`: **173 tests passed**
+(113 admission/import-location tests and 60 native transaction/public-flow tests). Packaged Slice
+sources exactly match the checkout. Ruff passes across `modelark`, `scripts` and `tests`; diff
+whitespace checks pass. No additional mounted-vfat or physical-media result is claimed.
+The full post-fix Slice suite passed **1,322 tests**, with five optional-codec skips and two
+upstream Torch deprecation warnings (509 seconds).
+
 Use the PR's exact-head trigger/result comments as the live round tracker. Count only newly
 requested rounds for this folder-projection extension; earlier
 PR #70 direct-USB reviews do not constitute review of the new code. Tie every result to the

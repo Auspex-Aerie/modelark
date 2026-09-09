@@ -177,7 +177,9 @@ def test_utf8_mount_flag_is_required_by_qualified_codec_profile(fat):
     assert raised.value.code == 'FILESYSTEM_UNSUPPORTED'
 
 
-@pytest.mark.parametrize('option', ['uid=99999', 'dmask=0000', 'fmask=0002', 'dmask=bad'])
+@pytest.mark.parametrize('option', ['uid=99999', 'dmask=0000', 'fmask=0002', 'dmask=bad',
+                                  'fmask=0477', 'fmask=0277', 'dmask=0477',
+                                  'dmask=0277', 'dmask=0177'])
 def test_mount_permissions_refuse_without_changing_anything(fat, option):
     observer, parent, state, *_ = fat
     key = option.split('=', 1)[0]
@@ -186,6 +188,15 @@ def test_mount_permissions_refuse_without_changing_anything(fat, option):
     with pytest.raises(TransferRefusal) as error:
         observer.observe(parent / 'Demo', archives=())
     assert error.value.code == 'DESTINATION_NOT_WRITABLE'
+    assert not (parent / 'Demo').exists()
+
+
+@pytest.mark.parametrize('fmask,dmask', [('0077', '0077'), ('0177', '0077')])
+def test_masks_preserving_required_owner_permissions_are_admitted(fat, fmask, dmask):
+    observer, parent, state, *_ = fat
+    state['options'] = state['options'].replace('fmask=0022', 'fmask=' + fmask).replace(
+        'dmask=0022', 'dmask=' + dmask)
+    observer.observe(parent / 'Demo', archives=())
     assert not (parent / 'Demo').exists()
 
 
@@ -309,12 +320,14 @@ def test_new_archive_role_is_checked_at_recheck(fat):
             observer.recheck(tree, value, archives=(SimpleNamespace(serial='USB-SERIAL'),))
 
 
-def test_permission_mask_change_during_live_attempt_is_revalidated(fat):
+@pytest.mark.parametrize('key,mask,detail', [
+    ('dmask', '0000', 'exclude group/other writes'), ('fmask', '0477', 'preserve owner')])
+def test_permission_mask_change_during_live_attempt_is_revalidated(fat, key, mask, detail):
     observer, parent, state, *_ = fat
     value = observer.observe(parent / 'Demo', archives=())
-    state['options'] = state['options'].replace('dmask=0022', 'dmask=0000')
+    state['options'] = state['options'].replace(key + '=0022', key + '=' + mask)
     with module.Fat32Tree(parent) as tree:
-        with pytest.raises(TransferRefusal, match='exclude group/other writes'):
+        with pytest.raises(TransferRefusal, match=detail):
             observer.recheck(tree, value)
 
 

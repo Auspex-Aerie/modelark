@@ -101,6 +101,10 @@ def _mount_policy(mount):
             _refuse('explicit FAT directory/file permission masks required', 'DESTINATION_NOT_WRITABLE')
         if int(value, 8) & 0o022 != 0o022:
             _refuse('FAT masks must exclude group/other writes', 'DESTINATION_NOT_WRITABLE')
+        required = 0o700 if key == 'dmask' else 0o600
+        if int(value, 8) & required:
+            _refuse('FAT masks must preserve owner directory rwx and file rw',
+                    'DESTINATION_NOT_WRITABLE')
     if 'rw' not in mount.options:
         _refuse('writable FAT mount required', 'DESTINATION_NOT_WRITABLE')
 

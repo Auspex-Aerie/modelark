@@ -5,6 +5,7 @@ from dataclasses import replace
 import errno
 import json
 import os
+import struct
 import threading
 from types import SimpleNamespace
 
@@ -103,6 +104,25 @@ def test_group_writable_parent_is_refused_before_output_creation(native):
     assert native.store.receipt(native.case.tx) is None
 
 
+@pytest.mark.parametrize('named_users', [1, 200])
+def test_real_default_acl_marker_budget_is_checked_before_mkdir(native, named_users):
+    entries = [(1, 7, 0xffffffff)] + [(2, 7, uid) for uid in range(100000, 100000 + named_users)]
+    entries += [(4, 7, 0xffffffff), (16, 7, 0xffffffff), (32, 7, 0xffffffff)]
+    acl = struct.pack('<I', 2) + b''.join(struct.pack('<HHI', *entry) for entry in entries)
+    os.setxattr(native.parent, 'system.posix_acl_default', acl)
+    if named_users == 1:
+        assert run(native).state == 'complete'
+    else:
+        # The ACL itself is accepted by this real kernel/filesystem. Admission
+        # must account for both child ACLs plus the ownership marker before mkdir.
+        with pytest.raises(t.TransferRefusal, match='xattr') as raised:
+            run(native)
+        assert raised.value.code == 'DESTINATION_NOT_WRITABLE'
+        assert not (native.parent / 'delivery').exists()
+    assert os.getxattr(native.parent, 'system.posix_acl_default') == acl
+    assert native.sibling.read_bytes() == b'existing sibling'
+
+
 def test_native_stop_and_fresh_adapter_resume_same_certified_root(native):
     stop_after_chunk(native)
     child = native.parent / "delivery"
@@ -122,6 +142,7 @@ def test_known_inode_shortfall_refuses_before_root_creation_and_can_retry(native
     def scarce(fd):
         observed = original(fd)
         return SimpleNamespace(f_bavail=observed.f_bavail, f_frsize=observed.f_frsize,
+                               f_bsize=observed.f_bsize,
                                f_favail=1, f_ffree=1)
     with monkeypatch.context() as patch:
         patch.setattr(os, "fstatvfs", scarce)
@@ -144,6 +165,7 @@ def test_remaining_inode_budget_deduplicates_publication_links_and_allows_zero_a
     def observed(fd):
         value = original(fd)
         return SimpleNamespace(f_bavail=value.f_bavail, f_frsize=value.f_frsize,
+                               f_bsize=value.f_bsize,
                                f_favail=available, f_ffree=available)
     monkeypatch.setattr(os, "fstatvfs", observed)
     with pytest.raises(t.TransferRefusal, match="DESTINATION_CAPACITY_WAIT"):
