@@ -39,7 +39,7 @@ def test_finding_33_live_envelope_succeeds_with_owner_fields(tmp_path):
     session = _claim(con, out)
 
     free = 10**12
-    fp = "a" * 64
+    fp = f.DRIVE_IDS["d0"]["fingerprint"]
 
     def observe(label):
         return dm.Observation(

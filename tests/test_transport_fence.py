@@ -68,8 +68,10 @@ from modelark import drive_fence
 from modelark import drive_mutation as dm
 from modelark import fetch
 
-_FP = "a" * 64
-_FP2 = "c" * 64
+_FP = capacity_evidence.identity_fingerprint_v1(
+    fs_uuid="fs-src", annex_uuid="uuid-src", serial="serial-src", filesystem_capacity_bytes=1000)
+_FP2 = capacity_evidence.identity_fingerprint_v1(
+    fs_uuid="fs-tgt", annex_uuid="uuid-tgt", serial="serial-tgt", filesystem_capacity_bytes=1000)
 
 
 # Restore the db module globals around EVERY test so a test that repoints CATALOG_DIR/DB_PATH/STATE_DIR
@@ -105,13 +107,15 @@ def _catalog(tmp_path):
 
 
 def _proven_drive(con, label="drive-00", *, epoch=1, generation=0, fp=_FP,
-                  fscap=1000, free=900, annex_uuid=None):
+                  fscap=1000, free=900, annex_uuid="uuid-src", fs_uuid="fs-src", serial="serial-src"):
     """A drive with proven identity for the current epoch (PR-03c will establish this on real drives)."""
+    if fp == _FP2:
+        fs_uuid, serial = "fs-tgt", "serial-tgt"
     con.execute(
         "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,identity_epoch,write_generation,"
-        "filesystem_capacity_bytes,identity_fingerprint,write_authority,annex_uuid) "
-        "VALUES(?,?,?,?,?,?,?, 'dedicated_local', ?)",
-        [label, fscap, free, epoch, generation, fscap, fp, annex_uuid])
+        "filesystem_capacity_bytes,identity_fingerprint,write_authority,annex_uuid,fs_uuid,serial) "
+        "VALUES(?,?,?,?,?,?,?, 'dedicated_local', ?,?,?)",
+        [label, fscap, free, epoch, generation, fscap, fp, annex_uuid, fs_uuid, serial])
 
 
 def _unproven_drive(con, label="drive-00"):
@@ -484,14 +488,14 @@ def test_replica_fences_source_and_target_and_passes_both_fds(tmp_path):
              mock.patch.object(fetch, "_annex_key_on_uuid", return_value=True), \
              mock.patch.object(fetch.subprocess, "run", side_effect=cap_run):
             fetch.run_replica_tasks([task], ctx=fetch.RunCtx(con=con))
-        assert held.get("fds") and len(held["fds"]) == 2, \
-            "both source and target identity+epoch fences must be held for a replica copy"
+        assert held.get("fds") and len(held["fds"]) == 4, \
+            "both canonical and null-serial fences for source and target must be held"
         mutating = [(cmd, fds) for cmd, fds in captured
                     if "remote" in cmd or ("annex" in cmd and ("copy" in cmd or "sync" in cmd))]
         assert mutating, f"expected mutating git children (remote/copy/sync); captured {[c for c, _ in captured]}"
         for cmd, fds in mutating:
             assert tuple(fds or ()) == held["fds"], \
-                f"replica child {cmd[:5]} must inherit BOTH actual held fence FDs; got {fds}"
+                f"replica child {cmd[:5]} must inherit ALL actual held fence FDs; got {fds}"
         syncs = [cmd for cmd, _fds in captured if "annex" in cmd and "sync" in cmd]
         assert syncs and all("drive-00" in cmd and "drive-04" in cmd for cmd in syncs), \
             f"the replica map sync must name only this group's source+target remotes; got {syncs}"
@@ -708,7 +712,8 @@ def test_observe_drive_derives_identity_from_live_evidence(tmp_path):
         stale_fp = capacity_evidence.identity_fingerprint_v1(
             fs_uuid="STALE-uuid", annex_uuid="STALE-annex", serial="STALE-serial",
             filesystem_capacity_bytes=222)
-        _proven_drive(con, "drive-00", fp=stale_fp, fscap=222, free=111)
+        _proven_drive(con, "drive-00", fp=stale_fp, fscap=222, free=111,
+                      fs_uuid="STALE-uuid", annex_uuid="STALE-annex", serial="STALE-serial")
         assert hasattr(fetch, "_observe_drive") and hasattr(fetch, "_live_drive_evidence"), \
             "PR-03b must add fetch._observe_drive + fetch._live_drive_evidence (live identity proof)"
         live_fp = capacity_evidence.identity_fingerprint_v1(
@@ -736,7 +741,8 @@ def test_live_identity_mismatch_refuses(tmp_path):
         proven_fp = capacity_evidence.identity_fingerprint_v1(
             fs_uuid="PROVEN-uuid", annex_uuid="PROVEN-annex", serial="PROVEN-serial",
             filesystem_capacity_bytes=1000)
-        _proven_drive(con, "drive-00", fp=proven_fp, fscap=1000, free=900)
+        _proven_drive(con, "drive-00", fp=proven_fp, fscap=1000, free=900,
+                      fs_uuid="PROVEN-uuid", annex_uuid="PROVEN-annex", serial="PROVEN-serial")
         assert hasattr(fetch, "_observe_drive") and hasattr(fetch, "_live_drive_evidence"), \
             "PR-03b must add fetch._observe_drive + fetch._live_drive_evidence"
         statvfs = types.SimpleNamespace(f_frsize=1, f_blocks=1000, f_bavail=900)

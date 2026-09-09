@@ -30,7 +30,10 @@ except ModuleNotFoundError as exc:               # ONLY the exact absent submodu
     admission = None
     _HAS_ADMISSION = False
 
-_FP = "a" * 64
+from modelark.capacity_evidence import identity_fingerprint_v1
+
+_FP = identity_fingerprint_v1(fs_uuid="copied-fs", annex_uuid=None, serial=None,
+                              filesystem_capacity_bytes=1000000)
 
 
 def _require_admission():
@@ -96,6 +99,8 @@ def _prepare_synthetic_evidence(con):
     matching clean anchor. This is the deliberate, audited test analogue of `drive reconcile`."""
     con.execute("UPDATE drives SET identity_epoch=1, write_generation=1, filesystem_capacity_bytes=1000000, "
                 "identity_fingerprint=?, write_authority='dedicated_local' WHERE drive_label='drive-00'", [_FP])
+    con.execute("UPDATE drives SET fs_uuid='copied-fs',annex_uuid=NULL,serial=NULL "
+                "WHERE drive_label='drive-00'")
     con.execute("INSERT INTO drive_dirty_generations(drive_label,identity_epoch,generation,operation_code) "
                 "VALUES('drive-00',1,1,'reconcile')")
     con.execute(

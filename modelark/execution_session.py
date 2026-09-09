@@ -172,7 +172,7 @@ def start_session(con, proposal_id, predecessor_id, services):
     ctrl = services.controller_flock
     fences = services.drive_fences
 
-    with ctrl.hold(), fences.hold_all_sorted(relevant):
+    with ctrl.hold(), fences.hold_all_sorted(relevant) as fence_binding:
         current_config = dict(services.config.read_graph_affecting_config() or {})
         frozen = ecfg.ExecutionConfig.from_values(current_config)
 
@@ -265,6 +265,12 @@ def start_session(con, proposal_id, predecessor_id, services):
 
         con.execute("BEGIN IMMEDIATE")
         try:
+            # Production fences bind all facts used to expand compatible keys.
+            # Projection/config callbacks run after acquisition; recheck here so
+            # they cannot leave a Start/Resume committed under stale alias keys.
+            validate_fences = getattr(fence_binding, "validate_current", None)
+            if callable(validate_fences):
+                validate_fences(con)
             # Re-check live session inside TX.
             if live_session_exists(con):
                 raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))

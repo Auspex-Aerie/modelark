@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from unittest import mock
 
+import pytest
+
 import _pr09_gate1_fixtures as f
 
 
@@ -167,9 +169,11 @@ def test_unpaired_ownership_refuses_atomically_unchanged():
     assert after == before, f"must remain unchanged; before={before} after={after}"
 
 
-def test_child_fence_delays_recovery_until_release():
+def test_child_fence_delays_recovery_until_release(tmp_path, monkeypatch):
     """Inherited FD held across parent death blocks recovery until child releases."""
     mod = _rec_mod()
+    from modelark import drive_fence
+    monkeypatch.setattr(drive_fence, "_LOCK_DIR", tmp_path / "locks")
     recover = getattr(mod, "recover_expired_session", None) or getattr(mod, "recover_session")
     inherit = getattr(mod, "inherit_drive_fence_fds", None)
     assert callable(inherit), "inherit_drive_fence_fds required"
@@ -183,7 +187,7 @@ def test_child_fence_delays_recovery_until_release():
         "VALUES('s-child',?,?, 'c','w','running',0,1,'2000-01-01T00:00:00Z')",
         ["ark", pid])
     # Simulate parent death with child still holding fence FDs
-    child_fds = inherit(session_id="s-child", drive_labels=["d0"])
+    child_fds = inherit(session_id="s-child", drive_labels=["d0"], con=con)
     assert child_fds is not None
     held = getattr(mod, "child_fence_still_held", None) or getattr(
         mod, "fence_fds_held", None)
@@ -200,3 +204,74 @@ def test_child_fence_delays_recovery_until_release():
             recover(con, session_id="s-child", services=f.default_services()),
             label="recovery after child release",
         )
+
+
+def _expired_case():
+    con = f.mem_con()
+    f.seed_plan_selection(con, repos=("org/a",))
+    _, pid, _ = f.create_and_approve(con)
+    con.execute(
+        "INSERT INTO execution_sessions("
+        "session_id,plan_id,approved_proposal_id,controller_identity,worker_identity,"
+        "state,bound_planner_revision,fencing_token,expires_at) "
+        "VALUES('expired','ark',?, 'c','w','running',0,1,'2000-01-01T00:00:00Z')", [pid])
+    return con, pid
+
+
+def test_recovery_missing_proposal_refuses_without_synthetic_drive_or_mutation():
+    from modelark.proposal import Refusal
+    con, _ = _expired_case()
+    con.execute("UPDATE execution_sessions SET approved_proposal_id='missing'")
+    services = f.default_services()
+    services.drive_fences.hold_all_sorted = mock.Mock(side_effect=AssertionError("no authority"))
+    before = tuple(con.iterdump())
+    with pytest.raises(Refusal, match="SESSION_AUTHORITY_UNPROVEN"):
+        _rec_mod().recover_expired_session(con, session_id="expired", services=services)
+    assert tuple(con.iterdump()) == before
+    services.drive_fences.hold_all_sorted.assert_not_called()
+
+
+def test_recovery_locks_owned_dirty_drive_even_if_not_in_proposal():
+    from contextlib import contextmanager
+    con, _ = _expired_case()
+    con.execute(
+        "INSERT INTO drive_dirty_generations(drive_label,identity_epoch,generation,"
+        "operation_code,owner_session_id,owner_fencing_token) "
+        "VALUES('owned-other',1,1,'test','expired',1)")
+    seen = []
+
+    @contextmanager
+    def hold(labels):
+        seen.extend(labels)
+        yield
+
+    services = f.default_services()
+    services.drive_fences.hold_all_sorted = hold
+    assert _rec_mod().recover_expired_session(con, session_id="expired", services=services)
+    assert "owned-other" in seen
+    assert _rec_mod().owned_dirty_generations(con, session_id="expired", fencing_token=1) == [
+        ("owned-other", 1, 1)]
+
+
+@pytest.mark.parametrize("race", ["owner", "proposal"])
+def test_recovery_rechecks_authority_after_physical_fences(race):
+    from contextlib import contextmanager
+    from modelark.proposal import Refusal
+    con, _ = _expired_case()
+
+    @contextmanager
+    def hold(labels):
+        if race == "owner":
+            con.execute(
+                "INSERT INTO drive_dirty_generations(drive_label,identity_epoch,generation,"
+                "operation_code,owner_session_id,owner_fencing_token) "
+                "VALUES('raced',1,1,'test','expired',1)")
+        else:
+            con.execute("UPDATE execution_sessions SET approved_proposal_id='changed'")
+        yield
+
+    services = f.default_services()
+    services.drive_fences.hold_all_sorted = hold
+    with pytest.raises(Refusal, match="SESSION_AUTHORITY_CHANGED"):
+        _rec_mod().recover_expired_session(con, session_id="expired", services=services)
+    assert con.execute("SELECT state FROM execution_sessions").fetchone() == ("running",)

@@ -921,13 +921,12 @@ def declare_lost(
 
         # Source-use gates hold this identity fence through the read. Keep revocation
         # serialized through the graph commit; never wait while holding SQLite's writer.
-        if drive["identity_fingerprint"]:
-            try:
-                fences.enter_context(drive_fence.hold_drives_sorted(
-                    [(drive["identity_fingerprint"], drive["identity_epoch"])], blocking=False))
-            except drive_fence.FenceUnavailable as exc:
-                raise proposal.Refusal("DRIVE_BUSY", {"drive_label": drive_label},
-                                       ("retry_after_source_read",)) from exc
+        try:
+            fences.enter_context(drive_fence.hold_drives_sorted(
+                proposal._fence_keys(c, [drive_label]), blocking=False))
+        except drive_fence.FenceUnavailable as exc:
+            raise proposal.Refusal("DRIVE_BUSY", {"drive_label": drive_label},
+                                   ("retry_after_source_read",)) from exc
 
         active_approval = c.execute(
             "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"

@@ -117,6 +117,12 @@ flocks at one caller. Retain the current low-level controller/drive lock order. 
 blocking lock waits while holding a SQLite write transaction. Captured facts must be rechecked
 after acquisition and at each mutation's existing guarded commit.
 
+Slice-2 qualification refinement (DEC-134): short read-only admission snapshots use
+shared locks over the entire alias set so concurrent portal readers do not block one
+another. All mutation/approval/session/lifecycle/child holders remain exclusive.
+Either exclusive alias still refuses admission, including when the drive is offline;
+never restore the former unfenced offline-anchor fallback to hide reader contention.
+
 Required consumer audit (no caller may be left on a disjoint new-only namespace):
 
 | Consumer | Required behavior / risk |
@@ -301,8 +307,8 @@ epoch-alias registry or new serialized authority format requires a separately ex
 
 | Slice | Scope | State |
 | --- | --- | --- |
-| 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Round-2 finding fixed; 388 targeted tests passed; final round-3 review pending |
-| 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Pending |
+| 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Accepted at 9692b4c in round 3 by Greptile and Codex; all CI green |
+| 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Locally qualified; external review pending |
 | 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Pending |
 | 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Pending |
 | 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Pending |
@@ -353,6 +359,48 @@ Round-2 correction validation: 388 targeted tests passed (91 neutral observation
 cases), two upstream Torch warnings, all-source Ruff and diff whitespace checks
 passed. Production change is the constructor-wide required type validation; no
 normal archive probe activation, schema/lock change, UI edit or live mutation.
+
+Slice 1, round 3, `9692b4c25f7d53e8a6da1f40c4561ac71cda746d`: Greptile accepted
+5/5 with authenticated thumbs-up; Codex's completed exact-head review reported no
+major issues and no new inline findings. Python 3.10, Python 3.12/wheel smoke and
+E2E CI all passed. Slice 1 is accepted; the same PR proceeds to slice 2.
+
+Slice 2 local integration: all eight physical-lock consumers now use one pure
+facts-to-compatible-keys policy, with global deduplication and both capacity epochs.
+No hash-only or label fallback is permitted in production. Offline admission also
+refuses contended anchors. Slice retains exact fresh-identity checks: a compatible
+lock never admits a stale source seal. Child handles close without explicit unlock
+and the session marker inode is retained, preserving surviving-child exclusion.
+
+Local adversarial review found a missing second facts check in Start/Resume and
+expired-session recovery: configuration/projection callbacks run after acquisition,
+so checking only before yielding the locks was insufficient. The production fence
+binding now carries the captured facts into the existing guarded transaction.
+Regression-first tests changed canonical serial or UUID facts after acquisition and
+reproduced the unintended session commit before adding the guarded checks. This is
+part of the approved capture/lock/recheck/commit contract, not new identity authority.
+
+The archive serial probe remains unchanged. Full-suite validation passed before
+slice 2's first external review. The complete isolated browser flow passed
+with unchanged assertions after DEC-134 resolved concurrent admission-reader
+contention. The earlier immediate graph-count timing failure remains separately
+documented; no UI or assertion change was used. Older test catalogs now contain
+authentic UUID/capacity fingerprints instead of placeholder hashes; assertions and
+production validation are not relaxed to accommodate those fixtures.
+
+Slice-2 diagnostic full run: 2637 passed, 6 skipped, 4 failed. Two failures were
+launch-singleton conflicts with the concurrently running disposable browser; both
+passed alone unchanged. Two fixtures used fingerprints inconsistent with their
+captured capacity/identity facts; both were corrected, and all four isolated
+regressions then passed. A final full run of the frozen code is required without
+overlapping pytest/browser jobs; the diagnostic count is not a green final gate.
+
+Slice-2 final frozen-code run, without overlapping jobs: **2646 passed, 6 skipped,
+5 deprecation warnings in 751.83 seconds**. Five skips are optional zstandard
+decoder cases (dependency absent); one is the existing acceptance fixture whose
+bytes are not on disk. No new skip or relaxed assertion was added. Isolated browser
+E2E, repository-wide Ruff and diff whitespace checks also passed. The PR remains
+draft pending this slice's external review and the remaining three safety slices.
 
 ## 7. Questions for Grok
 

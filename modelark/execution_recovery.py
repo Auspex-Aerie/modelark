@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -78,63 +79,72 @@ def owned_dirty_generations(con, *, session_id, fencing_token):
 
 
 def inherit_drive_fence_fds(
-    *, session_id=None, drive_labels=None, catalog_path=None, con=None, **_k
+    *, session_id=None, drive_labels=None, catalog_path=None, con=None,
+    marker_only=False, **_k
 ):
     """Acquire OS-visible flock FDs for the session (child inherits pass_fds).
 
-    Locks use proven identity_fingerprint + identity_epoch (not bare labels) when
-    ``con`` is available so recovery and workers contend on the same authority keys.
+    Every compatible physical key plus the stable session marker is retained.
+    Nonempty drive selections require proven catalog facts, never bare labels.
+    Catalog-free marker fixtures must explicitly opt into ``marker_only=True``;
+    this seam cannot be used for a nonempty drive selection.
     """
     from modelark import drive_fence
+    from modelark.drive_identity import compatible_keys
+    from modelark.execution_service import _capture_fence_identities
 
     sid = session_id or ""
     labels = list(drive_labels or ())
+    if (not labels and con is None and marker_only is not True) or (marker_only and labels):
+        raise Refusal("DRIVE_IDENTITY_UNPROVEN", {
+            "session_id": sid, "reason": "explicit_empty_marker_authority_required"}, ())
+    captured = _capture_fence_identities(con, labels)
+    keys = compatible_keys(identity for _, identity in captured)
     paths = []
     handles = []
     marker = _lock_dir() / f"session-child-{sid}.lock"
     marker.parent.mkdir(parents=True, exist_ok=True)
-    # Drop any prior hold for this session before re-acquiring (avoids self-deadlock).
-    release_child_fences(sid)
-    mh = open(marker, "w")  # noqa: SIM115
+    meta_path = _lock_dir() / f"session-child-{sid}.json"
+    # Never release an existing hold to reacquire: children may share its open
+    # file descriptions. Also never unlink the marker and split its namespace.
+    if sid in _CHILD_FENCE_HANDLES:
+        raise Refusal("CHILD_FENCE_HELD", {"session_id": sid}, ())
+    marker_held = False
     try:
-        fcntl.flock(mh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError as exc:
-        mh.close()
-        raise Refusal("CHILD_FENCE_HELD", {"session_id": sid, "path": str(marker)}, ()) from exc
-    handles.append(mh)
-    paths.append(str(marker))
-    for label in labels:
-        identity, epoch = str(label), 1
-        if con is not None and hasattr(con, "execute"):
-            row = con.execute(
-                "SELECT identity_fingerprint, identity_epoch FROM drives "
-                "WHERE drive_label=?", [label]).fetchone()
-            if row and row[0]:
-                identity, epoch = row[0], int(row[1] or 1)
-        path = drive_fence.drive_lock_path(identity, epoch)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        h = open(path, "w")  # noqa: SIM115
-        try:
-            fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            for prev in handles:
-                try:
-                    fcntl.flock(prev, fcntl.LOCK_UN)
-                    prev.close()
-                except OSError:
-                    pass
-            raise Refusal(
-                "CHILD_FENCE_HELD",
-                {"session_id": sid, "path": str(path), "label": label},
-                ()) from exc
-        handles.append(h)
-        paths.append(str(path))
+        for path in [marker, *(drive_fence.drive_lock_path(*key) for key in keys)]:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            h = open(path, "w")  # noqa: SIM115
+            # Register before flock so the just-opened descriptor is closed on failure.
+            handles.append(h)
+            try:
+                fcntl.flock(h, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise Refusal("CHILD_FENCE_HELD", {
+                    "session_id": sid, "path": str(path)}, ()) from exc
+            if path == marker:
+                marker_held = True
+            paths.append(str(path))
+        if _capture_fence_identities(con, labels) != captured:
+            raise Refusal("DRIVE_IDENTITY_CHANGED", {"drives": labels}, ())
+        meta_path.write_text(json.dumps({
+            "session_id": sid, "paths": paths, "labels": labels,
+        }))
+    except BaseException:
+        # Clean our metadata only while owning the marker. A failed marker
+        # acquisition must not erase another process's diagnostic metadata.
+        if marker_held:
+            try:
+                meta_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for handle in reversed(handles):
+            try:
+                handle.close()
+            except OSError:
+                pass
+        raise
     _CHILD_FENCE_HANDLES[sid] = handles
     _CHILD_FENCE_META[sid] = paths
-    meta_path = _lock_dir() / f"session-child-{sid}.json"
-    meta_path.write_text(json.dumps({
-        "session_id": sid, "paths": paths, "labels": labels,
-    }))
     return [h.fileno() for h in handles]
 
 
@@ -166,18 +176,19 @@ def child_fence_still_held(*_a, session_id=None, **_k):
 
 
 def release_child_fences(session_id: str) -> None:
-    for h in _CHILD_FENCE_HANDLES.pop(session_id, []) or []:
+    # Close, do not LOCK_UN: inherited descriptors share the flock description,
+    # and a still-running child must retain exclusion after this parent releases.
+    handles = _CHILD_FENCE_HANDLES.pop(session_id, [])
+    _CHILD_FENCE_META.pop(session_id, None)
+    if handles:
+        meta = _lock_dir() / f"session-child-{session_id}.json"
         try:
-            fcntl.flock(h, fcntl.LOCK_UN)
-            h.close()
+            meta.unlink(missing_ok=True)
         except OSError:
             pass
-    _CHILD_FENCE_META.pop(session_id, None)
-    marker = _lock_dir() / f"session-child-{session_id}.lock"
-    meta = _lock_dir() / f"session-child-{session_id}.json"
-    for p in (marker, meta):
+    for h in handles:
         try:
-            p.unlink(missing_ok=True)
+            h.close()
         except OSError:
             pass
 
@@ -222,32 +233,48 @@ def recover_expired_session(con, *, session_id, services):
     if not _expired(expires_at, now):
         raise Refusal("SESSION_NOT_EXPIRED", {"expires_at": expires_at, "now": now.isoformat()}, ())
 
-    labels = []
-    try:
+    def _recovery_labels():
         from modelark.proposal import load_proposal
-        prop = load_proposal(con, proposal_id)
+
+        # A missing/corrupt proposal is an authority failure, not permission to
+        # substitute a synthetic drive. Valid empty proposals remain empty.
+        try:
+            prop = load_proposal(con, proposal_id)
+        except (KeyError, ValueError, TypeError, sqlite3.DatabaseError) as exc:
+            raise Refusal("SESSION_AUTHORITY_UNPROVEN", {
+                "session_id": session_id, "proposal_id": proposal_id}, ()) from exc
+        labels = set()
         for t in prop.get("tasks") or ():
             for k in ("target_drive", "source_drive", "satisfying_drive"):
                 if t.get(k):
-                    labels.append(t[k])
-        labels = sorted(set(labels))
-    except Exception:
-        labels = []
-
-    owned_before = owned_dirty_generations(
-        con, session_id=session_id, fencing_token=token)
+                    labels.add(t[k])
+        owned = owned_dirty_generations(
+            con, session_id=session_id, fencing_token=token)
+        labels.update(row[0] for row in owned)
+        return sorted(labels), sorted(owned)
 
     ctrl = services.controller_flock
     fences = services.drive_fences
-    with ctrl.hold(), fences.hold_all_sorted(labels or ["d0"]):
+
+    def _recover_fenced(labels, owned_before, fence_binding):
+        if child_fence_still_held(session_id=session_id):
+            raise Refusal("CHILD_FENCE_HELD", {"session_id": session_id}, ("wait_child",))
         con.execute("BEGIN IMMEDIATE")
         try:
+            validate_fences = getattr(fence_binding, "validate_current", None)
+            if callable(validate_fences):
+                validate_fences(con)
+            if _recovery_labels() != (labels, owned_before):
+                raise Refusal("SESSION_AUTHORITY_CHANGED", {"session_id": session_id}, ())
             # Re-read under locks; CAS on token + live state + still-expired lease.
             row2 = con.execute(
-                "SELECT state, fencing_token, expires_at FROM execution_sessions "
+                "SELECT state, fencing_token, expires_at, approved_proposal_id "
+                "FROM execution_sessions "
                 "WHERE session_id=?", [session_id]).fetchone()
             if not row2:
                 raise Refusal("SESSION_NOT_FOUND", {"session_id": session_id}, ())
+            if row2[3] != proposal_id:
+                raise Refusal("SESSION_AUTHORITY_CHANGED", {"session_id": session_id}, ())
             expected = authority.Attempt(session_id, token)
             actual = authority.Attempt(session_id, int(row2[1]))
             try:
@@ -269,6 +296,10 @@ def recover_expired_session(con, *, session_id, services):
             except authority.AuthorityLost as exc:
                 raise Refusal(
                     "SESSION_STATE_INVALID", {"state": row2[0]}, ()) from exc
+            # The clock is an injected callback inside this transaction. Keep
+            # the physical-fact CAS adjacent to the write after every callback.
+            if callable(validate_fences):
+                validate_fences(con)
             # Expiry re-validated above; CAS on token + live state + still-expired expires_at.
             exp_bound = row2[2]
             if exp_bound is None:
@@ -296,14 +327,13 @@ def recover_expired_session(con, *, session_id, services):
             except Exception:
                 pass
             raise
-    owned_after = owned_dirty_generations(
-        con, session_id=session_id, fencing_token=token)
-    if owned_before and not owned_after:
-        raise Refusal(
-            "DIRTY_GENERATION_LOST",
-            {"session_id": session_id, "before": owned_before}, ())
-    release_child_fences(session_id)
-    return True
+        release_child_fences(session_id)
+        return True
+
+    with ctrl.hold():
+        labels, owned_before = _recovery_labels()
+        with fences.hold_all_sorted(labels) as fence_binding:
+            return _recover_fenced(labels, owned_before, fence_binding)
 
 
 recover_session = recover_expired_session

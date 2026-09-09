@@ -29,7 +29,10 @@ except ModuleNotFoundError as exc:               # ONLY the exact absent submodu
         raise
     _HAS_ADMISSION = False
 
-_FP = "a" * 64
+from modelark.capacity_evidence import identity_fingerprint_v1
+
+_FP = identity_fingerprint_v1(fs_uuid="reporting-fs", annex_uuid=None, serial=None,
+                              filesystem_capacity_bytes=1000)
 
 
 def _require_admission():
@@ -57,6 +60,7 @@ def _clean_offline(con, label="drive-00", *, fscap=1000, anchor_free=800):
         "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,identity_epoch,write_generation,"
         "filesystem_capacity_bytes,identity_fingerprint,write_authority) "
         "VALUES(?,?,?,1,1,?,?, 'dedicated_local')", [label, fscap, anchor_free, fscap, _FP])
+    con.execute("UPDATE drives SET fs_uuid='reporting-fs' WHERE drive_label=?", [label])
     con.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('ark',?)", [label])
     con.execute("INSERT INTO drive_dirty_generations(drive_label,identity_epoch,generation,operation_code)"
                 " VALUES(?,1,1,'reconcile')", [label])

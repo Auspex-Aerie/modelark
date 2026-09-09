@@ -11,6 +11,55 @@ from contextlib import contextmanager
 from unittest import mock
 
 from modelark.core import db
+from modelark.capacity_evidence import identity_fingerprint_v1
+
+
+def _fingerprint(label):
+    return identity_fingerprint_v1(fs_uuid=label + "-fs", annex_uuid=None, serial=None,
+                                   filesystem_capacity_bytes=1000000000000)
+
+
+def test_approval_rechecks_full_identity_after_observation_before_commit():
+    from modelark import proposal
+    con = _mem()
+    _seed_selection(con)
+    draft = _create(proposal, con)
+
+    class Services(proposal._DefaultServices):
+        def observe_exact_capacity(self, con, labels):
+            evidence = super().observe_exact_capacity(con, labels)
+            con.execute("UPDATE drives SET serial='new-serial' WHERE drive_label='d0'")
+            return evidence
+
+    _assert_refuses(lambda: _approve(proposal, con, _pid(draft), services=Services()),
+                    code="APPROVED_INPUT_CHANGED", label="post-observation identity CAS")
+    assert _lifecycle(con, _pid(draft)) == "draft"
+    con.close()
+
+
+def test_approval_captures_identity_inside_controller_and_rechecks_after_lock():
+    from modelark import proposal, drive_fence
+    con = _mem()
+    _seed_selection(con)
+    draft = _create(proposal, con)
+
+    @contextmanager
+    def controller(*args, **kwargs):
+        con.execute("UPDATE drives SET serial='captured-under-controller' WHERE drive_label='d0'")
+        yield
+
+    @contextmanager
+    def fences(keys, **kwargs):
+        assert len(keys) == 2, "capture must include facts changed before controller entry"
+        con.execute("UPDATE drives SET serial='changed-after-capture' WHERE drive_label='d0'")
+        yield
+
+    with mock.patch.object(drive_fence, "hold_controller", controller), \
+            mock.patch.object(drive_fence, "hold_drives_sorted", fences):
+        _assert_refuses(lambda: _approve(proposal, con, _pid(draft)),
+                        code="APPROVED_INPUT_CHANGED", label="post-lock identity CAS")
+    assert _lifecycle(con, _pid(draft)) == "draft"
+    con.close()
 
 
 class _EventCon:
@@ -105,7 +154,8 @@ def _seed_selection(con, repos=("org/m",)):
         "write_authority,filesystem_capacity_bytes) "
         "VALUES('d0',1000000000000,1000000000000,'primary',0,'active','enabled',1,1,?,"
         "'dedicated_local',1000000000000)",
-        ["f" * 64])
+        [_fingerprint("d0")])
+    con.execute("UPDATE drives SET fs_uuid='d0-fs' WHERE drive_label='d0'")
     # Clean anchor so default A6 evidence uses offline admission (not catalog free→live).
     con.execute(
         "INSERT OR IGNORE INTO drive_dirty_generations"
@@ -116,7 +166,7 @@ def _seed_selection(con, repos=("org/m",)):
         "identity_fingerprint,write_authority,identity_proof,fence_proof,observed_at) "
         "VALUES('d0',1,1,1000000000000,1000000000000,?,'dedicated_local','seed','seed',"
         "'2026-01-01T00:00:00Z')",
-        ["f" * 64])
+        [_fingerprint("d0")])
     from modelark import plan
     if plan.get(con, "ark") is None:
         plan.create(con, "ark", name="Ark")
@@ -613,8 +663,8 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
     _seed_selection(con)
     # Two-copy requirement so the assignment must place work on both plan members.
     con.execute("UPDATE models SET numcopies=2 WHERE repo_id='org/m'")
-    fp_d0 = "f" * 64  # _seed_selection d0 fingerprint, epoch 1
-    fp_d1 = "e" * 64
+    fp_d0 = _fingerprint("d0")
+    fp_d1 = _fingerprint("d1")
     con.execute(
         "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
         "lifecycle,eligibility,identity_epoch,write_generation,identity_fingerprint,"
@@ -622,6 +672,7 @@ def test_approval_acquires_controller_then_sorted_drives_then_evidence_before_tx
         "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',2,1,?,"
         "'dedicated_local',1000000000000)",
         [fp_d1])
+    con.execute("UPDATE drives SET fs_uuid='d1-fs' WHERE drive_label='d1'")
     con.execute(
         "INSERT OR IGNORE INTO drive_dirty_generations"
         "(drive_label,identity_epoch,generation,operation_code) VALUES('d1',2,1,'seed')")
@@ -940,7 +991,7 @@ def test_two_copy_executable_sets_source_drive_on_replica():
     con = _mem()
     _seed_selection(con)
     con.execute("UPDATE models SET numcopies=2 WHERE repo_id='org/m'")
-    fp_d1 = "e" * 64
+    fp_d1 = _fingerprint("d1")
     con.execute(
         "INSERT OR IGNORE INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
         "lifecycle,eligibility,identity_epoch,write_generation,identity_fingerprint,"
@@ -948,6 +999,7 @@ def test_two_copy_executable_sets_source_drive_on_replica():
         "VALUES('d1',1000000000000,1000000000000,'replica',0,'active','enabled',2,1,?,"
         "'dedicated_local',1000000000000)",
         [fp_d1])
+    con.execute("UPDATE drives SET fs_uuid='d1-fs' WHERE drive_label='d1'")
     con.execute(
         "INSERT OR IGNORE INTO drive_dirty_generations"
         "(drive_label,identity_epoch,generation,operation_code) VALUES('d1',2,1,'seed')")

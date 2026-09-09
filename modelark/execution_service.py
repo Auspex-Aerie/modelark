@@ -3,11 +3,56 @@ from __future__ import annotations
 
 import os
 import socket
+from collections.abc import Sequence
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
 
 from modelark import execution_session as esess
 from modelark.proposal import Refusal
+
+
+def _capture_fence_identities(con, labels):
+    """Capture complete authority facts; a label alone is never a physical key."""
+    from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity
+
+    captured = []
+    for label in sorted(set(labels)):
+        if con is None:
+            raise Refusal("DRIVE_IDENTITY_UNPROVEN", {"drive": label}, ())
+        row = con.execute(
+            "SELECT fs_uuid,annex_uuid,serial,filesystem_capacity_bytes,"
+            "identity_epoch,identity_fingerprint FROM drives WHERE drive_label=?",
+            [label]).fetchone()
+        if row is None:
+            raise Refusal("DRIVE_IDENTITY_UNPROVEN", {"drive": label}, ())
+        identity = FenceIdentity(*row)
+        try:
+            identity.lock_keys()
+        except UnprovenFenceIdentity as exc:
+            raise Refusal("DRIVE_IDENTITY_UNPROVEN", {"drive": label}, ()) from exc
+        captured.append((label, identity))
+    return tuple(captured)
+
+
+class _PhysicalFenceBinding(Sequence):
+    """Held descriptors plus the exact facts their compatible keys exclude."""
+
+    def __init__(self, captured, handles):
+        self._captured = captured
+        self._handles = tuple(handles)
+
+    def __len__(self):
+        return len(self._handles)
+
+    def __getitem__(self, index):
+        return self._handles[index]
+
+    def validate_current(self, con):
+        """Recheck within the caller's guarded transaction, without acquiring locks."""
+        labels = [label for label, _ in self._captured]
+        if _capture_fence_identities(con, labels) != self._captured:
+            raise Refusal("DRIVE_IDENTITY_CHANGED", {"drives": labels}, ())
 
 
 def production_services(con=None, *, catalog_path=None, state_dir=None) -> SimpleNamespace:
@@ -68,20 +113,17 @@ def production_services(con=None, *, catalog_path=None, state_dir=None) -> Simpl
             return drive_fence.hold_controller(cat, blocking=True)
 
     class _DriveFences:
+        @contextmanager
         def hold_all_sorted(self, labels):
-            keys = []
+            from modelark.drive_identity import compatible_keys
+
             labels = list(labels or ())
-            if con is not None:
-                for label in labels:
-                    row = con.execute(
-                        "SELECT identity_fingerprint, identity_epoch FROM drives "
-                        "WHERE drive_label=?", [label]).fetchone()
-                    if row and row[0]:
-                        keys.append((row[0], int(row[1])))
-            if not keys and labels:
-                # Fall back to label-as-identity for synthetic/test catalogs without fingerprints
-                keys = [(str(lab), 1) for lab in labels]
-            return drive_fence.hold_drives_sorted(keys, blocking=True)
+            captured = _capture_fence_identities(con, labels)
+            keys = compatible_keys(identity for _, identity in captured)
+            with drive_fence.hold_drives_sorted(keys, blocking=True) as handles:
+                binding = _PhysicalFenceBinding(captured, handles)
+                binding.validate_current(con)
+                yield binding
 
     host = socket.gethostname()
     worker = SimpleNamespace(

@@ -2872,3 +2872,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Shared observation/fences, catalog readers, archive/Fill/source consumers, explicit repair, invariant and cross-process qualification in docs/plans/archive-serial-identity-consistency.md. Preserve archive bytes, provenance, task/session history, old anchors, Slice output and receipts. New Preview/Approve/Start is required for affected work. No live repair, service restart, device operation or automatic merge is authorized by this code change.
 - `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
 - `related`: DEC-132, DEC-129, DEC-130
+
+### DEC-134: Share admission snapshot locks without weakening writer exclusion
+- `id`: DEC-134
+- `date`: 2026-09-09
+- `status`: accepted
+- `triggered_by`: DEC-133 slice-2 disposable browser qualification reproduced concurrent library-plan and preview readers contending on exclusive locks; one returned CAPACITY_EVIDENCE_UNKNOWN and left approval unavailable despite sequential fresh reads being feasible.
+- `decision`: Only short read-only admission snapshots acquire shared locks over the complete canonical/null-serial alias set. Writers, reconciliation, approvals, session authority, lifecycle revocation and child transports retain exclusive locks. Either exclusive alias still makes the snapshot non-executable, including offline anchors. Preserve global acquisition order and close-only handle release.
+- `rationale`: Exclusive snapshot readers falsely classified each other as writers after offline contention became correctly fail-closed. Returning offline evidence despite contention would hide real writers; UI retries would mask the cause. Shared snapshot locks distinguish read concurrency from mutation exclusion across processes without adding a second namespace.
+- `impact`: Neutral lock primitive and admission snapshot adapter, real cross-process reader/writer tests and portal qualification. No changes to identity admission, schema, serial observation activation, live catalog, service or device operations.
+- `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
+- `related`: DEC-133

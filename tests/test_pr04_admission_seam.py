@@ -42,8 +42,78 @@ except ModuleNotFoundError as exc:               # ONLY the exact absent submodu
 
 from modelark import capacity, capacity_evidence, drive_fence, drive_mutation, reconcile
 
-_FP = "a" * 64
+_FP = capacity_evidence.identity_fingerprint_v1(
+    fs_uuid="admission-fs", annex_uuid=None, serial=None, filesystem_capacity_bytes=1000)
 _FP_OTHER = "b" * 64
+
+
+def test_offline_clean_anchor_is_not_executable_when_either_alias_is_held(tmp_path, monkeypatch):
+    monkeypatch.setattr(drive_fence, "_LOCK_DIR", tmp_path / "locks")
+    con = _mem()
+    _proven(con, generation=1)
+    _dirty(con, "drive-00")
+    _anchor(con, "drive-00")
+    con.execute("UPDATE drives SET serial='disk-serial'")
+    keys = admission._facts(con, "drive-00").fence_identity().lock_keys()
+    assert len(keys) == 2
+    for key in keys:
+        with drive_fence.hold_drives_sorted([key]):
+            ev = admission.preview_by_drive(con, ["drive-00"], observe=lambda _: None, now="t")["drive-00"]
+            assert not ev.executable and ev.admissible_free == 0
+            assert ev.code == "DRIVE_FENCE_UNAVAILABLE"
+    assert admission.preview_by_drive(con, ["drive-00"], observe=lambda _: None, now="t")["drive-00"].executable
+    con.close()
+
+
+def test_serial_fact_change_during_observation_refuses_even_when_null_hash_unchanged():
+    con = _mem()
+    _proven(con, generation=1)
+    _dirty(con, "drive-00")
+    _anchor(con, "drive-00")
+
+    def observe(_):
+        con.execute("UPDATE drives SET serial='new-serial'")
+        return None
+
+    ev = admission.preview_by_drive(con, ["drive-00"], observe=observe,
+                                    now="t", fence=_FakeFence())["drive-00"]
+    assert not ev.executable and ev.code == "DRIVE_IDENTITY_UNPROVEN"
+    con.close()
+
+
+def test_nested_read_snapshots_coexist_without_promoting_old_identity(tmp_path, monkeypatch):
+    monkeypatch.setattr(drive_fence, "_LOCK_DIR", tmp_path / "locks")
+    catalogs = [_mem(), _mem()]
+    canonical = capacity_evidence.identity_fingerprint_v1(
+        fs_uuid="admission-fs", annex_uuid=None, serial="canonical-serial",
+        filesystem_capacity_bytes=1000)
+    for con, fingerprint in zip(catalogs, (_FP, canonical)):
+        _proven(con, generation=1, fp=fingerprint)
+        _dirty(con, "drive-00")
+        _anchor(con, "drive-00", fp=fingerprint)
+        con.execute("UPDATE drives SET serial='canonical-serial'")
+    inner = []
+
+    def outer_observe(_):
+        inner.append(admission.preview_by_drive(
+            catalogs[1], ["drive-00"], observe=lambda _: None, now="inner")["drive-00"])
+        return None
+
+    try:
+        outer = admission.preview_by_drive(
+            catalogs[0], ["drive-00"], observe=outer_observe, now="outer")["drive-00"]
+        assert outer.executable and outer.kind == "anchor"
+        assert inner[0].executable and inner[0].kind == "anchor"
+        assert outer.admissible_free == inner[0].admissible_free == 850
+        # Lock compatibility cannot make the live canonical observation match
+        # the unrepaired catalog's null-serial fingerprint.
+        stale = admission.preview_by_drive(
+            catalogs[0], ["drive-00"], observe=lambda _: _obs(fp=canonical),
+            now="live")["drive-00"]
+        assert not stale.executable and stale.code == "DRIVE_IDENTITY_UNPROVEN"
+    finally:
+        for con in catalogs:
+            con.close()
 
 
 def _require_admission():
@@ -72,6 +142,7 @@ def _proven(con, label="drive-00", *, role="primary", raid=0, epoch=1, generatio
         [label, role, raid, nominal if nominal is not None else fscap, free,
          epoch, generation, fscap, fp, authority])
     con.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('ark',?)", [label])
+    con.execute("UPDATE drives SET fs_uuid='admission-fs' WHERE drive_label=?", [label])
 
 
 def _migrated(con, label="drive-09", *, role="primary", raid=0, capacity_bytes=1000, free=500):

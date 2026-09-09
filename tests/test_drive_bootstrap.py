@@ -45,8 +45,9 @@ from modelark import drive_fence
 from modelark import drive_mutation as dm
 from modelark import register
 
-_FP = "a" * 64
 _FS, _ANX, _SER = "fs-uuid-1", "annex-uuid-1", "serial-1"
+_FP = capacity_evidence.identity_fingerprint_v1(
+    fs_uuid=_FS, annex_uuid=_ANX, serial=_SER, filesystem_capacity_bytes=1000)
 
 
 try:
@@ -100,9 +101,9 @@ def _drive_row(con, label="drive-00", *, fs_uuid=_FS, annex_uuid=_ANX, serial=_S
 def _proven_drive(con, label="drive-00", *, epoch=1, generation=0, fp=_FP, fscap=1000, free=900,
                   fs_uuid=_FS, annex_uuid=_ANX):
     con.execute("INSERT INTO drives(drive_label,capacity_bytes,free_bytes,identity_epoch,write_generation,"
-                "filesystem_capacity_bytes,identity_fingerprint,write_authority,fs_uuid,annex_uuid) "
-                "VALUES(?,?,?,?,?,?,?, 'dedicated_local', ?,?)",
-                [label, fscap, free, epoch, generation, fscap, fp, fs_uuid, annex_uuid])
+                "filesystem_capacity_bytes,identity_fingerprint,write_authority,fs_uuid,annex_uuid,serial) "
+                "VALUES(?,?,?,?,?,?,?, 'dedicated_local', ?,?,?)",
+                [label, fscap, free, epoch, generation, fscap, fp, fs_uuid, annex_uuid, _SER])
 
 
 def _dirty_gen(con, label="drive-00", *, epoch=1, gen=1, op="reconcile", owner=None, token=None):
@@ -427,13 +428,13 @@ def test_within_tolerance_refresh_reanchors_generation_2_with_fresh_free(tmp_pat
     generation 2 and re-anchors the fresh raw free (a no-op refresh keeping stale free is not allowed)."""
     cap, anchored_free = 8_000_000_000_000, 4_000_000_000_000
     with _catalog(tmp_path) as con:
-        _proven_drive(con, "drive-00", fp=_FP, epoch=1, generation=1, fscap=cap, free=anchored_free)
+        _proven_drive(con, "drive-00", fp=_real_fp(cap), epoch=1, generation=1, fscap=cap, free=anchored_free)
         _dirty_gen(con, "drive-00", epoch=1, gen=1)
-        _anchor(con, "drive-00", epoch=1, gen=1, free=anchored_free, fscap=cap)
+        _anchor(con, "drive-00", epoch=1, gen=1, free=anchored_free, fscap=cap, fp=_real_fp(cap))
         bs = _bootstrap()
         fresh = anchored_free - (bs.free_drift_tolerance_v1(4096) - 1)          # drifted, strictly BELOW tolerance
         with mock.patch.object(bs, "_live_evidence",
-                               return_value=_ev(fp=_FP, capacity=cap, free=fresh, alloc_unit=4096)), \
+                               return_value=_ev(fp=_real_fp(cap), capacity=cap, free=fresh, alloc_unit=4096)), \
              mock.patch.object(bs, "_inventory", return_value=_clean_inv()), \
              mock.patch.object(register, "archive_path", return_value=tmp_path / "mount"):
             report = bs.reconcile_drive(con, "drive-00", now="2026-07-23 12:00:00", dedicated=True)
@@ -451,13 +452,13 @@ def test_refresh_above_drift_tolerance_refuses_without_acceptance(tmp_path):
     silently re-anchored away)."""
     cap, anchored_free = 8_000_000_000_000, 4_000_000_000_000
     with _catalog(tmp_path) as con:
-        _proven_drive(con, "drive-00", fp=_FP, epoch=1, generation=1, fscap=cap, free=anchored_free)
+        _proven_drive(con, "drive-00", fp=_real_fp(cap), epoch=1, generation=1, fscap=cap, free=anchored_free)
         _dirty_gen(con, "drive-00", epoch=1, gen=1)
-        _anchor(con, "drive-00", epoch=1, gen=1, free=anchored_free, fscap=cap)
+        _anchor(con, "drive-00", epoch=1, gen=1, free=anchored_free, fscap=cap, fp=_real_fp(cap))
         bs = _bootstrap()
         drifted = anchored_free - (bs.free_drift_tolerance_v1(4096) + 1)        # strictly ABOVE tolerance
         with mock.patch.object(bs, "_live_evidence",
-                               return_value=_ev(fp=_FP, capacity=cap, free=drifted, alloc_unit=4096)), \
+                               return_value=_ev(fp=_real_fp(cap), capacity=cap, free=drifted, alloc_unit=4096)), \
              mock.patch.object(bs, "_inventory", return_value=_clean_inv()), \
              mock.patch.object(register, "archive_path", return_value=tmp_path / "mount"):
             try:
@@ -476,13 +477,13 @@ def test_refresh_above_drift_tolerance_reanchors_with_accept_drift(tmp_path):
     generation 2 + anchor storing the observed free, under a DISTINCT 'accept-drift' operation code."""
     cap, anchored_free = 8_000_000_000_000, 4_000_000_000_000
     with _catalog(tmp_path) as con:
-        _proven_drive(con, "drive-00", fp=_FP, epoch=1, generation=1, fscap=cap, free=anchored_free)
+        _proven_drive(con, "drive-00", fp=_real_fp(cap), epoch=1, generation=1, fscap=cap, free=anchored_free)
         _dirty_gen(con, "drive-00", epoch=1, gen=1)
-        _anchor(con, "drive-00", epoch=1, gen=1, free=anchored_free, fscap=cap)
+        _anchor(con, "drive-00", epoch=1, gen=1, free=anchored_free, fscap=cap, fp=_real_fp(cap))
         bs = _bootstrap()
         drifted = anchored_free - (bs.free_drift_tolerance_v1(4096) + 1)        # above tolerance, but accepted
         with mock.patch.object(bs, "_live_evidence",
-                               return_value=_ev(fp=_FP, capacity=cap, free=drifted, alloc_unit=4096)), \
+                               return_value=_ev(fp=_real_fp(cap), capacity=cap, free=drifted, alloc_unit=4096)), \
              mock.patch.object(bs, "_inventory", return_value=_clean_inv()), \
              mock.patch.object(register, "archive_path", return_value=tmp_path / "mount"):
             report = bs.reconcile_drive(con, "drive-00", now="2026-07-23 12:00:00",

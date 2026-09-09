@@ -31,7 +31,10 @@ except ModuleNotFoundError as exc:               # ONLY the exact absent submodu
         raise
     _HAS_ADMISSION = False
 
-_FP = "a" * 64
+from modelark.capacity_evidence import identity_fingerprint_v1
+
+_FP = identity_fingerprint_v1(fs_uuid="transport-fs", annex_uuid=None, serial=None,
+                              filesystem_capacity_bytes=1000)
 
 
 def _require_admission():
@@ -74,6 +77,7 @@ def _proven_drive(con, label="drive-00", *, fp=_FP, fscap=1000, free=900):
         "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,identity_epoch,write_generation,"
         "filesystem_capacity_bytes,identity_fingerprint,write_authority) "
         "VALUES(?,?,?,1,0,?,?, 'dedicated_local')", [label, fscap, free, fscap, fp])
+    con.execute("UPDATE drives SET fs_uuid='transport-fs' WHERE drive_label=?", [label])
     con.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('ark',?)", [label])
 
 

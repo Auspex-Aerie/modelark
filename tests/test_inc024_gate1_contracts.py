@@ -15,6 +15,7 @@ import pytest
 
 import _pr09_gate1_fixtures as f
 from modelark import archive_manifest, capacity, proposal as prop
+from modelark.capacity_evidence import identity_fingerprint_v1
 from modelark.proposal import Refusal
 
 
@@ -393,12 +394,15 @@ def test_c09_joint_feasibility_uses_planned_not_wide_charge():
     admissible = free - floor
     assert admissible == 10_450, f"witness admissible expected 10450, got {admissible}"
     for label, meta in f.DRIVE_IDS.items():
+        fingerprint = identity_fingerprint_v1(
+            fs_uuid=label + "-fs", annex_uuid=None, serial=None,
+            filesystem_capacity_bytes=free)
         con.execute(
             "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,role,raid_backed,"
             "lifecycle,eligibility,identity_epoch,write_generation,identity_fingerprint,"
-            "write_authority,filesystem_capacity_bytes) "
-            "VALUES(?,?,?,?,0,'active','enabled',?,1,?,'dedicated_local',?)",
-            [label, free, free, meta["role"], meta["epoch"], meta["fingerprint"], free])
+            "write_authority,filesystem_capacity_bytes,fs_uuid) "
+            "VALUES(?,?,?,?,0,'active','enabled',?,1,?,'dedicated_local',?,?)",
+            [label, free, free, meta["role"], meta["epoch"], fingerprint, free, label + "-fs"])
         con.execute(
             "INSERT INTO drive_dirty_generations"
             "(drive_label,identity_epoch,generation,operation_code) VALUES(?,?,1,'seed')",
@@ -408,7 +412,7 @@ def test_c09_joint_feasibility_uses_planned_not_wide_charge():
             "(drive_label,identity_epoch,generation,anchor_free_bytes,filesystem_capacity_bytes,"
             "identity_fingerprint,write_authority,identity_proof,fence_proof,observed_at) "
             "VALUES(?,?,1,?,?,?,'dedicated_local','seed','seed','2026-01-01T00:00:00Z')",
-            [label, meta["epoch"], free, free, meta["fingerprint"]])
+            [label, meta["epoch"], free, free, fingerprint])
     if plan_mod.get(con, "ark") is None:
         plan_mod.create(con, "ark", name="Ark")
     for label in f.DRIVE_IDS:

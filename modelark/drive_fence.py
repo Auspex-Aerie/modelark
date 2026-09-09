@@ -6,8 +6,9 @@ keyed on the catalog identity — every process opening the same catalog contend
 drive contends across different catalogs and state directories. Lock files live in a fixed host
 directory, never under a caller's state dir, so the namespaces above actually collide.
 
-PR-03a is a dormant internal facility: no production call site imports it yet (child-FD inheritance and
-transport integration are #35-B PR-03b; registration/recovery are PR-03c).
+Workflow adapters expand compatible physical identities before using these raw-key primitives.
+Only read-only admission snapshots use shared holds; authority-changing operations remain exclusive.
+Drive handles close without explicit unlock so inherited children retain exclusion (DEC-133/134).
 """
 from __future__ import annotations
 
@@ -55,10 +56,11 @@ def drive_lock_path(identity, epoch) -> Path:
     return _LOCK_DIR / f"drive-{drive_lock_key(identity, epoch)}.lock"
 
 
-def _acquire(path: Path, blocking: bool):
+def _acquire(path: Path, blocking: bool, *, shared=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(path, "w")                          # noqa: SIM115 — held open for the lock's lifetime
-    flags = fcntl.LOCK_EX if blocking else (fcntl.LOCK_EX | fcntl.LOCK_NB)
+    mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+    flags = mode if blocking else (mode | fcntl.LOCK_NB)
     try:
         fcntl.flock(handle, flags)
     except OSError as exc:                            # BlockingIOError (held) is a subclass of OSError
@@ -80,16 +82,33 @@ def hold_controller(catalog_path, *, blocking=True):
 @contextmanager
 def hold_drives_sorted(keyed_drives, *, blocking=True):
     """Hold per-drive locks for ``keyed_drives`` (iterable of ``(identity, epoch)``), acquired in
-    canonical sorted order and released in reverse."""
+    canonical sorted unique order and closed in reverse. Closing (not explicitly
+    unlocking) preserves an inherited child's hold on the same open-file description."""
+    with _hold_drives(keyed_drives, blocking=blocking, shared=False) as handles:
+        yield handles
+
+
+@contextmanager
+def hold_drive_reads_sorted(keyed_drives, *, blocking=False):
+    """Read-only admission snapshots coexist, but exclude every exclusive writer.
+
+    Callers still expand and hold the entire compatible alias set. This confers no
+    mutation authority and does not change writer, approval or child lock modes.
+    """
+    with _hold_drives(keyed_drives, blocking=blocking, shared=True) as handles:
+        yield handles
+
+
+@contextmanager
+def _hold_drives(keyed_drives, *, blocking, shared):
     handles = []
     try:
-        for identity, epoch in sorted(keyed_drives):
-            handles.append(_acquire(drive_lock_path(identity, epoch), blocking))
+        for identity, epoch in sorted(set(keyed_drives)):
+            handles.append(_acquire(drive_lock_path(identity, epoch), blocking, shared=shared))
         yield handles
     finally:
         for handle in reversed(handles):
             try:
-                fcntl.flock(handle, fcntl.LOCK_UN)
                 handle.close()
             except OSError:
                 pass

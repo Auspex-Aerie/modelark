@@ -41,6 +41,7 @@ from typing import Callable
 from modelark import capacity_evidence, drive_fence, register
 from modelark import drive_mutation as dm
 from modelark import execution_authority as authority
+from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity, compatible_keys
 from modelark.core import db
 
 # Re-export the typed refusal so operator entry points (the `drive reconcile` CLI) can translate it to a
@@ -265,7 +266,7 @@ def _require_complete_inventory(
 def _persisted(con, label: str):
     row = con.execute(
         "SELECT identity_epoch, write_generation, identity_fingerprint, filesystem_capacity_bytes, "
-        "write_authority, fs_uuid, annex_uuid FROM drives WHERE drive_label=?", [label]).fetchone()
+        "write_authority, fs_uuid, annex_uuid, serial FROM drives WHERE drive_label=?", [label]).fetchone()
     if row is None:
         raise dm.DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
     return row
@@ -291,7 +292,7 @@ class _RecoveryOwner:
 
 
 def _dirty_owner(con, label, facts):
-    epoch, gen, fp, cap, auth, _, _ = facts
+    epoch, gen, fp, cap, auth = facts[:5]
     if dm._generation_is_clean(con, label, epoch, gen, fp, cap, auth):
         return None
     row = con.execute(
@@ -371,7 +372,7 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
         with drive_fence.hold_controller(db.DB_PATH, blocking=blocking):
             require_no_live_session(con)
             facts = _persisted(con, label)
-            p_epoch, p_gen, p_fp, p_cap, p_auth, p_fs, p_annex = facts
+            p_epoch, p_gen, p_fp, p_cap, p_auth, p_fs, p_annex, p_serial = facts
             owner = _capture_recovery_owner(con, label, facts)
             ev = _live_evidence(con, label)
             if not ev.proven:
@@ -389,8 +390,15 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
             if owner is not None and (p_gen <= 0 or p_fp != ev.fingerprint or p_cap != ev.capacity
                                       or p_auth != "dedicated_local"):
                 raise dm.DriveMutationRefused("DRIVE_RECOVERY_IDENTITY_CHANGED", drive=label)
-            keyed = ([(p_fp, p_epoch), (ev.fingerprint, p_epoch + 1)] if transition
-                     else [(ev.fingerprint, p_epoch)])
+            identities = [FenceIdentity(
+                ev.fs_uuid, ev.annex_uuid, p_serial, ev.capacity,
+                p_epoch + 1 if transition else p_epoch, ev.fingerprint)]
+            if p_fp is not None:
+                identities.append(FenceIdentity(p_fs, p_annex, p_serial, p_cap, p_epoch, p_fp))
+            try:
+                keyed = compatible_keys(identities)
+            except UnprovenFenceIdentity as exc:
+                raise dm.DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label, reason=str(exc)) from exc
             with drive_fence.hold_drives_sorted(keyed, blocking=blocking):
                 require_no_live_session(con)
                 if _persisted(con, label) != facts:
@@ -403,7 +411,7 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
                 if owner is not None:
                     return _recover_owned_generation(con, label, dest, facts, owner, ev, now, progress)
                 return _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now,
-                                          accept_drift, transition, progress)
+                                          accept_drift, transition, progress, facts)
     except drive_fence.FenceUnavailable as exc:
         raise dm.DriveMutationRefused("DRIVE_FENCE_UNAVAILABLE", **exc.evidence) from exc
 
@@ -431,7 +439,18 @@ def _decide_and_commit(
     accept_drift,
     transition,
     progress,
+    captured_facts,
 ):
+    def commit(body):
+        def checked():
+            from modelark.execution_session import require_no_live_session
+            require_no_live_session(con)
+            if (_persisted(con, label) != captured_facts
+                    or _dirty_owner(con, label, captured_facts) is not None):
+                raise dm.DriveMutationRefused("DRIVE_RECOVERY_OWNER_CHANGED", drive=label)
+            return body()
+        return dm._immediate(con, checked)
+
     if p_fp is None:                                     # (A) bootstrap: establish identity + first anchor
         inventory = _require_complete_inventory(con, label, dest, progress=progress)
         final = _final_observation(con, label, ev)
@@ -449,7 +468,7 @@ def _decide_and_commit(
         return Reconciliation(
             "bootstrapped",
             p_epoch,
-            dm._immediate(con, _body),
+            commit(_body),
             final.free,
             inventory=inventory,
         )
@@ -472,7 +491,7 @@ def _decide_and_commit(
         return Reconciliation(
             "epoch_advanced",
             new_epoch,
-            dm._immediate(con, _body),
+            commit(_body),
             final.free,
             inventory=inventory,
         )
@@ -492,7 +511,7 @@ def _decide_and_commit(
         return Reconciliation(
             "refreshed",
             p_epoch,
-            dm._immediate(con, _body0),
+            commit(_body0),
             final.free,
             inventory=inventory,
         )
@@ -506,7 +525,11 @@ def _decide_and_commit(
             raise dm.DriveMutationRefused("DRIVE_RECOVERY_SESSION_ACTIVE", drive=label)
         inventory = _require_complete_inventory(con, label, dest, progress=progress)
         final = _final_observation(con, label, ev)
-        dm.publish_clean_anchor(con, label, p_epoch, p_gen, final.observation(), now)
+        def publish():
+            dm._publish_anchor_locked(con, label, p_epoch, p_gen, final.observation(), now)
+            from modelark.proposal import bump_revision
+            bump_revision(con)
+        commit(publish)
         return Reconciliation(
             "recovered",
             p_epoch,
@@ -536,7 +559,7 @@ def _decide_and_commit(
     return Reconciliation(
         "drift_accepted" if drifted else "refreshed",
         p_epoch,
-        dm._immediate(con, _body),
+        commit(_body),
         final.free,
         inventory=inventory,
     )

@@ -7,6 +7,12 @@ import pytest
 
 from modelark import drive_lifecycle, plan, proposal
 from modelark.core import db
+from modelark.capacity_evidence import identity_fingerprint_v1
+
+
+def _fingerprint(serial):
+    return identity_fingerprint_v1(fs_uuid=serial + "-fs", annex_uuid=None, serial=serial,
+                                   filesystem_capacity_bytes=1000000000000)
 
 
 def _catalog(tmp_path):
@@ -25,9 +31,9 @@ def _catalog(tmp_path):
         "VALUES('org/model','model.safetensors',100,'safetensors','bf16',?)",
         ["1" * 64],
     )
-    for label, serial, fingerprint in (
-        ("drive-00", "KEEP-SERIAL", "a" * 64),
-        ("drive-02", "FAILED-SERIAL", "b" * 64),
+    for label, serial in (
+        ("drive-00", "KEEP-SERIAL"),
+        ("drive-02", "FAILED-SERIAL"),
     ):
         con.execute(
             "INSERT INTO drives(drive_label,serial,hw_model,capacity_bytes,free_bytes,"
@@ -35,8 +41,9 @@ def _catalog(tmp_path):
             "identity_fingerprint,write_authority) "
             "VALUES(?,?,?,1000000000000,900000000000,1000000000000,'primary',"
             "'active','enabled',3,?,'dedicated_local')",
-            [label, serial, "test disk", fingerprint],
+            [label, serial, "test disk", _fingerprint(serial)],
         )
+        con.execute("UPDATE drives SET fs_uuid=? WHERE drive_label=?", [serial + "-fs", label])
     plan.create(con, "ark", name="Ark")
     plan.add_drive(con, "ark", "drive-00")
     plan.add_drive(con, "ark", "drive-02")
@@ -115,7 +122,7 @@ def test_preview_is_read_only_and_exposes_preserved_residency(tmp_path):
     preview = drive_lifecycle.loss_preview(con, "drive-02")
     assert preview["planner_revision"] == 7
     assert preview["identity_epoch"] == 3
-    assert preview["identity_fingerprint"] == "b" * 64
+    assert preview["identity_fingerprint"] == _fingerprint("FAILED-SERIAL")
     assert preview["plans"] == [{"plan_id": "ark", "is_active": True}]
     assert preview["archived_rows"] == 1
     assert preview["replica_rows"] == 1
@@ -134,7 +141,7 @@ def test_declare_lost_bumps_once_invalidates_approval_and_preserves_history(tmp_
     result = _declare(con, preview)
     assert result == {
         "drive_label": "drive-02", "lifecycle": "lost", "eligibility": "excluded",
-        "identity_epoch": 3, "identity_fingerprint": "b" * 64,
+        "identity_epoch": 3, "identity_fingerprint": _fingerprint("FAILED-SERIAL"),
         "planner_revision": 8, "changed": True, "approval_invalidated": True,
     }
     assert con.execute(

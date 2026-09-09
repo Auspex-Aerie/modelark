@@ -20,6 +20,7 @@ import urllib.request
 from pathlib import Path
 
 from modelark import plan
+from modelark.capacity_evidence import identity_fingerprint_v1
 from modelark.core import db
 
 PORT = 8099
@@ -105,14 +106,17 @@ def _seed(con) -> None:
     # Reconcile the placeable drives (proven identity + a matching clean anchor) so admission evidence is
     # available offline (#35-C). A migrated drive would be `unknown` and capacity-block everything —
     # the fail-closed migration default — masking the intended policy/replica-capacity blockers.
-    for label, cap, fp in (
-        ("drive-00", 10000000000000, "a" * 64),
-        ("drive-replica", 1000000000, "b" * 64),
-        ("drive-07", 8000000000000, "c" * 64),
+    for label, cap in (
+        ("drive-00", 10000000000000),
+        ("drive-replica", 1000000000),
+        ("drive-07", 8000000000000),
     ):
+        fs_uuid = label + "-filesystem"
+        fp = identity_fingerprint_v1(fs_uuid=fs_uuid, annex_uuid=None, serial=None,
+                                     filesystem_capacity_bytes=cap)
         con.execute("UPDATE drives SET identity_epoch=1, write_generation=1, filesystem_capacity_bytes=?, "
-                    "identity_fingerprint=?, write_authority='dedicated_local' WHERE drive_label=?",
-                    (cap, fp, label))
+                    "identity_fingerprint=?,fs_uuid=?,write_authority='dedicated_local' WHERE drive_label=?",
+                    (cap, fp, fs_uuid, label))
         con.execute("INSERT INTO drive_dirty_generations(drive_label,identity_epoch,generation,"
                     "operation_code) VALUES(?,1,1,'reconcile')", (label,))
         con.execute("INSERT INTO drive_clean_anchors(drive_label,identity_epoch,generation,"
