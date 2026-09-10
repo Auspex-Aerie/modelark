@@ -69,7 +69,31 @@ read from the live archive, and no application service is started or stopped.
 
 ## Stage results and reviews
 
-Initial local unit/regression run: 63 passed, 5 skipped (optional zstd cases in
-the local environment). Large exploratory runs completed all 13 child checks;
-the final reviewed-code run and review status will be recorded before handoff.
-These remain HYP-002 evidence, not a blanket production go decision.
+Local targeted regression run after review hardening: **71 passed, 5 skipped**
+(optional zstd cases in this environment); full-project Ruff passed.
+
+Unchanged-code large runs passed all **13** checks in both dependency stacks:
+
+| Runtime | Code revision | Python / ZipNN / Torch | Result |
+|---|---|---|---|
+| Development | f336101 | 3.10.12 / 0.5.4 / 2.13.0 | 13/13 |
+| Installed dependencies, checkout code | 4311547 | 3.10.12 / 0.5.4 / 2.14.0 | 13/13 |
+
+Final installed-dependency run: `/tmp/modelark-codec-qualification-b8fo65k8/result.json`.
+Its maximum measured RSS across phases was 1,765,400,576 bytes (about 1.64 GiB);
+maximum virtual-address peak was 6,774,444,032 bytes (about 6.31 GiB), under the
+same 8 GiB AS policy. Source-code fingerprints are in the report. Package
+versions and these source hashes are not native-binary attestation.
+
+Local Grok CLI review round 1 found no blockers, with hardening suggestions.
+Accounting-error typing, malformed membership rejection and precise test wording
+were addressed. Round 2 **ACCEPTED 4311547** with no blockers. Child-process-group
+lifecycle, native binary identity and general-purpose worker API remain outside
+this unadopted qualification stage; they must not be inferred from its result.
+
+The full core suite is also being run in a disposable user/network namespace:
+ordinary sandbox execution blocks localhost sockets, and ordinary host execution
+collides with the live portal's intentionally host-wide singleton. Namespace
+isolation preserves that guard and does not stop the live service. CI validates
+the PR revision independently. These remain HYP-002 evidence, not a blanket
+production go decision or a completed physical Slice test.

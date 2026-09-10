@@ -2992,3 +2992,6 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `method`: Stage A uses fresh sequential workers, an 8 GiB RLIMIT_AS ceiling, 2 GiB additional observed host/visible-cgroup headroom, full original hashes and a deliberate denied allocation. No resource reservation or production/physical acceptance is inferred. Wider hostile-input, installed-runtime and lifecycle qualification remains necessary before live admission.
 - `docs_updated`: docs/decision_log.md, docs/codec-resource-qualification.md
 - `related`: DEC-138, DEC-139, scripts/qualify_codec_resources.py
+
+#### HYP-002 results — 2026-09-10
+- Unchanged-code synthetic runs completed all 13 checks using Python 3.10.12 / ZipNN 0.5.4 with dev Torch 2.13.0 (f336101) and installed-dependency Torch 2.14.0 (4311547). Both whole and StreamZNN compression/canary/restore passed original hashes at both observed failure sizes under one 8 GiB AS policy plus 2 GiB sampled headroom. Final report: `/tmp/modelark-codec-qualification-b8fo65k8/result.json`, with implementation fingerprints; max RSS 1,765,400,576 bytes and virtual peak 6,774,444,032 bytes. This supports feasibility for these fixtures, not general host-OOM protection, native binary attestation or production caller adoption. HYP remains open for the broader qualification/integration gates.
