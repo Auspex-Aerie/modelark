@@ -69,7 +69,7 @@ read from the live archive, and no application service is started or stopped.
 
 ## Stage results and reviews
 
-Local targeted regression run after review hardening: **71 passed, 5 skipped**
+Local targeted regression run after remote-review hardening: **74 passed, 5 skipped**
 (optional zstd cases in this environment); full-project Ruff passed.
 
 Unchanged-code large runs passed all **13** checks in both dependency stacks:
@@ -91,9 +91,20 @@ were addressed. Round 2 **ACCEPTED 4311547** with no blockers. Child-process-gro
 lifecycle, native binary identity and general-purpose worker API remain outside
 this unadopted qualification stage; they must not be inferred from its result.
 
-The full core suite is also being run in a disposable user/network namespace:
+Remote review round 1 found a cgroup named `host` could overwrite the host sample
+in a flat observation dictionary. A regression reproduced the overestimate. Host
+and cgroup evidence now occupy separate structural fields; tests cover `host`
+and names matching both new field labels. The post-fix installed-dependency run
+passed all 13 checks: `/tmp/modelark-codec-qualification-9bdahflv/result.json`.
+Its source fingerprints bind that result to the corrected implementation.
+
+The full core suite ran in a disposable user/network namespace:
 ordinary sandbox execution blocks localhost sockets, and ordinary host execution
 collides with the live portal's intentionally host-wide singleton. Namespace
 isolation preserves that guard and does not stop the live service. CI validates
-the PR revision independently. These remain HYP-002 evidence, not a blanket
+the PR revision independently. The namespace run had 3,297 passes, 6 skips and
+7 permission/ACL failures caused by user-namespace UID mapping; those seven
+passed when rerun as the ordinary host user. The initial PR head also passed
+both Python CI test jobs and E2E. New commits require their own CI/review results.
+These remain HYP-002 evidence, not a blanket
 production go decision or a completed physical Slice test.

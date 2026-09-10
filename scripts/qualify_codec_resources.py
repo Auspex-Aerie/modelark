@@ -32,16 +32,16 @@ def available_memory() -> dict:
 
 
 def _available_memory():
-    values = {}
+    host_available = None
     for line in Path("/proc/meminfo").read_text().splitlines():
         fields = line.split()
         if fields and fields[0] == "MemAvailable:":
             if len(fields) != 3 or fields[2] != "kB":
                 raise CodecResourceRefusal("unrecognized MemAvailable accounting")
-            values["host"] = int(fields[1]) * 1024
-            if values["host"] < 0:
+            host_available = int(fields[1]) * 1024
+            if host_available < 0:
                 raise CodecResourceRefusal("negative host memory accounting")
-    if "host" not in values:
+    if host_available is None:
         raise CodecResourceRefusal("host available memory is unknown")
     mounts = [line.split() for line in Path("/proc/self/mountinfo").read_text().splitlines()
               if " - cgroup2 " in line]
@@ -55,6 +55,7 @@ def _available_memory():
         raise CodecResourceRefusal("invalid cgroup membership")
     root = Path("/sys/fs/cgroup")
     current = root / relative
+    cgroup_headroom = {}
     while True:
         # Initial hierarchy roots have no memory.max; a visible namespace root
         # may have one and its limit must not be discarded.
@@ -64,11 +65,13 @@ def _available_memory():
             if used < 0 or maximum != "max" and int(maximum) < 0:
                 raise CodecResourceRefusal("negative cgroup memory accounting")
             if maximum != "max":
-                values[str(current.relative_to(root))] = max(0, int(maximum) - used)
+                cgroup_headroom[str(current.relative_to(root))] = max(0, int(maximum) - used)
         if current == root:
             break
         current = current.parent
-    return {"available_bytes": min(values.values()), "observations": values}
+    return {"available_bytes": min([host_available, *cgroup_headroom.values()]),
+            "observations": {"host_available_bytes": host_available,
+                             "cgroup_headroom_bytes": cgroup_headroom}}
 
 
 def _dump(path, record):

@@ -35,12 +35,28 @@ def test_ancestor_limit_and_memavailable_not_memfree(monkeypatch):
     _proc(monkeypatch)
     sample = q.available_memory()
     assert sample["available_bytes"] == 40000
-    assert sample["observations"]["host"] == 200 * 1024
+    assert sample["observations"]["host_available_bytes"] == 200 * 1024
+    assert sample["observations"]["cgroup_headroom_bytes"] == {"a": 40000}
 
 
 def test_visible_root_limit_is_not_ignored(monkeypatch):
     _proc(monkeypatch, root_limit=True)
     assert q.available_memory()["available_bytes"] == 20000
+
+
+@pytest.mark.parametrize("group", ["host", "host_available_bytes", "cgroup_headroom_bytes"])
+def test_cgroup_names_cannot_replace_host_headroom(monkeypatch, group):
+    files = _proc(monkeypatch)
+    files["/proc/meminfo"] = "MemAvailable: 1 kB\n"
+    files["/proc/self/cgroup"] = f"0::/{group}\n"
+    files[f"/sys/fs/cgroup/{group}/memory.max"] = "200000"
+    files[f"/sys/fs/cgroup/{group}/memory.current"] = "0"
+    sample = q.available_memory()
+    assert sample["available_bytes"] == 1024
+    assert sample["observations"]["host_available_bytes"] == 1024
+    assert sample["observations"]["cgroup_headroom_bytes"] == {group: 200000}
+    with pytest.raises(CodecResourceRefusal):
+        q.CodecMemoryPolicy(4096, 0).admit(sample["available_bytes"])
 
 
 def test_overdrawn_cgroup_has_zero_headroom(monkeypatch):
