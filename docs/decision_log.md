@@ -2939,3 +2939,56 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `revisit_when`: Scope the next Slice/USB onboarding UI increment, and before presenting FAT32 delivery as a self-service workflow without attended CLI assistance.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-folders.md
 - `related`: DEC-130, docs/usable-slice-direct.md, modelark/slice/fat32_observation.py
+
+### DEC-138: Share RAM-safety admission across compression and original-byte decoding
+- `id`: DEC-138
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: Operator condition on the representation plan: a file accepted for compression must be decompressible under equivalent conditions, using the same RAM-safety methodology rather than a separate Slice limit.
+- `decision`: Use one shared resource-admission mechanism and explicit budget/headroom methodology for compression, round-trip verification, restore and Slice decoding. Operation-specific resource estimates are permitted only when qualified; identical methodology does not mean pretending compression and decompression allocate identically. Under the same supported codec/runtime, resource profile and available headroom, accepted compression must produce output that the corresponding decoder admits and verifies byte-for-byte. Test both operations under that shared profile. Genuine runtime/resource differences may cause a typed resource refusal, never an unexplained consumer-specific format/size cap.
+- `rationale`: Sharing codec parsing alone leaves the writer/reader RAM-policy mismatch intact. Successful compression or a child process is not by itself proof of safe decoding; qualify the complete round trip, including native memory and buffers.
+- `impact`: Tightens docs/plans/slice-representation-architecture.md: common RAM admission on the compression side is required before claiming parity, while broader decoder-adapter migration remains staged. Preserve archive bytes, original hashes, canary-before-drop, old approval semantics and distinct source/transport authority. Existing archives may have been created under different resources and must be detected and evaluated rather than assumed compatible with today's budget.
+- `docs_updated`: docs/decision_log.md, docs/plans/slice-representation-architecture.md
+- `related`: DEC-021, DEC-022, INC-003
+- `scope_boundary`: Design requirement only; no implementation, deployment, archive rewrite, live test, PR push or host configuration change is performed or authorized by this confirmation.
+
+### DEC-139: Reuse standalone StreamZNN behind explicit Slice representation boundaries
+- `id`: DEC-139
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: Operator approved the jointly reviewed representation plan and staged implementation/review workflow after DEC-138 made shared RAM admission mandatory.
+- `decision`: Separate selection of original-file identity, delivery representation and transport. Preserve current original-file delivery; extend the MIT standalone StreamZNN with caller-owned bounded stream primitives rather than duplicate its decoder. Keep ModelArk resource orchestration and archive/destination authority outside that module. Stage common RAM qualification, reusable reading, guarded whole-frame admission, existing-consumer alignment and end-to-end qualification. Original-output source alternatives may have different encodings of identical original bytes; future stored output must bind exact stored bytes and its own verification claim.
+- `rationale`: A second consumer-specific codec/resource policy recreated a producer/reader incompatibility. Shared mechanisms must not collapse different delivery evidence or grant Slice archive retrieval/mutation authority.
+- `impact`: Implementation and review sequence in docs/plans/slice-representation-architecture.md; each stage gets up to three local Grok CLI rounds followed by up to three Greptile/Codex PR rounds. Remaining findings or common architectural causes are summarized instead of patched indefinitely. Operator retains merge control. Live deployment and physical acceptance remain separately scoped.
+- `docs_updated`: docs/decision_log.md, docs/plans/slice-representation-architecture.md, docs/codec-resource-qualification.md
+- `related`: DEC-021, DEC-022, DEC-081, DEC-098, DEC-138
+
+### DEF-045: Defer selectable stored-representation export
+- `id`: DEF-045
+- `date`: 2026-09-10
+- `status`: active
+- `triggered_by`: DEC-139 separates selection from requested representation; operator explicitly places compressed-output choice in later work.
+- `decision`: Specify but do not expose stored-export CLI/profile modes in the current original-delivery repair. Future stored output must bind stored digest/size, original linkage, exact paths, capacity and truthful receipt evidence without automatic decoding or recompression.
+- `revisit_when`: Operator scopes compressed local export or peer serving; complete those representation/evidence contracts before exposing a public switch.
+- `docs_updated`: docs/decision_log.md, docs/plans/slice-representation-architecture.md
+- `related`: DEC-139
+
+### DEF-046: Defer peer transport implementation behind representation contracts
+- `id`: DEF-046
+- `date`: 2026-09-10
+- `status`: active
+- `triggered_by`: DEC-139 and operator direction that later P2P builds on Slice functionality.
+- `decision`: No peer listener, discovery, authorization or network transport in the current arc. Preserve the distinction between network representation and requested final output; transport must not widen approval or verification claims.
+- `revisit_when`: Peer distribution is explicitly scoped after representation identity and verification contracts are stable.
+- `docs_updated`: docs/decision_log.md, docs/plans/slice-representation-architecture.md
+- `related`: DEC-139, DEF-045
+
+### HYP-002: Can one explicit address-space envelope admit both codec directions on the installed stack?
+- `id`: HYP-002
+- `date`: 2026-09-10
+- `status`: open
+- `triggered_by`: DEC-138; ZipNN imports substantial virtual mappings, so a byte-frame cap or compression multiplier is not a complete memory methodology.
+- `question`: Can whole and streamed compression, canary and restoration of synthetic fixtures matching the observed 99,630,640 and 409,993,344 byte failures succeed under one enforced worker AS ceiling, with measured RSS and controlled over-limit refusal?
+- `method`: Stage A uses fresh sequential workers, an 8 GiB RLIMIT_AS ceiling, 2 GiB additional observed host/visible-cgroup headroom, full original hashes and a deliberate denied allocation. No resource reservation or production/physical acceptance is inferred. Wider hostile-input, installed-runtime and lifecycle qualification remains necessary before live admission.
+- `docs_updated`: docs/decision_log.md, docs/codec-resource-qualification.md
+- `related`: DEC-138, DEC-139, scripts/qualify_codec_resources.py
