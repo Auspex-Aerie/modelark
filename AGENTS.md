@@ -1,0 +1,39 @@
+# ModelArk (modelark)
+
+An ark for open model weights: catalog model metadata broadly, archive supported artifacts from a
+curated set across an offline git-annex drive library, and record distinct remote-header, ingestion,
+copy, and physical-verification evidence. Do not collapse those evidence levels into a claim that
+every catalog entry is loadable or every offline copy is currently verified. See `README.md` for the
+current product contract and `catalog_discussions.md` for non-normative catalog research.
+
+Package: `modelark.core` (shared catalog/db) + `modelark` (discovery, archive, portal, restore).
+Tooling: `.venv` for runtime, `.venv-dev` for tests/builds, `hf` CLI for Hub auth, and
+`git-annex` for bytes. DuckDB is optional and used only for legacy migration.
+
+## Decision log
+
+Decisions, deferrals, and hypotheses for this project are recorded in
+`docs/decision_log.md` — an append-only,
+[ADRLight](https://github.com/Indubitable-Industries/ADRLight)-style ledger (this
+repo is `Auspex-Aerie/modelark`). Record architecture/policy decisions there as
+you make them, following the format at the top of that file; append only, never
+rewrite past entries (status updates excepted).
+
+## Review automation
+
+Trigger Greptile reviews with the exact canonical mention `@greptileai review`.
+GitHub API identities such as `greptile-apps[bot]` identify reactions and review
+authors; they are not substitutes for the trigger mention, even if a push causes
+an automatic review at the same time.
+
+## Operator approval continuity (2026-09-10)
+
+When the operator replies "ok", "begin", "go", "continue", or equivalent to an
+activity just described, treat that as authorization to perform that activity
+and its normal, scoped supporting steps across subsequent turns. Do not ask for
+the same approval again merely because a new turn or implementation step begins.
+Ask again only for a materially different target, risk, destructive action, or
+scope not covered by the described activity, or a genuinely required user choice.
+Missing credentials or sudo access are execution blockers, not missing consent:
+provide the exact necessary command instead of asking for redundant authorization.
+This preference does not bypass tool permissions or safety boundaries.

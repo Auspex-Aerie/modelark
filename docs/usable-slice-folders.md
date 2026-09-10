@@ -2,8 +2,11 @@
 
 Approved scope: DEC-130 and [the implementation scope](plans/folder-projection-scope.md).
 Native ext4 and separate FAT32 session execution are implemented. Disposable kernel-vfat writer,
-public-flow and alias qualification passed. PR review and real-source/USB acceptance remain
-outstanding. This is not a deployed or physical-media-qualified release.
+public-flow and alias qualification passed. Reviewed merge `16e8b3f` was deployed on 2026-09-10;
+the attended real-source FAT32 USB smoke test passed under the qualified mount profile described
+below. This is evidence for that tested configuration, not arbitrary USB or filesystem support.
+See the [acceptance record](acceptance/source-identity-usb-2026-09-10.md) for live repair,
+raw-source completion and the still-incomplete compressed-source follow-up.
 
 ## Operator workflow
 
@@ -138,16 +141,37 @@ capacity waits and failures require a new intent and different output folder. Re
 untouched. A known capacity shortfall before claim consumption is retryable. The media report
 says export verified, not host transaction committed; committed host status supplies that evidence.
 
-## Remaining gates
+## Completed qualification gates and evidence limits
 
-- Gate C: finish qualification of the implemented `fat32-folder-session.v1`. The operator's first
+- Gate C: qualification of the implemented `fat32-folder-session.v1` passed. The operator's first
   disposable-image run passed no-replace/flush, original-byte/report delivery, 30 interruption
   boundaries and sibling preservation. The updated [attended script](plans/fat32-session-protocol.md)
   additionally exercises exact/case/numbered-short-alias parent checks and public Preview/Approve/
   Start with synthetic source/backing evidence. The operator reported all additions passed in
   `/tmp/modelark-fat32-qualification-ru4sibe7`; the planned disposable-image gate is complete.
-- Gate D: separately authorized real-source reconciliation and attended USB acceptance. The
-  existing FAT32 USB has not been qualified or written by this implementation.
+- Gate D: the separately authorized source-evidence repair and attended FAT32 USB smoke test passed
+  on 2026-09-10 using deployed merge `16e8b3f`. Public Preview → Approve → Start → Status delivered
+  `facebook/wav2vec2-base-960h` from the repaired drive-07 archive: nine uncompressed source files,
+  377,615,574 original bytes. Every delivered size/SHA-256 matched the sealed closure, the exact
+  output-file layout matched, the FAT export report was published, and host status was `complete`.
+  All eight pre-existing USB files retained their sizes/hashes; the live catalog was logically
+  unchanged. The portal was restored with Fill idle.
+  The operator temporarily mounted the USB with the qualified FAT32 name/permission options and
+  `noexec`, without desktop `showexec`; no formatting or existing-file deletion was performed.
+  This successful raw-file transfer does not qualify compressed-source decoding on physical media,
+  interruption/power-loss survival, arbitrary desktop mount options, or functional model loading.
+  Private evidence: candidate `16e8b3f/usb-slice-acceptance-k7bol08o/result.json`;
+  transaction `a40ac9f588c847f682d0b2f08939318f`. Output and receipts remain on the USB.
 
 No reformat, permission rewriting, live deployment, archive reconciliation or deliberate media
 removal was performed as part of the native implementation.
+
+## Deferred destination onboarding
+
+DEF-044 records the operator-requested follow-up from attended USB testing: a UI to select the
+destination device/folder, explain readiness and mount-policy refusals, and generate exact commands
+for the freshly verified target. Commands must account for mount-directory removal after unmount,
+privileges and restoration of temporary settings while preserving existing files and archive
+protection. Common desktop FAT32 settings such as `showexec` need qualification before admission;
+the current implementation still refuses them. Revisit in the next Slice/USB onboarding UI scope,
+before describing FAT32 delivery as self-service without attended CLI assistance.

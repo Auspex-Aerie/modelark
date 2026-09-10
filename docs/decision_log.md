@@ -2916,3 +2916,39 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Initial selection in execution_service/start_session and regression coverage for Start/Resume, lock-wait replacement, independent SQLite publication races and actual repair. Preserve execution formats, epochs, physical aliases, history and valid omitted-selection behavior. No live repair, deployment or device operations.
 - `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md, docs/archive-serial-repair.md
 - `related`: DEC-133, DEC-136
+
+### BOT-007: Repeated approval prompts fragmented an already authorized activity
+- `id`: BOT-007
+- `date`: 2026-09-10
+- `status`: logged
+- `triggered_by`: Operator correction during the attended USB Slice test after the assistant asked again about a supporting step.
+- `claim`: The assistant treated the next supporting operation as needing another approval despite the operator having said to begin the described activity.
+- `correction`: "Ok", "begin", and equivalent replies authorize the activity just described and its normal scoped supporting steps across turns; do not reset consent at each step.
+- `verified`: The operator explicitly confirmed continuation of the previously described temporary USB mount adjustment and test retry. Missing sudo credentials remain an execution blocker, not missing consent.
+- `lesson`: Carry scoped authorization forward. Ask only for materially different targets, risks, destructive actions, scope, or unresolved user choices; never bypass tool permissions or safety boundaries.
+- `docs_updated`: /home/phaze/PycharmProjects/modelark/AGENTS.md, docs/decision_log.md
+
+### DEF-044: Defer guided Slice destination selection and mount onboarding
+- `id`: DEF-044
+- `date`: 2026-09-10
+- `status`: active
+- `triggered_by`: Attended physical FAT32 USB preview refused the desktop's `showexec` mount option; the manual unmount/mount sequence also encountered a removed mount directory. The operator requested this onboarding work be deferred and recorded.
+- `decision`: Defer a UI that guides destination device/folder selection, explains eligibility and unsupported mount settings, and generates exact operator-run commands for the selected device. Continue the current attended test using the existing qualified profile and explicit commands.
+- `rationale`: Closed admission remains safe, but requiring operators to reconstruct a long mount recipe is not an adequate self-service experience. Desktop defaults require qualification rather than silently widening the writer's allowlist.
+- `impact`: Future onboarding must distinguish source archives from destinations, bind commands to freshly verified device identity and mount state, handle mount-directory recreation after unmount, preserve existing files, show privilege requirements and temporary-setting restoration, and recheck readiness afterward. No implicit formatting, permission changes, remounts, or approval of a different target. Evaluate common desktop FAT32 defaults, including `showexec`, under qualification before claiming support.
+- `revisit_when`: Scope the next Slice/USB onboarding UI increment, and before presenting FAT32 delivery as a self-service workflow without attended CLI assistance.
+- `docs_updated`: docs/decision_log.md, docs/usable-slice-folders.md
+- `related`: DEC-130, docs/usable-slice-direct.md, modelark/slice/fat32_observation.py
+
+### BOT-008: Merge order was presented without verifying review readiness
+- `id`: BOT-008
+- `date`: 2026-09-10
+- `status`: logged
+- `triggered_by`: Operator observed that PR #73 was not done after the assistant suggested merging it before dependent PR #74.
+- `claim`: The assistant established dependency order and mergeability but failed to check unresolved reviews before encouraging the merge.
+- `correction`: The operator challenged readiness; inspection found four unresolved review comments covering three documentation issues despite successful CI.
+- `verified`: README and the folder scope retained pre-rollout status, the folder guide called completed gates remaining, and BOT-007 used a workstation-specific path. This change synchronizes current status while preserving the distinction between successful raw-source physical delivery and incomplete compressed-source acceptance.
+- `lesson`: Check current-head findings as well as CI before recommending a merge. Merge order, GitHub mergeability, completed review execution and reviewer acceptance are separate facts. The operator subsequently authorized fixing, pushing and merging #73 without another review wait; that exception does not authorize merging #74.
+- `correction_to`: BOT-007's `docs_updated` reference `/home/phaze/PycharmProjects/modelark/AGENTS.md` denotes repository-root `AGENTS.md`; its portable repository-relative reference is `AGENTS.md`. Preserve the original entry under the append-only rule.
+- `docs_updated`: AGENTS.md (BOT-007 path correction only; unchanged here), README.md, docs/plans/folder-projection-scope.md, docs/usable-slice-folders.md, docs/decision_log.md
+- `related`: BOT-007, PR #73, PR #74
