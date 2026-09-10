@@ -2905,3 +2905,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Ordinary reconciliation guards and race tests only. Preserve eight-field identity state, serial-repair bindings, history, lock aliases and proof/schema formats. No live repair, deployment or device operations.
 - `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
 - `related`: DEC-133, DEC-135
+
+### DEC-137: Bind Start approval selection under controller and publication guards
+- `id`: DEC-137
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: DEC-133 final qualification review, Codex P1 3975232723; real public approval replacement before controller acquisition reproduced a session admitted against a superseded proposal.
+- `decision`: Keep the service's omitted selection unresolved until session admission. Under the controller lock, resolve omission or reload the exact explicit ID, require approved lifecycle and the active approval binding, then derive physical fences from that proposal. Inside BEGIN IMMEDIATE, revalidate that same ID, lifecycle, active binding and complete loaded proposal before allocating a token or inserting a session. Never switch proposals after projection.
+- `rationale`: A preflight approval object is not durable authority across lock waits or later callbacks. Projection equivalence and unchanged physical identity cannot substitute for approval validity. In the real repair fixture, the existing semantic fingerprint check already refused stale execution; that incidental refusal does not close the independently reproduced approval-replacement race.
+- `impact`: Initial selection in execution_service/start_session and regression coverage for Start/Resume, lock-wait replacement, independent SQLite publication races and actual repair. Preserve execution formats, epochs, physical aliases, history and valid omitted-selection behavior. No live repair, deployment or device operations.
+- `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md, docs/archive-serial-repair.md
+- `related`: DEC-133, DEC-136

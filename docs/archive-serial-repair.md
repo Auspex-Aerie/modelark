@@ -115,6 +115,9 @@ completed archive work should be recognized as satisfied, not erased to force
 replanning. Approve and Start remain separate actions. Explicit stale proposal IDs
 refuse even after a new approval exists; only omission may select the active
 approval. Old-session Resume must not silently adopt a new proposal.
+Start resolves that omission under its controller lock and verifies the selected
+approval again in the session-creation transaction. An approval change during
+admission refuses rather than rebinding the projected work.
 
 For Slice, preview changed source evidence afresh, review it, then approve/start
 separately. Preserve existing output and completed receipts. Begin with a tiny
@@ -135,4 +138,4 @@ catalog after later archive writes can discard their history. Catalog restoratio
 requires a separate recovery decision under quiescence; it is not automatic.
 
 See the [serial-identity plan](plans/archive-serial-identity-consistency.md) for the
-implementation and exact qualification/review record (DEC-133 through DEC-136).
+implementation and exact qualification/review record (DEC-133 through DEC-137).

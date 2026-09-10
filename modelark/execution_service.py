@@ -153,16 +153,8 @@ def start_fill(*, plan_id: str = "ark", proposal_id: str | None = None,
         con = db.connect()
     if services is None:
         services = production_services(con)
-    if proposal_id is None:
-        try:
-            row = con.execute(
-                "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
-            ).fetchone()
-            proposal_id = row[0] if row else None
-        except Exception:
-            proposal_id = None
-    if not proposal_id:
-        return Refusal("APPROVAL_MISSING", {}, ("preview_again",))
+    # Preserve omission until start_session resolves it under the controller.
+    # Resolving here would turn a stale convenience lookup into an explicit ID.
     return esess.start_session(con, proposal_id, predecessor_id, services)
 
 

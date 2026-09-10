@@ -312,7 +312,7 @@ epoch-alias registry or new serialized authority format requires a separately ex
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
 | 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Accepted at 7a5c6d0 in round 2 by Greptile and Codex; all CI green |
 | 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Accepted at 7365562 in follow-up cycle 2 round 2 by both reviewers; all CI green |
-| 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Local qualification passed; final review round 1 and exact-head CI required |
+| 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Round 1 all CI/Greptile accepted; Codex P1 approval race under correction for round 2 |
 
 Slice-1 validation: 39 new command-boundary/ancestry cases plus existing observer,
 source and direct/folder/FAT32 public integration tests: 336 passed, two upstream
@@ -809,6 +809,35 @@ packaged-resource and clone-first migration smoke checks passed. Six installed
 core read-only/read-write and Slice reader checks passed for catalogs 7 and 8,
 retaining their physical versions and logical Slice schema 7. No deployment
 or live mutations occurred. Final review/CI acceptance remains required.
+
+### Slice 5 round 1 finding and round 2 correction
+
+At `4758896f08776641f5eb77e574c78abb02c72900`, all exact-head CI passed
+(run 34433516469), Greptile accepted 5/5 with thumbs-up 414353339, but Codex
+completed at 03:41:19Z with P1 3975232723. Start cached the approved proposal
+before controller acquisition, then checked sessions, drafts and physical facts
+at publication without revalidating approval authority. Actual public replacement
+could supersede the old approval while Start waited and still admit its session.
+
+DEC-137 keeps omitted IDs unresolved through the service wrapper, reloads/resolves
+the selection under the controller before deriving physical keys, and revalidates
+the same selected ID, lifecycle, active pointer and full proposal inside the
+publication transaction. A change never silently selects a different proposal
+after config/projection admission. Existing refusal categories and history remain.
+
+Before correction, the 58 new assertions failed: 54 demonstrated stale approval,
+selection or definition use; four actual repair cases already refused through a
+semantic-identity check but lacked the direct approval-missing diagnostic. The
+repair cases keep real directory binding, observation and repair with low-level
+hardware seams, and now prove direct approval revocation. A separate old-function
+check with unchanged valid configuration confirmed the repair fixture's semantic
+guard remains an independent protection; no claim of a live repair bypass is made.
+Expanded qualification passed: 525 execution/gate2/serial/proposal/history tests
+in 77.64 seconds, followed by 49 admission/proposal-surface/catalog-migration
+tests in 4.08 seconds. The complete isolated browser workflow passed afterward;
+all-source Ruff and diff checks passed. Final wheel qualification follows before
+the round-2 review request. The 3220-pass local full result above is the round-1
+baseline; require fresh exact-head full CI for this correction.
 
 ## 7. Questions for Grok
 
