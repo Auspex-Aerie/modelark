@@ -22,6 +22,7 @@ from dataclasses import dataclass, replace
 
 from modelark import capacity, capacity_evidence, drive_fence
 from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity
+from modelark.serial_identity import is_legacy_serial_mismatch
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,19 @@ def _derive(con, label: str, *, observation, fence_held: bool, now: str) -> capa
         anchor_fingerprint=(f.anchor[2] if f.anchor else None),
         anchor_filesystem_capacity=(f.anchor[3] if f.anchor else None),
         safety_floor_bytes=floor)
+    # Preserve this one closed operator diagnostic without changing the pure
+    # admission verdict. An observer's refusal string is not identity authority:
+    # independently prove the exact saved-null -> canonical-serial mismatch.
+    if (evidence.code == "DRIVE_IDENTITY_UNPROVEN"
+            and fence_held and f.authority == "dedicated_local"
+            and observation is not None and not observation.identity_proven
+            and getattr(observation, "refusal_code", None) == "DRIVE_SERIAL_REPAIR_REQUIRED"
+            and observation.filesystem_capacity == f.filesystem_capacity
+            and is_legacy_serial_mismatch(
+                fs_uuid=f.fs_uuid, annex_uuid=f.annex_uuid, serial=f.serial,
+                fingerprint=f.fingerprint, filesystem_capacity_bytes=f.filesystem_capacity,
+                live_fingerprint=observation.fingerprint)):
+        evidence = replace(evidence, code="DRIVE_SERIAL_REPAIR_REQUIRED")
     return replace(evidence, observed_at=now, identity_epoch=f.epoch)
 
 

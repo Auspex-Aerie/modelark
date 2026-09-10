@@ -311,7 +311,7 @@ epoch-alias registry or new serialized authority format requires a separately ex
 | 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Accepted at 9692b4c in round 3 by Greptile and Codex; all CI green |
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
 | 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Accepted at 7a5c6d0 in round 2 by Greptile and Codex; all CI green |
-| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Implemented; 2916 tests and isolated E2E pass; submitting review round 1 |
+| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | All three round-1 findings fixed; 2979 tests and isolated E2E pass; submitting round 2 |
 | 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Pending |
 
 Slice-1 validation: 39 new command-boundary/ancestry cases plus existing observer,
@@ -552,6 +552,63 @@ Isolated browser E2E and all-source Ruff/diff checks passed. All four initial su
 failures are resolved; no new skips, weakened identity guards or changed expected
 outcomes. Submit this implementation for slice-4 review round 1. Corrected probe
 and explicit repair ship together in this slice; no deployment/live repair occurred.
+
+Slice 4, round 1, `949814b01a10dc288d7bc8e559e93b5412051ffa`: all Python/wheel
+and browser CI passed (run 34416085966). Greptile requested changes (4/5), P1
+3973883384: the last hardware observation preceded BEGIN IMMEDIATE, so a catalog
+write-lock wait could make the published identity/free-space evidence stale.
+Twenty new regressions failed before correction; two clone-no-live checks already
+passed. Both actual publication stages now obtain fresh hardware/free-space
+evidence after the transaction acquires its write lock and before guarded writes.
+Inventory/backup remain outside the transaction; clone rehearsal still uses only
+captured evidence. The new tests cover clean enrichment, dirty recovery and
+enrichment after a committed bridge, including unchanged old-state preservation
+on refusal. The combined repair/proof-boundary/owner/approval/CLI/consumer run
+passed **115 tests**. This closes the acquisition-wait gap; it does not claim
+SQLite can prevent physical unplugging after an observation. The full suite with
+this correction passed **2938 tests, 6 existing skips, 5 warnings in 763.08
+seconds**, before the additional Codex corrections below.
+
+Codex round 1 completed at 23:26:18 with P1 3973921583 and P2 3973921588.
+P1 exposed a separate supported case: skip-SMART/RAID-style registration may have
+no canonical serial, even when current physical observation can read one. Such
+records keep serial:null as their v1 identity input; observed hardware metadata
+must not implicitly enrich their identity or rewrite the catalog. Apply one pure
+selection rule in bootstrap, Fill observation and Slice local reads; retain actual
+serial separately in fence evidence and in same-observation attachment comparisons.
+Known nonempty canonical serials remain mandatory exact matches; failed topology
+observation remains a refusal. Explicit known-serial repair eligibility is unchanged.
+The separate portal registration preparation requires a nonempty serial and needs
+no change. This preserves existing optionality, not a blanket ignore-serial rule.
+
+P2 exposed diagnostic loss in admission and again in execution projection. Preserve
+only independently recognized serial-repair-required evidence on an already
+unknown/non-executable/zero-capacity result. Keep existing refusal categories and
+fence/stale-fact precedence, adding the precise evidence code and explicit
+inspection/repair/re-preview guidance. Do not add hardware probes to default
+services or promote unknown evidence into execution authority. Both corrections
+require regression-first consumer tests before the grouped round-2 submission.
+
+Both Codex corrections are now implemented. Optional serial selection is shared
+by bootstrap, Fill and Slice; actual observations remain separate from canonical
+identity proof and known serial mismatches still refuse. Four regressions failed
+before this correction; 294 targeted tests passed afterward. Admission retains
+the repair diagnostic only after independently recognizing the exact mismatch,
+without changing unknown/non-executable/zero-capacity evidence. Preview, Approve,
+Start and Resume now carry inspection/repair/fresh-preview guidance; mixed fleets
+retain ordinary reconciliation guidance for their other unknown drives. Four
+workflow regressions and a separate top-level Preview-actions regression failed
+before correction; 169 targeted tests passed afterward (24 new cases). Counts
+overlap existing suites and are not a combined full-suite result. All changes are
+frozen; all-source Ruff/diff checks pass. Combined full-suite validation is running
+alone before isolated browser qualification and the single grouped round-2 push.
+
+Grouped round-1 correction qualification: **2979 passed, 6 existing skips,
+5 deprecation warnings in 830.73 seconds**, with no overlapping jobs. The complete
+isolated browser workflow then passed. All-source Ruff and diff checks pass.
+The three new regression files add 63 cases over the original slice-4 head.
+Submit all three corrections together for review round 2; no external acceptance
+of these fixes is claimed yet and slice 5 remains pending. No live mutation occurred.
 
 ## 7. Questions for Grok
 

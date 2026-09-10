@@ -78,7 +78,9 @@ class Inventory:
 class _LiveEvidence:
     """One consistent snapshot of a drive's live volume (probed once, so identity/capacity/free never
     disagree within a decision): the stable identifiers, capacity/free, allocation unit, and the
-    composite identity fingerprint."""
+    composite identity fingerprint. ``serial`` remains the actual disk readout;
+    ``serial_in_identity`` records whether the catalog binds serial as identity.
+    Successful discovery never silently enriches a serial-less registration."""
     path: str | None
     fs_uuid: str | None
     annex_uuid: str | None
@@ -88,11 +90,15 @@ class _LiveEvidence:
     alloc_unit: int | None
     fingerprint: str | None
     proven: bool
+    serial_in_identity: bool = True
 
     def observation(self) -> dm.Observation:
         proof = json.dumps({"v": 1, "fs_uuid": self.fs_uuid, "annex_uuid": self.annex_uuid,
-                            "serial": self.serial}, sort_keys=True, separators=(",", ":"))
-        return dm.Observation(self.proven, self.free, self.capacity, self.fingerprint, proof, proof)
+                            "serial": self.serial if self.serial_in_identity else None},
+                           sort_keys=True, separators=(",", ":"))
+        observed = json.dumps({"v": 1, "fs_uuid": self.fs_uuid, "annex_uuid": self.annex_uuid,
+                               "serial": self.serial}, sort_keys=True, separators=(",", ":"))
+        return dm.Observation(self.proven, self.free, self.capacity, self.fingerprint, proof, observed)
 
 
 @dataclass(frozen=True)
@@ -155,12 +161,19 @@ def _live_evidence(con, label: str) -> _LiveEvidence:
     if not (fs_uuid or annex_uuid):
         return _LiveEvidence(str(path), fs_uuid, annex_uuid, serial, None, None, None, None, False)
     capacity = st.f_blocks * st.f_frsize
-    fingerprint = capacity_evidence.identity_fingerprint_v1(
-        fs_uuid=fs_uuid, annex_uuid=annex_uuid, serial=serial, filesystem_capacity_bytes=capacity)
     saved = con.execute('SELECT serial FROM drives WHERE drive_label=?', [label]).fetchone()
+    from modelark.serial_identity import serial_for_identity
+    try:
+        identity_serial = serial_for_identity(saved[0] if saved else None, serial)
+    except SerialIdentityUnproven:
+        return _LiveEvidence(str(path), fs_uuid, annex_uuid, serial, capacity,
+                             st.f_bavail * st.f_frsize, st.f_frsize, None, False)
+    fingerprint = capacity_evidence.identity_fingerprint_v1(
+        fs_uuid=fs_uuid, annex_uuid=annex_uuid, serial=identity_serial, filesystem_capacity_bytes=capacity)
     known_serial_matches = saved is not None and (not saved[0] or saved[0] == serial)
     return _LiveEvidence(str(path), fs_uuid, annex_uuid, serial, capacity,
-                         st.f_bavail * st.f_frsize, st.f_frsize, fingerprint, known_serial_matches)
+                         st.f_bavail * st.f_frsize, st.f_frsize, fingerprint, known_serial_matches,
+                         serial_in_identity=bool(saved and saved[0]))
 
 
 def _annex_keys_present(dest, keys, *, target_uuid) -> set[str]:
@@ -530,15 +543,24 @@ def repair_serial_identity(con, label: str, *, expected_binding: str, now,
                 _serial_backup_rehearsal(con, label, state, owner, final, now, artifacts=artifacts)
                 _serial_guard(con, label, state)
                 if state["status"] == "legacy_dirty":
-                    final = _serial_live(con, label, state)
-                    state = dm._immediate(
-                        con, lambda: _serial_recover_locked(con, label, state, owner, final, now))
+                    def recover():
+                        # BEGIN may wait for an unrelated catalog writer. Refresh
+                        # hardware only after acquisition, not before that wait.
+                        observed = _serial_live(con, label, state)
+                        return _serial_recover_locked(con, label, state, owner, observed, now)
+
+                    state = dm._immediate(con, recover)
                     recovered = True
                     _emit_progress(progress, "serial_legacy_recovered")
                     _serial_guard(con, label, state)
-                final = _serial_live(con, label, state)
-                generation, affected = dm._immediate(
-                    con, lambda: _serial_enrich_locked(con, label, state, final, now))
+
+                def enrich():
+                    # The actual catalog commit uses fresh identity/free-space
+                    # evidence; clone rehearsal deliberately uses captured data.
+                    observed = _serial_live(con, label, state)
+                    return _serial_enrich_locked(con, label, state, observed, now), observed
+
+                (generation, affected), final = dm._immediate(con, enrich)
                 return {"drive_label": label, "status": "repaired", "identity_epoch": facts[0],
                         "generation": generation, "old_fingerprint": facts[2],
                         "canonical_fingerprint": final.fingerprint, "observed_serial": final.serial,
@@ -709,7 +731,8 @@ def _final_observation(con, label: str, ev: _LiveEvidence) -> _LiveEvidence:
     vanished or its stable identity/capacity changed during inventory — the anchor must reflect the
     final observed state, never the pre-inventory one."""
     final = _live_evidence(con, label)
-    if not final.proven or final.fingerprint != ev.fingerprint or final.capacity != ev.capacity:
+    if (not final.proven or final.fingerprint != ev.fingerprint or final.capacity != ev.capacity
+            or final.serial != ev.serial):
         raise dm.DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
     return final
 

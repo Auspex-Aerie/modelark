@@ -1464,8 +1464,11 @@ def validate_exact_assignment(con, proposal: Mapping,
                 ("preview_again",))
         ev = evidence_by_drive.get(label)
         if ev is not None and hasattr(ev, "executable") and not ev.executable:
-            raise Refusal("EXACT_ASSIGNMENT_REJECTED", {"drive": label, "evidence": ev},
-                          ("preview_again",))
+            code = getattr(ev, "code", None)
+            actions = (("inspect_serial_identity", "repair_serial_identity", "preview_again")
+                       if code == "DRIVE_SERIAL_REPAIR_REQUIRED" else ("preview_again",))
+            raise Refusal("EXACT_ASSIGNMENT_REJECTED",
+                          {"drive": label, "evidence": ev, "evidence_code": code}, actions)
 
     # Joint remaining capacity across the full executable assignment (not pointwise full free).
     remaining = _admissible_map_from_evidence(evidence_by_drive)

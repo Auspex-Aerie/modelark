@@ -37,6 +37,21 @@ def _capacity(value, name):
         raise SerialIdentityUnproven(f'{name} must be a positive integer')
 
 
+def serial_for_identity(canonical_serial, observed_serial):
+    """Select the existing catalog's serial binding without enriching it.
+
+    A successful physical observation is required before calling: None is an
+    observed absence, never a probe failure. Catalog NULL/empty deliberately
+    leaves serial out of the fingerprint; discovering a serial does not register
+    it. Known serials retain the actual observed input, and the workflow must
+    additionally require equality with the canonical serial before admission.
+    """
+    if canonical_serial != "":
+        _normalized_string(canonical_serial, 'canonical serial', optional=True)
+    _normalized_string(observed_serial, 'observed serial', optional=True)
+    return observed_serial if canonical_serial else None
+
+
 def _correction(*, fs_uuid, annex_uuid, serial, fingerprint, filesystem_capacity_bytes):
     _normalized_string(fs_uuid, 'fs_uuid', optional=True)
     _normalized_string(annex_uuid, 'annex_uuid', optional=True)

@@ -683,21 +683,32 @@ def _observe_drive(con, label: str) -> drive_mutation.Observation:
     """Fenced observation for the mutation envelope: prove the drive's identity from LIVE evidence — the
     fingerprint is recomputed from the current volume (fs/annex/serial + filesystem capacity), NOT read
     from the persisted row — and read its live filesystem free/capacity. Identity is unproven when the
-    drive is absent or exposes neither an fs nor an annex UUID."""
+    drive is absent or exposes neither an fs nor an annex UUID. Serial participates
+    only when canonically registered; actual observed serial remains in fence evidence."""
     ev = _live_drive_evidence(con, label)
     if ev is None or not (ev["fs_uuid"] or ev["annex_uuid"]):
         return drive_mutation.Observation(
             identity_proven=False, free_bytes=None, filesystem_capacity=None,
             fingerprint=None, identity_proof="", fence_proof="")
-    fingerprint = capacity_evidence.identity_fingerprint_v1(
-        fs_uuid=ev["fs_uuid"], annex_uuid=ev["annex_uuid"], serial=ev["serial"],
-        filesystem_capacity_bytes=ev["filesystem_capacity_bytes"])
-    proof = json.dumps(
-        {"v": 1, "fs_uuid": ev["fs_uuid"], "annex_uuid": ev["annex_uuid"], "serial": ev["serial"]},
-        sort_keys=True, separators=(",", ":"))
     saved = con.execute(
         "SELECT fs_uuid,annex_uuid,serial,identity_fingerprint,filesystem_capacity_bytes "
         "FROM drives WHERE drive_label=?", [label]).fetchone()
+    from modelark.serial_identity import serial_for_identity, SerialIdentityUnproven
+    try:
+        identity_serial = serial_for_identity(saved[2] if saved else None, ev["serial"])
+    except SerialIdentityUnproven:
+        return drive_mutation.Observation(
+            False, ev["free_bytes"], ev["filesystem_capacity_bytes"], None, "", "",
+            refusal_code="DRIVE_IDENTITY_UNPROVEN")
+    fingerprint = capacity_evidence.identity_fingerprint_v1(
+        fs_uuid=ev["fs_uuid"], annex_uuid=ev["annex_uuid"], serial=identity_serial,
+        filesystem_capacity_bytes=ev["filesystem_capacity_bytes"])
+    proof = json.dumps(
+        {"v": 1, "fs_uuid": ev["fs_uuid"], "annex_uuid": ev["annex_uuid"], "serial": identity_serial},
+        sort_keys=True, separators=(",", ":"))
+    observed = json.dumps(
+        {"v": 1, "fs_uuid": ev["fs_uuid"], "annex_uuid": ev["annex_uuid"], "serial": ev["serial"]},
+        sort_keys=True, separators=(",", ":"))
     refusal_code = None
     if saved is None:
         refusal_code = "DRIVE_IDENTITY_UNPROVEN"
@@ -715,7 +726,7 @@ def _observe_drive(con, label: str) -> drive_mutation.Observation:
     return drive_mutation.Observation(
         identity_proven=refusal_code is None, free_bytes=ev["free_bytes"],
         filesystem_capacity=ev["filesystem_capacity_bytes"], fingerprint=fingerprint,
-        identity_proof=proof, fence_proof=proof, refusal_code=refusal_code)
+        identity_proof=proof, fence_proof=observed, refusal_code=refusal_code)
 
 
 def observe_for_admission(con, label: str) -> "drive_mutation.Observation | None":
