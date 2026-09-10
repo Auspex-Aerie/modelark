@@ -312,7 +312,7 @@ epoch-alias registry or new serialized authority format requires a separately ex
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
 | 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Accepted at 7a5c6d0 in round 2 by Greptile and Codex; all CI green |
 | 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Accepted at 7365562 in follow-up cycle 2 round 2 by both reviewers; all CI green |
-| 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Round 1 all CI/Greptile accepted; Codex P1 approval race under correction for round 2 |
+| 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration within implementation scope. | Accepted at efa898b in round 2 by both reviewers; all exact-head CI green. Merged as 16e8b3f; separately approved live acceptance recorded below |
 
 Slice-1 validation: 39 new command-boundary/ancestry cases plus existing observer,
 source and direct/folder/FAT32 public integration tests: 336 passed, two upstream
@@ -838,6 +838,39 @@ tests in 4.08 seconds. The complete isolated browser workflow passed afterward;
 all-source Ruff and diff checks passed. Final wheel qualification follows before
 the round-2 review request. The 3220-pass local full result above is the round-1
 baseline; require fresh exact-head full CI for this correction.
+
+Final acceptance recorded 2026-09-10 at 04:03 UTC: round-2 head
+`efa898b26d56088f076784a4b1ce4c7c3c233438` passed both reviewers and all exact-head
+CI (run 34435220618). Greptile summary 5607935672 names this head, accepted 5/5
+at 03:59:47Z with thumbs-up 414365440; Codex no-major-issues comment 5612750292
+at 04:00:29Z and completed summary at 04:00:31Z. No new inline findings.
+The exact-commit wheel verified 122 payload files, passed all 11 old/new-client
+cases and six independently installed reader checks plus resource/migration smoke.
+Report: `/tmp/modelark-serial-clients-8thqtxfx/result.json`; wheel SHA-256
+`52b420e5c4d71846640064e94d5578521ecb8c03f09458a1ac62db61c3ca7c93`.
+All five implementation slices were complete at that checkpoint. The PR remained
+draft for operator merge, and the monitor was paused. No deployment, live repair,
+restart or archive/USB writes occurred during that implementation/review phase.
+The acceptance annotation was retained locally instead of changing the reviewed head.
+
+### Separately approved rollout and physical acceptance
+
+The operator merged PR #72 as `16e8b3f3a5f5baec34c5720971bad01a8ed19533` on
+2026-09-10 and separately approved live deployment, source repair and USB testing.
+The installed wheel matched all 122 packaged files in the merge; existing runtime
+dependency versions and the old candidate were retained. Stopped-service checks,
+consistent backups, clone rehearsal and live before/after comparisons passed.
+Drive-07 retained its canonical serial and identity epoch, advanced evidence generation
+2 → 3, and selectively superseded one Fill approval. Catalog reader floor became 8;
+the new installed read-only opener accepted it and the old installed reader refused
+a repaired copy. Historical rows and unrelated evidence/approvals were preserved.
+
+The public raw-source FAT32 USB workflow completed with nine independently hashed
+files, preserved siblings and an unchanged catalog. The portal was restored without
+Fill resume. Compressed-source preflight subsequently exposed the documented whole-frame
+decoding limit in the smaller candidate sets; no compressed USB completion is claimed.
+See [the acceptance record](../acceptance/source-identity-usb-2026-09-10.md) for evidence
+boundaries and remaining qualification, and DEF-044 for deferred onboarding.
 
 ## 7. Questions for Grok
 
