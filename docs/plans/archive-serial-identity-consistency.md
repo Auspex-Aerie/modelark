@@ -311,7 +311,7 @@ epoch-alias registry or new serialized authority format requires a separately ex
 | 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Accepted at 9692b4c in round 3 by Greptile and Codex; all CI green |
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
 | 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Accepted at 7a5c6d0 in round 2 by Greptile and Codex; all CI green |
-| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Approved post-cap fixes implemented and locally qualified; submitting cycle-2 round-1 review |
+| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Lifecycle/publication fix locally qualified; submitting cycle-2 round-2 review |
 | 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Pending |
 
 Slice-1 validation: 39 new command-boundary/ancestry cases plus existing observer,
@@ -702,6 +702,35 @@ git-config subprocess reading the original annex UUID through the parent procfd
 after pathname replacement. The loss tests use actual public registration and
 exercise all historical-use exclusions, both initialized identity aliases, exact
 confirmation/CAS, live Fill exclusion, rollback, and two-connection writer exclusion.
+
+Cycle 2 round 1, `2df1ddee43f96f222668e4c068799b7b0734f059`: all CI passed
+(run 34426372202); Greptile accepted 5/5 with authenticated thumbs-up 414306340.
+Codex completed at 2026-09-10T01:46:36Z with P2 3974735813. A first reconciliation
+can hold prospective physical locks while still inventorying before BEGIN; the
+new metadata-only loss operation can commit during that interval. Reconciliation's
+persisted-facts check omitted lifecycle/eligibility, allowing subsequent authority
+publication for the lost drive. SQLite serialized the writes, but not the earlier
+work against the state that authorized its later publication.
+
+Two actual public-registration/loss regressions on separate SQLite connections
+failed before correction: loss during the real inventory progress callback and
+immediately before the publication transaction. Both retain the prospective physical
+fence and use disposable catalogs/directories. Correct ordinary reconciliation by
+capturing lifecycle/eligibility separately from its unchanged eight-field identity
+tuple, rejecting initially non-active drives before archive IO, and comparing exact
+metadata after physical acquisition and inside every publication transaction,
+including ended-owner recovery. Active-but-excluded drives retain maintenance
+support. No proof/binding-format change or generic physical-lock fallback.
+DEC-136 records this publication guard. The seven-path matrix reproduced 77 failures
+before correction, with seven unchanged active-excluded controls passing. The frozen
+focused suite then passed **503 tests in 44.85 seconds**, including ordinary
+bootstrap/aliases/owner recovery, loss/lifecycle and all serial-repair/proof suites.
+An initial sandbox run's six abstract-socket permission errors all passed in the
+host-permitted rerun without assertion or production changes for those errors.
+The subsequent complete isolated browser workflow and all-source Ruff/diff checks
+passed. There is no new local full-suite result for this correction: the preceding
+3095-pass run is baseline evidence; require fresh complete exact-head Python/wheel
+and browser CI. Submit round 2; slice 5 remains pending acceptance.
 
 ## 7. Questions for Grok
 

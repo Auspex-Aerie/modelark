@@ -956,8 +956,9 @@ def declare_lost(
         # Source-use gates hold this identity fence through the read. Keep revocation
         # serialized through the graph commit; never wait while holding SQLite's writer.
         # A never-bootstrapped registration has no physical lock identity and
-        # cannot have admitted a source read. Serialize this narrow metadata-only
-        # case against competing bootstrap with the existing BEGIN IMMEDIATE.
+        # cannot have admitted a source read. BEGIN IMMEDIATE serializes catalog
+        # writes; bootstrap's in-transaction lifecycle CAS also rejects publication
+        # from observation/inventory already in flight before this loss commit.
         if not _never_bootstrapped_for_loss(c, drive_label):
             try:
                 fences.enter_context(drive_fence.hold_drives_sorted(

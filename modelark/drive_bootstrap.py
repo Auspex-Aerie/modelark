@@ -294,6 +294,23 @@ def _persisted(con, label: str):
     return row
 
 
+def _reconcile_metadata(con, label: str, *, expected=None):
+    """Ordinary maintenance requires active lifecycle, not placement eligibility.
+
+    Keep this binding separate from the physical-identity tuple used by serial
+    repair. First bootstrap has no persisted physical fence for loss to acquire,
+    so publication must compare the captured metadata inside its writer transaction.
+    """
+    metadata = con.execute(
+        "SELECT lifecycle,eligibility FROM drives WHERE drive_label=?", [label],
+    ).fetchone()
+    if (metadata is None or metadata[0] != "active"
+            or (expected is not None and metadata != expected)):
+        code = "DRIVE_IDENTITY_UNPROVEN" if expected is None else "DRIVE_RECOVERY_OWNER_CHANGED"
+        raise dm.DriveMutationRefused(code, drive=label, lifecycle_eligibility=metadata)
+    return metadata
+
+
 def _serial_repair_state(con, label):
     """Capture one coherent binding, reusing a caller-owned transaction when present."""
     own = not con.in_transaction
@@ -641,7 +658,7 @@ def _capture_recovery_owner(con, label, facts, *, expected=None):
     return captured
 
 
-def _recover_owned_generation(con, label, dest, facts, owner, ev, now, progress):
+def _recover_owned_generation(con, label, dest, facts, owner, ev, now, progress, metadata):
     """Inventory outside SQLite's write transaction, then CAS + anchor in one short commit."""
     from modelark.execution_session import require_no_live_session
     from modelark.proposal import bump_revision
@@ -652,6 +669,7 @@ def _recover_owned_generation(con, label, dest, facts, owner, ev, now, progress)
 
     def publish():
         require_no_live_session(con)
+        _reconcile_metadata(con, label, expected=metadata)
         if _persisted(con, label) != facts:
             raise dm.DriveMutationRefused("DRIVE_RECOVERY_OWNER_CHANGED", drive=label)
         _capture_recovery_owner(con, label, facts, expected=owner)
@@ -670,12 +688,14 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
     for the full contract; raises a typed ``dm.DriveMutationRefused`` for every fail-closed path."""
     from modelark.execution_session import require_no_live_session
     require_no_live_session(con)
+    _reconcile_metadata(con, label)
     # Early diagnostic only: capture again after both fences, before the inventory.
     _capture_recovery_owner(con, label, _persisted(con, label))
     try:
         with drive_fence.hold_controller(db.DB_PATH, blocking=blocking):
             require_no_live_session(con)
             facts = _persisted(con, label)
+            metadata = _reconcile_metadata(con, label)
             p_epoch, p_gen, p_fp, p_cap, p_auth, p_fs, p_annex, p_serial = facts
             owner = _capture_recovery_owner(con, label, facts)
             ev = _live_evidence(con, label)
@@ -709,6 +729,7 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
                 raise dm.DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label, reason=str(exc)) from exc
             with drive_fence.hold_drives_sorted(keyed, blocking=blocking):
                 require_no_live_session(con)
+                _reconcile_metadata(con, label, expected=metadata)
                 if _persisted(con, label) != facts:
                     raise dm.DriveMutationRefused("DRIVE_RECOVERY_OWNER_CHANGED", drive=label)
                 fenced_owner = _capture_recovery_owner(con, label, facts, expected=owner)
@@ -717,9 +738,9 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
                 owner = fenced_owner
                 dest = register.archive_path(con, label)
                 if owner is not None:
-                    return _recover_owned_generation(con, label, dest, facts, owner, ev, now, progress)
+                    return _recover_owned_generation(con, label, dest, facts, owner, ev, now, progress, metadata)
                 return _decide_and_commit(con, label, dest, p_epoch, p_gen, p_fp, p_cap, ev, now,
-                                          accept_drift, transition, progress, facts)
+                                          accept_drift, transition, progress, facts, metadata)
     except drive_fence.FenceUnavailable as exc:
         raise dm.DriveMutationRefused("DRIVE_FENCE_UNAVAILABLE", **exc.evidence) from exc
 
@@ -749,11 +770,13 @@ def _decide_and_commit(
     transition,
     progress,
     captured_facts,
+    metadata,
 ):
     def commit(body):
         def checked():
             from modelark.execution_session import require_no_live_session
             require_no_live_session(con)
+            _reconcile_metadata(con, label, expected=metadata)
             if (_persisted(con, label) != captured_facts
                     or _dirty_owner(con, label, captured_facts) is not None):
                 raise dm.DriveMutationRefused("DRIVE_RECOVERY_OWNER_CHANGED", drive=label)

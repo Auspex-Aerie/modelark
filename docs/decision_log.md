@@ -2894,3 +2894,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Neutral attachment observation, shared archive observer and narrow lifecycle classifier with regression-first tests. Preserve v1 proof formats, serial optionality, historical evidence, existing initialized-drive locks and Slice destination policy. No live repair/deployment/device writes; attachment checks are observations, not a lease against subsequent external remounts.
 - `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
 - `related`: DEC-133, DEC-134
+
+### DEC-136: Revalidate reconciliation lifecycle at authority publication
+- `id`: DEC-136
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: DEC-135 follow-up review, Codex P2 3974735813; two disposable public-registration/loss races reproduced authority publication after loss committed during inventory or before BEGIN.
+- `decision`: Ordinary reconciliation captures lifecycle and eligibility separately from identity proof inputs, requires an active lifecycle before archive observation, and compares the captured metadata after physical-lock acquisition and inside every authority-publication transaction, including ended-owner recovery. Stable active-but-excluded drives remain maintainable.
+- `rationale`: SQLite excludes simultaneous writes, not stale pre-transaction work. The earlier pristine-loss test held an already-open bootstrap write transaction and missed inventory before that transaction. Exact publication-state checks close that gap without manufacturing physical keys for never-initialized records or extending write transactions across inventory.
+- `impact`: Ordinary reconciliation guards and race tests only. Preserve eight-field identity state, serial-repair bindings, history, lock aliases and proof/schema formats. No live repair, deployment or device operations.
+- `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
+- `related`: DEC-133, DEC-135
