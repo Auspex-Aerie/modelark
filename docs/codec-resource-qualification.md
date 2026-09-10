@@ -16,8 +16,8 @@ including a constrained visible root, taking the minimum. Unknown accounting
 refuses. This is conservative sampled admission, **not a memory reservation**.
 Unrelated processes can still consume memory after the observation.
 
-Fresh workers install `RLIMIT_AS` before importing the native codec, disable core
-dumps and refuse a lower inherited limit instead of relaxing it. This is a hard
+Fresh workers install `RLIMIT_AS` before importing the native codec, set their
+core-file limit to zero and refuse a lower inherited limit instead of relaxing it. This is a hard
 virtual address-space ceiling, not an RSS cap or protection against arbitrary
 concurrent host pressure. Existing native file mappings make virtual and resident
 usage differ substantially. A successful run cannot certify all future workloads.

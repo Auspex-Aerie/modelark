@@ -21,7 +21,12 @@ def _proc(monkeypatch, *, root_limit=False):
     if root_limit:
         files["/sys/fs/cgroup/memory.max"] = "50000"
         files["/sys/fs/cgroup/memory.current"] = "30000"
-    monkeypatch.setattr(Path, "read_text", lambda path, *a, **k: files[str(path)])
+    def read(path, *args, **kwargs):
+        if str(path) not in files:
+            raise FileNotFoundError(str(path))
+        return files[str(path)]
+
+    monkeypatch.setattr(Path, "read_text", read)
     monkeypatch.setattr(Path, "exists", lambda path: str(path) in files)
     return files
 
@@ -48,11 +53,26 @@ def test_overdrawn_cgroup_has_zero_headroom(monkeypatch):
     ("/proc/meminfo", "MemFree: 1000000 kB\n"),
     ("/proc/self/cgroup", "2:memory:/a\n"),
     ("/proc/self/cgroup", "0::/../a\n"),
+    ("/proc/self/cgroup", "0:://a\n"),
+    ("/proc/self/cgroup", "0::/a/\n"),
     ("/proc/self/mountinfo", "1 2 0:3 /hidden /sys/fs/cgroup rw - cgroup2 cgroup rw\n"),
 ])
 def test_unknown_headroom_refuses(monkeypatch, path, value):
     files = _proc(monkeypatch)
     files[path] = value
+    with pytest.raises(CodecResourceRefusal):
+        q.available_memory()
+
+
+@pytest.mark.parametrize("value", [None, "unknown", "-1"])
+@pytest.mark.parametrize("field", ["memory.max", "memory.current"])
+def test_unreadable_or_invalid_ancestor_is_typed_refusal(monkeypatch, value, field):
+    files = _proc(monkeypatch)
+    path = f"/sys/fs/cgroup/a/{field}"
+    if value is None:
+        del files[path]
+    else:
+        files[path] = value
     with pytest.raises(CodecResourceRefusal):
         q.available_memory()
 

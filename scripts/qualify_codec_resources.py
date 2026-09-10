@@ -25,6 +25,13 @@ from modelark.codec_resources import CodecMemoryPolicy, CodecResourceRefusal
 
 def available_memory() -> dict:
     """Conservative visible Linux memory headroom; unknown accounting refuses."""
+    try:
+        return _available_memory()
+    except (OSError, ValueError, OverflowError) as exc:
+        raise CodecResourceRefusal("could not establish memory headroom") from exc
+
+
+def _available_memory():
     values = {}
     for line in Path("/proc/meminfo").read_text().splitlines():
         fields = line.split()
@@ -32,6 +39,8 @@ def available_memory() -> dict:
             if len(fields) != 3 or fields[2] != "kB":
                 raise CodecResourceRefusal("unrecognized MemAvailable accounting")
             values["host"] = int(fields[1]) * 1024
+            if values["host"] < 0:
+                raise CodecResourceRefusal("negative host memory accounting")
     if "host" not in values:
         raise CodecResourceRefusal("host available memory is unknown")
     mounts = [line.split() for line in Path("/proc/self/mountinfo").read_text().splitlines()
@@ -42,7 +51,7 @@ def available_memory() -> dict:
     if len(groups) != 1 or not groups[0].startswith("0::/"):
         raise CodecResourceRefusal("unrecognized unified cgroup membership")
     relative = groups[0][4:]
-    if any(part in {".", ".."} for part in relative.split("/")):
+    if relative and any(part in {"", ".", ".."} for part in relative.split("/")):
         raise CodecResourceRefusal("invalid cgroup membership")
     root = Path("/sys/fs/cgroup")
     current = root / relative
@@ -52,6 +61,8 @@ def available_memory() -> dict:
         if current != root or (current / "memory.max").exists():
             maximum = (current / "memory.max").read_text().strip()
             used = int((current / "memory.current").read_text().strip())
+            if used < 0 or maximum != "max" and int(maximum) < 0:
+                raise CodecResourceRefusal("negative cgroup memory accounting")
             if maximum != "max":
                 values[str(current.relative_to(root))] = max(0, int(maximum) - used)
         if current == root:

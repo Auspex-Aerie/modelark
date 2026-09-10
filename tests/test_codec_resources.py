@@ -85,7 +85,7 @@ else:
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux worker guard")
-def test_native_abort_is_contained_without_core_dump(tmp_path):
+def test_abort_terminates_child_with_zero_core_limit():
     import signal
 
     program = '''

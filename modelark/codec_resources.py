@@ -68,7 +68,8 @@ class CodecMemoryPolicy:
 
         Install before importing native codecs. Never call in the service or
         use preexec_fn in a multithreaded parent. Failure means abort that child;
-        do not fall back to an unguarded decode. Core dumps are disabled too.
+        do not fall back to an unguarded decode. Set the core-file limit to zero;
+        this does not change the host's separate crash-reporting policy.
         """
         if sys.platform != "linux":
             raise CodecResourceRefusal("codec AS guard is only qualified on Linux")
