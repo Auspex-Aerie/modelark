@@ -3008,3 +3008,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 
 #### HYP-002 results — 2026-09-10
 - Unchanged-code synthetic runs completed all 13 checks using Python 3.10.12 / ZipNN 0.5.4 with dev Torch 2.13.0 (f336101) and installed-dependency Torch 2.14.0 (4311547). Both whole and StreamZNN compression/canary/restore passed original hashes at both observed failure sizes under one 8 GiB AS policy plus 2 GiB sampled headroom. Final report: `/tmp/modelark-codec-qualification-b8fo65k8/result.json`, with implementation fingerprints; max RSS 1,765,400,576 bytes and virtual peak 6,774,444,032 bytes. This supports feasibility for these fixtures, not general host-OOM protection, native binary attestation or production caller adoption. HYP remains open for the broader qualification/integration gates.
+
+### DEC-140: Review every pushed PR head with both reviewers within the stage's three-round budget
+- `id`: DEC-140
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: Operator clarified that every new commit pushed to a PR must receive Codex and Greptile review after PR #74's documentation/main reconciliation.
+- `decision`: After each push, request both canonical reviewer mentions on the resulting head, covering all new commits including documentation and merge commits. Verify head-specific results before declaring review acceptance. Keep at most three review/fix rounds for the scoped stage; do not restart that allowance per push. After the third round, summarize unresolved findings and common architectural causes before further changes or reviews. Batch known changes rather than leaving an unreviewed final fix.
+- `rationale`: Unchanged runtime code does not establish review acceptance of new documentation, policy or merge results. Completed CI and previous-head approval are separate evidence.
+- `impact`: AGENTS.md carries the ongoing rule. PR #74's remaining third round must cover reconciliation and this policy record. The explicit no-review-wait merge exception for already-merged PR #73 does not apply to #74 or future PRs; merge authority remains separately scoped.
+- `docs_updated`: AGENTS.md, docs/decision_log.md
+- `related`: DEC-139, BOT-008
