@@ -312,7 +312,7 @@ epoch-alias registry or new serialized authority format requires a separately ex
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
 | 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Accepted at 7a5c6d0 in round 2 by Greptile and Codex; all CI green |
 | 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Accepted at 7365562 in follow-up cycle 2 round 2 by both reviewers; all CI green |
-| 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | In progress; no final review requested yet |
+| 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Local qualification passed; final review round 1 and exact-head CI required |
 
 Slice-1 validation: 39 new command-boundary/ancestry cases plus existing observer,
 source and direct/folder/FAT32 public integration tests: 336 passed, two upstream
@@ -791,9 +791,24 @@ fix; the provisional result does not qualify that later code.
 
 All contributors are frozen. The final full suite ran alone and passed **3220 tests,
 six existing skips and five deprecation warnings in 863.15 seconds**. Isolated
-browser and final installed-wheel qualification follow. Operator handoff is in
-`docs/archive-serial-repair.md`, linked from operations and upgrading. No final
-review has been requested yet.
+browser and final installed-wheel results follow below. Operator handoff is in
+`docs/archive-serial-repair.md`, linked from operations and upgrading. Final
+review round 1 and exact-head CI are required before operator merge.
+
+Final code qualification at `4b97f26aa1ab7257be01b6135b668f08ec942e10`:
+the isolated browser workflow passed after the full suite. A fresh wheel built
+from that exact commit verified all 122 packaged payload files and passed the
+complete 11-case actual old/new-client matrix again. Artifact SHA-256 is
+`f39286e7131e5455470dba02857b2566bc122b551538f81cbc9db8999fc3bbe8`;
+retained report: `/tmp/modelark-serial-clients-y4yihwch/result.json`.
+The old wheel's six reader-floor cases also passed again, with 115 payload files
+verified against base `97e5066b96e7cf0824b9786a8116548810c8272d` (report
+`/tmp/modelark-reader-floor-qualification-irbdzmhz/result.json`). The new wheel
+was separately pip-installed into a disposable target; origin, entry-point,
+packaged-resource and clone-first migration smoke checks passed. Six installed
+core read-only/read-write and Slice reader checks passed for catalogs 7 and 8,
+retaining their physical versions and logical Slice schema 7. No deployment
+or live mutations occurred. Final review/CI acceptance remains required.
 
 ## 7. Questions for Grok
 
