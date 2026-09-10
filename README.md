@@ -115,15 +115,19 @@ identity, manifests, placement, copy evidence, resumable movement, and verified 
 ModelArk is becoming an evidence-preserving storage primitive for later local-model tools rather
 than another cache tied to one inference engine.
 
-That same boundary supports two future directions:
+That same boundary supports local delivery today and future peer transport:
 
 - **Usable Slice:** ask for a named subset of the existing catalog, then materialize and verify it
-  for a specific consumer or machine.
+  for a specific consumer or machine. Local folder delivery is implemented, with native ext4
+  and narrowly qualified FAT32 USB adapters. See the [folder guide](docs/usable-slice-folders.md)
+  for filesystem, mount, source and recovery constraints.
 - **Peer-to-peer transport:** exchange sealed artifact sets while preserving evidence instead of
   treating successful transport as proof of usability.
 
-Usable Slice, local delivery adapters, scratch transfer, and P2P transport are future work—not
-shipped features.
+Attended physical FAT32 delivery passed using uncompressed archive sources; this does not qualify
+every compressed source, filesystem, desktop mount setup or model for functional loading.
+Compressed-source physical acceptance and guided destination onboarding remain incomplete.
+Scratch transfer and P2P transport remain future work—not shipped features.
 
 ## Project and support
 

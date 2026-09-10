@@ -2939,3 +2939,16 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `revisit_when`: Scope the next Slice/USB onboarding UI increment, and before presenting FAT32 delivery as a self-service workflow without attended CLI assistance.
 - `docs_updated`: docs/decision_log.md, docs/usable-slice-folders.md
 - `related`: DEC-130, docs/usable-slice-direct.md, modelark/slice/fat32_observation.py
+
+### BOT-008: Merge order was presented without verifying review readiness
+- `id`: BOT-008
+- `date`: 2026-09-10
+- `status`: logged
+- `triggered_by`: Operator observed that PR #73 was not done after the assistant suggested merging it before dependent PR #74.
+- `claim`: The assistant established dependency order and mergeability but failed to check unresolved reviews before encouraging the merge.
+- `correction`: The operator challenged readiness; inspection found four unresolved review comments covering three documentation issues despite successful CI.
+- `verified`: README and the folder scope retained pre-rollout status, the folder guide called completed gates remaining, and BOT-007 used a workstation-specific path. This change synchronizes current status while preserving the distinction between successful raw-source physical delivery and incomplete compressed-source acceptance.
+- `lesson`: Check current-head findings as well as CI before recommending a merge. Merge order, GitHub mergeability, completed review execution and reviewer acceptance are separate facts. The operator subsequently authorized fixing, pushing and merging #73 without another review wait; that exception does not authorize merging #74.
+- `correction_to`: BOT-007's `docs_updated` reference `/home/phaze/PycharmProjects/modelark/AGENTS.md` denotes repository-root `AGENTS.md`; its portable repository-relative reference is `AGENTS.md`. Preserve the original entry under the append-only rule.
+- `docs_updated`: AGENTS.md (BOT-007 path correction only; unchanged here), README.md, docs/plans/folder-projection-scope.md, docs/usable-slice-folders.md, docs/decision_log.md
+- `related`: BOT-007, PR #73, PR #74

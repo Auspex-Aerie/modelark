@@ -1,13 +1,17 @@
 # Folder-based projection — approved scope
 
 Status: approved 2026-09-09 after Grok CLI critique (DEC-130). Gate A contracts and Gate B native
-ext4 and FAT32 session execution are implemented. Both FAT32 image qualification runs passed;
-PR review and real archive/USB acceptance remain pending. Native authority/versioning is in DEC-131.
+ext4 and FAT32 session execution are implemented. Both FAT32 image qualification runs passed.
+Implementation review and deployment through PR #72 are complete; attended raw-source archive-to-
+FAT32 USB acceptance passed on 2026-09-10 using deployed merge `16e8b3f`. Compressed-source
+physical acceptance remains incomplete. Native authority/versioning is in DEC-131.
+See the [acceptance record](../acceptance/source-identity-usb-2026-09-10.md) for exact evidence.
 
-## Current checkpoint: public FAT32 routing
+## Historical checkpoint: public FAT32 routing
 
 - This checkpoint supersedes earlier "disabled" and "image not run" statements below; those
-  describe prior implementation stages. Changes remain local, uncommitted and undeployed.
+  describe prior implementation stages. At this checkpoint changes were local, uncommitted and
+  undeployed; the current status above supersedes that rollout state and the pending gates below.
 - Operator-reported first kernel-vfat image qualification passed on 2026-09-09; artifacts are in
   `/tmp/modelark-fat32-qualification-reohetp0`. No-replace/flush, payload/report, 30 interruption
   boundaries and sibling preservation passed. This was not a physical USB or archive test.
@@ -17,7 +21,8 @@ PR review and real archive/USB acceptance remain pending. Native authority/versi
 - Supplemental real-driver exact/case/numbered-short-alias checks and public workflow with
   synthetic source/backing passed in the operator's expanded attended run, with artifacts at
   `/tmp/modelark-fat32-qualification-ru4sibe7`. Every earlier writer/fault/sibling check passed again.
-  Source reconciliation, physical target acceptance and review remain separate gates.
+  Source reconciliation, physical target acceptance and review were still separate pending gates
+  at this checkpoint; they were subsequently completed for the raw-source acceptance above.
 - Final full Slice source regression: **1,287 passed, 5 optional-codec skips**, two upstream Torch
   deprecation warnings. The new routing-error test exposed an unclassified mount-inventory IO
   failure; the hint now returns a typed refusal and all six routing tests pass in the full run.
