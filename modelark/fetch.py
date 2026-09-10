@@ -652,25 +652,24 @@ def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, download_dir: Pat
 
 
 def _live_drive_evidence(con, label: str) -> dict | None:
-    """Read a drive's LIVE identity + filesystem evidence from low-level probes on the mounted volume —
-    never the catalog row. ``None`` when the drive is not mounted."""
+    """Read matching live volume/disk evidence, never identity from the catalog.
+
+    ``None`` means absent, changed or unobservable, not partially proven evidence.
+    """
     path = register.archive_path(con, label)
     if path is None:
         return None
+    from modelark.block_identity import BlockObservationError
     try:
-        st = os.statvfs(path)
-    except OSError:
-        # registered but not statvfs-able right now (archive dir absent / unmounted / vanished
-        # mid-probe): identity is unknown, not an error. Returning None -> unproven observation ->
-        # the envelope refuses DRIVE_IDENTITY_UNPROVEN (a typed, handled terminal), never an OSError
-        # that would escape the refusal handler and crash the caller.
+        volume = register.observe_archive_volume(path)
+    except BlockObservationError:
         return None
     return {
-        "fs_uuid": register.probe_fs_uuid(path),
-        "annex_uuid": register.probe_annex_uuid(path),
-        "serial": register.probe_serial(path),
-        "filesystem_capacity_bytes": st.f_blocks * st.f_frsize,
-        "free_bytes": st.f_bavail * st.f_frsize,
+        "fs_uuid": volume.fs_uuid,
+        "annex_uuid": volume.annex_uuid,
+        "serial": volume.serial,
+        "filesystem_capacity_bytes": volume.capacity_bytes,
+        "free_bytes": volume.free_bytes,
     }
 
 
@@ -678,22 +677,50 @@ def _observe_drive(con, label: str) -> drive_mutation.Observation:
     """Fenced observation for the mutation envelope: prove the drive's identity from LIVE evidence — the
     fingerprint is recomputed from the current volume (fs/annex/serial + filesystem capacity), NOT read
     from the persisted row — and read its live filesystem free/capacity. Identity is unproven when the
-    drive is absent or exposes neither an fs nor an annex UUID."""
+    drive is absent or exposes neither an fs nor an annex UUID. Serial participates
+    only when canonically registered; actual observed serial remains in fence evidence."""
     ev = _live_drive_evidence(con, label)
     if ev is None or not (ev["fs_uuid"] or ev["annex_uuid"]):
         return drive_mutation.Observation(
             identity_proven=False, free_bytes=None, filesystem_capacity=None,
             fingerprint=None, identity_proof="", fence_proof="")
+    saved = con.execute(
+        "SELECT fs_uuid,annex_uuid,serial,identity_fingerprint,filesystem_capacity_bytes "
+        "FROM drives WHERE drive_label=?", [label]).fetchone()
+    from modelark.serial_identity import serial_for_identity, SerialIdentityUnproven
+    try:
+        identity_serial = serial_for_identity(saved[2] if saved else None, ev["serial"])
+    except SerialIdentityUnproven:
+        return drive_mutation.Observation(
+            False, ev["free_bytes"], ev["filesystem_capacity_bytes"], None, "", "",
+            refusal_code="DRIVE_IDENTITY_UNPROVEN")
     fingerprint = capacity_evidence.identity_fingerprint_v1(
-        fs_uuid=ev["fs_uuid"], annex_uuid=ev["annex_uuid"], serial=ev["serial"],
+        fs_uuid=ev["fs_uuid"], annex_uuid=ev["annex_uuid"], serial=identity_serial,
         filesystem_capacity_bytes=ev["filesystem_capacity_bytes"])
     proof = json.dumps(
+        {"v": 1, "fs_uuid": ev["fs_uuid"], "annex_uuid": ev["annex_uuid"], "serial": identity_serial},
+        sort_keys=True, separators=(",", ":"))
+    observed = json.dumps(
         {"v": 1, "fs_uuid": ev["fs_uuid"], "annex_uuid": ev["annex_uuid"], "serial": ev["serial"]},
         sort_keys=True, separators=(",", ":"))
+    refusal_code = None
+    if saved is None:
+        refusal_code = "DRIVE_IDENTITY_UNPROVEN"
+    elif saved[2] and saved[2] != ev["serial"]:
+        # In particular, the old null-serial fingerprint must not turn failure
+        # to confirm a KNOWN physical serial into an accepted identity.
+        refusal_code = "DRIVE_IDENTITY_MISMATCH"
+    else:
+        from modelark.serial_identity import is_legacy_serial_mismatch
+        if is_legacy_serial_mismatch(
+                fs_uuid=saved[0], annex_uuid=saved[1], serial=saved[2],
+                fingerprint=saved[3], filesystem_capacity_bytes=saved[4],
+                live_fingerprint=fingerprint):
+            refusal_code = "DRIVE_SERIAL_REPAIR_REQUIRED"
     return drive_mutation.Observation(
-        identity_proven=True, free_bytes=ev["free_bytes"],
+        identity_proven=refusal_code is None, free_bytes=ev["free_bytes"],
         filesystem_capacity=ev["filesystem_capacity_bytes"], fingerprint=fingerprint,
-        identity_proof=proof, fence_proof=proof)
+        identity_proof=proof, fence_proof=observed, refusal_code=refusal_code)
 
 
 def observe_for_admission(con, label: str) -> "drive_mutation.Observation | None":

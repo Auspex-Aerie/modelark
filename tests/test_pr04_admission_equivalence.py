@@ -30,7 +30,8 @@ except ModuleNotFoundError as exc:               # ONLY the exact absent submodu
 
 from modelark import capacity, capacity_evidence, drive_mutation, reconcile
 
-_FP = "a" * 64
+_FP = capacity_evidence.identity_fingerprint_v1(
+    fs_uuid="equivalence-fs", annex_uuid=None, serial=None, filesystem_capacity_bytes=1000)
 
 
 def _require_admission():
@@ -52,6 +53,7 @@ def _proven(con, label, *, role="primary", raid=0, fscap=1000, free=900, fp=_FP)
         "write_generation,filesystem_capacity_bytes,identity_fingerprint,write_authority) "
         "VALUES(?,?,?,?,?,1,0,?,?, 'dedicated_local')",
         [label, role, raid, fscap, free, fscap, fp])
+    con.execute("UPDATE drives SET fs_uuid='equivalence-fs' WHERE drive_label=?", [label])
     con.execute("INSERT INTO plan_drives(plan_id,drive_label) VALUES('ark',?)", [label])
 
 

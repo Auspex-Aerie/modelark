@@ -1,0 +1,870 @@
+# Archive serial identity consistency and legacy evidence transition
+
+Status: implementation and one new PR approved by the operator on 2026-09-09 after
+local Grok ACCEPT. Work proceeds in the slices below. Deployment and another live
+transition remain separate operator approval gates.
+
+## 1. Outcome and non-goals
+
+Make registration, live archive observation, reconciliation and Slice source reads agree about
+the physical disk serial. Correct the existing null-serial fingerprints without moving archive
+bytes, rewriting historical anchors, pretending a paused Fill completed, or weakening source checks.
+
+This is not a Slice destination ownership change. A folder remains the owned output unit. Existing
+backing-device checks (serial or WWN, filesystem identity, protected-role/archive exclusion) remain.
+No formatting, remount, archive cleanup/rehash/ingestion, catalog relabeling, automatic Fill resume,
+device replacement adoption, general RAID support, new filesystem profile or generic migration framework.
+
+## 2. Evidence and present live state
+
+The mounted source is a partition. `register.probe_serial` takes findmnt's source and runs
+`lsblk -dno SERIAL` directly on that partition. Registration's preparation code instead resolves
+PKNAME to the parent disk. The Slice hardware observer also resolves the physical disk.
+
+For the attended source, registration's saved serial is correct. The partition probe returned
+None, so both the old clean anchor and PR 71's new clean anchor bind serial:null. Slice recomputes
+from the saved disk serial and correctly rejects the different fingerprint. The fingerprint hash
+function is shared already; the producers disagree about its inputs.
+
+PR 71 recovery succeeded and is not to be undone: 2769 claims present, zero missing; old owner and
+session/history preserved. Current source is epoch 1/generation 2, now anchored; planner revision
+2948. Consistent pre-recovery backup and full table comparison are retained under
+`/tmp/modelark-live-acceptance-R3KfnE`. Only one anchor and planner revision changed. Portal remains
+stopped, Fill paused, existing USB files untouched, and no executable USB transaction exists.
+
+Do not rerun the current reconciliation hoping this mismatch will disappear. Do not correct the
+catalog serial: it is not the faulty datum. Do not simply change the probe and ship it: corrected
+observations would disagree with existing fingerprints, and fingerprints also name physical locks.
+
+## 3. Separate the three contracts
+
+1. **Hardware observation:** find the unambiguous physical backing disk of the mounted filesystem.
+   A serial is optional supporting identity evidence, not a synonym for a filesystem or folder.
+   Absence must be distinguished from a failed/ambiguous observation. A known saved serial that
+   cannot be confirmed must not silently turn into null.
+2. **Archive identity/admission:** the existing v1 fingerprint binds filesystem UUID, annex UUID,
+   optional serial and filesystem capacity. Keep that algorithm unchanged. A mounted candidate
+   must match the current canonical identity and clean generation where the workflow requires it.
+3. **Mutual exclusion:** all supported operations on the same archive must still contend even
+   when one catalog/old attempt knows the legacy null-serial fingerprint and another knows the
+   corrected fingerprint. Lock compatibility does NOT make a stale fingerprint executable evidence.
+
+## 4. Proposed implementation design
+
+### A. One physical ancestry observation contract
+
+Introduce a workflow-neutral host/block-identity seam for mounted-source -> physical-disk ancestry.
+Prefer extracting/reusing the already tested ancestry logic behind Slice's inventory rather than
+inventing another first-parent parser. Keep compatibility imports if needed; do not make register
+or Fill import the Slice workflow. Implementation must inventory actual consumers before extraction.
+
+- Resolve the covering mount's major:minor through the block inventory to its physical disk;
+  do not assume findmnt SOURCE is a literal device path (UUID/PARTUUID/mapper spellings exist).
+  A mounted partition walks to its parent; a whole-disk filesystem stays on that disk.
+- Support only already qualified unambiguous single-parent part/crypt/LVM chains. Detect cycles,
+  duplicate/ambiguous identities, missing nodes, multiple parents and unsupported mappings.
+- Obtain the serial from the physical disk, never the partition or an arbitrary first parent.
+- Preserve serial spelling/case used by the established fingerprint contract; trim only established
+  command-output whitespace. WWN may support topology/backing checks but is NOT substituted into
+  the serial field. No UUID/serial fabrication or arbitrary fallback.
+- Distinguish a genuinely absent serial on proven topology from IO/command/parse/permission failure.
+  The latter cannot create a trusted null-serial identity. Known saved serial mismatch or inability
+  to confirm it refuses; never overwrite it with whatever disk happens to be mounted.
+- Re-observe before the transition commits; no stale topology cache or path-only identity proof.
+
+Use this seam in registration's identity verification and the live observations used by
+`drive_bootstrap` and `fetch`. Verify parity with Slice source observation. If extraction touches
+Slice observers, their admission/protected-role behavior must remain pinned by existing tests.
+Extract ancestry only, not LinuxObserver's USB policy; retain direct=True where it applies today.
+Do not replace register._parent_disk's SMART/formatting guards as incidental cleanup. Preserve
+RAID/skip-SMART workflows; empty canonical serials are not eligible for this specific repair.
+Do not change diagnostic web/disk_api serial fields into identity authority.
+
+Normal reconcile/Fill observation must classify the recognized serial-input mismatch explicitly
+and refuse with a repair-required diagnostic before inventory or dirtying, not fall into clean
+refresh with only the new lock and fail late at anchor publication. The early comparison is a
+diagnostic, never mutation authority: authoritative observations/CAS remain under the full fences.
+
+### B. Permanent compatibility lock alias, not just a migration-time double lock
+
+Proposed bounded solution for this particular v1 null-serial correction: keep the capacity epoch
+unchanged and acquire both the canonical fingerprint lock and its exact null-serial v1 alias at
+that epoch. Derive the alias only from validated filesystem UUID, annex UUID and capacity facts.
+Deduplicate identical keys (genuinely absent serial), globally sort all drive keys and retain/release
+every handle together. Child transports inherit ALL held drive FDs.
+
+Why permanent: holding old+new keys only during transition would leave a later old-catalog reader
+or old binary using the old lock while an updated operation uses only the new lock. A schema bump
+on one catalog or the application launch singleton alone does not protect another copied catalog
+or an already surviving child. Updated operations keep the null-serial alias so those old holds
+continue to exclude them after the transition.
+
+Expand bidirectionally from facts, including unrepaired records and sealed old candidates: never
+compute null-of-an-existing-hash. Nonblocking acquisition is a sorted AND of the entire unique set,
+not success if either one is free. Production missing/unprovable identity must refuse, not fall back
+to a label string; retain synthetic test seams only as explicitly injected nonproduction fixtures.
+
+The proposed alias policy is deliberately conservative: cloned UUID/capacity tuples may contend
+even on separate devices. It does not establish identity or allow a write that fails admission.
+Unknown arbitrary fingerprint changes, changed non-null serials, changed UUIDs and capacity changes
+are not classified as this repair. Keep capacity-transition semantics, but expand BOTH the old
+epoch/identity and prospective new epoch/identity into their alias sets before acquiring the union.
+Leaving that branch on raw keys would bypass an old null-identity hold during a subsequent resize.
+This does not promise new cross-host or arbitrary historical-capacity/epoch compatibility.
+
+Use a shared pure key-expansion helper plus workflow-owned evidence adapters, not ad hoc extra
+flocks at one caller. Retain the current low-level controller/drive lock order. Do not perform
+blocking lock waits while holding a SQLite write transaction. Captured facts must be rechecked
+after acquisition and at each mutation's existing guarded commit.
+
+Slice-2 qualification refinement (DEC-134): short read-only admission snapshots use
+shared locks over the entire alias set so concurrent portal readers do not block one
+another. All mutation/approval/session/lifecycle/child holders remain exclusive.
+Either exclusive alias still refuses admission, including when the drive is offline;
+never restore the former unfenced offline-anchor fallback to hide reader contention.
+
+Required consumer audit (no caller may be left on a disjoint new-only namespace):
+
+| Consumer | Required behavior / risk |
+| --- | --- |
+| `drive_mutation` / `fetch` | Every archive writer holds both identities; all child FDs survive controller exit. Exact live identity admission remains mandatory. |
+| `drive_bootstrap` | Bootstrap, refresh, dirty recovery and explicit serial transition share key expansion; transition cannot accidentally bypass PR 71 owner guards. |
+| `admission.preview_by_drive` | Nonblocking observations contend on either key and retain fail-closed executable-capacity behavior. |
+| `proposal._fence_keys` / approval | Approval evidence and commit are fenced by compatible identities; recapture stale pre-lock facts. |
+| `execution_service` | Fill Start/Resume acquires the same expanded set, without production label-as-identity fallback for proven catalogs. |
+| `execution_recovery` | Its separate inherit_drive_fence_fds acquisition must expand every drive and retain/pass every FD plus its marker. No label fallback, new marker-presence assumption or early release. |
+| `drive_lifecycle` | Loss/revocation still conflicts with a Slice source reader using either identity; history preservation stays intact. |
+| `slice.sources.FencedSources` | Old sealed candidates and fresh catalog bindings cannot use disjoint locks; stale source evidence still refuses. |
+| `slice.domain` / `local_source` | Preview and artifact-open checks agree with the corrected canonical serial. Do not add a blanket ignore-serial or accept-either-fingerprint branch. |
+
+Also search direct `drive_lock_path`, `drive_lock_key`, raw flock and inherited-FD consumers;
+tests must inventory the importer/key-construction set to prevent a missed independent caller.
+
+### C. Mandatory old-reader exclusion
+
+Updated alias locking is not enough: an OLD Slice reading a repaired schema-7 catalog can hold
+only the new key while an OLD Fill on an unrepaired schema-7 copy holds only the old key. Therefore
+repair MUST raise the catalog reader floor atomically with the corrected fingerprint. Proposed
+mechanism: catalog PRAGMA user_version 8. This is an explicit metadata/version migration in scope,
+even if no new tables/columns are needed. It is distinct from private Slice schema 8.
+
+New code supports the unchanged table layout of catalog v7 and v8; no automatic mass-upgrade on
+open. Slice 3 keeps fresh/bootstrap catalogs at v7 as well: the schema/bootstrap ladder target
+and supported reader ceiling are separate constants. Only explicit repair stamps v8. Older provenance versions retain their existing clone-first
+upgrade requirements. Repair requires a consistent backup and clone rehearsal, then raises v7 to
+v8 inside the same transaction as the first repaired drive. A failure must leave both the old
+identity and old version intact. Repaired copies carry v8; unrepaired v7 copies remain protected
+against updated operations by the permanent alias. Quiesce already-open old processes first.
+
+Audit every normal opener: core/db read/write and version validation; Slice's explicit sqlite
+reader; CLI/portal/Fill, hash-repair and deployment/migration validators. An old shipped binary
+must refuse a repaired v8 catalog before reading source bytes or mutating archive state. Prove
+that behavior with the actual pre-fix wheel, not only mocks of the new version check. Raw ad hoc
+SQLite clients are not supported ModelArk authority and must not be used for repair or rollback.
+
+Avoid gratuitously staling unrelated Slice seals: v8 changes the reader floor, not the v7 domain
+record layout. Propose an explicit closed v7/v8 -> existing domain-snapshot-v7 adapter mapping
+(document that field as the logical snapshot schema), keeping unchanged facts' hashes/seals byte
+identical. Corrected source fingerprints still change their seals normally. Golden tests must
+prove unaffected existing plans remain valid and affected plans refuse; do not achieve this by
+ignoring fingerprints, anchor IDs or authority fields. Unknown catalog versions still refuse.
+If this mapping cannot preserve truthful semantics and safety, return that compatibility impact
+for approval rather than silently invalidating every unrelated in-progress Slice.
+
+### D. Explicit, narrow existing-catalog evidence transition
+
+Proposed operator surface: an explicit serial-identity repair mode on the existing drive
+reconciliation command, preceded by a report-only inspection of affected drives and bound work.
+Do not silently run it during catalog open, ordinary observation, Fill, approval or Slice preview.
+Exact flag/API spelling can be settled during implementation review; approval must name the drive
+and captured old identity so stale operator intent cannot repair a different state.
+
+Eligibility requires ALL of:
+
+- No live Fill/other active ModelArk controller; same controller/physical fences as recovery, plus
+  both identity keys. Existing old-key writer/reader/child hold blocks the transition.
+- Existing current generation is clean under the OLD persisted identity. Dirty state must first
+  take the explicit legacy recovery bridge below; never erase ownership or skip missing claims.
+- Strictly parsed current anchor proof identifies the recognized v1 null-serial case. Validate
+  version/types/keys, UUID agreement, capacity and reproduction of the exact old fingerprint.
+  Missing/malformed/contradictory proof is not an invitation to guess from two possible hashes.
+- Live stable UUIDs and capacity are unchanged; physical-disk serial is proven and exactly matches
+  the nonempty canonical saved serial. Recompute the intended canonical v1 fingerprint. A changed
+  real serial, absent canonical serial, disk replacement or capacity change is a separate refusal.
+- Full report-only inventory passes, followed by fresh identity/free-space observation while all
+  fences remain held. Extras/debris remain untouched; this is not full-byte verification.
+
+**Dirty legacy recovery bridge, available in the corrected binary:** report-only classification
+may use a validated prior anchor proof in the same epoch with the exact current persisted old
+fingerprint/capacity when the dirty current generation has no anchor. No matching historical proof
+means explicit unproven/refusal, not guessing from a hash. For an operator-selected dirty owned or
+sessionless generation, acquire both identities plus controller exclusion, prove live UUID/capacity
+and canonical serial, apply PR 71's exact terminal-owner/child/CAS rules, inventory and take fresh
+observation. Atomically publish ONLY that existing generation's OLD-identity clean anchor and
+revision, leaving its owner/history unchanged. The proof retains the legacy null-serial identity
+encoding; separately report the newly proven actual serial, not a claim that it was unavailable.
+This bridge is allowed only inside explicit serial-repair workflow, never ordinary writers/readers.
+Commit and report this recovery milestone before the separate enrichment step. If enrichment then
+fails, the old-identity clean state is safe/retryable; do not roll back successful recovery by SQL.
+Incomplete claims or unproven owner leave dirty and refuse. Never publish the new fingerprint on
+the dirty generation. Test this with the real-style paused/no-expiry generation and prior anchor.
+
+**Clean enrichment transaction:** within one short BEGIN IMMEDIATE, recheck no live session and exact captured old
+epoch/generation/fingerprint/capacity/authority/UUID/serial, current clean anchor and relevant owner
+evidence. In this precise order: verify old cleanliness; insert dirty generation G+1 with a distinct
+operation code and null owner; atomically update the drive's generation and fingerprint; publish
+the new clean anchor for G+1 using live serial-bearing proof. Preserve all old rows/anchors. Do not
+update fingerprint before checking old cleanliness or publish before the new drive facts exist.
+Private guarded primitives can be reused only if they implement this order in the same transaction;
+their standalone/public wrappers are not a substitute for the composite transition.
+Keep the epoch unchanged because neither stable identity nor capacity changed; the new generation
+records this evidence correction. Supersede affected approved Fill proposals and clear the active
+approval pointer IF it refers to an affected proposal (target/source/satisfying drive bindings all
+count), using existing proposal machinery; preserve unrelated approvals and all immutable proposal
+task rows. Raise the catalog reader floor and bump revision in this same commit. A revision bump
+alone is insufficient because executable task identity checks can be epoch-only. Any failed check
+or commit leaves this step's prior state intact. A rerun after success reports already-correct.
+
+No table-layout changes are currently proposed: existing generation/anchor/proof records hold the
+correction. The catalog reader-version migration above IS mandatory. Any additional DDL, generic
+epoch-alias registry or new serialized authority format requires a separately explained scope delta.
+
+### E. Existing work and rollback
+
+- Archive files, paths, digests/provenance, residency, copy/task results, drive labels, plan membership
+  and canonical descriptive serial remain unchanged. No re-download or re-ingestion.
+- Paused/terminal session row, token, terminal reason and old generation owner stay unchanged.
+  Affected Fill approvals are superseded: operator uses new Preview -> Approve -> Start (new session).
+  Resume of the old session/proposal must refuse with stable superseded/approval-missing guidance,
+  including systemd auto-resume. No implicit successor-resume onto a different proposal is added.
+  Fresh planning must recognize already archived work; no task/archive reset or forced redownload.
+- Preserve pending/approved/completed Slice journals, seals and any existing output. Old approvals
+  remain tied to old identity; refuse stale execution with a clear re-preview action. Never reseal
+  or transparently change a transaction's source. Completed receipts remain historical evidence.
+- Destination folder target IDs, reservation overlap rules, filesystem profiles, private-state
+  schema, hardware/protected-role admission and root certificates are not to change.
+- Hash-repair state also binds fingerprint at (drive, epoch). Preserve it as old evidence, do not
+  retag complete/halted results onto the new identity. Calls with the old fingerprint must halt/refuse
+  under its existing CAS; any later hash repair must explicitly bind the new fingerprint. No hash
+  repair or provenance rewrite is performed by this transition. Regression-test this separate consumer.
+- Back up each catalog before its attended repair; rehearse on a consistent clone first. Offline
+  drives remain unmodified and explicitly marked as requiring inspection, not mass-upgraded.
+- A backup is not an automatic rollback: restoring an old catalog after new archive writes would
+  discard subsequent state. Before any later writes, failed repair rolls back transactionally;
+  after successful repair, old code must be rejected by the catalog version gate; updated-vs-old
+  copied-catalog operations still contend through aliases. Do not promise that rolling back only
+  the binary restores service. Do not auto-start the old portal. Deploy/rollout remains attended.
+
+## 5. Test and review gates
+
+1. Reproduce the actual partition/disk discrepancy below the helper boundary (findmnt names a
+   partition, lsblk partition serial empty, parent serial present). Registration, archive observer
+   and Slice observer must agree. Include whole disk, qualified single-parent mappings, cycles,
+   ambiguity, missing nodes, probe failure, genuine serial absence and WWN-without-serial.
+2. Seed a real-schema catalog with correct descriptive serial and authentic old null-serial proof;
+   reproduce current Slice refusal, then exercise public inspection/repair/Preview/Approve/Start
+   against disposable source bytes. Do not stop at isolated helper success or mocked final evidence.
+3. Prove exact repair eligibility, no-op retry, unchanged history/content tables, old-anchor retention,
+   same epoch/new generation, coherent canonical fingerprint and only intended revision changes.
+4. Refuse wrong serial/UUID/capacity, unknown proof version, duplicate JSON keys, malformed proof,
+   dirty owned/sessionless states, live sessions, held child/reader fences and stale operator binding.
+   Define the dirty-state recovery route explicitly; test old paused catalog, not just our now-clean one.
+5. Inject races before/after acquisition, during inventory and before BEGIN; rollback after each write
+   point. Owner/session, current anchor and drive fact changes cannot publish partial repaired state.
+6. Real cross-process lock matrix: old null-only holder vs updated reader/writer/approval/repair;
+   updated holder vs legacy null-only process; corrected-key legacy holder vs updated process;
+   copied catalog, different state dirs, stale candidate, released controller with surviving child,
+   reverse label order and duplicate aliases. All must contend without deadlock or early release.
+   Add the two-OLD-binary cell (old Slice/repaired catalog versus old Fill/unrepaired copy): old
+   Slice must fail the version gate. Assert both epoch sides' aliases in capacity transitions and
+   all FDs from execution_recovery's independent child acquisition. Distinguish truly absent serial
+   from failed observation; a second acquisition of the same alias cannot deadlock its own process.
+7. Test Fill re-preview/approval/restart behavior and preservation of completed copy/task results.
+   Test old Slice seals refuse or remain readable as appropriate without changing output/receipts.
+8. Existing archive mutation/admission/proposal/lifecycle/recovery/source/observer suites, golden
+   plan seals, all-source lint, installed wheel and full CI must pass. Imported helpers must not
+   broaden the reviewed mutation-envelope owners or introduce register/Fill/Slice dependency cycles.
+   Test catalog v7/v8 accepted by updated code, v8 refused by old wheel, older provenance upgrade
+   rules unchanged, reader floor rolled back on every failed enrichment, unchanged-domain v7/v8
+   mapping preserves unaffected seals, and no automatic version/fingerprint upgrade on normal open.
+9. Run copied-catalog rehearsal and read-only real-host identity parity before requesting separate
+   live repair. Preserve the 2409-test baseline and add regressions; never edit fixtures solely to
+   hide the old mismatch or turn an unproven observation into trusted evidence.
+
+## 6. Delivery stages and approval gates
+
+- **Approved implementation:** one draft PR, with independently tested commits in the order below.
+  Do not deploy intermediate commits or the probe correction alone. If audit reveals additional authority
+  consumers/format migration, report the delta before expanding implementation.
+- Review each slice locally and with Greptile/Codex in the same PR before proceeding to the next.
+  Keep review requests tied to exact heads and record findings/fixes. The established three-round
+  iteration limit remains a stop-and-summarize gate if findings persist; do not loop indefinitely.
+  Merge is the operator's action, not an automatic step.
+- **After separate rollout approval:** rehearse backup -> quiescence -> exact-drive repair -> new
+  source preview; verify before/after catalog invariants and only then resume the original tiny USB
+  acceptance. Qualified FAT32 remount still requires an attended sudo password. No cleanup is implied.
+
+### Implementation slices (mutable tracker)
+
+| Slice | Scope | State |
+| --- | --- | --- |
+| 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Accepted at 9692b4c in round 3 by Greptile and Codex; all CI green |
+| 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
+| 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Accepted at 7a5c6d0 in round 2 by Greptile and Codex; all CI green |
+| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Accepted at 7365562 in follow-up cycle 2 round 2 by both reviewers; all CI green |
+| 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Round 1 all CI/Greptile accepted; Codex P1 approval race under correction for round 2 |
+
+Slice-1 validation: 39 new command-boundary/ancestry cases plus existing observer,
+source and direct/folder/FAT32 public integration tests: 336 passed, two upstream
+Torch deprecation warnings. Repository-wide Ruff and diff whitespace checks passed.
+The first sandbox run could not create four ACL fixtures; the host rerun passed
+using disposable fixtures, without changing/skipping those tests.
+
+Slice-2 audit note: independent execution recovery also manufactures `d0` after
+proposal-load failure and can leak the just-opened handle if its raw flock fails.
+Remove that unproven production fallback and make partial acquisition cleanup
+exception-safe as part of the already approved all-caller/child-FD integration.
+
+### PR 72 review record (mutable)
+
+Slice 1, round 1, `be84377332ddc1e04a332f83855b8a538baa340a`: Greptile and Codex
+both found stale backing evidence under a stable mount number and malformed parent
+metadata treated as absent. Codex additionally found differing serial normalization
+between uniqueness validation and observation. These are three distinct defects,
+with overlapping reviewer comments (including a duplicate Codex topology comment).
+The common assumption was that the old ancestry parser's representation rules and
+a mount-only final check were sufficient for the new serial authority producer.
+Corrections stay at that shared boundary: strict optional ancestry-string validation,
+one serial normalization function, and full inventory re-observation before return.
+New command-boundary tests reproduce all three before the fixes.
+
+Both Python CI jobs passed at the round-1 head. E2E failed an immediate graph-link
+count assertion in unchanged browser code; the unchanged browser harness passed
+locally against the isolated temporary catalog. Do not weaken that assertion to
+make this PR green; require fresh CI at the revised head before closing the gate.
+
+Round-1 correction validation: 379 targeted tests passed (82 neutral observation
+cases), two upstream Torch deprecation warnings; isolated browser E2E and all-source
+Ruff passed. No UI/test assertion change was needed for the local browser pass.
+
+Slice 1, round 2, `def4304d2d7bcacc4ed274e2af0163b180c7c33d`: Greptile accepted
+5/5 with no outstanding findings; Python 3.10, Python 3.12/wheel smoke and E2E CI
+all passed. Codex found one P2 (3972640139): malformed or missing type on an
+off-ancestry node bypassed global duplicate-serial filtering because type validation
+only ran along the selected path. Nine new cases reproduced this before correction.
+Require a nonempty well-formed type for every node during construction, before
+global filtering. Round 3 is the final review round in this cycle; remaining findings
+after that require a stop-and-summarize rather than a fourth iteration.
+
+Round-2 correction validation: 388 targeted tests passed (91 neutral observation
+cases), two upstream Torch warnings, all-source Ruff and diff whitespace checks
+passed. Production change is the constructor-wide required type validation; no
+normal archive probe activation, schema/lock change, UI edit or live mutation.
+
+Slice 1, round 3, `9692b4c25f7d53e8a6da1f40c4561ac71cda746d`: Greptile accepted
+5/5 with authenticated thumbs-up; Codex's completed exact-head review reported no
+major issues and no new inline findings. Python 3.10, Python 3.12/wheel smoke and
+E2E CI all passed. Slice 1 is accepted; the same PR proceeds to slice 2.
+
+Slice 2 local integration: all eight physical-lock consumers now use one pure
+facts-to-compatible-keys policy, with global deduplication and both capacity epochs.
+No hash-only or label fallback is permitted in production. Offline admission also
+refuses contended anchors. Slice retains exact fresh-identity checks: a compatible
+lock never admits a stale source seal. Child handles close without explicit unlock
+and the session marker inode is retained, preserving surviving-child exclusion.
+
+Local adversarial review found a missing second facts check in Start/Resume and
+expired-session recovery: configuration/projection callbacks run after acquisition,
+so checking only before yielding the locks was insufficient. The production fence
+binding now carries the captured facts into the existing guarded transaction.
+Regression-first tests changed canonical serial or UUID facts after acquisition and
+reproduced the unintended session commit before adding the guarded checks. This is
+part of the approved capture/lock/recheck/commit contract, not new identity authority.
+
+The archive serial probe remains unchanged. Full-suite validation passed before
+slice 2's first external review. The complete isolated browser flow passed
+with unchanged assertions after DEC-134 resolved concurrent admission-reader
+contention. The earlier immediate graph-count timing failure remains separately
+documented; no UI or assertion change was used. Older test catalogs now contain
+authentic UUID/capacity fingerprints instead of placeholder hashes; assertions and
+production validation are not relaxed to accommodate those fixtures.
+
+Slice-2 diagnostic full run: 2637 passed, 6 skipped, 4 failed. Two failures were
+launch-singleton conflicts with the concurrently running disposable browser; both
+passed alone unchanged. Two fixtures used fingerprints inconsistent with their
+captured capacity/identity facts; both were corrected, and all four isolated
+regressions then passed. A final full run of the frozen code is required without
+overlapping pytest/browser jobs; the diagnostic count is not a green final gate.
+
+Slice-2 final frozen-code run, without overlapping jobs: **2646 passed, 6 skipped,
+5 deprecation warnings in 751.83 seconds**. Five skips are optional zstandard
+decoder cases (dependency absent); one is the existing acceptance fixture whose
+bytes are not on disk. No new skip or relaxed assertion was added. Isolated browser
+E2E, repository-wide Ruff and diff whitespace checks also passed. The PR remains
+draft pending this slice's external review and the remaining three safety slices.
+
+Slice 2, round 1, `4f57c2017e7fe9e97717f030a50c3f129bb9f510`: Greptile accepted
+5/5 with authenticated thumbs-up; Codex completed the exact-head review with no
+major issues and no inline findings (comment 5608996209). Python 3.10, Python
+3.12/wheel smoke and E2E CI all passed. Slice 2 is accepted; proceed to slice 3.
+
+Slice-3 compatibility implementation: the physical supported set is exactly {7,8},
+while bootstrap/provenance layout remains 7. Ordinary opens and explicit schema
+ladder calls preserve supported versions; unknown future versions refuse before
+journal-mode mutation. Clone validation uses the closed set, remigration rejects
+future snapshots, and provenance helpers cannot lower a malformed v8 to v7.
+Slice maps physical 7/8 to logical snapshot 7; its separate private store version
+and destination journal are untouched. Golden hashes, canonical plan bytes,
+approval and fenced-source tests preserve unchanged facts while changed identity,
+authority, generation and anchor evidence still invalidate the old plan.
+
+Focused qualification so far: 64 core/version/migration tests and 137 Slice tests
+passed, followed by 25 core compatibility tests including two added end-to-end
+clone rehearsal/remigration cases. These counts overlap, not a combined total.
+The actual pre-fix wheel built from `97e5066b96e7cf0824b9786a8116548810c8272d`
+passed all six isolated reader-floor cases: core read-only, core read/write and
+Slice each accept v7 and refuse v8. The script verifies all 115 packaged source
+payloads against that commit and checks imported module origins. Rejected v8
+fixtures retain exact catalog/schema/row/version/synthetic-byte state without
+sidecars. The accepted v7 writable opener legitimately enables WAL; logical
+catalog state is unchanged. This is reader-floor evidence, not a physical archive
+test or the slice-5 two-client exclusion matrix.
+
+Opener audit boundary: CLI/portal/Fill enter through core catalog validation;
+Slice has two explicit read-only adapters (snapshot and protected-fleet inventory).
+All three supplied-connection hash audit/repair entry points now check the closed
+version set before observation or writes; repair write paths recheck after BEGIN.
+Legacy-runtime migration operates on a disposable staged catalog and
+retains the core migration boundary. Benchmark/phase-3 gate scripts are offline
+evidence tooling with synthetic fixture contracts, not supported repair or live
+archive authority; their historical fixture policies are not redesigned here.
+Deployment's existing table-presence/service/API health checks are **not** evidence
+of catalog readability. The later rollout gate must validate with the installed
+build's read-only opener, after old processes are quiesced; checkout constants or
+a healthy metadata endpoint do not satisfy that gate.
+
+Hash-repair qualification: final direct compatibility/legacy repair/planner writer/
+live-session matrix passed 56 tests. An earlier explicit-guard/provenance regression
+run passed 78 tests; these are overlapping targeted suites. One current-layout
+synthetic fixture had an obsolete v2 version stamp and now uses the layout target;
+legacy hash evidence semantics and assertions are unchanged.
+
+Slice-3 full frozen-code run, without overlapping jobs: **2722 passed, 6 skipped,
+5 deprecation warnings in 818.25 seconds**. The skips remain the five unavailable
+optional zstandard decoder cases and one existing acceptance fixture with absent
+bytes. No new skips or relaxed assertions. Repository-wide Ruff and diff checks
+pass. The actual old-wheel qualification was rerun on fresh disposable fixtures
+and again passed all six cases. Submit this slice for its first external review;
+corrected archive probing and all live operations remain inactive.
+
+Slice 3, round 1, `e322ab48b078665dd5f025b510f8cdd91cc5ae95`: Greptile accepted
+5/5 with authenticated thumbs-up 414193622; all Python/wheel and browser CI passed
+(run 34409943761). Codex found P2 3973451726: a supplied-connection audit checked
+the reader floor without holding a snapshot through row/resolver reads, allowing
+a concurrent future-version commit to be interpreted after the check. Four real
+two-connection WAL regressions reproduced the race before correction. The audit
+now owns a read snapshot when needed, validates within it and reuses caller-owned
+transactions without ending them. Repair's post-BEGIN audit remains within its
+existing write transaction. This is a version-check lifetime omission, not a need
+for a new catalog layout or identity policy. Round-2 correction qualification:
+73 hash-repair/snapshot/provenance-remediation/CLI cases and 51 planner-writer/
+live-session/provenance-contract cases passed (124 total). All-source Ruff and
+diff checks passed. No test assertion was relaxed. The preceding 2722-pass full
+run is the round-1 baseline; require fresh full CI at the corrected round-2 head.
+
+Slice 3, round 2, `7a5c6d0799915053a442ecbc45bb1ba81638d793`: Greptile accepted
+5/5 with thumbs-up 414200604; Codex completed with no major issues or new inline
+findings (comment 5609511200). Python 3.10, Python 3.12/wheel smoke and E2E all
+passed (run 34411191853). Slice 3 is accepted; proceed to explicit repair in slice 4.
+
+Slice-4 implementation: `drive reconcile LABEL --inspect-serial-identity` reads
+saved catalog evidence in one snapshot and returns an exact-state binding. It does
+not inspect hardware or authorize archive IO. Explicit repair additionally requires
+`--repair-serial-identity --expected-binding BINDING --writers-stopped`; the last
+flag is an operator assertion, not automatic detection/quiescence of old programs.
+The repair holds controller plus canonical/legacy physical fences, verifies the
+actual saved serial/UUIDs/capacity, inventories claims without changing bytes, and
+retains a SQLite backup and transaction rehearsal before modifying the catalog.
+Backup files and their directory plus its parent are flushed before publication.
+Failure reports retain attempted artifact locations, but do not certify incomplete
+or failed rehearsal files as validated backups.
+
+Dirty recovery applies PR 71's owner/child checks and publishes only the existing
+generation's old-identity anchor, with actual observed serial retained separately
+in fence evidence. It commits and reports that milestone. Enrichment then advances
+the generation, changes the fingerprint, publishes its anchor, supersedes affected
+approvals, stamps reader floor 8 and bumps revision in one guarded transaction.
+Every old anchor/generation/session remains history. A post-bridge failure leaves
+the recovered old-identity clean state intact; inspect again for a fresh retry
+binding. No ordinary open/reconcile/Fill path performs this repair automatically.
+
+Local adversarial review identified a handoff race: rereading state after the
+recovery callback could silently adopt changed session evidence. The clean state
+is now captured and validated within the bridge transaction, and checked again
+after the callback and inside enrichment. Regression tests reproduce token/history
+changes and require refusal, preserving the committed old clean state. Generic
+post-bridge errors now retain the recovery milestone and artifact paths as typed
+operator evidence. These are bounded implementations of the approved CAS and
+two-stage failure contract, not additional identity policy.
+
+Initial focused qualification: 148 repair/proof/observer/approval/CLI/adversarial
+tests passed; then 158 bootstrap/registration/transport/envelope/workflow tests
+passed (overlapping counts). The latter adds real contention on either lock alias
+and a two-connection WAL snapshot race. Expanded adversarial qualification passed
+52 cases: owned paused/no-expiry recovery, live/child refusals, malformed historical
+proof, stale bindings, rollback at every enrichment write point, missing inventory,
+backup/rehearsal/fsync failures and fresh identity changes before and after the
+committed bridge. Seven actual-repair consumer cases passed with nonempty archive
+claims: selective approval supersession, old Start/Resume refusal, immutable
+task/session/content history and preserved old hash-repair fingerprints whose
+later use refuses before resolving archive bytes. All-source Ruff/diff checks pass.
+Slice-4 diagnostic full run: **2911 passed, 6 existing skips, 4 failed in 752.54
+seconds**. One old planner-revision fixture fabricated an observation missing the
+new optional diagnostic field; it now uses the real Observation type, preserving
+all assertions (57 related tests passed). The other three failures reproduced an
+existing replan-test isolation leak: installing its bridge fake before monkeypatch
+captured the original caused teardown to restore the fake instead of real Start.
+The ordered replan/serial consumer run reproduced all three failures. Fix the
+test patch at its source, not the serial-repair refusal expectations. The bridge
+factory is now side-effect-free and both callers scope its installation; a new
+regression guards that contract. The same ordered run passed **54 tests** after
+the fix (previously 3 failed, 50 passed). No production identity/admission check or
+test assertion was weakened. Standalone replan-script execution has a separate
+pre-existing parameterized-test argument limitation reproduced against HEAD;
+the authoritative pytest/CI path is unchanged. Require an isolated browser pass
+and fresh complete suite; the diagnostic full run is not a green gate. No slice-4
+external acceptance or complete slice-5 qualification is claimed.
+
+Browser qualification exposed the previously recorded graph-count race twice:
+cards and text render synchronously, but `drawLinks` runs in requestAnimationFrame
+and an advisory/queue refresh may rebuild those cards. The immediate count could
+run before drawing (the subsequent failure screenshot already contained the link).
+The test now uses Playwright's retrying exact-count assertion for **one** link,
+including after resize. No expected count or production UI behavior changed.
+The entire isolated browser flow then passed, including approval, registration,
+terminal and library flows. All-source Ruff/diff checks pass. A new full pytest
+run is underway alone, with its output separate from the diagnostic failure report.
+
+Slice-4 final frozen-code run, without overlapping jobs: **2916 passed, 6 skipped,
+5 deprecation warnings in 758.86 seconds**. Skips remain five unavailable optional
+zstandard decoder cases and one existing acceptance fixture with absent bytes.
+Isolated browser E2E and all-source Ruff/diff checks passed. All four initial suite
+failures are resolved; no new skips, weakened identity guards or changed expected
+outcomes. Submit this implementation for slice-4 review round 1. Corrected probe
+and explicit repair ship together in this slice; no deployment/live repair occurred.
+
+Slice 4, round 1, `949814b01a10dc288d7bc8e559e93b5412051ffa`: all Python/wheel
+and browser CI passed (run 34416085966). Greptile requested changes (4/5), P1
+3973883384: the last hardware observation preceded BEGIN IMMEDIATE, so a catalog
+write-lock wait could make the published identity/free-space evidence stale.
+Twenty new regressions failed before correction; two clone-no-live checks already
+passed. Both actual publication stages now obtain fresh hardware/free-space
+evidence after the transaction acquires its write lock and before guarded writes.
+Inventory/backup remain outside the transaction; clone rehearsal still uses only
+captured evidence. The new tests cover clean enrichment, dirty recovery and
+enrichment after a committed bridge, including unchanged old-state preservation
+on refusal. The combined repair/proof-boundary/owner/approval/CLI/consumer run
+passed **115 tests**. This closes the acquisition-wait gap; it does not claim
+SQLite can prevent physical unplugging after an observation. The full suite with
+this correction passed **2938 tests, 6 existing skips, 5 warnings in 763.08
+seconds**, before the additional Codex corrections below.
+
+Codex round 1 completed at 23:26:18 with P1 3973921583 and P2 3973921588.
+P1 exposed a separate supported case: skip-SMART/RAID-style registration may have
+no canonical serial, even when current physical observation can read one. Such
+records keep serial:null as their v1 identity input; observed hardware metadata
+must not implicitly enrich their identity or rewrite the catalog. Apply one pure
+selection rule in bootstrap, Fill observation and Slice local reads; retain actual
+serial separately in fence evidence and in same-observation attachment comparisons.
+Known nonempty canonical serials remain mandatory exact matches; failed topology
+observation remains a refusal. Explicit known-serial repair eligibility is unchanged.
+The separate portal registration preparation requires a nonempty serial and needs
+no change. This preserves existing optionality, not a blanket ignore-serial rule.
+
+P2 exposed diagnostic loss in admission and again in execution projection. Preserve
+only independently recognized serial-repair-required evidence on an already
+unknown/non-executable/zero-capacity result. Keep existing refusal categories and
+fence/stale-fact precedence, adding the precise evidence code and explicit
+inspection/repair/re-preview guidance. Do not add hardware probes to default
+services or promote unknown evidence into execution authority. Both corrections
+require regression-first consumer tests before the grouped round-2 submission.
+
+Both Codex corrections are now implemented. Optional serial selection is shared
+by bootstrap, Fill and Slice; actual observations remain separate from canonical
+identity proof and known serial mismatches still refuse. Four regressions failed
+before this correction; 294 targeted tests passed afterward. Admission retains
+the repair diagnostic only after independently recognizing the exact mismatch,
+without changing unknown/non-executable/zero-capacity evidence. Preview, Approve,
+Start and Resume now carry inspection/repair/fresh-preview guidance; mixed fleets
+retain ordinary reconciliation guidance for their other unknown drives. Four
+workflow regressions and a separate top-level Preview-actions regression failed
+before correction; 169 targeted tests passed afterward (24 new cases). Counts
+overlap existing suites and are not a combined full-suite result. All changes are
+frozen; all-source Ruff/diff checks pass. Combined full-suite validation is running
+alone before isolated browser qualification and the single grouped round-2 push.
+
+Grouped round-1 correction qualification: **2979 passed, 6 existing skips,
+5 deprecation warnings in 830.73 seconds**, with no overlapping jobs. The complete
+isolated browser workflow then passed. All-source Ruff and diff checks pass.
+The three new regression files add 63 cases over the original slice-4 head.
+Submit all three corrections together for review round 2; no external acceptance
+of these fixes is claimed yet and slice 5 remains pending. No live mutation occurred.
+
+Slice 4 round 2, `43ec31e075400782f075fda6909f2f4f5a6c6095`: Greptile accepted
+5/5 with no actionable findings; all exact-head CI passed. Codex completed at
+00:16:39 UTC with P2 3974209089: component reads could mix the original filesystem
+UUID/annex/capacity with a later same-parent disk observation after a remount.
+Six repair-orchestration regressions reproduced unintended publication before
+correction, spanning clean enrichment, dirty recovery and post-bridge enrichment.
+Use one shared archive-volume observation boundary for bootstrap and Fill: compare
+filesystem/annex identity and allocation geometry before and after the physical
+probe, refuse drift/errors and use the final free-space read. This is bounded
+revalidation, not a lease against later remounts or an ABA guarantee. It preserves
+canonical serial optionality and existing mutation/destination/SMART policies.
+The shared assumption behind both timing findings was treating separately sampled
+evidence as a coherent observation: round 1 fixed acquisition timing; round 2 fixes
+the observation's internal consistency. Final review round 3 follows qualification;
+any remaining findings at that cap require a stop-and-summarize.
+
+Round-2 correction is implemented and frozen: bootstrap and Fill now share
+`register.observe_archive_volume`. Ten component-level regressions reproduced
+before correction; **39 new volume/repair tests passed** afterward, followed by
+**87 compatibility tests**. Coverage includes second-read UUID/annex/statvfs errors,
+geometry changes, final free-space selection and serial absence versus failure.
+The six actual repair races now refuse, retaining old state or the already committed
+legacy bridge as appropriate. All-source Ruff/diff checks pass. Full-suite validation
+is running alone; browser qualification and final round-3 submission follow its pass.
+
+Final round-3 submission qualification: **3018 passed, 6 existing skips,
+5 deprecation warnings in 831.69 seconds**, with no overlapping jobs. The complete
+isolated browser workflow passed afterward; all-source Ruff/diff checks passed.
+Submit this shared observation correction and 39 new regression cases for the
+third and final slice-4 review round. No live catalog or archive/USB mutation.
+
+Round 3 completed on `c7c163d0f8002de7ae96f182c3207416e63d4ae1`. Greptile
+accepted 5/5 and all CI passed. Codex completed at 2026-09-10T01:01:23Z with two
+remaining P2 findings. **Iteration stopped and the heartbeat was paused.**
+
+- 3974537628: a remount after the second filesystem UUID read but before its
+  remaining annex/statvfs reads can still produce a torn sample when the other
+  fields match. This occurs inside the check, without an ABA cycle. The repeated
+  volume tuple does not itself establish one attachment across all component reads.
+- 3974537632: `declare_lost` unconditionally requires compatible physical fence
+  keys, preventing revocation of newly registered drives whose fingerprint and
+  filesystem capacity are intentionally unset before first reconciliation.
+
+Source inspection supports both reports; no new code/tests were implemented after
+the cap. Proposed follow-up, not yet approved: make the shared observation explicitly
+attachment-scoped with a final identity check after all reads, and distinguish
+never-bootstrapped catalog revocation from identity-fenced archive operations while
+retaining proven-drive fences and exact guarded state. The first is the same
+coherence assumption as the previous timing findings; the second is a distinct
+lifecycle overconstraint, not justification for weakening general identity checks.
+Slice 5 remains pending. No fourth review or automatic merge; await operator direction.
+
+### Approved post-cap follow-up (review cycle 2)
+
+On 2026-09-10 the operator approved both proposed fixes and continued work in the
+same PR (DEC-135). The prior three-round cycle remains recorded above. Start a new
+bounded cycle of at most three reviews for this approved follow-up; do not silently
+erase or reinterpret the earlier cap. Slice 5 stays behind acceptance of slice 4.
+
+- Hold a directory FD across the entire shared observation; bind kernel mount ID,
+  device and inode, and check original-path attachment before/after every component
+  and before returning. Annex and capacity use the retained descriptor; fs/disk
+  pathname probes remain covered by those checks. Retain final filesystem/geometry
+  agreement, serial optionality and failure-versus-absence distinctions. Use a
+  neutral attachment helper, not Slice's destination/birth-time policy machinery.
+- In `declare_lost` alone, recognize the exact initial epoch/generation, absent
+  canonical fingerprint/filesystem capacity, unknown authority and no historical
+  archive/anchor/generation/repair/task-use evidence. Registered nominal metadata
+  and plan membership may exist. Catalog revocation retains graph transaction,
+  exact binding and live-session guards; initialized/partial/corrupt states keep
+  the normal compatible physical-fence requirement. No generic lock fallback.
+
+Regression-first: nine actual repair-orchestration cases reproduced directory
+replacement during each final component across clean/dirty/post-bridge publication
+(all nine failed before correction). Sixteen independent consumer cases reproduced
+replacement at all component boundaries. Fixtures are disposable directories and
+catalogs, not live remounts. Both implementations are complete and frozen for full
+qualification. Attachment/component/consumer integration passed 243 tests, including
+the nine new repair cases and six prior torn-volume cases. A separate loss/lifecycle
+set passed 68 tests. These are targeted qualification sets, not counts of new cases.
+All-source Ruff and diff checks pass. The frozen full suite passed **3095 tests,
+6 existing skips and 5 deprecation warnings in 842.22 seconds**, run alone
+(`/tmp/modelark-pr72-slice4-cycle2-round1-full.xml`). The subsequent complete isolated
+browser workflow also passed. No concurrent full/browser jobs and no new skips.
+
+Additional attachment coverage includes mount-ID-only changes with stable device/
+inode at every component, missing/malformed/unreadable fdinfo, symlink components,
+descriptor cleanup across failures, retained-FD filesystem accounting, and a real
+git-config subprocess reading the original annex UUID through the parent procfd
+after pathname replacement. The loss tests use actual public registration and
+exercise all historical-use exclusions, both initialized identity aliases, exact
+confirmation/CAS, live Fill exclusion, rollback, and two-connection writer exclusion.
+
+Cycle 2 round 1, `2df1ddee43f96f222668e4c068799b7b0734f059`: all CI passed
+(run 34426372202); Greptile accepted 5/5 with authenticated thumbs-up 414306340.
+Codex completed at 2026-09-10T01:46:36Z with P2 3974735813. A first reconciliation
+can hold prospective physical locks while still inventorying before BEGIN; the
+new metadata-only loss operation can commit during that interval. Reconciliation's
+persisted-facts check omitted lifecycle/eligibility, allowing subsequent authority
+publication for the lost drive. SQLite serialized the writes, but not the earlier
+work against the state that authorized its later publication.
+
+Two actual public-registration/loss regressions on separate SQLite connections
+failed before correction: loss during the real inventory progress callback and
+immediately before the publication transaction. Both retain the prospective physical
+fence and use disposable catalogs/directories. Correct ordinary reconciliation by
+capturing lifecycle/eligibility separately from its unchanged eight-field identity
+tuple, rejecting initially non-active drives before archive IO, and comparing exact
+metadata after physical acquisition and inside every publication transaction,
+including ended-owner recovery. Active-but-excluded drives retain maintenance
+support. No proof/binding-format change or generic physical-lock fallback.
+DEC-136 records this publication guard. The seven-path matrix reproduced 77 failures
+before correction, with seven unchanged active-excluded controls passing. The frozen
+focused suite then passed **503 tests in 44.85 seconds**, including ordinary
+bootstrap/aliases/owner recovery, loss/lifecycle and all serial-repair/proof suites.
+An initial sandbox run's six abstract-socket permission errors all passed in the
+host-permitted rerun without assertion or production changes for those errors.
+The subsequent complete isolated browser workflow and all-source Ruff/diff checks
+passed. There is no new local full-suite result for this correction: the preceding
+3095-pass run is baseline evidence; require fresh complete exact-head Python/wheel
+and browser CI. Submit round 2; slice 5 remains pending acceptance.
+
+Cycle 2 round 2, `7365562081a9bbcbe24863baf6bdec3ab72aeb72`: Greptile accepted
+5/5 (summary 5607935672, thumbs-up 414313456); Codex reported no major issues
+(comment 5611543191, completed 2026-09-10T02:01:55Z), with no new inline findings.
+All exact-head Python/wheel and browser CI passed (run 34427390383). Slice 4 is
+accepted. Begin slice 5 qualification and operator handoff in the same PR; this
+acceptance is not authorization to deploy, repair the live catalog or run USB IO.
+
+### Slice 5 qualification in progress
+
+Independent qualification covers actual repaired-source Slice public workflows,
+fresh Fill Preview/Approve/Start with completed-work preservation, and verified
+old/new wheel process exclusion plus the two-old-client reader-floor case. Synthetic
+host providers and disposable files are explicit test boundaries, not evidence of
+physical USB eligibility or a substitute for live deployment acceptance.
+
+Read-only host parity and copied-catalog rehearsal passed. Registration's shared
+serial probe, neutral physical ancestry, archive observation, Fill and Slice agreed
+on the mounted partition's physical-parent serial. The deployed service remained
+inactive at its prior build. A consistent read-only source snapshot was backed up
+to a fresh temporary directory; all repair writes targeted that copy. It found
+2769 catalogued claims present, 5615 extras and no debris; inventory did not remove
+extras and is not full-byte verification. On the copy, generation advanced 2 to 3,
+the fingerprint changed, the reader floor became 8 and one affected approval was
+superseded. Only the expected six catalog tables/version changed; all other table
+digests, including sessions/history/archive records, remained identical. The live
+catalog's complete logical table digests and version were unchanged afterward.
+Private evidence is retained in `/tmp/modelark-serial-host-rehearsal-__thk7j7/result.json`.
+This does not certify live-writer quiescence or authorize a live repair/USB test.
+
+Public Fill qualification exposed an existing start-selection fallback: an explicit
+superseded proposal ID can select the newly active approval after fresh approval.
+That contradicts the approved stale-approval contract even though the new proposal
+has independent authority. Correct only initial selection: omission may resolve the
+active pointer; an explicit invalid/superseded ID must refuse rather than silently
+select another proposal. Before correction, 16 regression cases failed while eight
+controls passed. After the bounded selection fix, 56 related tests passed. The
+public Fill cases use a real disposable archive and retained-directory/shared
+observation; only low-level hardware probes and filesystem geometry are injected.
+They preserve completed bytes/history, require fresh approval, and stop at durable
+session admission without launching a transfer worker.
+
+Four public Slice cases passed with 21 related compatibility/history cases. These
+exercise actual preview/approval/start, source readers, folder transactions and
+receipts against synthetic host providers and disposable files, including changed
+source refusal and unchanged version-7 seals over a version-8 catalog.
+
+The provisional installed-wheel matrix passed all 11 process cases, with four
+harness guardrail tests passing. Both wheels were verified against exact commit
+payloads. Coverage includes old/new lock aliases, inherited child descriptors after
+parent exit, release/reacquisition, and an old Fill lock holder while another old
+client refuses the repaired catalog. The old read-only SQLite opener may create
+WAL/SHM sidecars before refusing version 8; main-catalog contents and source bytes
+remain unchanged, but this is not whole-directory byte identity. The old Fill
+case exercises its production lock adapter, not a complete historical download.
+The updated wheel must be rebuilt and this matrix repeated for the final selection
+fix; the provisional result does not qualify that later code.
+
+All contributors are frozen. The final full suite ran alone and passed **3220 tests,
+six existing skips and five deprecation warnings in 863.15 seconds**. Isolated
+browser and final installed-wheel results follow below. Operator handoff is in
+`docs/archive-serial-repair.md`, linked from operations and upgrading. Final
+review round 1 and exact-head CI are required before operator merge.
+
+Final code qualification at `4b97f26aa1ab7257be01b6135b668f08ec942e10`:
+the isolated browser workflow passed after the full suite. A fresh wheel built
+from that exact commit verified all 122 packaged payload files and passed the
+complete 11-case actual old/new-client matrix again. Artifact SHA-256 is
+`f39286e7131e5455470dba02857b2566bc122b551538f81cbc9db8999fc3bbe8`;
+retained report: `/tmp/modelark-serial-clients-y4yihwch/result.json`.
+The old wheel's six reader-floor cases also passed again, with 115 payload files
+verified against base `97e5066b96e7cf0824b9786a8116548810c8272d` (report
+`/tmp/modelark-reader-floor-qualification-irbdzmhz/result.json`). The new wheel
+was separately pip-installed into a disposable target; origin, entry-point,
+packaged-resource and clone-first migration smoke checks passed. Six installed
+core read-only/read-write and Slice reader checks passed for catalogs 7 and 8,
+retaining their physical versions and logical Slice schema 7. No deployment
+or live mutations occurred. Final review/CI acceptance remains required.
+
+### Slice 5 round 1 finding and round 2 correction
+
+At `4758896f08776641f5eb77e574c78abb02c72900`, all exact-head CI passed
+(run 34433516469), Greptile accepted 5/5 with thumbs-up 414353339, but Codex
+completed at 03:41:19Z with P1 3975232723. Start cached the approved proposal
+before controller acquisition, then checked sessions, drafts and physical facts
+at publication without revalidating approval authority. Actual public replacement
+could supersede the old approval while Start waited and still admit its session.
+
+DEC-137 keeps omitted IDs unresolved through the service wrapper, reloads/resolves
+the selection under the controller before deriving physical keys, and revalidates
+the same selected ID, lifecycle, active pointer and full proposal inside the
+publication transaction. A change never silently selects a different proposal
+after config/projection admission. Existing refusal categories and history remain.
+
+Before correction, the 58 new assertions failed: 54 demonstrated stale approval,
+selection or definition use; four actual repair cases already refused through a
+semantic-identity check but lacked the direct approval-missing diagnostic. The
+repair cases keep real directory binding, observation and repair with low-level
+hardware seams, and now prove direct approval revocation. A separate old-function
+check with unchanged valid configuration confirmed the repair fixture's semantic
+guard remains an independent protection; no claim of a live repair bypass is made.
+Expanded qualification passed: 525 execution/gate2/serial/proposal/history tests
+in 77.64 seconds, followed by 49 admission/proposal-surface/catalog-migration
+tests in 4.08 seconds. The complete isolated browser workflow passed afterward;
+all-source Ruff and diff checks passed. Final wheel qualification follows before
+the round-2 review request. The 3220-pass local full result above is the round-1
+baseline; require fresh exact-head full CI for this correction.
+
+## 7. Questions for Grok
+
+Is same-epoch/new-generation plus permanent null-serial lock alias the smallest safe repair, or is
+there a concrete caller/old-client path it misses? Does the explicit repair preserve paused work
+without silently validating an old proposal? Is a schema/seal change actually required? Identify
+implementation surface we missed, unsafe topology assumptions, migration/rollback holes, and tests
+that would still pass while the real workflow fails. Give ACCEPT or REQUEST_CHANGES with must-fix
+versus optional points; do not implement or touch any live service/catalog/device.
+
+## Local review record
+
+Grok CLI session `01a0878a-6089-7821-8e86-bbe090fdcc8d`, review pass 1: REQUEST_CHANGES.
+The bounded inspection reached its tool-turn limit; the same session then produced its verdict
+without further investigation. Must-fix points: reader-version floor/two-old-client split; shared
+bidirectional alias expansion including resize; all child FDs/no label fallback; early explicit
+ordinary-path refusal; exact composite publication order; dirty legacy bridge; affected approval
+invalidation; neutral ancestry extraction without destination-policy changes. All are now explicit
+above. Added separate hash-repair CAS and unaffected Slice-seal compatibility checks.
+
+Reviewer point 5 said advance and publish helpers cannot be reused. The actual issue is ordering:
+advance under the old clean facts, update identity, then publish under the new facts can compose
+inside one guarded transaction. The plan pins the order and prohibits convenience wrappers; it
+does not require duplicating a correct private primitive merely to satisfy that wording.
+
+Revised-plan confirmation in the same local CLI session: ACCEPT. Grok confirmed all eight
+must-fix requirements are covered and accepted the guarded private-primitive composition.
+It also confirmed the separate hash-repair CAS and two-old-binary test requirements.
+This accepted the written plan only. The operator subsequently approved implementation and
+PR publication; live migration remains a separate gate.

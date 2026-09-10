@@ -2861,3 +2861,58 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Drive-bootstrap adapter, existing CLI refusal translation and focused regressions only. No schema change, auto-resume/completion, destructive cleanup, full-byte verification claim, deployment or live catalog/device mutation. A subsequent clean reconciliation keeps ordinary refresh semantics.
 - `docs_updated`: docs/decision_log.md, docs/operations.md, docs/plans/terminal-session-reconciliation.md
 - `related`: modelark/execution_authority.py, modelark/execution_recovery.py, modelark/drive_bootstrap.py
+
+### DEC-133: Correct archive serial evidence with compatible exclusion and explicit repair
+- `id`: DEC-133
+- `date`: 2026-09-09
+- `status`: accepted
+- `triggered_by`: Attended source preflight found canonical disk serial present but v1 anchors bound a null partition serial; operator approved the locally Grok-reviewed plan and sliced implementation in one PR.
+- `decision`: Share workflow-neutral physical ancestry observation without changing Slice destination policy. Retain v1 identity hashes and capacity epochs; updated operations permanently hold both canonical and null-serial identity locks derived from facts, including every child FD. Correct recognized legacy evidence only through explicit bound reconciliation, preserving dirty-owner history via a separate old-identity recovery milestone. Publish a new clean generation, invalidate affected Fill approvals and raise catalog reader floor to 8 in one transaction. Accept physical catalog 7/8 as the same logical Slice snapshot schema; do not mass-upgrade on open.
+- `rationale`: The canonical serial is correct; independent observers supplied inconsistent hash inputs. A probe-only fix would strand admission and split physical exclusion. Updated dual locks alone cannot exclude two old binaries using repaired versus unrepaired catalog copies, so repaired catalogs must reject old readers. Neither identity compatibility nor a revision bump makes old approvals executable.
+- `impact`: Shared observation/fences, catalog readers, archive/Fill/source consumers, explicit repair, invariant and cross-process qualification in docs/plans/archive-serial-identity-consistency.md. Preserve archive bytes, provenance, task/session history, old anchors, Slice output and receipts. New Preview/Approve/Start is required for affected work. No live repair, service restart, device operation or automatic merge is authorized by this code change.
+- `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
+- `related`: DEC-132, DEC-129, DEC-130
+
+### DEC-134: Share admission snapshot locks without weakening writer exclusion
+- `id`: DEC-134
+- `date`: 2026-09-09
+- `status`: accepted
+- `triggered_by`: DEC-133 slice-2 disposable browser qualification reproduced concurrent library-plan and preview readers contending on exclusive locks; one returned CAPACITY_EVIDENCE_UNKNOWN and left approval unavailable despite sequential fresh reads being feasible.
+- `decision`: Only short read-only admission snapshots acquire shared locks over the complete canonical/null-serial alias set. Writers, reconciliation, approvals, session authority, lifecycle revocation and child transports retain exclusive locks. Either exclusive alias still makes the snapshot non-executable, including offline anchors. Preserve global acquisition order and close-only handle release.
+- `rationale`: Exclusive snapshot readers falsely classified each other as writers after offline contention became correctly fail-closed. Returning offline evidence despite contention would hide real writers; UI retries would mask the cause. Shared snapshot locks distinguish read concurrency from mutation exclusion across processes without adding a second namespace.
+- `impact`: Neutral lock primitive and admission snapshot adapter, real cross-process reader/writer tests and portal qualification. No changes to identity admission, schema, serial observation activation, live catalog, service or device operations.
+- `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
+- `related`: DEC-133
+
+### DEC-135: Bind complete archive observations to an attachment and separate uninitialized revocation
+- `id`: DEC-135
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: PR 72 slice-4 review cap exposed final-component torn reads and loss declaration blocked before bootstrap; operator approved both scoped architectural corrections and continuation.
+- `decision`: Retain an open archive-directory handle for the complete observation, validating kernel mount/device/inode attachment around every component read and before return. Use descriptor-backed annex and filesystem accounting reads; path-selected probes must be checked against the same retained attachment. Separately allow catalog-only loss declaration for strictly proven never-initialized drives, under existing graph transaction/live-session/CAS guards, while initialized or ambiguous records retain compatible physical fencing.
+- `rationale`: Repeating independently resolved pathname reads does not bind them to one attachment. Revoking a never-initialized catalog entry does not grant archive access, but missing identity alone cannot prove that exception safe. Neither correction authorizes ignoring changed identity, treating failed probes as absence, or accepting malformed prior-use state.
+- `impact`: Neutral attachment observation, shared archive observer and narrow lifecycle classifier with regression-first tests. Preserve v1 proof formats, serial optionality, historical evidence, existing initialized-drive locks and Slice destination policy. No live repair/deployment/device writes; attachment checks are observations, not a lease against subsequent external remounts.
+- `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
+- `related`: DEC-133, DEC-134
+
+### DEC-136: Revalidate reconciliation lifecycle at authority publication
+- `id`: DEC-136
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: DEC-135 follow-up review, Codex P2 3974735813; two disposable public-registration/loss races reproduced authority publication after loss committed during inventory or before BEGIN.
+- `decision`: Ordinary reconciliation captures lifecycle and eligibility separately from identity proof inputs, requires an active lifecycle before archive observation, and compares the captured metadata after physical-lock acquisition and inside every authority-publication transaction, including ended-owner recovery. Stable active-but-excluded drives remain maintainable.
+- `rationale`: SQLite excludes simultaneous writes, not stale pre-transaction work. The earlier pristine-loss test held an already-open bootstrap write transaction and missed inventory before that transaction. Exact publication-state checks close that gap without manufacturing physical keys for never-initialized records or extending write transactions across inventory.
+- `impact`: Ordinary reconciliation guards and race tests only. Preserve eight-field identity state, serial-repair bindings, history, lock aliases and proof/schema formats. No live repair, deployment or device operations.
+- `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
+- `related`: DEC-133, DEC-135
+
+### DEC-137: Bind Start approval selection under controller and publication guards
+- `id`: DEC-137
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: DEC-133 final qualification review, Codex P1 3975232723; real public approval replacement before controller acquisition reproduced a session admitted against a superseded proposal.
+- `decision`: Keep the service's omitted selection unresolved until session admission. Under the controller lock, resolve omission or reload the exact explicit ID, require approved lifecycle and the active approval binding, then derive physical fences from that proposal. Inside BEGIN IMMEDIATE, revalidate that same ID, lifecycle, active binding and complete loaded proposal before allocating a token or inserting a session. Never switch proposals after projection.
+- `rationale`: A preflight approval object is not durable authority across lock waits or later callbacks. Projection equivalence and unchanged physical identity cannot substitute for approval validity. In the real repair fixture, the existing semantic fingerprint check already refused stale execution; that incidental refusal does not close the independently reproduced approval-replacement race.
+- `impact`: Initial selection in execution_service/start_session and regression coverage for Start/Resume, lock-wait replacement, independent SQLite publication races and actual repair. Preserve execution formats, epochs, physical aliases, history and valid omitted-selection behavior. No live repair, deployment or device operations.
+- `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md, docs/archive-serial-repair.md
+- `related`: DEC-133, DEC-136

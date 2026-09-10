@@ -21,6 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from modelark import capacity, capacity_evidence, drive_fence
+from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity
+from modelark.serial_identity import is_legacy_serial_mismatch
 
 
 @dataclass(frozen=True)
@@ -32,23 +34,32 @@ class _Facts:
     authority: str
     raid: bool
     anchor: tuple | None            # (anchor_free_bytes, identity_epoch, identity_fingerprint, fs_capacity)
+    fs_uuid: str | None = None
+    annex_uuid: str | None = None
+    serial: str | None = None
+
+    def fence_identity(self):
+        return FenceIdentity(self.fs_uuid, self.annex_uuid, self.serial,
+                             self.filesystem_capacity, self.epoch, self.fingerprint)
 
 
 def _facts(con, label: str) -> _Facts:
     row = con.execute(
         "SELECT identity_epoch, write_generation, identity_fingerprint, filesystem_capacity_bytes, "
-        "coalesce(write_authority,'unknown'), coalesce(raid_backed,0) FROM drives WHERE drive_label=?",
+        "coalesce(write_authority,'unknown'), coalesce(raid_backed,0), fs_uuid, annex_uuid, serial "
+        "FROM drives WHERE drive_label=?",
         [label]).fetchone()
     if row is None:
         return _Facts(None, 0, None, None, "unknown", False, None)
-    epoch, generation, fingerprint, fs_capacity, authority, raid = row
+    epoch, generation, fingerprint, fs_capacity, authority, raid, fs_uuid, annex_uuid, serial = row
     # The anchor for the drive's EXACT current (identity_epoch, write_generation): a stale old-epoch
     # anchor at a higher generation must not shadow the current one.
     anchor = con.execute(
         "SELECT anchor_free_bytes, identity_epoch, identity_fingerprint, filesystem_capacity_bytes "
         "FROM drive_clean_anchors WHERE drive_label=? AND identity_epoch=? AND generation=?",
         [label, epoch, generation]).fetchone()
-    return _Facts(epoch, generation, fingerprint, fs_capacity, authority, bool(raid), anchor)
+    return _Facts(epoch, generation, fingerprint, fs_capacity, authority, bool(raid), anchor,
+                  fs_uuid, annex_uuid, serial)
 
 
 def _derive(con, label: str, *, observation, fence_held: bool, now: str) -> capacity_evidence.Evidence:
@@ -79,6 +90,19 @@ def _derive(con, label: str, *, observation, fence_held: bool, now: str) -> capa
         anchor_fingerprint=(f.anchor[2] if f.anchor else None),
         anchor_filesystem_capacity=(f.anchor[3] if f.anchor else None),
         safety_floor_bytes=floor)
+    # Preserve this one closed operator diagnostic without changing the pure
+    # admission verdict. An observer's refusal string is not identity authority:
+    # independently prove the exact saved-null -> canonical-serial mismatch.
+    if (evidence.code == "DRIVE_IDENTITY_UNPROVEN"
+            and fence_held and f.authority == "dedicated_local"
+            and observation is not None and not observation.identity_proven
+            and getattr(observation, "refusal_code", None) == "DRIVE_SERIAL_REPAIR_REQUIRED"
+            and observation.filesystem_capacity == f.filesystem_capacity
+            and is_legacy_serial_mismatch(
+                fs_uuid=f.fs_uuid, annex_uuid=f.annex_uuid, serial=f.serial,
+                fingerprint=f.fingerprint, filesystem_capacity_bytes=f.filesystem_capacity,
+                live_fingerprint=observation.fingerprint)):
+        evidence = replace(evidence, code="DRIVE_SERIAL_REPAIR_REQUIRED")
     return replace(evidence, observed_at=now, identity_epoch=f.epoch)
 
 
@@ -90,10 +114,11 @@ def execution_evidence(con, label: str, observation, *, now: str) -> capacity_ev
 
 
 def preview_by_drive(con, labels, *, observe, now: str,
-                     fence=drive_fence.hold_drives_sorted) -> dict[str, capacity_evidence.Evidence]:
+                     fence=drive_fence.hold_drive_reads_sorted) -> dict[str, capacity_evidence.Evidence]:
     """Preview/API/CLI SNAPSHOT admission for each drive. ``observe(label) -> Observation | None`` is the
     injected live reader (``None`` when the drive is not mounted). For a proven drive the identity-derived
-    drive fence is tried NON-BLOCKING; the observation + derivation happen UNDER the held fence and the
+    shared drive fence is tried NON-BLOCKING; concurrent snapshots coexist but writers exclude them.
+    The observation + derivation happen UNDER the held fence and the
     fence is released immediately after (a snapshot, not a reservation). A contended fence is
     fail-closed."""
     out: dict[str, capacity_evidence.Evidence] = {}
@@ -104,12 +129,26 @@ def preview_by_drive(con, labels, *, observe, now: str,
             out[label] = _derive(con, label, observation=None, fence_held=False, now=now)
             continue
         try:
-            with fence([(captured.fingerprint, captured.epoch)], blocking=False):
+            keys = captured.fence_identity().lock_keys()
+            with fence(keys, blocking=False):
                 observation = observe(label)                 # observe + revalidate UNDER the held fence
-                out[label] = _derive(con, label, observation=observation, fence_held=True, now=now)
+                unchanged = _facts(con, label).fence_identity() == captured.fence_identity()
+                out[label] = _derive(con, label, observation=observation,
+                                     fence_held=unchanged, now=now)
+                if not unchanged:
+                    out[label] = replace(out[label], kind="unknown", executable=False,
+                                         admissible_free=0, code="DRIVE_IDENTITY_UNPROVEN")
+        except UnprovenFenceIdentity:
+            out[label] = replace(
+                _derive(con, label, observation=None, fence_held=False, now=now),
+                kind="unknown", executable=False, admissible_free=0,
+                code="DRIVE_IDENTITY_UNPROVEN")
         except drive_fence.FenceUnavailable:
-            # Fail-closed: a mounted-but-unfenceable drive is DRIVE_FENCE_UNAVAILABLE (diagnostic observe
-            # only, still zero executable); an offline one derives from the anchor/unknown path.
+            # Contention invalidates this snapshot even offline: a writer may be
+            # invalidating the clean anchor while holding either compatible key.
             observation = observe(label)
-            out[label] = _derive(con, label, observation=observation, fence_held=False, now=now)
+            out[label] = replace(
+                _derive(con, label, observation=observation, fence_held=False, now=now),
+                kind="unknown", executable=False, admissible_free=0,
+                code="DRIVE_FENCE_UNAVAILABLE")
     return out

@@ -428,6 +428,10 @@ def _actions_for(drive: CapacityDrive, base: tuple[str, ...]) -> tuple[str, ...]
     """When a block is due to UNKNOWN evidence (zero executable), lead with mount/reconcile so the
     operator is not told to free/trim observed space that was never actually observed. The complete
     mixed-fleet outcome ladder is #38; this only preserves the typed cause and the right first action."""
+    if drive.evidence_kind == "unknown" and drive.evidence_code == "DRIVE_SERIAL_REPAIR_REQUIRED":
+        # Ordinary reconciliation cannot repair this evidence, and explicit
+        # serial repair invalidates affected approvals before a fresh preview.
+        return ("inspect_serial_identity", "repair_serial_identity", "retry_preview")
     if drive.evidence_kind == "unknown":
         return ("mount_or_reconcile_drive", *base)
     return base
@@ -1233,6 +1237,11 @@ def plan_capacity(
             failures = _capacity_short_failures(solver_inp, capacity_drives, mode)
         elif code == "CAPACITY_EVIDENCE_UNKNOWN":
             failures = _unknown_evidence_failures(capacity_drives, mode, solver_inp)
+            if any(f.evidence_code == "DRIVE_SERIAL_REPAIR_REQUIRED" for f in failures):
+                # The pure solver has no serial-repair taxonomy. Project the
+                # closed per-drive guidance here, retaining ordinary reconcile
+                # actions only when another unknown drive actually needs them.
+                actions = tuple(dict.fromkeys(action for f in failures for action in f.actions))
         elif code in {
             "TARGET_TIER_MISSING", "UNPROVEN_PROVENANCE", "REQUIREMENT_EXCEEDS_USABLE_MAX",
             "FAILURE_DOMAIN_UNSATISFIABLE", "GRAPH_DEPENDENCY_INVARIANT",

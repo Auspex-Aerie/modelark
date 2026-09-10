@@ -24,6 +24,10 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
+from modelark.catalog_versions import (
+    CATALOG_LAYOUT_VERSION, MAX_SUPPORTED_CATALOG_VERSION, SUPPORTED_CATALOG_VERSIONS,
+)
+
 PKG_ROOT = Path(__file__).resolve().parent           # modelark/core
 REPO_ROOT = PKG_ROOT.parent.parent                   # source root for legacy/editable-install detection only
 
@@ -226,6 +230,7 @@ def migrate_existing_catalog(*, backup_existing: bool = True) -> sqlite3.Connect
     existed = DB_PATH.exists()
     con = sqlite3.connect(str(DB_PATH), isolation_level=None, check_same_thread=False)
     try:
+        _validate_catalog_version(int(con.execute("PRAGMA user_version").fetchone()[0]))
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA busy_timeout=15000")
         con.execute("PRAGMA synchronous=NORMAL")
@@ -257,7 +262,8 @@ _LIFECYCLE_ELIGIBILITY_SCHEMA_VERSION = 4  # v4: drives.lifecycle + drives.eligi
 _PROPOSAL_CONTROL_SCHEMA_VERSION = 5  # v5: planner_state + proposals + execution_sessions (#39-A)
 _EXECUTION_CONFIG_HASH_SCHEMA_VERSION = 6  # v6: placement_proposals.execution_config_hash (PR-09 / B7)
 _PROVENANCE_SCHEMA_VERSION = 7  # v7: DEC-053 provenance + DEF-034 derivation CHECK + DEC-054 repair state
-_SCHEMA_VERSION = 7
+# Bootstrap and provenance ladder target, not the highest supported reader floor.
+_SCHEMA_VERSION = CATALOG_LAYOUT_VERSION
 # Canonical bootstrap marker: planner state exists, but no planner mutation has occurred yet.
 # Do not use wall-clock time here; migration identity must be reproducible from the same seed.
 _PLANNER_STATE_BOOTSTRAP_UPDATED_AT = "1970-01-01 00:00:00"
@@ -285,9 +291,9 @@ REPAIR_STATUS_VALUES = frozenset({
 
 
 def _validate_catalog_version(version: int, *, read_only: bool = False) -> None:
-    if version > _SCHEMA_VERSION:
+    if version > MAX_SUPPORTED_CATALOG_VERSION:
         raise RuntimeError(
-            f"Catalog schema v{version} is newer than this ModelArk build (v{_SCHEMA_VERSION}); "
+            f"Catalog schema v{version} is newer than this ModelArk build (v{MAX_SUPPORTED_CATALOG_VERSION}); "
             "upgrade ModelArk before opening it."
         )
     if read_only and version < _SCHEMA_VERSION:
@@ -902,8 +908,8 @@ def _migrate(con, version: int, *, backup_existing: bool) -> None:
         # or explicit clone migration helpers. connect() refuses bare existing v6.
         _migrate_provenance_v7(con, backup_existing=backup_existing)
         version = _PROVENANCE_SCHEMA_VERSION
-    if version != _SCHEMA_VERSION:
-        raise RuntimeError(f"Catalog migration stopped at v{version}, expected v{_SCHEMA_VERSION}")
+    if version not in SUPPORTED_CATALOG_VERSIONS:
+        raise RuntimeError(f"Catalog migration stopped at unsupported v{version}")
 
 
 def _migrate_legacy_columns(con) -> None:
@@ -1114,8 +1120,8 @@ def _validate_migrated_clone(con: sqlite3.Connection) -> None:
     if "drive_hash_repair_state" not in tables:
         raise RuntimeError("migrated clone missing drive_hash_repair_state")
     version = int(con.execute("PRAGMA user_version").fetchone()[0])
-    if version < _PROVENANCE_SCHEMA_VERSION:
-        raise RuntimeError(f"migrated clone user_version={version}, expected >=7")
+    if version not in SUPPORTED_CATALOG_VERSIONS:
+        raise RuntimeError(f"migrated clone user_version={version}, expected 7 or 8")
     # Illegal non-null derivation values must already have been rejected by rebuild.
     bad_dm = con.execute(
         "SELECT proposal_id, derivation_mode FROM placement_proposals "
@@ -1134,6 +1140,13 @@ def _migrate_provenance_v7(con: sqlite3.Connection, *, backup_existing: bool) ->
     Returns the measured backfill classification counts from
     :func:`_apply_provenance_backfill` (including ``disagreement``).
     """
+    version = int(con.execute("PRAGMA user_version").fetchone()[0])
+    _validate_catalog_version(version)
+    if version > _PROVENANCE_SCHEMA_VERSION:
+        # A reader-floor stamp is not permission to rebuild/downgrade a malformed
+        # repaired catalog. Validate it without resetting the floor to version 7.
+        _validate_migrated_clone(con)
+        return {"hub_confirmed": 0, "legacy_unknown": 0, "null_digest": 0, "disagreement": 0}
     empty = {
         "hub_confirmed": 0,
         "legacy_unknown": 0,
@@ -2086,9 +2099,9 @@ def rehearse_provenance_migration(
         clone_con.execute("PRAGMA foreign_keys=OFF")
         # Ensure clone is at least v6 before provenance (frozen fixtures are v6).
         ver = int(clone_con.execute("PRAGMA user_version").fetchone()[0])
-        if ver > _SCHEMA_VERSION:
+        if ver > MAX_SUPPORTED_CATALOG_VERSION:
             raise RuntimeError(
-                f"clone user_version {ver} newer than build v{_SCHEMA_VERSION}")
+                f"clone user_version {ver} newer than build v{MAX_SUPPORTED_CATALOG_VERSION}")
         if ver < _EXECUTION_CONFIG_HASH_SCHEMA_VERSION:
             _migrate(clone_con, ver, backup_existing=False)
             ver = int(clone_con.execute("PRAGMA user_version").fetchone()[0])
@@ -2254,6 +2267,7 @@ def _remigrate_snapshot_to_expected(snapshot_path: Path, work: Path) -> Path:
     try:
         con.execute("PRAGMA foreign_keys=OFF")
         ver = int(con.execute("PRAGMA user_version").fetchone()[0])
+        _validate_catalog_version(ver)
         if ver < _EXECUTION_CONFIG_HASH_SCHEMA_VERSION:
             _migrate(con, ver, backup_existing=False)
             ver = int(con.execute("PRAGMA user_version").fetchone()[0])

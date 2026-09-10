@@ -2,6 +2,7 @@
 from contextlib import ExitStack, contextmanager
 
 from modelark import drive_fence
+from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity
 from .catalog import read_catalog
 from .domain import SliceRefusal, SliceSpec
 from .transaction import TransferRefusal
@@ -33,13 +34,25 @@ class FencedSources:
 
     @contextmanager
     def open(self, candidate):
-        key = (candidate.drive.identity_fingerprint, candidate.drive.identity_epoch)
+        def identity(drive):
+            return FenceIdentity(drive.fs_uuid, drive.annex_uuid, drive.serial,
+                                 drive.filesystem_capacity_bytes, drive.identity_epoch,
+                                 drive.identity_fingerprint)
+
         with ExitStack() as stack:
             try:
-                stack.enter_context(drive_fence.hold_drives_sorted([key], blocking=False))
+                captured = identity(candidate.drive)
+                keys = captured.lock_keys()
+                stack.enter_context(drive_fence.hold_drives_sorted(keys, blocking=False))
                 spec = SliceSpec((candidate.copy.repo_id,), "source-evidence", "unused")
                 snapshot = read_catalog(self.catalog_path, spec)
+                fresh = next((drive for drive in snapshot.drives
+                              if drive.drive_label == candidate.drive.drive_label), None)
+                if fresh is None or identity(fresh) != captured:
+                    raise TransferRefusal("SOURCE_EVIDENCE_UNAVAILABLE", "source identity changed")
                 stream = stack.enter_context(self.reader.open(candidate))
+            except UnprovenFenceIdentity as exc:
+                raise TransferRefusal("SOURCE_EVIDENCE_UNAVAILABLE", str(exc)) from exc
             except drive_fence.FenceUnavailable as exc:
                 raise TransferRefusal("SOURCE_BUSY", candidate.drive.drive_label) from exc
             except SliceRefusal as exc:

@@ -176,10 +176,16 @@ class LocalArchiveReader:
                     raise TransferRefusal("SOURCE_CHANGED", "observer and source descriptor attachments differ")
                 drive = candidate.drive
                 annex = _annex_uuid(tree)
+                from modelark.serial_identity import serial_for_identity, SerialIdentityUnproven
+                try:
+                    identity_serial = serial_for_identity(drive.serial, expected[1])
+                except SerialIdentityUnproven as exc:
+                    raise TransferRefusal("SOURCE_IDENTITY_UNPROVEN", label) from exc
                 fingerprint = identity_fingerprint_v1(
-                    fs_uuid=expected[0], annex_uuid=annex, serial=expected[1],
+                    fs_uuid=expected[0], annex_uuid=annex, serial=identity_serial,
                     filesystem_capacity_bytes=expected[2])
-                if (expected[:3] != (drive.fs_uuid, drive.serial, drive.filesystem_capacity_bytes)
+                if ((expected[0], expected[2]) != (drive.fs_uuid, drive.filesystem_capacity_bytes)
+                        or (bool(drive.serial) and expected[1] != drive.serial)
                         or annex != drive.annex_uuid or fingerprint != drive.identity_fingerprint):
                     raise TransferRefusal("SOURCE_CHANGED", label)
                 stream = stack.enter_context(os.fdopen(_open_content(tree, candidate), "rb"))

@@ -43,6 +43,17 @@ def _offline(drive) -> bool:
     return bool(_g(drive, "offline", False))
 
 
+def _unknown_capacity_refusal(target, evidence, *, offline=False):
+    code = _g(evidence, "code")
+    detail = {"drive": target, "evidence_code": code}
+    if offline:
+        detail["offline"] = True
+    actions = ("mount_and_reconcile", "resume_same_approval")
+    if code == "DRIVE_SERIAL_REPAIR_REQUIRED":
+        actions = ("inspect_serial_identity", "repair_serial_identity", "preview_again")
+    return Refusal("CAPACITY_EVIDENCE_UNKNOWN", detail, actions)
+
+
 def _arch_key_match(archived: Mapping, repo: str, rfilename: str, drive: str) -> dict | None:
     # Support tuple keys (repo, rfilename, drive) or nested dicts
     if (repo, rfilename, drive) in archived:
@@ -436,15 +447,9 @@ def project_pure(proposal, current_input, current_graph, session_overlay):
             if d is not None and _offline(d):
                 # Keep target; do not remap. Evidence unknown is preferred code when non-executable.
                 if ev is not None and not _g(ev, "executable", True):
-                    return Refusal(
-                        "CAPACITY_EVIDENCE_UNKNOWN",
-                        {"drive": target, "offline": True},
-                        ("mount_and_reconcile", "resume_same_approval"))
+                    return _unknown_capacity_refusal(target, ev, offline=True)
             if ev is not None and not _g(ev, "executable", True) and _g(ev, "kind") == "unknown":
-                return Refusal(
-                    "CAPACITY_EVIDENCE_UNKNOWN",
-                    {"drive": target},
-                    ("mount_and_reconcile", "resume_same_approval"))
+                return _unknown_capacity_refusal(target, ev)
 
         remaining.append(_TaskView(data=td, schedule_state=schedule))
 

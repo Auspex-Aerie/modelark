@@ -1,6 +1,7 @@
 # Operating ModelArk
 
-This guide is the everyday reference for a current schema-v7 installation. For a new host, begin
+This guide covers catalog v7 and compatible catalog v8 after explicit serial-identity repair.
+For a new host, begin
 with [Fresh install and first archive](getting-started.md). For any older catalog, stop and follow
 [Upgrading ModelArk](upgrading.md) before starting the new binary.
 
@@ -50,6 +51,10 @@ in [deployment.md](deployment.md).
 
 Use `.venv/bin/modelark --help` and the relevant subcommand's `--help` for current arguments. Raw SQL
 querying exists for expert diagnosis, but it is not a supported mutation surface.
+
+If archive observation reports `DRIVE_SERIAL_REPAIR_REQUIRED`, use the attended
+[archive serial-identity repair guide](archive-serial-repair.md). Do not change the
+saved disk serial or repeatedly run ordinary reconciliation to bypass that refusal.
 
 Must-have repositories require a second copy:
 

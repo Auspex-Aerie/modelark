@@ -136,6 +136,14 @@ class Gap:
 
 @dataclass(frozen=True)
 class CatalogSnapshot:
+    """Immutable logical domain records, independent of physical catalog reader floor.
+
+    ``schema_version`` identifies this record layout, not SQLite user_version.
+    The explicit catalog adapter maps physical catalogs 7 and 8 to logical 7;
+    identity fingerprints, generations, anchors and all other evidence remain
+    fully bound into snapshots and applicable proposal seals.
+    """
+
     catalog_id: str
     files: tuple[FileFact, ...]
     copies: tuple[CopyFact, ...]
@@ -323,7 +331,7 @@ def _source(file, copy, drive, anchors):
 
 def preview(spec: SliceSpec, snapshot: CatalogSnapshot) -> SlicePreview:
     if snapshot.schema_version != 7 or not snapshot.catalog_id:
-        raise SliceRefusal("INVALID_SNAPSHOT", "schema v7 and snapshot provenance required")
+        raise SliceRefusal("INVALID_SNAPSHOT", "logical schema v7 and snapshot provenance required")
     snapshot = _scope(snapshot, spec)
     files = _index(snapshot.files, lambda f: (f.repo_id, f.rfilename))
     _index(snapshot.copies, lambda c: (c.repo_id, c.rfilename, c.drive_label))

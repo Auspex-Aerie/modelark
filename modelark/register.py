@@ -21,6 +21,7 @@ import re
 import shutil
 import stat
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -472,15 +473,11 @@ def prepare_new_identity_archive(
         raise RuntimeError(
             f"filesystem UUID changed before registration: expected {fs_uuid!r}, "
             f"observed {(live_uuid[0] if live_uuid else None)!r}")
-    parent = _run("lsblk", "-nro", "PKNAME", volume_dev, check=False).stdout.strip()
-    serial_device = f"/dev/{parent.splitlines()[0]}" if parent else volume_dev
-    live_serial = _run(
-        "lsblk", "-dno", "SERIAL", serial_device, check=False
-    ).stdout.strip().splitlines()
-    if not live_serial or live_serial[0] != serial:
+    live_serial = probe_serial(mount_path)
+    if live_serial != serial:
         raise RuntimeError(
             f"hardware serial changed before registration: expected {serial!r}, "
-            f"observed {(live_serial[0] if live_serial else None)!r}")
+            f"observed {live_serial!r}")
     root_source = _run("findmnt", "-nro", "SOURCE", "/", check=False).stdout.strip()
     if root_source and _parent_disk(volume_dev) == _parent_disk(root_source.split("[", 1)[0]):
         raise RuntimeError(
@@ -741,7 +738,8 @@ def archive_path(con, label: str) -> Path | None:
 # ---- live identity probes (read the mounted volume, never the catalog) ------
 # These back the fenced observation used by the physical-mutation envelope: identity is proven from the
 # CURRENT device, so a stale catalog row cannot vouch for a swapped/mismounted volume. Linux-only
-# (findmnt/lsblk); off-platform they degrade to None → identity unknown → the envelope refuses.
+# (findmnt/lsblk); physical serial observation failures raise rather than claiming
+# a successfully observed absent serial. Workflow adapters translate those failures.
 
 def probe_fs_uuid(path) -> str | None:
     """Live filesystem UUID of the volume containing `path`."""
@@ -755,13 +753,55 @@ def probe_annex_uuid(path) -> str | None:
 
 
 def probe_serial(path) -> str | None:
-    """Live hardware serial of the device backing `path` (supporting identity evidence), or None."""
-    src = _run("findmnt", "-fno", "SOURCE", "--target", str(path), check=False).stdout.strip()
-    src = src.splitlines()[0] if src else ""
-    if not src:
-        return None
-    out = _run("lsblk", "-dno", "SERIAL", src, check=False).stdout.strip()
-    return out.splitlines()[0] if out else None
+    """Physical parent-disk serial; None only when a proven disk reports no serial.
+
+    BlockObservationError means failed/ambiguous observation, never absence.
+    """
+    from modelark.block_identity import observe_mounted_disk
+    return observe_mounted_disk(path).serial
+
+
+@dataclass(frozen=True)
+class ArchiveVolumeObservation:
+    fs_uuid: str | None
+    annex_uuid: str | None
+    serial: str | None
+    capacity_bytes: int
+    free_bytes: int
+    alloc_unit_bytes: int
+
+
+def observe_archive_volume(path) -> ArchiveVolumeObservation:
+    """Read volume and disk evidence within one retained directory attachment.
+
+    Free space may legitimately drift; only the final reading is returned. A
+    failed or changed observation is unproven, never partially usable evidence.
+    Every component, including the last, is attachment-checked. This is a bounded
+    observation, not a mount lease or an ABA guarantee.
+    """
+    from modelark.attachment_observation import BoundDirectory
+    from modelark.block_identity import BlockObservationError
+
+    def volume_facts(bound):
+        fs_uuid = bound.read(probe_fs_uuid, bound.path)
+        annex_uuid = bound.read(probe_annex_uuid, bound.pinned_path)
+        st = bound.read(os.fstatvfs, bound.fd)
+        return (fs_uuid, annex_uuid, st.f_blocks * st.f_frsize,
+                st.f_frsize, st.f_bavail * st.f_frsize)
+
+    try:
+        with BoundDirectory(path) as bound:
+            before = volume_facts(bound)
+            serial = bound.read(probe_serial, bound.path)
+            after = volume_facts(bound)
+            if before[:-1] != after[:-1]:
+                raise BlockObservationError("archive volume changed during physical-disk observation")
+            fs_uuid, annex_uuid, capacity, alloc_unit, free = after
+            result = ArchiveVolumeObservation(fs_uuid, annex_uuid, serial, capacity, free, alloc_unit)
+            bound.check()
+            return result
+    except (OSError, RuntimeError, subprocess.SubprocessError, UnicodeError) as exc:
+        raise BlockObservationError("archive volume observation failed") from exc
 
 
 def list_drives(con) -> list[dict]:

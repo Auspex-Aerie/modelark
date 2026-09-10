@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import ExitStack
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -140,25 +141,33 @@ class SessionStart:
     execution_config: Any
 
 
-def start_session(con, proposal_id, predecessor_id, services):
-    """RFC-002 start/resume. Returns SessionStart or Refusal (or raises Refusal)."""
+def _selected_approval(con, proposal_id):
+    """Read exact current approval authority; never substitute an explicit ID."""
+    row = con.execute(
+        "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
+    ).fetchone()
+    active_id = row[0] if row else None
+    # Only an omitted selection means "use the active approval". An explicit
+    # stale/missing proposal is not permission to start a different assignment.
+    if proposal_id is None:
+        proposal_id = active_id
     try:
         proposal = load_proposal(con, proposal_id)
     except Exception:
         proposal = None
-    if not proposal or proposal.get("lifecycle") != "approved":
-        # Also try active pointer
-        row = con.execute(
-            "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
-        ).fetchone()
-        if row and row[0] and row[0] != proposal_id:
-            try:
-                proposal = load_proposal(con, row[0])
-                proposal_id = row[0]
-            except Exception:
-                pass
-        if not proposal or proposal.get("lifecycle") != "approved":
-            return Refusal("APPROVAL_MISSING", {"proposal_id": proposal_id}, ("preview_again",))
+    if not proposal or proposal.get("lifecycle") != "approved" or active_id != proposal_id:
+        return Refusal("APPROVAL_MISSING", {"proposal_id": proposal_id}, ("preview_again",))
+    return proposal
+
+
+def start_session(con, proposal_id, predecessor_id, services):
+    """RFC-002 start/resume. Returns SessionStart or Refusal (or raises Refusal)."""
+    requested_id = proposal_id
+    # Preflight is only an early refusal, not authority across lock acquisition.
+    proposal = _selected_approval(con, requested_id)
+    if isinstance(proposal, Refusal):
+        return proposal
+    proposal_id = proposal["proposal_id"]
 
     pending = current_draft_ids(con)
     if pending:
@@ -168,11 +177,18 @@ def start_session(con, proposal_id, predecessor_id, services):
             ("review_or_discard_pending",),
         )
 
-    relevant = _proposal_drive_ids(proposal)
     ctrl = services.controller_flock
     fences = services.drive_fences
 
-    with ctrl.hold(), fences.hold_all_sorted(relevant):
+    with ctrl.hold(), ExitStack() as held:
+        # Approval replacement/repair may finish while Start waits for the
+        # controller. Resolve omission here, before deriving any physical keys.
+        proposal = _selected_approval(con, requested_id)
+        if isinstance(proposal, Refusal):
+            return proposal
+        proposal_id = proposal["proposal_id"]
+        relevant = _proposal_drive_ids(proposal)
+        fence_binding = held.enter_context(fences.hold_all_sorted(relevant))
         current_config = dict(services.config.read_graph_affecting_config() or {})
         frozen = ecfg.ExecutionConfig.from_values(current_config)
 
@@ -265,6 +281,21 @@ def start_session(con, proposal_id, predecessor_id, services):
 
         con.execute("BEGIN IMMEDIATE")
         try:
+            # Pin the selected ID: an active-pointer change must refuse, never
+            # select a replacement after projection/fence/config admission.
+            current_proposal = _selected_approval(con, proposal_id)
+            if isinstance(current_proposal, Refusal):
+                raise current_proposal
+            if current_proposal != proposal:
+                raise Refusal("APPROVED_INPUT_CHANGED",
+                              {"reason": "approval_changed", "proposal_id": proposal_id},
+                              ("preview_again",))
+            # Production fences bind all facts used to expand compatible keys.
+            # Projection/config callbacks run after acquisition; recheck here so
+            # they cannot leave a Start/Resume committed under stale alias keys.
+            validate_fences = getattr(fence_binding, "validate_current", None)
+            if callable(validate_fences):
+                validate_fences(con)
             # Re-check live session inside TX.
             if live_session_exists(con):
                 raise Refusal("FILL_SESSION_ACTIVE", live_owner(con), ("wait_or_stop",))

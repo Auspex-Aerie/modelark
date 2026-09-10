@@ -1173,6 +1173,47 @@ def load_proposal(con, proposal_id: str) -> dict:
     return d
 
 
+def approved_proposals_bound_to_drive(con, drive_label: str) -> tuple[str, ...]:
+    """Inspect approvals affected by this drive's serial-evidence correction.
+
+    A drive can be a write target, a copy source, or the location satisfying an
+    already-archived requirement. All three bind execution authority, including
+    bindings on an approved proposal that is not the current active pointer.
+    """
+    rows = con.execute(
+        "SELECT DISTINCT p.proposal_id FROM placement_proposals p "
+        "JOIN proposal_tasks t ON t.proposal_id=p.proposal_id "
+        "WHERE p.lifecycle='approved' AND "
+        "(t.target_drive=? OR t.source_drive=? OR t.satisfying_drive=?) "
+        "ORDER BY p.proposal_id",
+        [drive_label, drive_label, drive_label]).fetchall()
+    return tuple(row[0] for row in rows)
+
+
+def supersede_serial_repair_approvals(con, drive_label: str) -> tuple[str, ...]:
+    """Supersede only affected approvals in the repair's BEGIN IMMEDIATE.
+
+    The caller owns physical fences, the IMMEDIATE transaction, and its single
+    planner-revision bump. SQLite exposes whether a transaction is open, not its
+    BEGIN mode; enforce the former here and require the latter of the caller.
+    Like normal approval replacement, change lifecycle/timestamp only. Immutable
+    task/file bindings and paused session history remain historical evidence.
+    """
+    if not con.in_transaction:
+        raise Refusal("SERIAL_REPAIR_TRANSACTION_REQUIRED", {"drive": drive_label}, ())
+    _require_fill_idle(con)
+    affected = approved_proposals_bound_to_drive(con, drive_label)
+    for proposal_id in affected:
+        con.execute(
+            "UPDATE placement_proposals SET lifecycle='superseded', "
+            "superseded_at=CURRENT_TIMESTAMP WHERE proposal_id=? AND lifecycle='approved'",
+            [proposal_id])
+        con.execute(
+            "UPDATE planner_state SET active_approved_proposal_id=NULL "
+            "WHERE singleton_id=1 AND active_approved_proposal_id=?", [proposal_id])
+    return affected
+
+
 def review_input_status(con, stored: Mapping) -> dict:
     """Read-only operator status for the inputs bound by a stored proposal.
 
@@ -1281,24 +1322,42 @@ def proposal_drive_ids(proposal: Mapping) -> list[tuple[str, int]]:
     return sorted(labels)
 
 
-def _fence_keys(con, labels: Sequence[str]) -> list[tuple[str, int]]:
-    """Resolve proposal-relevant labels to sorted (fingerprint, epoch) fence keys.
+def _fence_facts(con, labels: Sequence[str]):
+    """Capture and validate physical identity facts in the caller's label order.
 
     Finding 38: refuse missing identity instead of silently omitting a drive from the fence set.
     """
-    keys = []
+    from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity
+    facts = []
     for label in labels:
         row = con.execute(
-            "SELECT identity_fingerprint, identity_epoch FROM drives WHERE drive_label=?",
+            "SELECT fs_uuid,annex_uuid,serial,filesystem_capacity_bytes,identity_epoch,"
+            "identity_fingerprint FROM drives WHERE drive_label=?",
             [label]).fetchone()
-        if not row or not row[0]:
+        try:
+            if not row:
+                raise UnprovenFenceIdentity("drive missing")
+            identity = FenceIdentity(*row)
+            identity.lock_keys()
+        except UnprovenFenceIdentity as exc:
             raise Refusal(
                 "DRIVE_IDENTITY_UNPROVEN",
-                {"drive": label, "reason": "missing_identity_fingerprint"},
+                {"drive": label, "reason": str(exc)},
                 ("reconcile_drive", "preview_again"),
-            )
-        keys.append((row[0], int(row[1])))
-    return sorted(keys)
+            ) from exc
+        facts.append(identity)
+    return tuple(facts)
+
+
+def _fence_keys(con, labels: Sequence[str]) -> list[tuple[str, int]]:
+    from modelark.drive_identity import compatible_keys
+    return list(compatible_keys(_fence_facts(con, labels)))
+
+
+def _require_fence_facts(con, labels, captured):
+    if _fence_facts(con, labels) != captured:
+        raise Refusal("APPROVED_INPUT_CHANGED", {"reason": "drive_fence_identity_changed"},
+                      ("preview_again",))
 
 
 # ---------------------------------------------------------------------------
@@ -1405,8 +1464,11 @@ def validate_exact_assignment(con, proposal: Mapping,
                 ("preview_again",))
         ev = evidence_by_drive.get(label)
         if ev is not None and hasattr(ev, "executable") and not ev.executable:
-            raise Refusal("EXACT_ASSIGNMENT_REJECTED", {"drive": label, "evidence": ev},
-                          ("preview_again",))
+            code = getattr(ev, "code", None)
+            actions = (("inspect_serial_identity", "repair_serial_identity", "preview_again")
+                       if code == "DRIVE_SERIAL_REPAIR_REQUIRED" else ("preview_again",))
+            raise Refusal("EXACT_ASSIGNMENT_REJECTED",
+                          {"drive": label, "evidence": ev, "evidence_code": code}, actions)
 
     # Joint remaining capacity across the full executable assignment (not pointwise full free).
     remaining = _admissible_map_from_evidence(evidence_by_drive)
@@ -1513,7 +1575,6 @@ def approve(con, proposal_id: str, *, mutation=None, services=None, **_extra):
     require_active_proposal_plan(con, proposal)
     require_unambiguous_current_draft(con)
     labels = proposal_drive_ids(proposal)
-    keys = _fence_keys(con, labels)
     catalog_path = getattr(db, "DB_PATH", None) or ":memory:"
 
     def _run_approve():
@@ -1525,7 +1586,11 @@ def approve(con, proposal_id: str, *, mutation=None, services=None, **_extra):
         except ImportError:
             pass
         with drive_fence.hold_controller(catalog_path, blocking=True):
+            from modelark.drive_identity import compatible_keys
+            captured = _fence_facts(con, labels)
+            keys = compatible_keys(captured)
             with drive_fence.hold_drives_sorted(keys, blocking=True):
+                _require_fence_facts(con, labels, captured)
                 # Evidence after fences, before BEGIN IMMEDIATE (A6).
                 observe = getattr(services, "observe_exact_capacity", None)
                 if observe is not None:
@@ -1538,7 +1603,8 @@ def approve(con, proposal_id: str, *, mutation=None, services=None, **_extra):
 
                 def mutate():
                     return _approve_tx(con, proposal_id, mutation=mutation,
-                                       evidence_by_drive=evidence)
+                                       evidence_by_drive=evidence,
+                                       fence_binding=(labels, captured))
 
                 result = fill_worker.WORKER.guarded_mutation(mutate)
                 if result is None:
@@ -1552,9 +1618,10 @@ def approve(con, proposal_id: str, *, mutation=None, services=None, **_extra):
 approve_proposal = approve
 
 
-def _approve_tx(con, proposal_id: str, *, mutation, evidence_by_drive) -> dict:
+def _approve_tx(con, proposal_id: str, *, mutation, evidence_by_drive, fence_binding) -> dict:
     con.execute("BEGIN IMMEDIATE")
     try:
+        _require_fence_facts(con, *fence_binding)
         proposal = load_proposal(con, proposal_id)
         if proposal["lifecycle"] != "draft":
             raise Refusal("PROPOSAL_NOT_DRAFT", {"lifecycle": proposal["lifecycle"]},

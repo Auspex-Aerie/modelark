@@ -211,10 +211,16 @@ def test_failed_root_reconfirmation_stops_before_wipe():
 
 
 def test_format_dry_run_preflights_without_confirmation_or_writes():
+    def isolated_catalog():
+        con = sqlite3.connect(":memory:", isolation_level=None)
+        con.executescript(db.SCHEMA_PATH.read_text())
+        return con
+
     baseline = {"model": "Test Disk", "serial": "SERIAL", "smart_passed": True,
                 "reallocated": 0, "pending": 0, "offline_uncorrectable": 0,
                 "power_on_hours": 1, "verdict": "ok"}
-    with mock.patch.object(register, "_transport", return_value="usb"), \
+    with mock.patch.object(db, "connect", side_effect=isolated_catalog), \
+         mock.patch.object(register, "_transport", return_value="usb"), \
          mock.patch.object(register, "smart_baseline", return_value=baseline), \
          mock.patch.object(register, "_validate_format_target") as validate, \
          mock.patch.object(register, "_mkfs") as mkfs:

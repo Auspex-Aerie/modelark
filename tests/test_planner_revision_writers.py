@@ -250,7 +250,7 @@ def test_dirty_and_clean_anchor_bump(tmp_path):
     _require_bump(con, "begin_generation", lambda: dm.begin_generation(con, "d0", "test-op"))
     gen = con.execute(
         "SELECT write_generation FROM drives WHERE drive_label='d0'").fetchone()[0]
-    obs = SimpleNamespace(
+    obs = dm.Observation(
         free_bytes=800, filesystem_capacity=1000, fingerprint="a" * 64,
         identity_proven=True, identity_proof="p", fence_proof="p")
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
@@ -265,11 +265,17 @@ def test_drive_bootstrap_reconcile_drive_with_real_live_evidence_type(tmp_path):
     _seed(con)
     from modelark import drive_bootstrap as dbp
     from modelark.drive_bootstrap import Inventory, _LiveEvidence
+    from modelark.capacity_evidence import identity_fingerprint_v1
+    fingerprint = identity_fingerprint_v1(
+        fs_uuid="fs-d0", annex_uuid="anx-d0", serial="ser-d0",
+        filesystem_capacity_bytes=1000)
+    con.execute("UPDATE drives SET fs_uuid='fs-d0',annex_uuid='anx-d0',serial='ser-d0',"
+                "identity_fingerprint=? WHERE drive_label='d0'", [fingerprint])
     assert hasattr(dbp, "reconcile_drive")
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
     live = _LiveEvidence(
         path="/mnt/d0", fs_uuid="fs-d0", annex_uuid="anx-d0", serial="ser-d0",
-        capacity=1000, free=900, alloc_unit=4096, fingerprint="a" * 64, proven=True)
+        capacity=1000, free=900, alloc_unit=4096, fingerprint=fingerprint, proven=True)
     assert hasattr(live, "observation") and callable(live.observation)
     inv = Inventory(present=[], missing=[], debris=[], extra=[])
     with mock.patch.object(dbp, "_live_evidence", return_value=live):

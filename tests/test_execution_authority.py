@@ -88,6 +88,9 @@ def test_fill_graph_write_rejects_authority_changed_after_preflight(change):
 ])
 def test_fill_recovery_rejects_authority_changed_before_fenced_transaction(monkeypatch, change, code):
     con = _connection()
+    # This unit fixture intentionally owns only the session table. Supply an
+    # explicit empty proposal; production no longer swallows missing authority.
+    monkeypatch.setattr("modelark.proposal.load_proposal", lambda *args: {"tasks": []})
 
     @contextmanager
     def controller():
@@ -113,6 +116,7 @@ def test_fill_recovery_rejects_authority_changed_before_fenced_transaction(monke
 
 def test_fill_recovery_checks_shared_attempt_under_fences_and_transaction(monkeypatch):
     con = _connection()
+    monkeypatch.setattr("modelark.proposal.load_proposal", lambda *args: {"tasks": []})
     held = []
     seen = []
     original = authority.require_current

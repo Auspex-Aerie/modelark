@@ -16,12 +16,15 @@ import sqlite3
 from types import SimpleNamespace
 from typing import Any, Callable
 from unittest import mock
+from modelark.capacity_evidence import identity_fingerprint_v1
 
 
 # Distinct fingerprints / epochs per drive (finding 18).
 DRIVE_IDS = {
-    "d0": {"fingerprint": "a" * 64, "epoch": 1, "role": "primary"},
-    "d1": {"fingerprint": "b" * 64, "epoch": 1, "role": "replica"},
+    label: {"fingerprint": identity_fingerprint_v1(
+        fs_uuid=label + "-fs", annex_uuid=None, serial=None,
+        filesystem_capacity_bytes=10**12), "epoch": 1, "role": role}
+    for label, role in (("d0", "primary"), ("d1", "replica"))
 }
 
 
@@ -60,6 +63,7 @@ def seed_plan_selection(con, *, repos=("org/a", "org/b"), with_archive_on=None):
             "write_authority,filesystem_capacity_bytes) "
             "VALUES(?,?,?,?,0,'active','enabled',?,1,?,'dedicated_local',?)",
             [label, free, free, meta["role"], meta["epoch"], meta["fingerprint"], free])
+        con.execute("UPDATE drives SET fs_uuid=? WHERE drive_label=?", [label + "-fs", label])
         con.execute(
             "INSERT OR IGNORE INTO drive_dirty_generations"
             "(drive_label,identity_epoch,generation,operation_code) VALUES(?,?,1,'seed')",

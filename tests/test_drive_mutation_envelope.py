@@ -37,6 +37,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from modelark.core import db
+from modelark.capacity_evidence import identity_fingerprint_v1
 
 # find_spec locates the module file without executing it: only an ABSENT envelope module activates the
 # Gate-1 guard, while a present-but-broken module surfaces its real import error from the import below.
@@ -49,8 +50,10 @@ else:
     drive_fence = dm = None
     _HAS = False
 
-_FP = "a" * 64
-_FP2 = "c" * 64
+_FP = identity_fingerprint_v1(fs_uuid="fs-a", annex_uuid="annex-a", serial="serial-a",
+                              filesystem_capacity_bytes=1000)
+_FP2 = identity_fingerprint_v1(fs_uuid="fs-c", annex_uuid="annex-c", serial="serial-c",
+                               filesystem_capacity_bytes=1000)
 
 
 def _require():
@@ -112,10 +115,13 @@ class _FailOn:
 
 
 def _proven_drive(con, label="drive-00", *, epoch=1, generation=0, fp=_FP, fscap=1000, free=900):
+    suffix = "c" if fp == _FP2 else "a"
     con.execute(
         "INSERT INTO drives(drive_label,capacity_bytes,free_bytes,identity_epoch,write_generation,"
-        "filesystem_capacity_bytes,identity_fingerprint,write_authority) "
-        "VALUES(?,?,?,?,?,?,?, 'dedicated_local')", [label, fscap, free, epoch, generation, fscap, fp])
+        "filesystem_capacity_bytes,identity_fingerprint,write_authority,fs_uuid,annex_uuid,serial) "
+        "VALUES(?,?,?,?,?,?,?, 'dedicated_local',?,?,?)",
+        [label, fscap, free, epoch, generation, fscap, fp,
+         "fs-" + suffix, "annex-" + suffix, "serial-" + suffix])
 
 
 def _dirty(con, label, epoch, generation, op="test"):
@@ -480,7 +486,8 @@ def test_unsorted_drives_acquire_locks_in_deterministic_identity_order(tmp_path)
         finally:
             drive_fence.hold_drives_sorted = real
         assert captured["keys"] == sorted(captured["keys"]), captured["keys"]
-        assert captured["keys"][0][0] == _FP and captured["keys"][1][0] == _FP2, captured["keys"]
+        assert len(captured["keys"]) == 4
+        assert {(_FP, 1), (_FP2, 1)} <= set(captured["keys"])
 
 
 def test_no_sqlite_transaction_during_observation_or_reconciliation(tmp_path):

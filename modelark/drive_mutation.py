@@ -20,6 +20,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 
 from modelark import drive_fence
+from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity, compatible_keys
 from modelark.core import db
 
 
@@ -33,6 +34,7 @@ class Observation:
     fingerprint: str | None
     identity_proof: str
     fence_proof: str
+    refusal_code: str | None = None
 
 
 class DriveMutationRefused(Exception):
@@ -83,6 +85,26 @@ def _drive_facts(con, label):
     if row is None:
         raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
     return row  # (identity_epoch, write_generation, identity_fingerprint, filesystem_capacity, authority)
+
+
+def _fence_identity(con, label):
+    row = con.execute(
+        "SELECT fs_uuid,annex_uuid,serial,filesystem_capacity_bytes,identity_epoch,identity_fingerprint "
+        "FROM drives WHERE drive_label=?", [label]).fetchone()
+    if row is None:
+        raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
+    identity = FenceIdentity(*row)
+    try:
+        identity.lock_keys()
+    except UnprovenFenceIdentity as exc:
+        raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label, reason=str(exc)) from exc
+    return identity
+
+
+def _require_fence_identities(con, captured):
+    for label, identity in captured.items():
+        if _fence_identity(con, label) != identity:
+            raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
 
 
 def _generation_is_clean(con, label, epoch, generation, fingerprint, capacity, authority):
@@ -157,6 +179,8 @@ def begin_generation(con, label, operation_code=None, *, identity_epoch=None, **
 
 
 def _require_identity(observation, fingerprint, capacity, label):
+    if observation.refusal_code:
+        raise DriveMutationRefused(observation.refusal_code, drive=label)
     if (not observation.identity_proven or observation.fingerprint != fingerprint
             or observation.filesystem_capacity != capacity):
         raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
@@ -235,6 +259,7 @@ def drive_mutation(
     mutations leave owner fields null and remain excluded while a live session exists.
     """
     session_owned = session_id is not None and fencing_token is not None
+    drive_labels = tuple(sorted(set(drive_labels)))
     if (session_id is None) != (fencing_token is None):
         raise DriveMutationRefused(
             "DIRTY_OWNER_PAIR_REQUIRED",
@@ -248,12 +273,13 @@ def drive_mutation(
         with ExitStack() as drive_fences:
             with drive_fence.hold_controller(db.DB_PATH, blocking=blocking):
                 facts = {label: _drive_facts(con, label) for label in drive_labels}
-                for label, (_epoch, _gen, fingerprint, _cap, _auth) in facts.items():
-                    if not fingerprint:              # only a stable proven identity may be locked here
-                        raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
-                keyed = sorted((facts[label][2], facts[label][0]) for label in drive_labels)  # (fp, epoch)
+                identities = {label: _fence_identity(con, label) for label in drive_labels}
+                keyed = compatible_keys(identities.values())
                 handles = drive_fences.enter_context(
                     drive_fence.hold_drives_sorted(keyed, blocking=blocking))
+                _require_fence_identities(con, identities)
+                if any(_drive_facts(con, label) != facts[label] for label in drive_labels):
+                    raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN")
                 # identity proven under BOTH fences before any dirtying
                 for label, (_epoch, _gen, fingerprint, capacity, _auth) in facts.items():
                     _require_identity(observe(label), fingerprint, capacity, label)
@@ -262,6 +288,7 @@ def drive_mutation(
                 owner_tok = int(fencing_token) if session_owned else None
 
                 def _dirty_body(c):
+                    _require_fence_identities(c, identities)
                     if session_owned:
                         _require_live_session_token(c, owner_sid, owner_tok)
                     out = {
@@ -297,6 +324,7 @@ def drive_mutation(
                 candidates[label] = observation
 
             def _anchor_body(c):
+                _require_fence_identities(c, identities)
                 if session_owned:
                     _require_live_session_token(c, owner_sid, owner_tok)
                 for label in drive_labels:

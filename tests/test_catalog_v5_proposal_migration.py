@@ -364,7 +364,7 @@ def test_newer_catalog_rejection_uses_schema_version_plus_one(tmp_path):
     db.CATALOG_DIR = tmp_path
     db.DB_PATH = tmp_path / "catalog.sqlite"
     con = db.connect()
-    future = db._SCHEMA_VERSION + 1
+    future = db.MAX_SUPPORTED_CATALOG_VERSION + 1
     con.execute(f"PRAGMA user_version={future}")
     con.close()
     try:

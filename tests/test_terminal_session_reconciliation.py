@@ -102,7 +102,8 @@ def test_unknown_owner_state_fails_closed(case):
 
 
 def test_real_held_child_marker_refuses_before_inventory(case):
-    fds = recovery.inherit_drive_fence_fds(session_id='ended-fill', drive_labels=[])
+    fds = recovery.inherit_drive_fence_fds(
+        session_id='ended-fill', drive_labels=[], marker_only=True)
     try:
         assert fds
         with pytest.raises(dm.DriveMutationRefused, match='DRIVE_RECOVERY_CHILD_UNPROVEN'):
@@ -207,7 +208,8 @@ def test_dirty_pair_changed_during_inventory_refuses(case, monkeypatch):
 
 def test_child_marker_becomes_held_during_inventory_refuses(case, monkeypatch):
     def inspect(*args, **kwargs):
-        recovery.inherit_drive_fence_fds(session_id='ended-fill', drive_labels=[])
+        recovery.inherit_drive_fence_fds(
+            session_id='ended-fill', drive_labels=[], marker_only=True)
         return case.inventory
     monkeypatch.setattr(bs, '_inventory', inspect)
     try:
