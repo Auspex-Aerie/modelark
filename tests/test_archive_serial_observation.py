@@ -1,5 +1,4 @@
 """Archive serial cutover below the host command boundary; disposable catalogs only."""
-from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
@@ -28,10 +27,13 @@ def archive(observed, monkeypatch, tmp_path):
                 [_fingerprint(None)])
     monkeypatch.setattr(drive_fence, "_LOCK_DIR", tmp_path / "locks")
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "isolated-catalog.sqlite")
-    monkeypatch.setattr(register, "archive_path", lambda *args: Path("/archive/modelark"))
+    archive_path = tmp_path / "archive"
+    archive_path.mkdir()
+    observed[0]["path"] = str(archive_path)
+    monkeypatch.setattr(register, "archive_path", lambda *args: archive_path)
     monkeypatch.setattr(register, "probe_fs_uuid", lambda _: "archive-fs")
     monkeypatch.setattr(register, "probe_annex_uuid", lambda _: "archive-annex")
-    monkeypatch.setattr(fetch.os, "statvfs", lambda _: SimpleNamespace(f_blocks=1000, f_frsize=1, f_bavail=850))
+    monkeypatch.setattr(fetch.os, "fstatvfs", lambda _: SimpleNamespace(f_blocks=1000, f_frsize=1, f_bavail=850))
     try:
         yield con, observed
     finally:

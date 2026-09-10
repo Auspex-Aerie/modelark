@@ -15,13 +15,14 @@ def observed(monkeypatch):
             "pkname": "/dev/sda", "serial": None, "uuid": "archive-fs"}
     disk = {"path": "/dev/sda", "type": "disk", "maj:min": "8:0",
             "serial": "ZR16L100", "wwn": "disk-wwn", "children": [part]}
-    state = {"payload": {"blockdevices": [disk]}, "mount": "8:1", "calls": []}
+    state = {"payload": {"blockdevices": [disk]}, "mount": "8:1", "calls": [],
+             "path": "/archive/modelark"}
     def run(argv, **kwargs):
         assert kwargs == {"check": True, "capture_output": True, "text": True}
         state["calls"].append(argv)
         if argv[0] == "findmnt":
             assert argv == ["findmnt", "--json", "--first-only", "--output", "MAJ:MIN",
-                            "--target", "/archive/modelark"]
+                            "--target", state["path"]]
             payload = {"filesystems": [{"maj:min": state["mount"], "source": "UUID=archive-fs"}]}
         else:
             assert argv == ["lsblk", "--json", "--bytes", "--paths", "--output",

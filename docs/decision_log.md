@@ -2883,3 +2883,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Neutral lock primitive and admission snapshot adapter, real cross-process reader/writer tests and portal qualification. No changes to identity admission, schema, serial observation activation, live catalog, service or device operations.
 - `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
 - `related`: DEC-133
+
+### DEC-135: Bind complete archive observations to an attachment and separate uninitialized revocation
+- `id`: DEC-135
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: PR 72 slice-4 review cap exposed final-component torn reads and loss declaration blocked before bootstrap; operator approved both scoped architectural corrections and continuation.
+- `decision`: Retain an open archive-directory handle for the complete observation, validating kernel mount/device/inode attachment around every component read and before return. Use descriptor-backed annex and filesystem accounting reads; path-selected probes must be checked against the same retained attachment. Separately allow catalog-only loss declaration for strictly proven never-initialized drives, under existing graph transaction/live-session/CAS guards, while initialized or ambiguous records retain compatible physical fencing.
+- `rationale`: Repeating independently resolved pathname reads does not bind them to one attachment. Revoking a never-initialized catalog entry does not grant archive access, but missing identity alone cannot prove that exception safe. Neither correction authorizes ignoring changed identity, treating failed probes as absence, or accepting malformed prior-use state.
+- `impact`: Neutral attachment observation, shared archive observer and narrow lifecycle classifier with regression-first tests. Preserve v1 proof formats, serial optionality, historical evidence, existing initialized-drive locks and Slice destination policy. No live repair/deployment/device writes; attachment checks are observations, not a lease against subsequent external remounts.
+- `docs_updated`: docs/decision_log.md, docs/plans/archive-serial-identity-consistency.md
+- `related`: DEC-133, DEC-134

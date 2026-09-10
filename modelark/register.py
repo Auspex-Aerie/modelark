@@ -772,31 +772,36 @@ class ArchiveVolumeObservation:
 
 
 def observe_archive_volume(path) -> ArchiveVolumeObservation:
-    """Bracket the physical-disk probe with matching volume identity and geometry.
+    """Read volume and disk evidence within one retained directory attachment.
 
     Free space may legitimately drift; only the final reading is returned. A
     failed or changed observation is unproven, never partially usable evidence.
-    This is a bounded observation, not a mount lease or an ABA guarantee.
+    Every component, including the last, is attachment-checked. This is a bounded
+    observation, not a mount lease or an ABA guarantee.
     """
+    from modelark.attachment_observation import BoundDirectory
     from modelark.block_identity import BlockObservationError
 
-    def volume_facts():
-        fs_uuid = probe_fs_uuid(path)
-        annex_uuid = probe_annex_uuid(path)
-        st = os.statvfs(path)
+    def volume_facts(bound):
+        fs_uuid = bound.read(probe_fs_uuid, bound.path)
+        annex_uuid = bound.read(probe_annex_uuid, bound.pinned_path)
+        st = bound.read(os.fstatvfs, bound.fd)
         return (fs_uuid, annex_uuid, st.f_blocks * st.f_frsize,
                 st.f_frsize, st.f_bavail * st.f_frsize)
 
     try:
-        before = volume_facts()
-        serial = probe_serial(path)
-        after = volume_facts()
-    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        with BoundDirectory(path) as bound:
+            before = volume_facts(bound)
+            serial = bound.read(probe_serial, bound.path)
+            after = volume_facts(bound)
+            if before[:-1] != after[:-1]:
+                raise BlockObservationError("archive volume changed during physical-disk observation")
+            fs_uuid, annex_uuid, capacity, alloc_unit, free = after
+            result = ArchiveVolumeObservation(fs_uuid, annex_uuid, serial, capacity, free, alloc_unit)
+            bound.check()
+            return result
+    except (OSError, RuntimeError, subprocess.SubprocessError, UnicodeError) as exc:
         raise BlockObservationError("archive volume observation failed") from exc
-    if before[:-1] != after[:-1]:
-        raise BlockObservationError("archive volume changed during physical-disk observation")
-    fs_uuid, annex_uuid, capacity, alloc_unit, free = after
-    return ArchiveVolumeObservation(fs_uuid, annex_uuid, serial, capacity, free, alloc_unit)
 
 
 def list_drives(con) -> list[dict]:

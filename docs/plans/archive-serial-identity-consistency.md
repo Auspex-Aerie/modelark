@@ -311,7 +311,7 @@ epoch-alias registry or new serialized authority format requires a separately ex
 | 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Accepted at 9692b4c in round 3 by Greptile and Codex; all CI green |
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
 | 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Accepted at 7a5c6d0 in round 2 by Greptile and Codex; all CI green |
-| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Round-2 P2 fixed; 3018 tests and isolated E2E pass; submitting final round 3 |
+| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Approved post-cap fixes implemented and locally qualified; submitting cycle-2 round-1 review |
 | 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Pending |
 
 Slice-1 validation: 39 new command-boundary/ancestry cases plus existing observer,
@@ -640,6 +640,68 @@ Final round-3 submission qualification: **3018 passed, 6 existing skips,
 isolated browser workflow passed afterward; all-source Ruff/diff checks passed.
 Submit this shared observation correction and 39 new regression cases for the
 third and final slice-4 review round. No live catalog or archive/USB mutation.
+
+Round 3 completed on `c7c163d0f8002de7ae96f182c3207416e63d4ae1`. Greptile
+accepted 5/5 and all CI passed. Codex completed at 2026-09-10T01:01:23Z with two
+remaining P2 findings. **Iteration stopped and the heartbeat was paused.**
+
+- 3974537628: a remount after the second filesystem UUID read but before its
+  remaining annex/statvfs reads can still produce a torn sample when the other
+  fields match. This occurs inside the check, without an ABA cycle. The repeated
+  volume tuple does not itself establish one attachment across all component reads.
+- 3974537632: `declare_lost` unconditionally requires compatible physical fence
+  keys, preventing revocation of newly registered drives whose fingerprint and
+  filesystem capacity are intentionally unset before first reconciliation.
+
+Source inspection supports both reports; no new code/tests were implemented after
+the cap. Proposed follow-up, not yet approved: make the shared observation explicitly
+attachment-scoped with a final identity check after all reads, and distinguish
+never-bootstrapped catalog revocation from identity-fenced archive operations while
+retaining proven-drive fences and exact guarded state. The first is the same
+coherence assumption as the previous timing findings; the second is a distinct
+lifecycle overconstraint, not justification for weakening general identity checks.
+Slice 5 remains pending. No fourth review or automatic merge; await operator direction.
+
+### Approved post-cap follow-up (review cycle 2)
+
+On 2026-09-10 the operator approved both proposed fixes and continued work in the
+same PR (DEC-135). The prior three-round cycle remains recorded above. Start a new
+bounded cycle of at most three reviews for this approved follow-up; do not silently
+erase or reinterpret the earlier cap. Slice 5 stays behind acceptance of slice 4.
+
+- Hold a directory FD across the entire shared observation; bind kernel mount ID,
+  device and inode, and check original-path attachment before/after every component
+  and before returning. Annex and capacity use the retained descriptor; fs/disk
+  pathname probes remain covered by those checks. Retain final filesystem/geometry
+  agreement, serial optionality and failure-versus-absence distinctions. Use a
+  neutral attachment helper, not Slice's destination/birth-time policy machinery.
+- In `declare_lost` alone, recognize the exact initial epoch/generation, absent
+  canonical fingerprint/filesystem capacity, unknown authority and no historical
+  archive/anchor/generation/repair/task-use evidence. Registered nominal metadata
+  and plan membership may exist. Catalog revocation retains graph transaction,
+  exact binding and live-session guards; initialized/partial/corrupt states keep
+  the normal compatible physical-fence requirement. No generic lock fallback.
+
+Regression-first: nine actual repair-orchestration cases reproduced directory
+replacement during each final component across clean/dirty/post-bridge publication
+(all nine failed before correction). Sixteen independent consumer cases reproduced
+replacement at all component boundaries. Fixtures are disposable directories and
+catalogs, not live remounts. Both implementations are complete and frozen for full
+qualification. Attachment/component/consumer integration passed 243 tests, including
+the nine new repair cases and six prior torn-volume cases. A separate loss/lifecycle
+set passed 68 tests. These are targeted qualification sets, not counts of new cases.
+All-source Ruff and diff checks pass. The frozen full suite passed **3095 tests,
+6 existing skips and 5 deprecation warnings in 842.22 seconds**, run alone
+(`/tmp/modelark-pr72-slice4-cycle2-round1-full.xml`). The subsequent complete isolated
+browser workflow also passed. No concurrent full/browser jobs and no new skips.
+
+Additional attachment coverage includes mount-ID-only changes with stable device/
+inode at every component, missing/malformed/unreadable fdinfo, symlink components,
+descriptor cleanup across failures, retained-FD filesystem accounting, and a real
+git-config subprocess reading the original annex UUID through the parent procfd
+after pathname replacement. The loss tests use actual public registration and
+exercise all historical-use exclusions, both initialized identity aliases, exact
+confirmation/CAS, live Fill exclusion, rollback, and two-connection writer exclusion.
 
 ## 7. Questions for Grok
 

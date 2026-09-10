@@ -857,6 +857,40 @@ def register_new_identity(
     }
 
 
+def _never_bootstrapped_for_loss(con, drive_label: str) -> bool:
+    """Classify only a pristine registration, under the graph-write transaction.
+
+    Registration may already record UUIDs, serial and nominal device capacity,
+    but does not initialize physical capacity evidence. Missing keys alone are
+    insufficient: older epochs or any historical use make this an unproven or
+    damaged identity, not a safe metadata-only exception. This grants no source,
+    capacity, or mutation authority and is private to explicit loss declaration.
+    """
+    if not con.in_transaction:
+        raise RuntimeError("loss classification requires the graph-write transaction")
+    row = con.execute(
+        "SELECT identity_epoch,write_generation,filesystem_capacity_bytes,"
+        "identity_fingerprint,write_authority FROM drives WHERE drive_label=?",
+        [drive_label],
+    ).fetchone()
+    if row != (1, 0, None, None, "unknown"):
+        return False
+    for table in (
+        "drive_dirty_generations", "drive_clean_anchors", "drive_hash_repair_state",
+        "archived", "replicas",
+    ):
+        if con.execute(
+            f"SELECT 1 FROM {table} WHERE drive_label=? LIMIT 1", [drive_label],
+        ).fetchone():
+            return False
+    # Includes frozen source/satisfaction bindings and terminal session history,
+    # not just the current approval pointer or executable target assignment.
+    return con.execute(
+        "SELECT 1 FROM proposal_tasks WHERE target_drive=? OR source_drive=? "
+        "OR satisfying_drive=? LIMIT 1", [drive_label, drive_label, drive_label],
+    ).fetchone() is None
+
+
 def declare_lost(
     con,
     drive_label: str,
@@ -921,12 +955,16 @@ def declare_lost(
 
         # Source-use gates hold this identity fence through the read. Keep revocation
         # serialized through the graph commit; never wait while holding SQLite's writer.
-        try:
-            fences.enter_context(drive_fence.hold_drives_sorted(
-                proposal._fence_keys(c, [drive_label]), blocking=False))
-        except drive_fence.FenceUnavailable as exc:
-            raise proposal.Refusal("DRIVE_BUSY", {"drive_label": drive_label},
-                                   ("retry_after_source_read",)) from exc
+        # A never-bootstrapped registration has no physical lock identity and
+        # cannot have admitted a source read. Serialize this narrow metadata-only
+        # case against competing bootstrap with the existing BEGIN IMMEDIATE.
+        if not _never_bootstrapped_for_loss(c, drive_label):
+            try:
+                fences.enter_context(drive_fence.hold_drives_sorted(
+                    proposal._fence_keys(c, [drive_label]), blocking=False))
+            except drive_fence.FenceUnavailable as exc:
+                raise proposal.Refusal("DRIVE_BUSY", {"drive_label": drive_label},
+                                       ("retry_after_source_read",)) from exc
 
         active_approval = c.execute(
             "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"

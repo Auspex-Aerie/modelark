@@ -1,5 +1,4 @@
 """Reject volume/disk observations assembled across a remount; no host IO."""
-from pathlib import Path
 import sqlite3
 import subprocess
 from types import SimpleNamespace
@@ -12,17 +11,19 @@ from modelark.core import db
 
 
 @pytest.fixture
-def volume(monkeypatch):
+def volume(monkeypatch, tmp_path):
     con = sqlite3.connect(":memory:", isolation_level=None)
     con.executescript(db.SCHEMA_PATH.read_text())
     con.execute("INSERT INTO drives(drive_label,fs_uuid,annex_uuid,serial) "
                 "VALUES('drive-a','fs-a','annex-a','serial-a')")
     state = dict(fs_uuid="fs-a", annex_uuid="annex-a", blocks=1000, allocation=1, free=800)
-    monkeypatch.setattr(register, "archive_path", lambda *a: Path("/synthetic/modelark"))
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    monkeypatch.setattr(register, "archive_path", lambda *a: archive)
     monkeypatch.setattr(register, "probe_fs_uuid", lambda _: state["fs_uuid"])
     monkeypatch.setattr(register, "probe_annex_uuid", lambda _: state["annex_uuid"])
     monkeypatch.setattr(register, "probe_serial", lambda _: "serial-a")
-    monkeypatch.setattr(register.os, "statvfs", lambda _: SimpleNamespace(
+    monkeypatch.setattr(register.os, "fstatvfs", lambda _: SimpleNamespace(
         f_blocks=state["blocks"], f_frsize=state["allocation"], f_bavail=state["free"]))
     try:
         yield con, state
@@ -69,13 +70,13 @@ def test_success_uses_final_free_space_not_the_pre_disk_probe_read(volume, monke
 
 
 @pytest.mark.parametrize("consumer", ["bootstrap", "fetch"])
-@pytest.mark.parametrize("probe", ["probe_fs_uuid", "probe_annex_uuid", "statvfs"])
+@pytest.mark.parametrize("probe", ["probe_fs_uuid", "probe_annex_uuid", "fstatvfs"])
 @pytest.mark.parametrize("error", [OSError, RuntimeError, subprocess.SubprocessError])
 def test_second_volume_read_error_returns_no_partial_evidence(
     volume, monkeypatch, consumer, probe, error,
 ):
     con, _ = volume
-    owner = register.os if probe == "statvfs" else register
+    owner = register.os if probe == "fstatvfs" else register
     original = getattr(owner, probe)
     calls = 0
 
@@ -98,7 +99,7 @@ def test_second_volume_read_error_returns_no_partial_evidence(
 
 
 def test_shared_boundary_raises_typed_refusal_for_changed_volume(volume, monkeypatch):
-    _, state = volume
+    con, state = volume
 
     def change_volume(_):
         state["fs_uuid"] = "replacement"
@@ -106,7 +107,7 @@ def test_shared_boundary_raises_typed_refusal_for_changed_volume(volume, monkeyp
 
     monkeypatch.setattr(register, "probe_serial", change_volume)
     with pytest.raises(BlockObservationError, match="volume changed"):
-        register.observe_archive_volume(Path("/synthetic/modelark"))
+        register.observe_archive_volume(register.archive_path(con, "drive-a"))
 
 
 @pytest.mark.parametrize("consumer", ["bootstrap", "fetch"])

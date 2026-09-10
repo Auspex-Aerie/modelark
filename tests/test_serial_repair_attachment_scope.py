@@ -1,4 +1,4 @@
-"""Real repair orchestration must reject volume changes inside its component probe."""
+"""Attachment replacement after the last UUID sample cannot publish repair evidence."""
 from types import SimpleNamespace
 
 import pytest
@@ -10,9 +10,9 @@ from test_serial_repair_workflow import OLD, seed
 
 
 @pytest.mark.parametrize('dirty,change_on', [(False, 1), (True, 1), (True, 2)])
-@pytest.mark.parametrize('field', ['fs_uuid', 'annex_uuid'])
-def test_component_volume_change_inside_publication_probe_refuses(
-    tmp_path, monkeypatch, dirty, change_on, field,
+@pytest.mark.parametrize('last_component', ['fs_uuid', 'annex_uuid', 'statvfs'])
+def test_repair_rejects_directory_attachment_replaced_during_final_components(
+    tmp_path, monkeypatch, dirty, change_on, last_component,
 ):
     with _catalog(tmp_path) as con:
         seed(con, dirty=dirty)
@@ -20,27 +20,32 @@ def test_component_volume_change_inside_publication_probe_refuses(
             _paused_owner(con)
         archive = tmp_path / 'archive'
         archive.mkdir()
-        sentinel = archive / 'untouched.txt'
-        sentinel.write_bytes(b'archive stays unchanged')
+        (archive / 'sentinel').write_bytes(b'original archive')
+        retained = tmp_path / 'original-attachment'
         monkeypatch.setattr(drive_fence, '_LOCK_DIR', tmp_path / 'locks')
         monkeypatch.setattr(register, 'archive_path', lambda *args: archive)
-        volume = {'fs_uuid': _FS, 'annex_uuid': _ANX}
-        monkeypatch.setattr(register, 'probe_fs_uuid', lambda path: volume['fs_uuid'])
-        monkeypatch.setattr(register, 'probe_annex_uuid', lambda path: volume['annex_uuid'])
-        monkeypatch.setattr(bootstrap.os, 'fstatvfs',
-                            lambda path: SimpleNamespace(f_blocks=1000, f_frsize=1, f_bavail=900))
+        monkeypatch.setattr(register, 'probe_serial', lambda path: _SER)
         transactions = []
-        changed = []
+        reads = {key: 0 for key in ('fs_uuid', 'annex_uuid', 'statvfs')}
+        replacements = []
 
-        def serial(path):
-            # A different equal-sized filesystem on the SAME disk: serial and
-            # capacity cannot distinguish this remount from the original volume.
+        def sample(component, value):
             if con.in_transaction and len(transactions) == change_on:
-                volume[field] = 'replacement-volume'
-                changed.append(change_on)
-            return _SER
+                reads[component] += 1
+                if component == last_component and reads[component] == 2:
+                    # Replace the path's directory while preserving every
+                    # reported UUID/serial/capacity. A held directory FD remains
+                    # attached to the old inode, not this replacement tree.
+                    archive.rename(retained)
+                    archive.mkdir()
+                    (archive / 'sentinel').write_bytes(b'replacement archive')
+                    replacements.append(component)
+            return value
 
-        monkeypatch.setattr(register, 'probe_serial', serial)
+        monkeypatch.setattr(register, 'probe_fs_uuid', lambda path: sample('fs_uuid', _FS))
+        monkeypatch.setattr(register, 'probe_annex_uuid', lambda path: sample('annex_uuid', _ANX))
+        monkeypatch.setattr(register.os, 'fstatvfs', lambda fd: sample(
+            'statvfs', SimpleNamespace(f_blocks=1000, f_frsize=1, f_bavail=900)))
         original = dm._immediate
 
         def immediate(connection, body):
@@ -51,16 +56,14 @@ def test_component_volume_change_inside_publication_probe_refuses(
         monkeypatch.setattr(dm, '_immediate', immediate)
         before = tuple(con.iterdump())
         sessions = con.execute('SELECT * FROM execution_sessions').fetchall()
-        generations = con.execute('SELECT * FROM drive_dirty_generations ORDER BY generation').fetchall()
         binding = bootstrap.inspect_serial_identity(con, 'drive-00')['binding']
         with pytest.raises(dm.DriveMutationRefused, match='DRIVE_SERIAL_REPAIR_LIVE_MISMATCH') as raised:
             bootstrap.repair_serial_identity(con, 'drive-00', expected_binding=binding,
                                              now='2026-09-10', writers_stopped=True)
-        assert changed, 'must reach the component-read race inside the actual transaction'
+        assert replacements == [last_component]
         assert raised.value.evidence['legacy_recovered'] is (change_on == 2)
         assert con.execute('PRAGMA user_version').fetchone() == (7,)
         assert con.execute('SELECT * FROM execution_sessions').fetchall() == sessions
-        assert con.execute('SELECT * FROM drive_dirty_generations ORDER BY generation').fetchall() == generations
         if change_on == 2:
             assert con.execute('SELECT identity_epoch,write_generation,identity_fingerprint FROM drives').fetchone() == (
                 1, 2, OLD)
@@ -69,4 +72,5 @@ def test_component_volume_change_inside_publication_probe_refuses(
         else:
             assert tuple(con.iterdump()) == before
         assert not con.in_transaction
-        assert sentinel.read_bytes() == b'archive stays unchanged'
+        assert (retained / 'sentinel').read_bytes() == b'original archive'
+        assert (archive / 'sentinel').read_bytes() == b'replacement archive'

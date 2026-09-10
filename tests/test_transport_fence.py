@@ -30,7 +30,7 @@ Second-round reviewer seams pinned here:
 Proposed production API surfaced by these tests (for Gate-1 review; names are the contract to confirm):
   * fetch._observe_drive(con, label) -> dm.Observation, deriving identity via
     fetch._live_drive_evidence(con, label), which reads only low-level probes:
-    register.probe_fs_uuid / probe_annex_uuid / probe_serial(mount) + os.statvfs(mount)
+    register.probe_fs_uuid / probe_annex_uuid / probe_serial(mount) + os.fstatvfs(bound_fd)
   * dm mutation writer exposes .child_fence_fds (the actual held drive-lock FDs)
   * fetch.fetch_model(..., mutation_writer=...) uses writer.child_fence_fds for its mutating children
     and calls writer.record_touched(paths, keys) AFTER physical publication + the durable archived row
@@ -725,7 +725,7 @@ def test_observe_drive_derives_identity_from_live_evidence(tmp_path):
              mock.patch.object(fetch.register, "probe_fs_uuid", return_value="LIVE-uuid", create=True), \
              mock.patch.object(fetch.register, "probe_annex_uuid", return_value="LIVE-annex", create=True), \
              mock.patch.object(fetch.register, "probe_serial", return_value="LIVE-serial", create=True), \
-             mock.patch.object(fetch.os, "statvfs", return_value=statvfs):
+             mock.patch.object(fetch.os, "fstatvfs", return_value=statvfs):
             obs = fetch._observe_drive(con, "drive-00")
         assert obs.identity_proven is False
         assert obs.refusal_code == "DRIVE_IDENTITY_MISMATCH"
@@ -751,7 +751,7 @@ def test_live_identity_mismatch_refuses(tmp_path):
              mock.patch.object(fetch.register, "probe_fs_uuid", return_value="SWAPPED-uuid", create=True), \
              mock.patch.object(fetch.register, "probe_annex_uuid", return_value="PROVEN-annex", create=True), \
              mock.patch.object(fetch.register, "probe_serial", return_value="PROVEN-serial", create=True), \
-             mock.patch.object(fetch.os, "statvfs", return_value=statvfs):
+             mock.patch.object(fetch.os, "fstatvfs", return_value=statvfs):
             try:
                 with dm.drive_mutation(con, ["drive-00"], "op",
                                        observe=lambda label: fetch._observe_drive(con, label),
@@ -770,7 +770,7 @@ def test_observe_drive_unmounted_is_unproven_not_a_crash(tmp_path):
         _proven_drive(con, "drive-00", fp=_FP)
         assert hasattr(fetch, "_observe_drive"), "PR-03b must add fetch._observe_drive"
         with mock.patch.object(fetch.register, "archive_path", return_value=tmp_path / "gone"), \
-             mock.patch.object(fetch.os, "statvfs", side_effect=FileNotFoundError(2, "not mounted")):
+             mock.patch.object(fetch.os, "fstatvfs", side_effect=FileNotFoundError(2, "not mounted")):
             assert fetch._observe_drive(con, "drive-00").identity_proven is False
             try:
                 with dm.drive_mutation(con, ["drive-00"], "op",
