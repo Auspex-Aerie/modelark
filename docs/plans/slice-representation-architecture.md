@@ -354,8 +354,10 @@ Stage A merged in PR #74 (`1995a4b`): shared policy, disposable real-codec
 qualification and tests; both final-head reviews and CI passed. Production
 resource-policy adoption is still false. See ../codec-resource-qualification.md.
 
-Stage B is in progress on `codex/streamznn-reader-adapter`: the standalone
-StreamZNN stream API, neutral dispatcher and Slice compatibility adapter.
+Stage B is implemented on `codex/streamznn-reader-adapter`: the standalone
+StreamZNN stream API, neutral dispatcher and Slice compatibility adapter. Local
+Grok CLI round 1 accepted `c272891`; local qualification passed. Remote review
+and merge remain pending; no live deployment or admission widening is claimed.
 See [Stage B evidence and boundaries](../streamznn-reader-adapter.md). Expanded
 zstd coverage found the legacy native-window units mismatch (INC-064); qualify
 and correct it in Stage C's explicit policy gate, preserving old seal semantics.

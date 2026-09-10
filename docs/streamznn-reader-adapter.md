@@ -67,9 +67,19 @@ Do not claim that zstd window compatibility or shared RAM admission is complete.
   `/tmp/modelark-codec-qualification-mu8c_x8m/result.json`; source hashes identify
   the implementation tested. This requalifies existing StreamZNN wrapper reuse,
   not large-frame admission through Slice.
-- Full-project Ruff passed. Full Slice regression is running separately.
-- Local Grok CLI review precedes the new PR; at most three local rounds, then
-  at most three Greptile/Codex rounds for this stage, per DEC-140.
+- Full Slice regression: **1,346 passed, 5 optional-codec skips** in 520.58 seconds.
+  The separate zstd-enabled run above covers the optional codec paths.
+- Fresh wheel, installed without dependencies into a disposable directory:
+  **93 passed** with zstd enabled and tests copied outside the checkout. Runtime
+  import locations were asserted; all three changed modules matched source bytes.
+- Full-project Ruff and diff whitespace checks passed.
+- Local Grok CLI round 1 **ACCEPTED c272891** with no actionable findings. It
+  confirmed that INC-064 stays at the Stage C policy gate, not a refactor fix.
+  Session: `f2d466e1-014e-452f-8e06-9b81ee841275`. The first CLI invocation ended
+  after review commentary; a same-session follow-up supplied its explicit verdict.
+  This is one review round, not a second code-review iteration. This evidence
+  update changes documentation only; remote review covers the pushed PR head.
+  At most three Greptile/Codex rounds remain available for Stage B, per DEC-140.
 
 No live deployment, archive/catalog access, physical USB writes, RAM-policy
 adoption, stored-export switch, P2P service or compression fallback change.
