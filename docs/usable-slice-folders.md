@@ -141,9 +141,9 @@ capacity waits and failures require a new intent and different output folder. Re
 untouched. A known capacity shortfall before claim consumption is retryable. The media report
 says export verified, not host transaction committed; committed host status supplies that evidence.
 
-## Remaining gates
+## Completed qualification gates and evidence limits
 
-- Gate C: finish qualification of the implemented `fat32-folder-session.v1`. The operator's first
+- Gate C: qualification of the implemented `fat32-folder-session.v1` passed. The operator's first
   disposable-image run passed no-replace/flush, original-byte/report delivery, 30 interruption
   boundaries and sibling preservation. The updated [attended script](plans/fat32-session-protocol.md)
   additionally exercises exact/case/numbered-short-alias parent checks and public Preview/Approve/
