@@ -143,36 +143,34 @@ def free_drift_tolerance_v1(alloc_unit_bytes: int) -> int:
 # ---- physical-evidence seams (isolated so the fenced/atomic logic below stays testable) -------------
 
 def _live_evidence(con, label: str) -> _LiveEvidence:
-    """Probe the CURRENT volume once and return a consistent evidence snapshot. Identity is unproven when
-    the drive is absent/unmounted or exposes neither an fs nor an annex UUID."""
+    """Observe the current disk between matching volume identity/geometry reads.
+
+    Identity is unproven for an absent, changing or unobservable volume, or one
+    exposing neither an fs nor an annex UUID. The observation is not a lease.
+    """
     path = register.archive_path(con, label)
     if path is None:
         return _LiveEvidence(None, None, None, None, None, None, None, None, False)
     try:
-        st = os.statvfs(path)
-    except OSError:                                      # unmounted/vanished mid-probe -> unknown, not error
-        return _LiveEvidence(str(path), None, None, None, None, None, None, None, False)
-    fs_uuid = register.probe_fs_uuid(path)
-    annex_uuid = register.probe_annex_uuid(path)
-    try:
-        serial = register.probe_serial(path)             # one proven physical-disk observation
+        volume = register.observe_archive_volume(path)
     except BlockObservationError:
-        return _LiveEvidence(str(path), fs_uuid, annex_uuid, None, None, None, None, None, False)
+        return _LiveEvidence(str(path), None, None, None, None, None, None, None, False)
+    fs_uuid, annex_uuid, serial = volume.fs_uuid, volume.annex_uuid, volume.serial
     if not (fs_uuid or annex_uuid):
         return _LiveEvidence(str(path), fs_uuid, annex_uuid, serial, None, None, None, None, False)
-    capacity = st.f_blocks * st.f_frsize
+    capacity = volume.capacity_bytes
     saved = con.execute('SELECT serial FROM drives WHERE drive_label=?', [label]).fetchone()
     from modelark.serial_identity import serial_for_identity
     try:
         identity_serial = serial_for_identity(saved[0] if saved else None, serial)
     except SerialIdentityUnproven:
         return _LiveEvidence(str(path), fs_uuid, annex_uuid, serial, capacity,
-                             st.f_bavail * st.f_frsize, st.f_frsize, None, False)
+                             volume.free_bytes, volume.alloc_unit_bytes, None, False)
     fingerprint = capacity_evidence.identity_fingerprint_v1(
         fs_uuid=fs_uuid, annex_uuid=annex_uuid, serial=identity_serial, filesystem_capacity_bytes=capacity)
     known_serial_matches = saved is not None and (not saved[0] or saved[0] == serial)
     return _LiveEvidence(str(path), fs_uuid, annex_uuid, serial, capacity,
-                         st.f_bavail * st.f_frsize, st.f_frsize, fingerprint, known_serial_matches,
+                         volume.free_bytes, volume.alloc_unit_bytes, fingerprint, known_serial_matches,
                          serial_in_identity=bool(saved and saved[0]))
 
 

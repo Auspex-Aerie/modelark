@@ -652,30 +652,24 @@ def _download_shard(ctx: RunCtx, repo_id: str, rfilename: str, download_dir: Pat
 
 
 def _live_drive_evidence(con, label: str) -> dict | None:
-    """Read a drive's LIVE identity + filesystem evidence from low-level probes on the mounted volume —
-    never the catalog row. ``None`` when the drive is not mounted."""
+    """Read matching live volume/disk evidence, never identity from the catalog.
+
+    ``None`` means absent, changed or unobservable, not partially proven evidence.
+    """
     path = register.archive_path(con, label)
     if path is None:
         return None
-    try:
-        st = os.statvfs(path)
-    except OSError:
-        # registered but not statvfs-able right now (archive dir absent / unmounted / vanished
-        # mid-probe): identity is unknown, not an error. Returning None -> unproven observation ->
-        # the envelope refuses DRIVE_IDENTITY_UNPROVEN (a typed, handled terminal), never an OSError
-        # that would escape the refusal handler and crash the caller.
-        return None
     from modelark.block_identity import BlockObservationError
     try:
-        serial = register.probe_serial(path)
+        volume = register.observe_archive_volume(path)
     except BlockObservationError:
         return None
     return {
-        "fs_uuid": register.probe_fs_uuid(path),
-        "annex_uuid": register.probe_annex_uuid(path),
-        "serial": serial,
-        "filesystem_capacity_bytes": st.f_blocks * st.f_frsize,
-        "free_bytes": st.f_bavail * st.f_frsize,
+        "fs_uuid": volume.fs_uuid,
+        "annex_uuid": volume.annex_uuid,
+        "serial": volume.serial,
+        "filesystem_capacity_bytes": volume.capacity_bytes,
+        "free_bytes": volume.free_bytes,
     }
 
 

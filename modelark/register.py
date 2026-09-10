@@ -21,6 +21,7 @@ import re
 import shutil
 import stat
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -758,6 +759,44 @@ def probe_serial(path) -> str | None:
     """
     from modelark.block_identity import observe_mounted_disk
     return observe_mounted_disk(path).serial
+
+
+@dataclass(frozen=True)
+class ArchiveVolumeObservation:
+    fs_uuid: str | None
+    annex_uuid: str | None
+    serial: str | None
+    capacity_bytes: int
+    free_bytes: int
+    alloc_unit_bytes: int
+
+
+def observe_archive_volume(path) -> ArchiveVolumeObservation:
+    """Bracket the physical-disk probe with matching volume identity and geometry.
+
+    Free space may legitimately drift; only the final reading is returned. A
+    failed or changed observation is unproven, never partially usable evidence.
+    This is a bounded observation, not a mount lease or an ABA guarantee.
+    """
+    from modelark.block_identity import BlockObservationError
+
+    def volume_facts():
+        fs_uuid = probe_fs_uuid(path)
+        annex_uuid = probe_annex_uuid(path)
+        st = os.statvfs(path)
+        return (fs_uuid, annex_uuid, st.f_blocks * st.f_frsize,
+                st.f_frsize, st.f_bavail * st.f_frsize)
+
+    try:
+        before = volume_facts()
+        serial = probe_serial(path)
+        after = volume_facts()
+    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        raise BlockObservationError("archive volume observation failed") from exc
+    if before[:-1] != after[:-1]:
+        raise BlockObservationError("archive volume changed during physical-disk observation")
+    fs_uuid, annex_uuid, capacity, alloc_unit, free = after
+    return ArchiveVolumeObservation(fs_uuid, annex_uuid, serial, capacity, free, alloc_unit)
 
 
 def list_drives(con) -> list[dict]:

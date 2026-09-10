@@ -311,7 +311,7 @@ epoch-alias registry or new serialized authority format requires a separately ex
 | 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Accepted at 9692b4c in round 3 by Greptile and Codex; all CI green |
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
 | 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Accepted at 7a5c6d0 in round 2 by Greptile and Codex; all CI green |
-| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | All three round-1 findings fixed; 2979 tests and isolated E2E pass; submitting round 2 |
+| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Round-2 P2 fixed; 3018 tests and isolated E2E pass; submitting final round 3 |
 | 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Pending |
 
 Slice-1 validation: 39 new command-boundary/ancestry cases plus existing observer,
@@ -609,6 +609,37 @@ isolated browser workflow then passed. All-source Ruff and diff checks pass.
 The three new regression files add 63 cases over the original slice-4 head.
 Submit all three corrections together for review round 2; no external acceptance
 of these fixes is claimed yet and slice 5 remains pending. No live mutation occurred.
+
+Slice 4 round 2, `43ec31e075400782f075fda6909f2f4f5a6c6095`: Greptile accepted
+5/5 with no actionable findings; all exact-head CI passed. Codex completed at
+00:16:39 UTC with P2 3974209089: component reads could mix the original filesystem
+UUID/annex/capacity with a later same-parent disk observation after a remount.
+Six repair-orchestration regressions reproduced unintended publication before
+correction, spanning clean enrichment, dirty recovery and post-bridge enrichment.
+Use one shared archive-volume observation boundary for bootstrap and Fill: compare
+filesystem/annex identity and allocation geometry before and after the physical
+probe, refuse drift/errors and use the final free-space read. This is bounded
+revalidation, not a lease against later remounts or an ABA guarantee. It preserves
+canonical serial optionality and existing mutation/destination/SMART policies.
+The shared assumption behind both timing findings was treating separately sampled
+evidence as a coherent observation: round 1 fixed acquisition timing; round 2 fixes
+the observation's internal consistency. Final review round 3 follows qualification;
+any remaining findings at that cap require a stop-and-summarize.
+
+Round-2 correction is implemented and frozen: bootstrap and Fill now share
+`register.observe_archive_volume`. Ten component-level regressions reproduced
+before correction; **39 new volume/repair tests passed** afterward, followed by
+**87 compatibility tests**. Coverage includes second-read UUID/annex/statvfs errors,
+geometry changes, final free-space selection and serial absence versus failure.
+The six actual repair races now refuse, retaining old state or the already committed
+legacy bridge as appropriate. All-source Ruff/diff checks pass. Full-suite validation
+is running alone; browser qualification and final round-3 submission follow its pass.
+
+Final round-3 submission qualification: **3018 passed, 6 existing skips,
+5 deprecation warnings in 831.69 seconds**, with no overlapping jobs. The complete
+isolated browser workflow passed afterward; all-source Ruff/diff checks passed.
+Submit this shared observation correction and 39 new regression cases for the
+third and final slice-4 review round. No live catalog or archive/USB mutation.
 
 ## 7. Questions for Grok
 
