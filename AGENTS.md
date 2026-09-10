@@ -26,6 +26,19 @@ GitHub API identities such as `greptile-apps[bot]` identify reactions and review
 authors; they are not substitutes for the trigger mention, even if a push causes
 an automatic review at the same time.
 
+After every push to an open PR, request both `@greptileai review` and
+`@codex review` on the resulting head, covering every newly pushed commit.
+Documentation-only changes, merge commits and base-branch reconciliation are
+not exemptions. Verify both reviewers' results against the current head;
+earlier-head approval and CI success do not substitute for current-head review.
+Apply at most three review/fix rounds per scoped stage, not three fresh rounds
+per push. Batch known changes before requesting a round. After round three,
+stop and summarize unresolved findings, review state, and any common
+architectural cause before further changes or another review cycle. Do not
+push an unreviewed final fix or silently reset the counter. A user-authorized
+exception applies only to its explicitly named scope; PR #73's one-time
+no-review-wait merge authorization does not carry forward to other PRs.
+
 ## Operator approval continuity (2026-09-10)
 
 When the operator replies "ok", "begin", "go", "continue", or equivalent to an
