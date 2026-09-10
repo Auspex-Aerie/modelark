@@ -311,8 +311,8 @@ epoch-alias registry or new serialized authority format requires a separately ex
 | 1. Shared observation | Extract neutral block ancestry; add tested mounted-path physical serial observer. Preserve Slice policies and leave the archive probe unchanged until safety integrations land. | Accepted at 9692b4c in round 3 by Greptile and Codex; all CI green |
 | 2. Compatible exclusion | Pure canonical/null-serial key expansion; every reader/writer/approval/recovery/lifecycle caller; both resize epochs; deduplication and child FD inheritance. | Accepted at 4f57c20 in round 1 by Greptile and Codex; all CI green |
 | 3. Reader compatibility | Catalog 7/8 readers, no implicit upgrade, old-reader rejection, logical Slice schema mapping and unchanged-seal tests. | Accepted at 7a5c6d0 in round 2 by Greptile and Codex; all CI green |
-| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Lifecycle/publication fix locally qualified; submitting cycle-2 round-2 review |
-| 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | Pending |
+| 4. Explicit repair | Enable corrected observation with early refusal; bound inspection, dirty legacy bridge, atomic clean enrichment and affected-approval invalidation. | Accepted at 7365562 in follow-up cycle 2 round 2 by both reviewers; all CI green |
+| 5. Qualification and handoff | Public workflows, fault/race and old-wheel matrix, full suite/installed wheel, clone rehearsal, operator docs and final PR review. No live migration. | In progress; no final review requested yet |
 
 Slice-1 validation: 39 new command-boundary/ancestry cases plus existing observer,
 source and direct/folder/FAT32 public integration tests: 336 passed, two upstream
@@ -731,6 +731,69 @@ The subsequent complete isolated browser workflow and all-source Ruff/diff check
 passed. There is no new local full-suite result for this correction: the preceding
 3095-pass run is baseline evidence; require fresh complete exact-head Python/wheel
 and browser CI. Submit round 2; slice 5 remains pending acceptance.
+
+Cycle 2 round 2, `7365562081a9bbcbe24863baf6bdec3ab72aeb72`: Greptile accepted
+5/5 (summary 5607935672, thumbs-up 414313456); Codex reported no major issues
+(comment 5611543191, completed 2026-09-10T02:01:55Z), with no new inline findings.
+All exact-head Python/wheel and browser CI passed (run 34427390383). Slice 4 is
+accepted. Begin slice 5 qualification and operator handoff in the same PR; this
+acceptance is not authorization to deploy, repair the live catalog or run USB IO.
+
+### Slice 5 qualification in progress
+
+Independent qualification covers actual repaired-source Slice public workflows,
+fresh Fill Preview/Approve/Start with completed-work preservation, and verified
+old/new wheel process exclusion plus the two-old-client reader-floor case. Synthetic
+host providers and disposable files are explicit test boundaries, not evidence of
+physical USB eligibility or a substitute for live deployment acceptance.
+
+Read-only host parity and copied-catalog rehearsal passed. Registration's shared
+serial probe, neutral physical ancestry, archive observation, Fill and Slice agreed
+on the mounted partition's physical-parent serial. The deployed service remained
+inactive at its prior build. A consistent read-only source snapshot was backed up
+to a fresh temporary directory; all repair writes targeted that copy. It found
+2769 catalogued claims present, 5615 extras and no debris; inventory did not remove
+extras and is not full-byte verification. On the copy, generation advanced 2 to 3,
+the fingerprint changed, the reader floor became 8 and one affected approval was
+superseded. Only the expected six catalog tables/version changed; all other table
+digests, including sessions/history/archive records, remained identical. The live
+catalog's complete logical table digests and version were unchanged afterward.
+Private evidence is retained in `/tmp/modelark-serial-host-rehearsal-__thk7j7/result.json`.
+This does not certify live-writer quiescence or authorize a live repair/USB test.
+
+Public Fill qualification exposed an existing start-selection fallback: an explicit
+superseded proposal ID can select the newly active approval after fresh approval.
+That contradicts the approved stale-approval contract even though the new proposal
+has independent authority. Correct only initial selection: omission may resolve the
+active pointer; an explicit invalid/superseded ID must refuse rather than silently
+select another proposal. Before correction, 16 regression cases failed while eight
+controls passed. After the bounded selection fix, 56 related tests passed. The
+public Fill cases use a real disposable archive and retained-directory/shared
+observation; only low-level hardware probes and filesystem geometry are injected.
+They preserve completed bytes/history, require fresh approval, and stop at durable
+session admission without launching a transfer worker.
+
+Four public Slice cases passed with 21 related compatibility/history cases. These
+exercise actual preview/approval/start, source readers, folder transactions and
+receipts against synthetic host providers and disposable files, including changed
+source refusal and unchanged version-7 seals over a version-8 catalog.
+
+The provisional installed-wheel matrix passed all 11 process cases, with four
+harness guardrail tests passing. Both wheels were verified against exact commit
+payloads. Coverage includes old/new lock aliases, inherited child descriptors after
+parent exit, release/reacquisition, and an old Fill lock holder while another old
+client refuses the repaired catalog. The old read-only SQLite opener may create
+WAL/SHM sidecars before refusing version 8; main-catalog contents and source bytes
+remain unchanged, but this is not whole-directory byte identity. The old Fill
+case exercises its production lock adapter, not a complete historical download.
+The updated wheel must be rebuilt and this matrix repeated for the final selection
+fix; the provisional result does not qualify that later code.
+
+All contributors are frozen. The final full suite ran alone and passed **3220 tests,
+six existing skips and five deprecation warnings in 863.15 seconds**. Isolated
+browser and final installed-wheel qualification follow. Operator handoff is in
+`docs/archive-serial-repair.md`, linked from operations and upgrading. No final
+review has been requested yet.
 
 ## 7. Questions for Grok
 

@@ -142,23 +142,19 @@ class SessionStart:
 
 def start_session(con, proposal_id, predecessor_id, services):
     """RFC-002 start/resume. Returns SessionStart or Refusal (or raises Refusal)."""
+    # Only an omitted selection means "use the active approval". An explicit
+    # stale/missing proposal is not permission to start a different assignment.
+    if proposal_id is None:
+        row = con.execute(
+            "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
+        ).fetchone()
+        proposal_id = row[0] if row else None
     try:
         proposal = load_proposal(con, proposal_id)
     except Exception:
         proposal = None
     if not proposal or proposal.get("lifecycle") != "approved":
-        # Also try active pointer
-        row = con.execute(
-            "SELECT active_approved_proposal_id FROM planner_state WHERE singleton_id=1"
-        ).fetchone()
-        if row and row[0] and row[0] != proposal_id:
-            try:
-                proposal = load_proposal(con, row[0])
-                proposal_id = row[0]
-            except Exception:
-                pass
-        if not proposal or proposal.get("lifecycle") != "approved":
-            return Refusal("APPROVAL_MISSING", {"proposal_id": proposal_id}, ("preview_again",))
+        return Refusal("APPROVAL_MISSING", {"proposal_id": proposal_id}, ("preview_again",))
 
     pending = current_draft_ids(con)
     if pending:

@@ -4,6 +4,21 @@ ModelArk upgrades application code normally, but it never silently rewrites an e
 schema is older than the installed release. Existing data is migrated through an explicit,
 backup-first, side-by-side procedure so the old runtime remains a usable rollback point.
 
+## Explicit archive serial repair and reader floor 8
+
+Builds carrying the reviewed serial-identity repair support the unchanged catalog
+layout at versions 7 and 8. Normal open leaves the version alone; only explicit
+repair raises the reader floor to 8 atomically with corrected identity evidence.
+This is distinct from the older provenance/table-layout migration below. Verify
+the exact installed build's read-only opener; the original 0.3.3 package version
+alone cannot identify a reader with this capability.
+
+Follow [archive-serial-repair.md](archive-serial-repair.md) for quiescence, backups,
+copied rehearsal, bound inspection/repair and fresh approvals. Old binaries must
+refuse repaired version-8 catalogs. An application-only rollback is not sufficient
+after repair; never lower the version stamp by hand. Existing v7 catalogs without
+this particular mismatch do not need automatic mass repair or a version upgrade.
+
 ## The 0.3.2 → 0.3.3 boundary
 
 ModelArk 0.3.3 retains schema v7 and requires no catalog migration. Retain the 0.3.2 runtime and
