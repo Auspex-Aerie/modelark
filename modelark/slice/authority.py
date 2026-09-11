@@ -121,6 +121,13 @@ class DeliveryAuthority:
                 except TransferRefusal as exc:
                     lease.check()
                     store.refuse_preclaim(tx, device, exc)
+                    if exc.code in {"SOURCE_BLOCKED", "WAITING_SOURCE"}:
+                        # Moving source admission before claim must preserve the
+                        # normal attended-wait result for every destination kind.
+                        # Read under exclusion: a concurrent Stop may have won.
+                        outcome = store.status(tx)
+                        lease.close()
+                        return outcome
                     raise
             outcome = store.claim(tx, device, lease.attempt, reservation)
             if outcome.state in {"complete", "stopped"}:

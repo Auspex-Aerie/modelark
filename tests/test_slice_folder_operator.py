@@ -126,6 +126,24 @@ def test_native_operator_roundtrip_and_completed_start_need_no_usb_observer(setu
     assert operator.start(tx, "/absent", {})["state"] == "complete"
 
 
+@pytest.mark.parametrize("code,expected", [("SOURCE_BLOCKED", "blocked_source"),
+                                           ("WAITING_SOURCE", "waiting_source")])
+def test_native_preflight_returns_source_status_without_output(setup, monkeypatch, code, expected):
+    parent, _, _ = setup
+    result = approved(setup)
+    tx = result["transaction_id"]
+    def refuse(self, proposal, check):
+        check()
+        raise t.TransferRefusal(code, "preflight source unavailable")
+    monkeypatch.setattr(Sources, "preflight", refuse, raising=False)
+    outcome = operator.start(tx, parent / "delivery", {})
+    assert outcome["state"] == expected and not outcome["ok"] and not outcome["can_write"]
+    assert code in outcome["reason"]
+    assert state.Store().events(tx) == [] and not (parent / "delivery").exists()
+    monkeypatch.setattr(Sources, "preflight", lambda self, proposal, check: check())
+    assert operator.start(tx, parent / "delivery", {})["state"] == "complete"
+
+
 def test_unapproved_native_plan_refuses_before_observation(setup, monkeypatch):
     parent, catalog, _ = setup
     result = operator.preview(catalog, parent / "delivery", ("org/model",), None)

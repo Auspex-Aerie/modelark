@@ -268,8 +268,14 @@ def test_preflight_refusal_never_creates_output_or_consumes_fat_attempt(fat, mon
             pytest.fail("stop was ignored")
         raise TransferRefusal(refusal)
     monkeypatch.setattr(fat.case.sources, "preflight", preflight, raising=False)
-    with pytest.raises(TransferRefusal, match=refusal):
-        t.start(fat.store, fat.case.tx, fat.case.adapter, fat.case.sources)
+    if refusal == "STOPPED":
+        with pytest.raises(TransferRefusal, match=refusal):
+            t.start(fat.store, fat.case.tx, fat.case.adapter, fat.case.sources)
+    else:
+        result = t.start(fat.store, fat.case.tx, fat.case.adapter, fat.case.sources)
+        assert result == fat.store.status(fat.case.tx)
+        assert result.state == {"SOURCE_BLOCKED": "blocked_source", "WAITING_SOURCE": "waiting_source"}[refusal]
+        assert refusal in result.reason
     assert not fat.store.attempt_consumed(fat.case.tx)
     assert fat.store.events(fat.case.tx) == []
     assert not (fat.parent / "delivery").exists()

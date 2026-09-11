@@ -126,6 +126,32 @@ def test_complete_export_receipt_and_control_stay_inside_child(setup, monkeypatc
     assert operator.start(result["transaction_id"], "/absent", {})["state"] == "complete"
 
 
+@pytest.mark.parametrize("code,expected", [("SOURCE_BLOCKED", "blocked_source"),
+                                           ("WAITING_SOURCE", "waiting_source"),
+                                           ("stop-race", "stopped")])
+def test_fat_preflight_returns_source_status_without_spending_attempt(setup, monkeypatch, code, expected):
+    result = approved(setup)
+    tx = result["transaction_id"]
+    def refuse(self, proposal, check):
+        check()
+        if code == "stop-race":
+            state.Store().request_stop(tx)
+        raise t.TransferRefusal("SOURCE_BLOCKED" if code == "stop-race" else code,
+                                "preflight source unavailable")
+    monkeypatch.setattr(Sources, "preflight", refuse, raising=False)
+    outcome = operator.start(tx, setup.parent / "delivery", {})
+    assert outcome["state"] == expected and not outcome["can_write"]
+    assert outcome["new_root_required"] is False
+    assert state.Store().events(tx) == [] and not (setup.parent / "delivery").exists()
+    assert not state.Store().attempt_consumed(tx)
+    if code == "stop-race":
+        assert state.Store().stop_requested(tx) and outcome["reason"] == "STOPPED"
+    else:
+        assert not outcome["ok"] and code in outcome["reason"]
+    monkeypatch.setattr(Sources, "preflight", lambda self, proposal, check: check())
+    assert operator.start(tx, setup.parent / "delivery", {})["state"] == "complete"
+
+
 def test_unapproved_plan_refuses_before_observation(setup, monkeypatch):
     result = preview(setup)
     monkeypatch.setattr(fat, "Fat32FolderObserver", lambda: pytest.fail("unapproved Start observed destination"))

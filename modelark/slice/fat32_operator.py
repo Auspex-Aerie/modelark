@@ -113,7 +113,8 @@ def start(store, tx, plan, destination_path, attachments):
                     raise
                 return {**_result(store.status(tx)), "new_root_required": store.attempt_consumed(tx)}
             if isinstance(session, t.Status):
-                return _result(session)
+                return {**_result(session), "new_root_required":
+                        session.state != "complete" and store.attempt_consumed(tx)}
             with session:
                 try:
                     result = session.run()

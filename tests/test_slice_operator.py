@@ -173,6 +173,22 @@ def test_start_uses_sealed_catalog_and_all_registry_exclusions(assembled):
     assert next(call for call in calls if call[0] == "sources")[1] == admission["catalog"]
 
 
+@pytest.mark.parametrize("code,expected", [("SOURCE_BLOCKED", "blocked_source"),
+                                           ("WAITING_SOURCE", "waiting_source")])
+def test_direct_preflight_returns_source_status_without_output(assembled, monkeypatch, code, expected):
+    operator, tx, store, _, destination, sources, _, _ = assembled
+    def refuse(proposal, check):
+        check()
+        raise t.TransferRefusal(code, "preflight source unavailable")
+    monkeypatch.setattr(sources, "preflight", refuse, raising=False)
+    result = operator.start(tx, destination.root, {})
+    assert result["state"] == expected and not result["ok"] and not result["can_write"]
+    assert code in result["reason"]
+    assert store.events(tx) == [] and not list(destination.root.iterdir())
+    monkeypatch.setattr(sources, "preflight", lambda proposal, check: check())
+    assert operator.start(tx, destination.root, {})["state"] == "complete"
+
+
 def test_unsealed_attachment_label_never_observes(assembled):
     operator, tx, _, _, destination, _, _, calls = assembled
     with pytest.raises(t.TransferRefusal, match="SOURCE_ATTACHMENT_UNSEALED"):

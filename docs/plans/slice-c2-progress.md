@@ -90,3 +90,12 @@ publishes a receipt.
   reaping occurs while the real archive fence is still held, on success, Stop,
   simulated source loss and destination failure. The original sealed hash is
   checked on success; consumer exceptions retain identity.
+- PR #77's first CI run exposed one regression on both Python versions: the
+  public serial-repair integration test is outside the `test_slice*` selection.
+  Source preflight correctly blocked the obsolete identity, but its exception
+  bypassed the usual public blocked-source result. The shared delivery authority
+  now returns the recorded source wait/block status before releasing exclusion;
+  unrelated failures retain their exception behavior. FAT reports its attempt
+  as unspent. Tests cover all three public destination paths, retry, a racing
+  Stop, and unchanged old receipts/output. The full CI-equivalent suite is part
+  of follow-up validation, not just the Slice filename subset.
