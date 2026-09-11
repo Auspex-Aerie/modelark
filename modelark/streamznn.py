@@ -121,17 +121,14 @@ def _positive_bound(value, name, *, zero=False):
         raise ValueError(f"invalid {name}")
 
 
-def read_zipnn_frame(stream: BinaryIO, *, max_stored_bytes: int, max_decoded_bytes: int,
-                     remaining_bytes: int, stored_length: int | None = None,
-                     prefix: bytes = b"", read_size: int = _HASH_READ,
-                     decode_frame: Callable[[bytes], object] | None = None) -> bytes:
-    """Read one validated, non-streaming ZipNN 0.5 lossless byte frame.
+def read_zipnn_header(stream: BinaryIO, *, max_stored_bytes: int, max_decoded_bytes: int,
+                      remaining_bytes: int, stored_length: int | None = None,
+                      prefix: bytes = b"", read_size: int = _HASH_READ) -> bytes:
+    """Read/validate only the fixed header, leaving payload in the caller's stream.
 
-    Validate declared sizes/modes before reading the payload or calling native code.
-    `prefix` contains bytes already consumed from this frame. The optional decoder
-    receives the complete validated blob; its exceptions propagate unchanged.
-    This bounds buffers, NOT native working memory. Caller owns the input stream.
-    This deliberately narrower API does not change legacy path-wrapper support.
+    Shared interpretation for in-process readers, guarded workers and preflight.
+    No native import, payload allocation, process management or source ownership.
+    The returned header carries original/stored sizes at offsets 16/24 (uint64 LE).
     """
     for value, name in ((max_stored_bytes, "stored bound"),
                         (max_decoded_bytes, "decoded bound"), (read_size, "read size")):
@@ -158,6 +155,25 @@ def read_zipnn_frame(stream: BinaryIO, *, max_stored_bytes: int, max_decoded_byt
     if (stored < 32 or original == 0 or (stored_length is not None and stored != stored_length)
             or header[14] > 26):
         raise StreamZnnError("inconsistent ZipNN frame header")
+    return header
+
+
+def read_zipnn_frame(stream: BinaryIO, *, max_stored_bytes: int, max_decoded_bytes: int,
+                     remaining_bytes: int, stored_length: int | None = None,
+                     prefix: bytes = b"", read_size: int = _HASH_READ,
+                     decode_frame: Callable[[bytes], object] | None = None) -> bytes:
+    """Read one validated, non-streaming ZipNN 0.5 lossless byte frame.
+
+    The optional decoder receives the complete validated blob; its exceptions
+    propagate unchanged. Bounds buffers, NOT native working memory. Caller owns
+    the stream. Legacy path-wrapper format support is deliberately unchanged.
+    """
+    header = read_zipnn_header(
+        stream, max_stored_bytes=max_stored_bytes, max_decoded_bytes=max_decoded_bytes,
+        remaining_bytes=remaining_bytes, stored_length=stored_length,
+        prefix=prefix, read_size=read_size)
+    original = int.from_bytes(header[16:24], "little")
+    stored = int.from_bytes(header[24:32], "little")
     blob = header + _read_exact(stream, stored - 32, read_size=read_size)
     if decode_frame is None:
         from zipnn import ZipNN

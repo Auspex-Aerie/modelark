@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import os
 from pathlib import Path
 import random
 import resource
@@ -20,59 +21,8 @@ import subprocess
 import sys
 import tempfile
 
-from modelark.codec_resources import CodecMemoryPolicy, CodecResourceRefusal
-
-
-def available_memory() -> dict:
-    """Conservative visible Linux memory headroom; unknown accounting refuses."""
-    try:
-        return _available_memory()
-    except (OSError, ValueError, OverflowError) as exc:
-        raise CodecResourceRefusal("could not establish memory headroom") from exc
-
-
-def _available_memory():
-    host_available = None
-    for line in Path("/proc/meminfo").read_text().splitlines():
-        fields = line.split()
-        if fields and fields[0] == "MemAvailable:":
-            if len(fields) != 3 or fields[2] != "kB":
-                raise CodecResourceRefusal("unrecognized MemAvailable accounting")
-            host_available = int(fields[1]) * 1024
-            if host_available < 0:
-                raise CodecResourceRefusal("negative host memory accounting")
-    if host_available is None:
-        raise CodecResourceRefusal("host available memory is unknown")
-    mounts = [line.split() for line in Path("/proc/self/mountinfo").read_text().splitlines()
-              if " - cgroup2 " in line]
-    if len(mounts) != 1 or mounts[0][3:5] != ["/", "/sys/fs/cgroup"]:
-        raise CodecResourceRefusal("full cgroup2 hierarchy is not visible")
-    groups = Path("/proc/self/cgroup").read_text().splitlines()
-    if len(groups) != 1 or not groups[0].startswith("0::/"):
-        raise CodecResourceRefusal("unrecognized unified cgroup membership")
-    relative = groups[0][4:]
-    if relative and any(part in {"", ".", ".."} for part in relative.split("/")):
-        raise CodecResourceRefusal("invalid cgroup membership")
-    root = Path("/sys/fs/cgroup")
-    current = root / relative
-    cgroup_headroom = {}
-    while True:
-        # Initial hierarchy roots have no memory.max; a visible namespace root
-        # may have one and its limit must not be discarded.
-        if current != root or (current / "memory.max").exists():
-            maximum = (current / "memory.max").read_text().strip()
-            used = int((current / "memory.current").read_text().strip())
-            if used < 0 or maximum != "max" and int(maximum) < 0:
-                raise CodecResourceRefusal("negative cgroup memory accounting")
-            if maximum != "max":
-                cgroup_headroom[str(current.relative_to(root))] = max(0, int(maximum) - used)
-        if current == root:
-            break
-        current = current.parent
-    return {"available_bytes": min([host_available, *cgroup_headroom.values()]),
-            "observations": {"host_available_bytes": host_available,
-                             "cgroup_headroom_bytes": cgroup_headroom}}
-
+from modelark.codec_resources import CodecMemoryPolicy, available_memory
+from modelark.codec_process import isolated_command, initialize_worker, runtime_record, validate_runtime
 
 def _dump(path, record):
     with Path(path).open("x") as handle:
@@ -121,10 +71,10 @@ def _metrics():
     return result
 
 
-def worker(request_path):
+def worker(request_path, parent_pid):
     request = json.loads(Path(request_path).read_text())
     policy = CodecMemoryPolicy.from_record(request["policy"])
-    policy.install_in_worker()  # before native imports, same for every operation
+    initialize_worker(policy, parent_pid)  # same guarded startup as the decoder
     before = _metrics()
     if request["phase"] == "allocation-refusal":
         try:
@@ -172,20 +122,52 @@ def worker(request_path):
                               "codec": request["codec"],
                               "zipnn_version": importlib.metadata.version("zipnn"),
                               "torch_version": importlib.metadata.version("torch"),
+                              "worker": validate_runtime(runtime_record(), policy),
                               "zipnn_module": str(Path(zipnn.__file__).name)})
 
 
-def run(*, large=False, output_parent=None):
+def _guarded_roundtrip(encoded, size, expected_hash, policy):
+    """Exercise the actual bounded parent transport, not a buffered stand-in."""
+    from modelark.codec_supervisor import guarded_zipnn_frame, IO_BYTES
+
+    before = _metrics()
+    digest = hashlib.sha256()
+    total = maximum_piece = 0
+    evidence = {}
+    with encoded.open("rb") as source:
+        with guarded_zipnn_frame(source, policy=policy,
+                                  max_stored_bytes=encoded.stat().st_size,
+                                  max_decoded_bytes=size, remaining_bytes=size,
+                                  on_complete=evidence.update) as chunks:
+            for piece in chunks:
+                maximum_piece = max(maximum_piece, len(piece))
+                total += len(piece)
+                digest.update(piece)
+        if source.read(1):
+            raise RuntimeError("guarded whole-frame fixture has trailing content")
+    if total != size or digest.hexdigest() != expected_hash or maximum_piece > IO_BYTES:
+        raise RuntimeError("guarded round trip differs from original or IO ceiling")
+    return {"passed": True, "phase": "guarded-reader", "codec": "zipnn-whole",
+            "policy": policy.to_record(), "original_bytes": size,
+            "original_sha256": digest.hexdigest(), "maximum_output_piece": maximum_piece,
+            **evidence,
+            "parent_metrics_before": before, "parent_metrics_after": _metrics()}
+
+
+def run(*, large=False, output_parent=None, guarded_reader=False):
     policy = CodecMemoryPolicy(8 << 30, 2 << 30)
     policy.admit(available_memory()["available_bytes"])
     output = Path(tempfile.mkdtemp(prefix="modelark-codec-qualification-", dir=output_parent))
     report = {"status": "running", "scope": "synthetic-codec-resource-qualification-only",
               "policy": policy.to_record(), "results": [], "large": large,
+              "guarded_reader": guarded_reader,
               "production_adoption": False, "physical_USB_or_archive_test": False}
     checkout = Path(__file__).resolve().parent.parent
     report["implementation_sha256"] = {
         name: _sha(checkout / name) for name in (
             "modelark/codec_resources.py", "modelark/compress.py", "modelark/streamznn.py",
+            "modelark/codec_worker.py", "modelark/codec_supervisor.py",
+            "modelark/codec_process.py",
             "scripts/qualify_codec_resources.py")}
     print(f"Qualification directory: {output}", flush=True)
     index = 0
@@ -202,8 +184,8 @@ def run(*, large=False, output_parent=None):
         # Native libraries may print: protocol is an exclusive result file, not stdout.
         with (output / f"{index:02d}-stdout.txt").open("x") as out, \
                 (output / f"{index:02d}-stderr.txt").open("x") as err:
-            proc = subprocess.Popen([sys.executable, "-m", "scripts.qualify_codec_resources",
-                                     "--worker", str(request_path)], stdout=out, stderr=err,
+            proc = subprocess.Popen(isolated_command("scripts.qualify_codec_resources",
+                                     "--worker", request_path, "--parent-pid", os.getpid()), stdout=out, stderr=err,
                                     close_fds=True)
             try:
                 code = proc.wait()
@@ -222,6 +204,8 @@ def run(*, large=False, output_parent=None):
     try:
         launch({"phase": "allocation-refusal"})
         sizes = [99_630_640, 409_993_344] if large else [2 << 20]
+        if large and guarded_reader:
+            sizes.insert(0, 64 << 20)  # Default StreamZNN-sized native work unit too.
         with tempfile.TemporaryDirectory(prefix="synthetic-", dir=output) as scratch:
             for size in sizes:
                 for codec in ("zipnn-whole", "streamznn"):
@@ -234,6 +218,10 @@ def run(*, large=False, output_parent=None):
                                "codec": codec, "sha256": digest}
                     for phase in ("compress", "canary", "restore"):
                         launch({**request, "phase": phase})
+                    if guarded_reader and codec == "zipnn-whole":
+                        result = _guarded_roundtrip(case / "misleading.blob", size, digest, policy)
+                        report["results"].append(result)
+                        print(f"passed guarded reader: {size} original bytes", flush=True)
         if any(_sha(checkout / name) != digest
                for name, digest in report["implementation_sha256"].items()):
             raise RuntimeError("implementation changed during qualification; rerun unchanged code")
@@ -251,12 +239,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--large", action="store_true", help="qualify the two real failure sizes")
     parser.add_argument("--output-parent", type=Path)
+    parser.add_argument("--guarded-reader", action="store_true",
+                        help="also qualify bounded parent/worker whole-frame transport")
     parser.add_argument("--worker", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--parent-pid", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.worker:
-        worker(args.worker)
+        worker(args.worker, args.parent_pid)
     else:
-        print(run(large=args.large, output_parent=args.output_parent))
+        print(run(large=args.large, output_parent=args.output_parent, guarded_reader=args.guarded_reader))
 
 
 if __name__ == "__main__":

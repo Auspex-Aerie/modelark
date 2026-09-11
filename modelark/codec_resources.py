@@ -1,6 +1,6 @@
 """Shared, operation-neutral memory admission for isolated codec workers.
 
-Stage A: qualification consumers only. No live writer/reader policy changes.
+Shared by qualification and the opt-in codec supervisor. No live caller rollout.
 RLIMIT_AS is a hard virtual-address-space ceiling, NOT an RSS reservation.
 Available memory is a fresh caller observation of the smallest host/cgroup
 headroom, not MemFree and not a promise against unrelated concurrent allocation.
@@ -8,11 +8,63 @@ headroom, not MemFree and not a promise against unrelated concurrent allocation.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from pathlib import Path
 import sys
 
 
 class CodecResourceRefusal(RuntimeError):
     """The requested resource envelope cannot be admitted or enforced."""
+
+
+def available_memory() -> dict:
+    """Conservative visible Linux memory headroom; unknown accounting refuses."""
+    try:
+        return _available_memory()
+    except (OSError, ValueError, OverflowError) as exc:
+        raise CodecResourceRefusal("could not establish memory headroom") from exc
+
+
+def _available_memory():
+    host_available = None
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        fields = line.split()
+        if fields and fields[0] == "MemAvailable:":
+            if len(fields) != 3 or fields[2] != "kB":
+                raise CodecResourceRefusal("unrecognized MemAvailable accounting")
+            host_available = int(fields[1]) * 1024
+            if host_available < 0:
+                raise CodecResourceRefusal("negative host memory accounting")
+    if host_available is None:
+        raise CodecResourceRefusal("host available memory is unknown")
+    mounts = [line.split() for line in Path("/proc/self/mountinfo").read_text().splitlines()
+              if " - cgroup2 " in line]
+    if len(mounts) != 1 or mounts[0][3:5] != ["/", "/sys/fs/cgroup"]:
+        raise CodecResourceRefusal("full cgroup2 hierarchy is not visible")
+    groups = Path("/proc/self/cgroup").read_text().splitlines()
+    if len(groups) != 1 or not groups[0].startswith("0::/"):
+        raise CodecResourceRefusal("unrecognized unified cgroup membership")
+    relative = groups[0][4:]
+    if relative and any(part in {"", ".", ".."} for part in relative.split("/")):
+        raise CodecResourceRefusal("invalid cgroup membership")
+    root = Path("/sys/fs/cgroup")
+    current = root / relative
+    cgroup_headroom = {}
+    while True:
+        # Initial hierarchy roots have no memory.max; a visible namespace root
+        # may have one and its limit must not be discarded.
+        if current != root or (current / "memory.max").exists():
+            maximum = (current / "memory.max").read_text().strip()
+            used = int((current / "memory.current").read_text().strip())
+            if used < 0 or maximum != "max" and int(maximum) < 0:
+                raise CodecResourceRefusal("negative cgroup memory accounting")
+            if maximum != "max":
+                cgroup_headroom[str(current.relative_to(root))] = max(0, int(maximum) - used)
+        if current == root:
+            break
+        current = current.parent
+    return {"available_bytes": min([host_available, *cgroup_headroom.values()]),
+            "observations": {"host_available_bytes": host_available,
+                             "cgroup_headroom_bytes": cgroup_headroom}}
 
 
 def _bytes(value, name, *, zero=False):

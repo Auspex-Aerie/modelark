@@ -3009,6 +3009,13 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 #### HYP-002 results — 2026-09-10
 - Unchanged-code synthetic runs completed all 13 checks using Python 3.10.12 / ZipNN 0.5.4 with dev Torch 2.13.0 (f336101) and installed-dependency Torch 2.14.0 (4311547). Both whole and StreamZNN compression/canary/restore passed original hashes at both observed failure sizes under one 8 GiB AS policy plus 2 GiB sampled headroom. Final report: `/tmp/modelark-codec-qualification-b8fo65k8/result.json`, with implementation fingerprints; max RSS 1,765,400,576 bytes and virtual peak 6,774,444,032 bytes. This supports feasibility for these fixtures, not general host-OOM protection, native binary attestation or production caller adoption. HYP remains open for the broader qualification/integration gates.
 
+#### HYP-002 results — Stage C1, 2026-09-10
+- The actual bounded parent/worker transport passed original hashes for 67,108,864, 99,630,640 and 409,993,344 byte whole frames on installed-dependency Python 3.10.12 / ZipNN 0.5.4 / Torch 2.14.0. The same run passed compression/canary/restore for whole and StreamZNN at all three sizes plus deliberate allocation refusal: 22 checks under the unchanged 8 GiB AS + 2 GiB sampled-headroom methodology. Report `/tmp/modelark-codec-qualification-jdbv4mjy/result.json` fingerprints the implementation. Parent output pieces were at most 65,536 bytes; live RSS snapshots stayed roughly 19–24 MB, not a peak-RSS proof or reservation. C1 is a non-production prerequisite; policy sealing, all-frame admission, zstd repair and shared production caller adoption remain open gates. See docs/guarded-codec-worker.md and the approved plan's mutable progress section.
+
+- Follow-up unchanged-code qualification after pinning the worker bootstrap against cwd shadow packages and separating error emission from output emission also passed all 22 checks: `/tmp/modelark-codec-qualification-_8of6ito/result.json`. Parent live RSS snapshots remained roughly 19–24 MB; current-exec virtual peak stayed below 48 MB. These corrections preserve the same memory-policy methodology and no-production-rollout boundary; the earlier result remains historical evidence for its fingerprint, not attestation of later code.
+
+- DEC-142's startup/session correction passed all 22 checks in `/tmp/modelark-codec-qualification-lg9hbfo8/result.json`, fingerprinting seven implementation files. Every guarded decode now records its own exact admission observation and actual child Python 3.10.12 / ZipNN 0.5.4 / Torch 2.14.0 identity, observed 8 GiB AS ceiling and parent-death signal. The three original hashes and 65,536-byte output ceiling passed; parent live RSS snapshots remained approximately 19–24 MB. Previous reports lack this per-child provenance and do not prove guards preceded site hooks; their earlier hash/output observations remain historical evidence. Separate disposable hook tests pass on Python 3.10.12 and 3.12.12. No production adoption, arbitrary-input safety or physical acceptance is inferred.
+
 ### DEC-140: Review every pushed PR head with both reviewers within the stage's three-round budget
 - `id`: DEC-140
 - `date`: 2026-09-10
@@ -3032,3 +3039,25 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `planned_remediation`: Stage B preserves existing refusal behavior and records an executable regression. Stage C's new explicit policy must qualify the units repair, known/unknown-content windows and supported backends without widening old sealed approvals. The work item and test gate are in docs/streamznn-reader-adapter.md.
 - `docs_updated`: docs/decision_log.md, docs/streamznn-reader-adapter.md, docs/plans/slice-representation-architecture.md
 - `related`: DEC-138, DEC-139, modelark/artifact_io.py, tests/test_artifact_io.py
+
+### DEC-141: Explicitly hand off merge-ready PRs and stop when they linger
+- `id`: DEC-141
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: Operator merged PR #75 and corrected the workflow: promptly request merges in bold, and stop and call out ready PRs left open instead of letting them hang.
+- `decision`: After verifying required reviews and CI against the current head, lead with a bold merge request and the PR link. If that ready PR remains open when encountered later, stop advancing dependent work and issue a clear bold reminder that it awaits the operator's merge. Do not describe blocked or unreviewed PRs as ready. Merge authority remains with the operator unless separately delegated for the specific PR.
+- `rationale`: Review completion needs an unmistakable human handoff; quietly reporting status or continuing dependent work leaves approved stages stranded.
+- `impact`: Project agent guidance and the active review monitor carry the same handoff rule; existing review budgets and exact-head requirements remain unchanged.
+- `docs_updated`: AGENTS.md, docs/decision_log.md
+- `related`: DEC-139, DEC-140, BOT-008
+
+### DEC-142: Own the complete codec-worker startup and evidence boundary
+- `id`: DEC-142
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: Operator approved the architectural correction after PR #76 Codex findings 3984989491, 3984989497 and 3984989506 exposed startup-hook ordering, stdio collision and actual-worker provenance gaps.
+- `decision`: Use one isolated no-site startup routine for the decoder and compression/canary/restore qualification children. Bind parent lifetime and install the existing shared memory policy before dependency site initialization. Keep the protocol writer above stdio descriptors. Frame and validate bounded actual-child runtime/guard evidence separately from original bytes, and publish completion evidence with the exact parent admission sample only after successful full consumption and child exit.
+- `rationale`: An isolated interpreter and guarded decode were insufficient while startup behavior and qualification provenance remained implicit. Own this bounded launch/session contract instead of accumulating consumer-specific patches or new RAM formulas.
+- `impact`: C1 worker protocol moves to internal v2; no archive-format, live data, old-seal, production Slice or compression rollout changes. The approved fix may proceed locally despite the partial first remote round; both reviewers remain required, cumulative review caps remain unchanged and the operator retains merge authority.
+- `docs_updated`: docs/decision_log.md, docs/guarded-codec-worker.md, docs/plans/slice-representation-architecture.md
+- `related`: DEC-138, DEC-139, DEC-140, DEC-141, HYP-002
