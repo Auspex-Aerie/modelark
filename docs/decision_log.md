@@ -3083,3 +3083,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Shared Slice private-state/authority and public interrupt plumbing, plus operation-neutral codec policy admission. No new schema, changed sealed policy values, archive format, live-instance change, parent resource-limit mutation or production writer rollout. Regression and qualification work stays in the C2 tracker.
 - `docs_updated`: docs/decision_log.md, docs/plans/slice-c2-progress.md, docs/codec-resource-qualification.md
 - `related`: DEC-138, DEC-139, DEC-142, HYP-002
+
+### DEC-145: Apply shared codec guards to the production writer and its in-process canary
+- `id`: DEC-145
+- `date`: 2026-09-11
+- `status`: accepted
+- `triggered_by`: Operator continuation of DEC-138/DEC-139 Stage D after merged C2; caller inventory found canary also serves external deep verification.
+- `decision`: First adopt the qualified shared policy at production fetch writer admission and isolated guarded startup, then verify its output through the neutral original-byte decoder in that same child. Preserve codec-selection preferences and disk caps. Resource or unsupported-decoding refusal retains the downloaded original for raw fallback; hash mismatch remains a failed canary. Keep legacy external canary/restore behavior until the explicit D2 compatibility gate.
+- `rationale`: A compression child without an enforced envelope is only crash isolation. A nested decoder child would break the existing writer/fence lifetime model. Applying Slice's strict policy silently to external legacy callers would change their supported formats and evidence semantics.
+- `impact`: Fetch child startup, shared in-process execution adapter, writer canary and monitored-child cleanup; actual writer-to-Slice qualification. No changed archive format, catalog/approval schema, live deployment, retrieval, source fences or standalone StreamZNN policy. D2 remains mandatory for full production parity.
+- `docs_updated`: docs/decision_log.md, docs/codec-resource-qualification.md, docs/plans/codec-stage-d-progress.md
+- `related`: DEC-138, DEC-139, DEC-142, DEC-144

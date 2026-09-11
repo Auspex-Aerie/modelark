@@ -2,8 +2,10 @@
 
 DEC-138 requires one RAM-admission methodology for compression, canary, restore
 and Slice. Stage A implements an operation-neutral `CodecMemoryPolicy` and a
-disposable qualification runner. **No live caller adopts it yet.** This is not a
-claim that Slice's 64 MiB incompatibility is fixed.
+disposable qualification runner. C2 subsequently adopted it in Slice. D1 adds
+production fetch compression and its in-child canary; public legacy canary/deep
+verification and restore still await D2. This is code adoption, not deployment
+or a claim that the complete parity/physical qualification arc is finished.
 
 ## What the policy means
 
@@ -31,6 +33,13 @@ usage differ substantially. A successful run cannot certify all future workloads
 
 Qualification uses an **8 GiB AS ceiling plus 2 GiB observed headroom reserve**.
 These are experimental parameters for this runtime, not newly deployed defaults.
+The D1 writer uses C2's same qualified profile for execution, without changing
+wishlist codec preference or capacity bounds. Resource/unsupported-frame refusal
+preserves the downloaded original and takes the existing raw storage path;
+digest mismatch remains a failed canary. The non-spawning adapter verifies the
+already-installed child ceiling and reuses the neutral original-byte reader.
+Canary headroom is sampled again inside the worker; changing pressure can refuse
+the canary even after successful compression. No sample reserves resources.
 Whole and StreamZNN operations are performed in separate fresh processes with the
 same policy. Native diagnostics go to separate files; results use exclusive JSON
 files rather than stdout. Temporary synthetic bytes are removed on exit, while
@@ -43,6 +52,7 @@ From the checkout, with its dev Python:
 ```sh
 python -m pytest -q tests/test_codec_resources.py tests/test_codec_qualification.py
 python -m scripts.qualify_codec_resources --large --output-parent /tmp
+python -m scripts.qualify_codec_resources --large --production-writer --output-parent /tmp
 ```
 
 Without `--large`, the runner uses 2 MiB inputs. Large mode uses exactly
@@ -57,6 +67,10 @@ Reports include exact policy, source-code digests, Python/ZipNN/Torch versions,
 format magic, original/stored identities, and peak RSS/virtual memory by phase.
 Code changes during a run invalidate it. No source/encoded/runtime fixture is
 read from the live archive, and no application service is started or stopped.
+The production-writer option exercises the actual fetch child plus canary and
+then Slice on its output, retaining actual worker/admission evidence. The
+`production_adoption: false` report field refers to incomplete overall D adoption;
+`production_writer_exercised` distinguishes this new D1 path.
 
 ## Limits and next gates
 

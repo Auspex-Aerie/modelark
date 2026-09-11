@@ -396,6 +396,9 @@ def test_run_monitored_forwards_inherit_fds_to_child(tmp_path):
         def wait(self, timeout=None):
             return 0
 
+        def poll(self):
+            return self.returncode
+
         def kill(self):
             pass
 
