@@ -76,7 +76,8 @@ code running as that same UID or root.
 `FolderTarget` seals the canonical filesystem scope, existing parent identity and intended child.
 It excludes free-space observations and the not-yet-created root identity. `NativePlan` adds the
 approved closure, backing/admission evidence, catalog, advisory snapshot and metadata allowance
-under `modelark.slice.native-transaction.v1`. `FolderReview` remains non-executable; parsing it
+under `modelark.slice.native-transaction.v1` for legacy approvals. Fresh previews use v2 and
+also bind the explicit decode/resource policy. `FolderReview` remains non-executable; parsing it
 cannot produce source approval, ownership or execution authority.
 
 Durable claims compare canonical same-filesystem paths: exact and ancestor/descendant roots
@@ -122,6 +123,26 @@ not a catalog schema migration. Legacy
 golden tests pin their seal hashes against reviewed commit `6fd87c3`. Unknown/mixed envelopes
 refuse before destination observation or writer authority. No public flag weakens an old seal.
 
+Fresh direct/native/FAT approval envelopes now carry a versioned original-byte decoding policy.
+ZipNN frames run in the C1-qualified child: 8 GiB AS ceiling plus 2 GiB sampled headroom, with
+individual buffer ceilings derived from that same envelope and at most 64 KiB output pieces.
+This is not an RSS reservation or a guarantee every smaller frame fits; unknown headroom and
+child allocation failures refuse. zstd stays bounded streaming with a 64 MiB byte-valued window;
+this policy currently qualifies only zstandard 0.25.0's C extension. Old approvals retain their
+old limits and conversion. Fresh preview and approval are necessary to use the new behavior.
+
+Before first output mutation, preflight checks fresh sealed source candidates under their read
+fences, including every StreamZNN header. It reads/discards payload in bounded pieces, so a large
+archive may take time to inspect. It is not a full decode/hash verification. A usable attached
+alternative can proceed; absent alternatives remain unchecked, and absent required sources wait.
+Actual decoding repeats header/resource checks and still verifies the sealed original hash.
+Native partial resume authenticates completed output without requiring its sources online.
+
+No private schema migration is added by these v2 envelopes. An older binary rejects them, including
+while checking overlapping ownership; stores with v2 records require the upgraded reader. The
+[C2 tracker](plans/slice-c2-progress.md) separates synthetic implementation qualification from
+the still-required public CLI, live deployment and physical compressed-source acceptance gates.
+
 ## FAT32 session workflow
 
 The same Preview → Approve → Start commands select the FAT32 adapter for a vfat parent;
@@ -138,7 +159,8 @@ Protected paths still include all of `/run`, so `/run/media/...` is currently re
 
 FAT32 has **one attempt, no resume**. Once the host claim is consumed, Stop, Ctrl+C, source or
 capacity waits and failures require a new intent and different output folder. Residue remains
-untouched. A known capacity shortfall before claim consumption is retryable. The media report
+untouched. Known capacity/source/header/resource refusals before claim consumption are retryable;
+so is a Stop acknowledged before the one-shot attempt is consumed. The media report
 says export verified, not host transaction committed; committed host status supplies that evidence.
 
 ## Completed qualification gates and evidence limits

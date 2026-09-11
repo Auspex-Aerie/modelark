@@ -111,9 +111,13 @@ adversarial same-account namespace isolation. Ordinary collisions still refuse.
 Source reads retain the shared archive fence, refresh the explicit read-only catalog and validate
 filesystem/serial/annex identity. Stored paths are repository-relative. Only a final annex link to the
 sealed key beneath the pinned object store is permitted. No annex command or retrieval runs. Raw,
-bounded ZipNN 0.5 byte-format, StreamZNN and optional zstd streams yield original bytes. The default
-64-MiB limit bounds individual frames/windows, not the native codec's entire working set; oversized
-legacy whole-ZipNN blobs and unsupported modes refuse. Consumer errors are not relabeled as source IO.
+bounded ZipNN 0.5 byte-format, StreamZNN and optional zstd streams yield original bytes. Old direct-v1
+approvals retain their 64-MiB frame/window bounds and legacy zstd behavior; these bounds alone are
+not a native working-memory guard. Fresh direct-v2 previews seal the versioned decode policy:
+ZipNN uses the qualified child AS/headroom guard, with bounded output into the parent, and zstd
+uses a qualified byte-valued window setting. No Start flag or current configuration widens an
+old approval. See [C2 policy and qualification limits](plans/slice-c2-progress.md).
+Unsupported modes refuse. Consumer errors are not relabeled as source IO.
 Source and destination attachments share lexical absolute-path normalization, expanding `~` and
 collapsing `..` without following symlinks. Operator preview/Start, observation and cached-loss
 recovery, descriptor binding and source reads use the same spelling. Descriptor opening still

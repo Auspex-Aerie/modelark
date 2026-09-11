@@ -1,5 +1,6 @@
 """Read-only source-use gate sharing the archive writer's nonblocking drive fence."""
 from contextlib import ExitStack, contextmanager
+import json
 
 from modelark import drive_fence
 from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity
@@ -32,8 +33,22 @@ class FencedSources:
     def __init__(self, catalog_path, reader):
         self.catalog_path, self.reader = catalog_path, reader
 
+    @property
+    def requires_preflight(self):
+        return getattr(self.reader, "policy", None) is not None
+
     @contextmanager
     def open(self, candidate):
+        with self._open(candidate) as result:
+            yield result
+
+    @contextmanager
+    def open_checked(self, candidate, check):
+        with self._open(candidate, check=check) as result:
+            yield result
+
+    @contextmanager
+    def _open(self, candidate, *, check=None, inspect=False, artifact=None):
         def identity(drive):
             return FenceIdentity(drive.fs_uuid, drive.annex_uuid, drive.serial,
                                  drive.filesystem_capacity_bytes, drive.identity_epoch,
@@ -50,7 +65,15 @@ class FencedSources:
                               if drive.drive_label == candidate.drive.drive_label), None)
                 if fresh is None or identity(fresh) != captured:
                     raise TransferRefusal("SOURCE_EVIDENCE_UNAVAILABLE", "source identity changed")
-                stream = stack.enter_context(self.reader.open(candidate))
+                if inspect:
+                    from .transaction import _same_source
+                    if artifact is None or not _same_source(artifact, candidate, snapshot):
+                        raise TransferRefusal("SOURCE_CHANGED", candidate.drive.drive_label)
+                    stream = stack.enter_context(self.reader.inspect(candidate, check=check))
+                elif check is not None and getattr(self.reader, "policy", None) is not None:
+                    stream = stack.enter_context(self.reader.open(candidate, check=check))
+                else:
+                    stream = stack.enter_context(self.reader.open(candidate))
             except UnprovenFenceIdentity as exc:
                 raise TransferRefusal("SOURCE_EVIDENCE_UNAVAILABLE", str(exc)) from exc
             except drive_fence.FenceUnavailable as exc:
@@ -61,3 +84,30 @@ class FencedSources:
                 raise TransferRefusal("SOURCE_MISSING", candidate.drive.drive_label) from exc
             # Do not translate exceptions thrown by the destination/consumer inside this yield.
             yield snapshot, _SourceRead(stream, candidate.drive.drive_label)
+
+    def preflight(self, proposal, check=lambda: None):
+        """All attached alternatives, before output/one-attempt authority exists.
+
+        An absent alternative is not checked. It preserves the existing wait
+        option when no attached candidate is currently usable. One bad encoding
+        never invalidates another sealed representation of the same original.
+        """
+        if getattr(self.reader, "policy", None) is None:
+            return
+        for artifact in proposal.closure:
+            usable, errors = False, []
+            for candidate in artifact.sources:
+                check()
+                try:
+                    with self._open(candidate, check=check, inspect=True, artifact=artifact):
+                        pass
+                    usable = True
+                except TransferRefusal as exc:
+                    if not (exc.code.startswith("SOURCE_") or exc.code == "WAITING_SOURCE"):
+                        raise
+                    errors.append({"code": exc.code, "drive_label": candidate.drive.drive_label,
+                                   "detail": exc.detail})
+            if not usable:
+                waiting = any(error["code"] == "WAITING_SOURCE" for error in errors)
+                raise TransferRefusal("WAITING_SOURCE" if waiting else "SOURCE_BLOCKED", json.dumps({
+                    "repo_id": artifact.repo_id, "rfilename": artifact.rfilename, "candidates": errors}))

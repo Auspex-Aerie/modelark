@@ -39,6 +39,14 @@ push an unreviewed final fix or silently reset the counter. A user-authorized
 exception applies only to its explicitly named scope; PR #73's one-time
 no-review-wait merge authorization does not carry forward to other PRs.
 
+Quota exception (2026-09-10): when a reviewer explicitly reports exhausted
+credits, do not keep tagging it, including after new pushes. Record its review
+as pending and continue available reviewers/CI. Resume its canonical trigger
+only after credits are restored or its announced reset time arrives; if that
+single retry is still quota-blocked, stop retrying and tell the operator.
+Quota refusal is neither acceptance nor a completed review, and does not reset
+the stage's counters. Never enable paid usage without explicit authorization.
+
 ## Operator approval continuity (2026-09-10)
 
 When the operator replies "ok", "begin", "go", "continue", or equivalent to an

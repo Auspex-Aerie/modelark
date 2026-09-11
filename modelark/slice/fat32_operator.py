@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from . import domain as d, state as private_state, transaction as t
+from .authority import PreclaimInterrupted
 from .catalog import read_catalog
 from .fat32_destination import Fat32Destination
 from .fat32_observation import Fat32FolderObserver, Fat32Tree
@@ -19,6 +20,8 @@ from .io_errors import io_boundary
 from .local_source import LocalArchiveReader
 from .paths import canonical_attachment
 from .sources import FencedSources
+from modelark.artifact_policy import qualified_policy
+from .fat32_plan import POLICY_VERSION
 
 
 def _intent(evidence):
@@ -47,11 +50,12 @@ def preview(catalog_path, destination_path, repo_ids):
     evidence = observer.observe(destination, archives=_archives(catalog), protected_paths=_protected(catalog))
     target = _intent(evidence)
     proposal = d.preview(replace(spec, destination_id=target.target_id), snapshot)
-    binding = binding_for(target, catalog, evidence.parent_path, evidence.backing_ids)
+    policy = qualified_policy()
+    binding = binding_for(target, catalog, evidence.parent_path, evidence.backing_ids, policy)
     reserve = estimate_metadata(proposal, binding, catalog, evidence.parent_path, evidence.backing_ids,
-                                evidence.capacity, private_state.HOST_STATE_DIR)
+                                evidence.capacity, private_state.HOST_STATE_DIR, policy)
     plan = Fat32Plan(proposal, binding, catalog, evidence.parent_path, evidence.backing_ids,
-                     evidence.capacity, reserve)
+                     evidence.capacity, reserve, POLICY_VERSION, policy)
     with io_boundary(None, "DESTINATION_UNPROVEN", "FAT32 preview setup/teardown failed"), \
             Fat32Tree(evidence.parent_path, writable=True) as tree:
         fresh = observer.recheck(tree, evidence, archives=_archives(catalog))
@@ -95,9 +99,13 @@ def start(store, tx, plan, destination_path, attachments):
         if fresh.capacity.available_bytes < plan.required_bytes(store.root):
             raise t.TransferRefusal("DESTINATION_CAPACITY_WAIT", "shared capacity insufficient before claim")
         with Fat32Destination(tree, plan.destination, store, tx, recheck=recheck) as destination:
-            sources = FencedSources(plan.catalog, LocalArchiveReader(attachments, observer=LinuxObserver()))
+            options = {"policy": plan.decode_policy} if plan.decode_policy is not None else {}
+            sources = FencedSources(plan.catalog, LocalArchiveReader(attachments, observer=LinuxObserver(), **options))
             try:
                 session = t.start(store, tx, destination, sources)
+            except PreclaimInterrupted as exc:
+                return {**_result(exc.outcome, stop_requested=True), "ok": False,
+                        "new_root_required": False}
             except KeyboardInterrupt:
                 _request_stop_once(store, tx)
                 # Never use native's fresh-Start interrupt acknowledgment path:
@@ -109,7 +117,8 @@ def start(store, tx, plan, destination_path, attachments):
                     raise
                 return {**_result(store.status(tx)), "new_root_required": store.attempt_consumed(tx)}
             if isinstance(session, t.Status):
-                return _result(session)
+                return {**_result(session), "new_root_required":
+                        session.state != "complete" and store.attempt_consumed(tx)}
             with session:
                 try:
                     result = session.run()

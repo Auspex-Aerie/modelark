@@ -241,7 +241,13 @@ def start(store, tx, destination: DestinationPort, sources: SourcePort, *, fault
     if isinstance(serial, Status):
         return serial
     (fault or (lambda point: None))("reservation_committed")
-    authority = DeliveryAuthority.acquire(store, tx, plan.destination.device_id, serial)
+    inspect = getattr(sources, "preflight", None)
+    # Existing native partial output is authenticated by Session recovery and
+    # actual source-use checks. Completed files must not require sources online.
+    preflight = ((lambda check: inspect(plan.proposal, check))
+                 if inspect is not None and getattr(sources, "requires_preflight", True)
+                 and not store.events(tx) else None)
+    authority = DeliveryAuthority.acquire(store, tx, plan.destination.device_id, serial, preflight=preflight)
     if isinstance(authority, Status):
         return authority
     try:
@@ -602,7 +608,10 @@ class Session:
         errors = []
         for source in artifact.sources:
             try:
-                with self.sources.open(source) as (snapshot, stream):
+                checked = getattr(self.sources, "open_checked", None)
+                context = (checked(source, self._boundary) if checked is not None
+                           else self.sources.open(source))
+                with context as (snapshot, stream):
                     if not _same_source(artifact, source, snapshot):
                         raise TransferRefusal("SOURCE_CHANGED", source.drive.drive_label)
                     return self._write(op, stream, asdict(source))

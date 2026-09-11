@@ -25,6 +25,7 @@ from .local_source import LocalArchiveReader
 from .paths import canonical_attachment
 from .io_errors import classify_io, io_boundary
 from .sources import FencedSources
+from modelark.artifact_policy import DecodePolicy, qualified_policy
 from .state import Store
 
 
@@ -91,9 +92,10 @@ def preview(catalog_path, destination_path, repo_ids, root):
             lambda: observer.recheck_attachment(tree, evidence),
             'DESTINATION_UNPROVEN', 'destination preview failed'):
         caps = capacity.capture(tree, evidence, proposal, private_state.HOST_STATE_DIR.absolute())
-        admission = {"version": "modelark.slice.direct.v1", "catalog": catalog_path, "capacity": caps}
+        admission = {"version": "modelark.slice.direct.v2", "catalog": catalog_path, "capacity": caps,
+                     "decode_policy": qualified_policy().to_record()}
         binding = t.DestinationBinding(evidence.device_id, evidence.fs_uuid,
-                                       "direct-v1:" + hashlib.sha256(d._json(admission)).hexdigest(),
+                                       "direct-v2:" + hashlib.sha256(d._json(admission)).hexdigest(),
                                        evidence.available_bytes)
         reserve = capacity.metadata_reserve_bytes(proposal, binding, caps, private_state.HOST_STATE_DIR.absolute())
         plan = t.TransferPlan(proposal, binding, metadata_reserve_bytes=reserve)
@@ -169,7 +171,10 @@ class _CheckedDestination(UsbDestination):
         self._observer.recheck_attachment(self.tree, self._evidence)
 
 
-def _acknowledge_interrupt(store, tx, destination, sources, session=None):
+def _acknowledge_interrupt(store, tx, destination, sources, session=None, *, error=None):
+    from .authority import PreclaimInterrupted
+    if isinstance(error, PreclaimInterrupted):
+        return error.outcome  # Already acknowledged while preclaim exclusion was held.
     store.request_stop(tx)
     try:
         if session is not None:
@@ -222,11 +227,13 @@ def start(tx, destination_path, attachments):
             # reconciliation belongs to the authenticated adapter, not fresh-start admission.
             destination = _CheckedDestination(tree, plan.destination, store, tx, observer, path,
                                               plan.proposal, admission["capacity"], admission["catalog"], evidence)
-            sources = FencedSources(admission["catalog"], LocalArchiveReader(attachments, observer=observer))
+            options = ({"policy": DecodePolicy.from_record(admission["decode_policy"])}
+                       if "decode_policy" in admission else {})
+            sources = FencedSources(admission["catalog"], LocalArchiveReader(attachments, observer=observer, **options))
             try:
                 session = t.start(store, tx, destination, sources)
-            except KeyboardInterrupt:
-                return _result(_acknowledge_interrupt(store, tx, destination, sources), stop_requested=True)
+            except KeyboardInterrupt as exc:
+                return _result(_acknowledge_interrupt(store, tx, destination, sources, error=exc), stop_requested=True)
             if isinstance(session, t.Status):
                 return _result(session)
             with session:

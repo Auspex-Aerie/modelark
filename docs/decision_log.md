@@ -3061,3 +3061,25 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: C1 worker protocol moves to internal v2; no archive-format, live data, old-seal, production Slice or compression rollout changes. The approved fix may proceed locally despite the partial first remote round; both reviewers remain required, cumulative review caps remain unchanged and the operator retains merge authority.
 - `docs_updated`: docs/decision_log.md, docs/guarded-codec-worker.md, docs/plans/slice-representation-architecture.md
 - `related`: DEC-138, DEC-139, DEC-140, DEC-141, HYP-002
+
+### DEC-143: Suspend reviewer triggers while its credits are exhausted
+- `id`: DEC-143
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: Operator corrected the PR #76 workflow after a new-head Greptile tag was posted despite its known exhausted-credit state.
+- `decision`: The every-push review requirement does not mean repeatedly tagging an unavailable reviewer. While credits are exhausted, leave that review pending and continue available reviewers and CI. Resume the canonical trigger only after restored credits or the announced reset; stop and report if a single post-reset retry still refuses. Do not enable paid usage without explicit authorization.
+- `rationale`: A known quota failure cannot produce a review; another push does not restore credits. Preserve the review gate without generating ineffective requests.
+- `impact`: Clarifies DEC-140 with a quota-aware trigger exception, not an acceptance waiver or counter reset. AGENTS.md and the active review watcher carry the same rule. The already-posted round-2 request is historical; no further exhausted-quota tags are authorized.
+- `docs_updated`: AGENTS.md, docs/decision_log.md
+- `related`: DEC-140, DEC-141, DEC-142
+
+### DEC-144: Own preclaim outcomes and share codec environment admission
+- `id`: DEC-144
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: Operator approved the bounded follow-up after PR #77 Codex findings 3985723013, 3985723019 and 3985723021; disposable probes reproduced interrupted FAT preflight, acknowledged-resume outcome masking and inherited-AS admission gaps.
+- `decision`: Interpret reservation/Stop serials through one predicate shared by preflight guards, refusal publication and claim. Acknowledge preflight interruption atomically under retained destination exclusion and carry that outcome to public adapters without another claim. Consume only the exact acknowledged Stop authorized by the reservation; any newer Stop wins. Share read-only platform/inherited-AS compatibility checks between codec admission and worker guard installation, retaining installation and verification in the fresh child.
+- `rationale`: Moving work before claim exposed execution-only assumptions. Give preclaim lifecycle and deterministic worker prerequisites explicit owners rather than adding destination-specific stop workarounds or a second RAM formula.
+- `impact`: Shared Slice private-state/authority and public interrupt plumbing, plus operation-neutral codec policy admission. No new schema, changed sealed policy values, archive format, live-instance change, parent resource-limit mutation or production writer rollout. Regression and qualification work stays in the C2 tracker.
+- `docs_updated`: docs/decision_log.md, docs/plans/slice-c2-progress.md, docs/codec-resource-qualification.md
+- `related`: DEC-138, DEC-139, DEC-142, HYP-002

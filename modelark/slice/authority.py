@@ -84,6 +84,13 @@ class Lease:
             raise TransferRefusal("EXECUTION_FENCE_LOST")
 
 
+class PreclaimInterrupted(KeyboardInterrupt):
+    """Stop already acknowledged under exclusion; adapters must not re-claim."""
+    def __init__(self, outcome):
+        super().__init__("source preflight interrupted")
+        self.outcome = outcome
+
+
 class DeliveryAuthority:
     """The sole execution facade for activation, boundaries, outcomes and release."""
     def __init__(self, store, tx, device, lease):
@@ -91,7 +98,7 @@ class DeliveryAuthority:
         self.attempt = lease.attempt
 
     @classmethod
-    def acquire(cls, store, tx, device, reservation):
+    def acquire(cls, store, tx, device, reservation, *, preflight=None):
         from .transaction import TransferRefusal
         try:
             lease = Lease(device, tx)
@@ -110,6 +117,29 @@ class DeliveryAuthority:
             if current.state == "complete":
                 lease.close()
                 return current
+            if preflight is not None:
+                def check():
+                    lease.check()
+                    store.guard_preclaim(tx, device, reservation)
+                try:
+                    check()
+                    preflight(check)
+                    check()
+                except KeyboardInterrupt as exc:
+                    lease.check()
+                    outcome = store.refuse_preclaim(
+                        tx, device, reservation, TransferRefusal("STOPPED"), interrupted=True)
+                    raise PreclaimInterrupted(outcome) from exc
+                except TransferRefusal as exc:
+                    lease.check()
+                    outcome = store.refuse_preclaim(tx, device, reservation, exc)
+                    if exc.code in {"SOURCE_BLOCKED", "WAITING_SOURCE"}:
+                        # Moving source admission before claim must preserve the
+                        # normal attended-wait result for every destination kind.
+                        # Read under exclusion: a concurrent Stop may have won.
+                        lease.close()
+                        return outcome
+                    raise
             outcome = store.claim(tx, device, lease.attempt, reservation)
             if outcome.state in {"complete", "stopped"}:
                 lease.close()

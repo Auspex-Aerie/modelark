@@ -13,9 +13,11 @@ import re
 from . import domain as d
 from .folder_contract import CapacityObservation, FolderProfile, FolderTarget, _decode, _fields
 from .transaction import TransferRefusal
+from modelark.artifact_policy import DecodePolicy
 
 
 VERSION = "modelark.slice.native-transaction.v1"
+POLICY_VERSION = "modelark.slice.native-transaction.v2"
 _ADMISSION_PREFIX = "native-folder-v1:"
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -66,8 +68,9 @@ class NativeBinding:
         if (not isinstance(self.target, FolderTarget)
                 or self.target.profile is not FolderProfile.NATIVE_EXT4
                 or not isinstance(self.admission_id, str)
-                or not self.admission_id.startswith(_ADMISSION_PREFIX)
-                or not _SHA.fullmatch(self.admission_id[len(_ADMISSION_PREFIX):])):
+                or self.admission_id.split(":", 1)[0] not in
+                {"native-folder-v1", "native-folder-v2"}
+                or not _SHA.fullmatch(self.admission_id.split(":", 1)[-1])):
             raise TransferRefusal("FOLDER_PLAN_INVALID", "native binding required")
 
     @property
@@ -83,14 +86,20 @@ class NativeBinding:
         return self.admission_id
 
 
-def binding_for(target, catalog, parent_path, backing_ids):
+def binding_for(target, catalog, parent_path, backing_ids, decode_policy=None):
     """Bind stable admission policy, excluding mutable free-space observations."""
     if not isinstance(target, FolderTarget) or target.profile is not FolderProfile.NATIVE_EXT4:
         raise TransferRefusal("FOLDER_PLAN_INVALID", "native target required")
-    payload = {"version": VERSION, "target": json.loads(target.to_json()),
+    payload = {"version": POLICY_VERSION if decode_policy is not None else VERSION,
+               "target": json.loads(target.to_json()),
                "catalog": _absolute(catalog), "parent_path": _absolute(parent_path),
                "backing_ids": _backing(backing_ids)}
-    return NativeBinding(target, _ADMISSION_PREFIX + hashlib.sha256(d._json(payload)).hexdigest())
+    if decode_policy is not None:
+        if not isinstance(decode_policy, DecodePolicy):
+            raise TransferRefusal("ADMISSION_CORRUPT", "typed decode policy required")
+        payload["decode_policy"] = decode_policy.to_record()
+    prefix = "native-folder-v2:" if decode_policy is not None else _ADMISSION_PREFIX
+    return NativeBinding(target, prefix + hashlib.sha256(d._json(payload)).hexdigest())
 
 
 @dataclass(frozen=True)
@@ -103,9 +112,12 @@ class NativePlan:
     capacity: CapacityObservation
     metadata_reserve_bytes: int
     version: str = VERSION
+    decode_policy: DecodePolicy | None = None
 
     def __post_init__(self):
-        if (self.version != VERSION or not isinstance(self.proposal, d.SlicePreview)
+        if (self.version != (POLICY_VERSION if self.decode_policy is not None else VERSION)
+                or self.decode_policy is not None and not isinstance(self.decode_policy, DecodePolicy)
+                or not isinstance(self.proposal, d.SlicePreview)
                 or not isinstance(self.destination, NativeBinding)
                 or not isinstance(self.capacity, CapacityObservation)
                 or not d._integer(self.metadata_reserve_bytes)):
@@ -114,7 +126,8 @@ class NativePlan:
         if not self.proposal.source_ready:
             raise TransferRefusal("PREVIEW_BLOCKED")
         object.__setattr__(self, "backing_ids", _backing(self.backing_ids))
-        expected = binding_for(self.destination.target, self.catalog, self.parent_path, self.backing_ids)
+        expected = binding_for(self.destination.target, self.catalog, self.parent_path,
+                               self.backing_ids, self.decode_policy)
         if self.destination != expected:
             raise TransferRefusal("ADMISSION_CORRUPT", "native admission differs from binding")
         if (self.proposal.spec.destination_id != expected.device_id
@@ -140,7 +153,10 @@ class NativePlan:
         return len(directories) + len(self.proposal.closure) + 2  # control + receipt
 
     def to_json(self):
-        return d._json(asdict(self)).decode()
+        record = asdict(self)
+        if self.decode_policy is None:
+            record.pop("decode_policy")  # preserve every legacy canonical byte/seal
+        return d._json(record).decode()
 
     @property
     def seal(self):
@@ -177,9 +193,14 @@ class NativePlan:
         from .transaction import decode_proposal
         try:
             obj = _decode(payload)
-            _fields(obj, {"proposal", "destination", "catalog", "parent_path", "backing_ids",
-                          "capacity", "metadata_reserve_bytes", "version"})
-            if obj["version"] != VERSION:
+            if type(obj) is not dict:
+                raise ValueError("plan envelope required")
+            keys = {"proposal", "destination", "catalog", "parent_path", "backing_ids",
+                    "capacity", "metadata_reserve_bytes", "version"}
+            if obj.get("version") == POLICY_VERSION:
+                keys.add("decode_policy")
+            _fields(obj, keys)
+            if obj["version"] not in {VERSION, POLICY_VERSION}:
                 raise ValueError("unsupported native transaction version")
             _fields(obj["destination"], {"target", "admission_id"})
             target = obj["destination"]["target"]
@@ -188,12 +209,14 @@ class NativePlan:
             return cls(decode_proposal(_proposal_record(obj["proposal"])),
                        NativeBinding(FolderTarget(**target), obj["destination"]["admission_id"]),
                        obj["catalog"], obj["parent_path"], obj["backing_ids"],
-                       CapacityObservation(**obj["capacity"]), obj["metadata_reserve_bytes"], obj["version"])
+                       CapacityObservation(**obj["capacity"]), obj["metadata_reserve_bytes"], obj["version"],
+                       DecodePolicy.from_record(obj["decode_policy"]) if obj["version"] == POLICY_VERSION else None)
         except (KeyError, TypeError, ValueError, RecursionError) as exc:
             raise TransferRefusal("STATE_CORRUPT", "invalid native plan: " + str(exc)) from exc
 
 
-def estimate_metadata(proposal, binding, catalog, parent_path, backing_ids, capacity, store_root):
+def estimate_metadata(proposal, binding, catalog, parent_path, backing_ids, capacity, store_root,
+                      decode_policy=None):
     """Conservative advisory metadata budget, not proof of filesystem allocation.
 
     Include serialized evidence and per-inode/directory overhead. Runtime space and
@@ -209,6 +232,7 @@ def estimate_metadata(proposal, binding, catalog, parent_path, backing_ids, capa
               "store": str(store_root)}
     allowance = 256 * 1024 + objects * 16 * 1024
     reserve = allowance + 3 * len(d._json(record))
-    plan = NativePlan(proposal, binding, catalog, parent_path, backing_ids, capacity, reserve)
+    plan = NativePlan(proposal, binding, catalog, parent_path, backing_ids, capacity, reserve,
+                     POLICY_VERSION if decode_policy is not None else VERSION, decode_policy)
     reserve = max(reserve, plan._metadata_minimum(store_root) + allowance)
     return reserve

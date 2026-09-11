@@ -245,6 +245,8 @@ def test_historic_serialless_seal_stales_but_completed_output_and_receipt_surviv
                                  {"drive-00": case.archive})
     assert stale_start["state"] == "blocked_source", stale_start
     assert "SOURCE_EVIDENCE_UNAVAILABLE" in stale_start["reason"]
+    assert not (case.parent / "approved-before-repair").exists()
+    assert state.Store().events(old["transaction_id"]) == []
     assert not (case.parent / "approved-before-repair" / REPO / NAME).exists()
     assert not (case.parent / "approved-before-repair/.modelark-slice-receipt.json").exists()
     assert state.Store().load(old["transaction_id"]) == old_plan

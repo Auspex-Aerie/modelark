@@ -40,6 +40,43 @@ def test_policy_roundtrip_and_closed_world():
             CodecMemoryPolicy.from_record(changed)
 
 
+@pytest.mark.parametrize("limits,allowed", [((-1, -1), True), ((4096, 4096), True),
+                                           ((8192, -1), True), ((4095, -1), False),
+                                           ((4095, 8192), False), ((4096, 4095), False)])
+def test_admission_and_install_share_read_only_environment_check(monkeypatch, limits, allowed):
+    import resource
+    policy = CodecMemoryPolicy(4096, 1024)
+    monkeypatch.setattr(resource, "getrlimit", lambda key: limits)
+    monkeypatch.setattr(resource, "setrlimit", lambda *a: pytest.fail("read-only admission changed limits"))
+    if allowed:
+        policy.check_worker_environment()
+        policy.admit(5120)
+    else:
+        for operation in (policy.check_worker_environment, lambda: policy.admit(5120), policy.install_in_worker):
+            with pytest.raises(CodecResourceRefusal, match="inherited AS ceiling"):
+                operation()
+
+
+@pytest.mark.parametrize("operation", ["check_worker_environment", "admit", "install_in_worker"])
+def test_unknown_environment_is_consistently_refused(monkeypatch, operation):
+    from modelark import codec_resources
+    policy = CodecMemoryPolicy(4096, 0)
+    with monkeypatch.context() as patch:
+        patch.setattr(codec_resources.sys, "platform", "unqualified-os")
+        with pytest.raises(CodecResourceRefusal, match="only qualified on Linux"):
+            getattr(policy, operation)(*([] if operation != "admit" else [4096]))
+
+
+def test_unreadable_limits_refuse_before_parent_mutation(monkeypatch):
+    import resource
+    def unreadable(key):
+        raise OSError("cannot inspect AS ceiling")
+    monkeypatch.setattr(resource, "getrlimit", unreadable)
+    monkeypatch.setattr(resource, "setrlimit", lambda *a: pytest.fail("changed parent guard"))
+    with pytest.raises(CodecResourceRefusal, match="could not inspect inherited"):
+        CodecMemoryPolicy(4096, 0).admit(4096)
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux worker guard")
 def test_real_child_ceiling_denies_allocation_and_does_not_change_parent():
     import resource
