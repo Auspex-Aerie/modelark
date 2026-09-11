@@ -3009,6 +3009,9 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 #### HYP-002 results — 2026-09-10
 - Unchanged-code synthetic runs completed all 13 checks using Python 3.10.12 / ZipNN 0.5.4 with dev Torch 2.13.0 (f336101) and installed-dependency Torch 2.14.0 (4311547). Both whole and StreamZNN compression/canary/restore passed original hashes at both observed failure sizes under one 8 GiB AS policy plus 2 GiB sampled headroom. Final report: `/tmp/modelark-codec-qualification-b8fo65k8/result.json`, with implementation fingerprints; max RSS 1,765,400,576 bytes and virtual peak 6,774,444,032 bytes. This supports feasibility for these fixtures, not general host-OOM protection, native binary attestation or production caller adoption. HYP remains open for the broader qualification/integration gates.
 
+#### HYP-002 results — Stage C1, 2026-09-10
+- The actual bounded parent/worker transport passed original hashes for 67,108,864, 99,630,640 and 409,993,344 byte whole frames on installed-dependency Python 3.10.12 / ZipNN 0.5.4 / Torch 2.14.0. The same run passed compression/canary/restore for whole and StreamZNN at all three sizes plus deliberate allocation refusal: 22 checks under the unchanged 8 GiB AS + 2 GiB sampled-headroom methodology. Report `/tmp/modelark-codec-qualification-jdbv4mjy/result.json` fingerprints the implementation. Parent output pieces were at most 65,536 bytes; live RSS snapshots stayed roughly 19–24 MB, not a peak-RSS proof or reservation. C1 is a non-production prerequisite; policy sealing, all-frame admission, zstd repair and shared production caller adoption remain open gates. See docs/guarded-codec-worker.md and the approved plan's mutable progress section.
+
 ### DEC-140: Review every pushed PR head with both reviewers within the stage's three-round budget
 - `id`: DEC-140
 - `date`: 2026-09-10

@@ -356,8 +356,17 @@ resource-policy adoption is still false. See ../codec-resource-qualification.md.
 
 Stage B is implemented on `codex/streamznn-reader-adapter`: the standalone
 StreamZNN stream API, neutral dispatcher and Slice compatibility adapter. Local
-Grok CLI round 1 accepted `c272891`; local qualification passed. Remote review
-and merge remain pending; no live deployment or admission widening is claimed.
+Grok CLI round 1 accepted `c272891`; local qualification passed. Both remote
+reviewers and all CI accepted final head `204c487`; PR #75 is still open as of
+the Stage C start. No live deployment or admission widening is claimed.
 See [Stage B evidence and boundaries](../streamznn-reader-adapter.md). Expanded
 zstd coverage found the legacy native-window units mismatch (INC-064); qualify
 and correct it in Stage C's explicit policy gate, preserving old seal semantics.
+
+Stage C is split at a non-executable integration boundary: C1 builds and qualifies
+the single-frame guarded worker; C2 wires bounded container output, all three
+approval policies and early candidate admission. C1 alone leaves every Slice
+limit unchanged. The Stage C review counter is retained across its incremental
+pushes; subdivision does not reset three fix/review rounds. See
+[C1 boundary and evidence](../guarded-codec-worker.md). No C2 implementation or
+complete Stage C acceptance is claimed yet.
