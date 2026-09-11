@@ -9,6 +9,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 import os
+from pathlib import Path
 import selectors
 import subprocess
 import sys
@@ -45,8 +46,14 @@ class _Input:
 
 
 def _launch(request, output):
+    # -m alone resolves against cwd/PYTHONPATH again, which can select a different
+    # modelark than the parent imported. Isolate Python's search path, then bind
+    # the bootstrap to this package root. No caller/archive path is used as code.
+    root = str(Path(__file__).resolve().parent.parent)
+    bootstrap = ("import sys; sys.path.insert(0, sys.argv.pop(1)); "
+                 "from modelark.codec_worker import main; raise SystemExit(main(sys.argv))")
     return subprocess.Popen(
-        [sys.executable, "-m", "modelark.codec_worker", str(output), str(os.getpid()),
+        [sys.executable, "-I", "-c", bootstrap, root, str(output), str(os.getpid()),
          json.dumps(request, separators=(",", ":"))],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         close_fds=True, pass_fds=(output,), bufsize=0)

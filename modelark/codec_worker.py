@@ -19,6 +19,10 @@ IO_BYTES = 64 << 10
 ERROR_BYTES = 4096
 
 
+class WorkerInitializationError(RuntimeError):
+    """Parent-lifetime protection failed, distinct from memory admission."""
+
+
 def bind_parent(parent_pid):
     """Linux kills the worker if its spawning thread dies, including mid-codec.
 
@@ -27,12 +31,12 @@ def bind_parent(parent_pid):
     must keep that thread alive for the entire context-managed decode.
     """
     if sys.platform != "linux":
-        raise CodecResourceRefusal("codec parent-death guard requires Linux")
+        raise WorkerInitializationError("codec parent-death guard requires Linux")
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
-        raise CodecResourceRefusal("could not install codec parent-death guard")
+        raise WorkerInitializationError("could not install codec parent-death guard")
     if os.getppid() != parent_pid:
-        raise CodecResourceRefusal("codec parent exited before worker initialization")
+        raise WorkerInitializationError("codec parent exited before worker initialization")
 
 
 def _send(fd, data):
@@ -44,7 +48,7 @@ def _send(fd, data):
         view = view[count:]
 
 
-def run(request, source, output):
+def run(request, source):
     """The process entrypoint is the only production caller of this function."""
     if type(request) is not dict or set(request) != {
             "version", "policy", "stored_bytes", "original_bytes"}:
@@ -70,8 +74,7 @@ def run(request, source, output):
         read_size=IO_BYTES, decode_frame=decode)
     if len(restored) != request["original_bytes"]:
         raise streamznn.StreamZnnError("worker decoded length differs from request")
-    _send(output, b"O" + len(restored).to_bytes(8, "little"))
-    _send(output, restored)
+    return restored
 
 
 def main(argv):
@@ -81,8 +84,9 @@ def main(argv):
         if len(argv[3]) > ERROR_BYTES:
             raise ValueError("oversize worker request")
         request = json.loads(argv[3])
-        run(request, sys.stdin.buffer, output)
-        return 0
+        restored = run(request, sys.stdin.buffer)
+    except WorkerInitializationError:
+        status, detail = b"I", b"codec worker initialization failed"
     except (CodecResourceRefusal, MemoryError):
         status, detail = b"R", b"codec memory guard refused work"
     except streamznn.DecodeLimitExceeded:
@@ -92,6 +96,16 @@ def main(argv):
     except Exception:
         # No paths or arbitrary exception contents are sent across this boundary.
         status, detail = b"I", b"codec worker refused frame"
+    else:
+        # A response is exactly one status frame. Once success emission begins,
+        # any output failure is represented only by an unsuccessful process exit;
+        # never append an error frame where the parent expects original bytes.
+        try:
+            _send(output, b"O" + len(restored).to_bytes(8, "little"))
+            _send(output, restored)
+            return 0
+        except Exception:
+            return 1
     try:
         _send(output, status + len(detail).to_bytes(8, "little") + detail)
     except OSError:

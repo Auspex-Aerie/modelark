@@ -260,6 +260,21 @@ def test_real_writer_frame_decodes_hash_and_closes_without_source_ownership():
     assert not source.closed
 
 
+def test_worker_origin_is_not_resolved_from_untrusted_cwd(monkeypatch, tmp_path):
+    fake = tmp_path / "modelark"
+    fake.mkdir()
+    (fake / "__init__.py").write_text("")
+    (fake / "codec_worker.py").write_text(
+        "import os,sys\nsys.stdin.buffer.read()\n"
+        "os.write(int(sys.argv[1]),b'O'+(4).to_bytes(8,'little')+b'fake')\n")
+    monkeypatch.chdir(tmp_path)
+    # A fake worker certifies malformed data; the package actually imported by
+    # the parent must be launched and refuse it instead, under its real guard.
+    with pytest.raises(cs.WorkerRefusal):
+        with decode() as parts:
+            list(parts)
+
+
 @pytest.mark.parametrize("phase", ["input", "compute", "output"])
 def test_parent_death_kills_worker(phase):
     # This subprocess becomes a subreaper solely inside the test, allowing it
@@ -329,5 +344,32 @@ def test_launch_failure_closes_pipes(monkeypatch):
 def test_worker_request_is_closed_world():
     from modelark.codec_worker import run
     with pytest.raises(ValueError, match="fields"):
-        run({"version": "modelark.codec-worker.v1", "source_path": "/unauthorized"}, None, None)
+        run({"version": "modelark.codec-worker.v1", "source_path": "/unauthorized"}, None)
     assert json.loads(json.dumps(POLICY.to_record())) == POLICY.to_record()
+
+
+@pytest.mark.parametrize("failure", [BrokenPipeError(), MemoryError()])
+def test_worker_never_appends_error_after_success_header(monkeypatch, failure):
+    from modelark import codec_worker as worker
+    monkeypatch.setattr(worker, "bind_parent", lambda pid: None)
+    monkeypatch.setattr(worker, "run", lambda request, source: b"abcd")
+    sent = []
+    def send(fd, data):
+        sent.append(data)
+        if len(sent) >= 2:
+            raise failure
+    monkeypatch.setattr(worker, "_send", send)
+    assert worker.main(["worker", "99", str(os.getpid()), "{}"]) == 1
+    assert sent == [b"O" + (4).to_bytes(8, "little"), b"abcd"]
+
+
+def test_parent_guard_failure_is_not_reported_as_ram(monkeypatch):
+    from modelark import codec_worker as worker
+    def fail(pid):
+        raise worker.WorkerInitializationError("no parent guard")
+    monkeypatch.setattr(worker, "bind_parent", fail)
+    sent = []
+    monkeypatch.setattr(worker, "_send", lambda fd, data: sent.append(data))
+    assert worker.main(["worker", "99", str(os.getpid()), "{}"]) == 1
+    assert len(sent) == 1 and sent[0][:1] == b"I"
+    assert sent[0][9:] == b"codec worker initialization failed"

@@ -18,6 +18,9 @@ stdout/stderr share a separately drained diagnostics pipe. No source path,
 archive/catalog/destination handle or fence FD is passed. `close_fds=True` closes
 unrelated inheritable handles. This is descriptor confinement, not a filesystem
 or credential sandbox: the worker still runs under the caller's OS account.
+Python starts with an isolated search path and an explicit root for the package
+the parent imported. The caller's current directory/PYTHONPATH cannot substitute
+a different `modelark.codec_worker` and bypass the intended guard/protocol.
 
 The child installs Linux parent-death SIGKILL and the irreversible AS/core-file
 limits before importing ZipNN. It validates the frame again and requires input
@@ -49,7 +52,7 @@ Command (from the checkout, using the installed candidate's dependency Python):
 python -m scripts.qualify_codec_resources --large --guarded-reader
 ```
 
-Disposable report: `/tmp/modelark-codec-qualification-jdbv4mjy/result.json`.
+Final local report: `/tmp/modelark-codec-qualification-_8of6ito/result.json`.
 All **22 checks passed** on Python 3.10.12 / ZipNN 0.5.4 / Torch 2.14.0:
 
 - Deliberate allocation refusal under the shared guard.
@@ -60,7 +63,7 @@ All **22 checks passed** on Python 3.10.12 / ZipNN 0.5.4 / Torch 2.14.0:
   default StreamZNN-sized native work unit, not integrated container traversal.
 
 Parent live RSS snapshots were approximately 19–24 MB and unchanged across each
-guarded decode; current-exec virtual peak was 47,804,416 bytes. These are not a
+guarded decode; current-exec virtual peak stayed below 48 MB. These are not a
 sampling proof of peak resident allocation. `ru_maxrss` also includes inherited
 pre-exec history and is not attributed to this worker transport. The report
 fingerprints all six relevant implementation files and refuses changes during
@@ -72,6 +75,20 @@ trailing worker messages, exit failure after output, native abort, resource
 refusal, cancellation during input/compute/output, consumer ENOSPC, source EIO,
 early close, descriptor inheritance, spawn failure and parent death. Existing
 standalone/Slice codec tests remain the compatibility gate.
+
+Local tests: **170 passed** with optional zstd installed, including 28 supervisor/
+worker tests. The complete existing Slice suite passed **1346**, with 5 optional
+skips. Ruff passed across the project. A rebuilt wheel exercises the real isolated
+worker bootstrap outside the checkout as well as the neutral/standalone readers.
+
+Grok CLI round 1 accepted its inspected C1 boundary and reported two low-severity
+failure-reporting observations: appending a second status after output begins,
+and labelling parent-guard initialization as RAM refusal. Both were corrected by
+separating decoding from response emission and distinguishing initialization
+failure. An independent local probe also found cwd package shadowing at worker
+launch; the pinned isolated bootstrap and its regression address it. The final
+report above was rerun after all three corrections. Round 2 reviews these changes;
+no final local/remote approval or complete Stage C acceptance is implied here.
 
 ## Remaining Stage C2 gate
 
