@@ -34,24 +34,27 @@ def hooked_venv(tmp_path):
 
 
 @pytest.mark.parametrize("module", ["modelark.codec_worker", "scripts.qualify_codec_resources",
-                                  "modelark.compress_worker"])
+                                  "modelark.compress_worker", "legacy-reader"])
 def test_both_workers_guard_before_site_hooks_and_restore_venv(hooked_venv, tmp_path, module, monkeypatch):
     target, packages, record = hooked_venv
     monkeypatch.setattr(sys, "executable", str(target / "bin/python"))
     policy = {"version": "modelark.codec-memory.v1", "address_space_bytes": 128 << 20, "reserve_bytes": 0}
-    if module == "modelark.codec_worker":
+    if module in {"modelark.codec_worker", "legacy-reader"}:
         request = {"version": "modelark.codec-worker.v2", "policy": policy,
                    "stored_bytes": 36, "original_bytes": 4}
+        if module == "legacy-reader":
+            request = {"version": "modelark.codec-worker.v3-legacy", "policy": policy,
+                       "stored_bytes": 0, "dtype": "bfloat16"}
         read, write = os.pipe()
         try:
-            result = subprocess.run(isolated_command(module, write, os.getpid(), json.dumps(request)),
+            result = subprocess.run(isolated_command("modelark.codec_worker", write, os.getpid(), json.dumps(request)),
                                     input=b"", capture_output=True, pass_fds=(write,))
         finally:
             os.close(write)
         response = os.read(read, 8192)
         os.close(read)
         assert result.returncode == 1
-        assert response[:1] == b"I", result.stderr
+        assert response[:1] == (b"R" if module == "legacy-reader" else b"I"), result.stderr
     elif module == "modelark.compress_worker":
         from modelark.artifact_policy import qualified_policy
         from dataclasses import replace

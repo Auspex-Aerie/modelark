@@ -53,10 +53,12 @@ def _launch(request, output):
         close_fds=True, pass_fds=(output,), bufsize=0)
 
 
-def _transfer(proc, output, source, header, check, policy, admission, on_complete):
+def _transfer(proc, output, source, header, check, policy, admission, on_complete,
+              *, stored_bytes=None):
     """Nonblocking full-duplex supervision, bounded even for noisy native code."""
+    streaming = stored_bytes is not None
     original = int.from_bytes(header[16:24], "little")
-    remaining = int.from_bytes(header[24:32], "little") - len(header)
+    remaining = (stored_bytes if streaming else int.from_bytes(header[24:32], "little")) - len(header)
     pending = header
     response = bytearray()
     detail = bytearray()
@@ -66,6 +68,8 @@ def _transfer(proc, output, source, header, check, policy, admission, on_complet
     status = None
     left = None
     output_eof = False
+    terminal = False
+    total = 0
     with selectors.DefaultSelector() as poll:
         for handle, events, tag in ((proc.stdin, selectors.EVENT_WRITE, "input"),
                                     (proc.stdout, selectors.EVENT_READ, "diagnostic"),
@@ -95,6 +99,8 @@ def _transfer(proc, output, source, header, check, policy, admission, on_complet
                             continue
                         pending = pending[count:]
                     if not pending and not remaining:
+                        if streaming and source.read(1):
+                            raise streamznn.StreamZnnError("stored source grew during decode")
                         poll.unregister(key.fileobj)
                         proc.stdin.close()
                 elif key.data == "diagnostic":
@@ -120,18 +126,30 @@ def _transfer(proc, output, source, header, check, policy, admission, on_complet
                         poll.unregister(key.fileobj)
                         continue
                     if status is None:
+                        if terminal:
+                            raise WorkerRefusal("INVALID", "trailing worker output")
                         response.extend(data)
                         if len(response) != 9:
                             continue
                         status = bytes(response[:1])
                         left = int.from_bytes(response[1:], "little")
                         if status == b"M":
-                            if runtime is not None or not 0 < left <= METADATA_BYTES or not proc.stdin.closed:
+                            if (runtime is not None or not 0 < left <= METADATA_BYTES
+                                    or not streaming and not proc.stdin.closed):
                                 raise WorkerRefusal("INVALID", "invalid worker metadata header")
+                        elif streaming and status == b"D":
+                            if runtime is None or not 0 < left <= IO_BYTES:
+                                raise WorkerRefusal("INVALID", "invalid worker data header")
+                        elif streaming and status == b"E":
+                            if runtime is None or left != total or not proc.stdin.closed:
+                                raise WorkerRefusal("INVALID", "invalid worker end header")
+                            left = 0
+                            terminal = True
                         elif status == b"O":
-                            if runtime is None or left != original or not proc.stdin.closed:
+                            if streaming or runtime is None or left != original or not proc.stdin.closed:
                                 raise WorkerRefusal("INVALID", "invalid worker success header")
-                        elif runtime is not None or status not in (b"R", b"I", b"U", b"L") or left > ERROR_BYTES:
+                        elif (not streaming and runtime is not None
+                              or status not in (b"R", b"I", b"U", b"L") or left > ERROR_BYTES):
                             raise WorkerRefusal("INVALID", "invalid worker error header")
                     else:
                         if len(data) > left:
@@ -146,18 +164,24 @@ def _transfer(proc, output, source, header, check, policy, admission, on_complet
                                     raise WorkerRefusal("INVALID", "invalid worker runtime evidence") from exc
                                 status = None
                                 response.clear()
-                        elif status == b"O":
+                        elif status in (b"O", b"D"):
+                            total += len(data)
                             check()
                             yield data
                             check()
+                            if status == b"D" and left == 0:
+                                status = None
+                                response.clear()
                         else:
                             detail.extend(data)
             code = proc.poll()
             if code is not None and output_eof:
                 if status is None or left != 0:
                     raise WorkerRefusal("WORKER_FAILED", f"incomplete worker result (exit {code})")
-                if status != b"O":
+                if status not in (b"O", b"E"):
                     kind = {b"R": "RESOURCE", b"I": "INVALID", b"U": "UNSUPPORTED", b"L": "LIMIT"}[status]
+                    if streaming and kind == "INVALID":
+                        kind = "CODEC_INVALID"
                     raise WorkerRefusal(kind, detail.decode("utf-8", errors="replace"))
                 if code != 0:
                     raise WorkerRefusal("WORKER_FAILED", f"worker failed after output (exit {code})")
@@ -194,7 +218,45 @@ def guarded_zipnn_frame(source, *, policy: CodecMemoryPolicy, max_stored_bytes,
     request = {"version": "modelark.codec-worker.v2", "policy": policy.to_record(),
                "stored_bytes": int.from_bytes(header[24:32], "little"),
                "original_bytes": int.from_bytes(header[16:24], "little")}
-    output, writer = os.pipe()
+    with _session(request, checked, header, check, policy, admission, on_complete) as chunks:
+        yield chunks
+
+
+@contextmanager
+def guarded_legacy_stream(source, *, stored_bytes, dtype="bfloat16", check=lambda: None,
+                          on_complete=lambda evidence: None):
+    """Legacy archive formats, unknown original size, same guarded byte-only child.
+
+    No Slice allowlist/window cap is imposed. Native legacy acceptance executes
+    under the shared AS ceiling. Completion still requires all stored input,
+    framed EOF, validated runtime and zero exit; callers own original hashes.
+    """
+    from .artifact_policy import qualified_policy
+    policy = qualified_policy().memory
+    if type(stored_bytes) is not int or stored_bytes < 0:
+        raise ValueError("nonnegative stored size required")
+    if type(dtype) is not str or not 0 < len(dtype) <= 128:
+        raise ValueError("unsupported dtype hint")
+    check()
+    admission = available_memory()
+    policy.admit(admission["available_bytes"])
+    check()
+    request = {"version": "modelark.codec-worker.v3-legacy", "policy": policy.to_record(),
+               "stored_bytes": stored_bytes, "dtype": dtype}
+    with _session(request, _Input(source, check), b"", check, policy, admission,
+                  on_complete, stored_bytes=stored_bytes) as chunks:
+        yield chunks
+
+
+@contextmanager
+def _session(request, source, header, check, policy, admission, on_complete, *, stored_bytes=None):
+    """One owner for launch, pipe ownership, cancellation and reaping in both modes."""
+    try:
+        output, writer = os.pipe()
+    except OSError as exc:
+        if stored_bytes is not None:
+            raise WorkerRefusal("WORKER_FAILED", "could not allocate codec pipes") from exc
+        raise
     proc = chunks = None
     try:
         try:
@@ -205,10 +267,16 @@ def guarded_zipnn_frame(source, *, policy: CodecMemoryPolicy, max_stored_bytes,
                 moved = fcntl.fcntl(writer, fcntl.F_DUPFD_CLOEXEC, 3)
                 os.close(writer)
                 writer = moved
-            proc = _launch(request, writer)
+            try:
+                proc = _launch(request, writer)
+            except OSError as exc:
+                if stored_bytes is not None:
+                    raise WorkerRefusal("WORKER_FAILED", "could not launch codec worker") from exc
+                raise
         finally:
             os.close(writer)
-        chunks = _transfer(proc, output, checked, header, check, policy, admission, on_complete)
+        chunks = _transfer(proc, output, source, header, check, policy, admission, on_complete,
+                           stored_bytes=stored_bytes)
         yield chunks
     finally:
         # Kill first: no new source reads/output are attempted during unwinding.

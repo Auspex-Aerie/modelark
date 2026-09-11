@@ -185,8 +185,33 @@ def _slice_roundtrip(encoded, codec, size, expected_hash, memory):
             "frames": evidence, "parent_metrics_before": before, "parent_metrics_after": _metrics()}
 
 
+def _public_reader_roundtrip(encoded, restored, size, expected_hash):
+    from modelark import compress
+    from modelark.codec_supervisor import guarded_legacy_stream
+    before = _metrics()
+    evidence, digest, total, maximum = [], hashlib.sha256(), 0, 0
+    with encoded.open("rb") as source:
+        with guarded_legacy_stream(source, stored_bytes=encoded.stat().st_size,
+                                   on_complete=evidence.append) as chunks:
+            for chunk in chunks:
+                digest.update(chunk)
+                total += len(chunk)
+                maximum = max(maximum, len(chunk))
+    if total != size or digest.hexdigest() != expected_hash or not evidence or maximum > 64 << 10:
+        raise RuntimeError("legacy reader failed bounded original identity")
+    if not compress.canary_ok(encoded, expected_hash):
+        raise RuntimeError("public canary failed original identity")
+    compress.decompress_file(encoded, restored)
+    if restored.stat().st_size != size or _sha(restored) != expected_hash:
+        raise RuntimeError("public restore failed original identity")
+    return {"passed": True, "phase": "production-legacy-readers", "original_bytes": total,
+            "original_sha256": digest.hexdigest(), "maximum_output_piece": maximum,
+            "stream_evidence": evidence[0], "public_canary": True, "public_restore": True,
+            "parent_metrics_before": before, "parent_metrics_after": _metrics()}
+
+
 def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=False,
-        production_writer=False):
+        production_writer=False, production_readers=False):
     policy = CodecMemoryPolicy(8 << 30, 2 << 30)
     policy.admit(available_memory()["available_bytes"])
     output = Path(tempfile.mkdtemp(prefix="modelark-codec-qualification-", dir=output_parent))
@@ -195,6 +220,7 @@ def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=F
               "guarded_reader": guarded_reader,
               "slice_reader": slice_reader,
               "production_writer_exercised": production_writer,
+              "production_readers_exercised": production_readers,
               "production_adoption": False, "physical_USB_or_archive_test": False}
     checkout = Path(__file__).resolve().parent.parent
     report["implementation_sha256"] = {
@@ -203,6 +229,7 @@ def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=F
             "modelark/codec_worker.py", "modelark/codec_supervisor.py",
             "modelark/codec_process.py",
             "modelark/codec_inprocess.py", "modelark/compress_worker.py", "modelark/fetch.py",
+            "modelark/codec_legacy.py", "modelark/restore.py", "modelark/verifier.py",
             "modelark/artifact_io.py", "modelark/artifact_policy.py", "modelark/artifact_preflight.py",
             "modelark/slice/decoding.py",
             "scripts/qualify_codec_resources.py")}
@@ -241,7 +268,7 @@ def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=F
     try:
         launch({"phase": "allocation-refusal"})
         sizes = [99_630_640, 409_993_344] if large else [2 << 20]
-        if large and (guarded_reader or slice_reader or production_writer):
+        if large and (guarded_reader or slice_reader or production_writer or production_readers):
             sizes.insert(0, 64 << 20)  # Default StreamZNN-sized native work unit too.
         with tempfile.TemporaryDirectory(prefix="synthetic-", dir=output) as scratch:
             for size in sizes:
@@ -278,6 +305,13 @@ def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=F
                             "writer_admission": result["admission"], "writer_runtime": result["worker"],
                             "stored_sha256": stored_digest, "stored_bytes": encoded.stat().st_size})
                         print(f"passed production writer/canary to Slice: {codec} {size} bytes", flush=True)
+                    if production_readers:
+                        # Prefer the actual production writer's artifact when it
+                        # was requested; the legacy qualification artifact otherwise.
+                        target = encoded if production_writer else case / "misleading.blob"
+                        result = _public_reader_roundtrip(target, case / "public-restored", size, digest)
+                        report["results"].append({**result, "codec": codec})
+                        print(f"passed public canary/restore: {codec} {size} bytes", flush=True)
         if any(_sha(checkout / name) != digest
                for name, digest in report["implementation_sha256"].items()):
             raise RuntimeError("implementation changed during qualification; rerun unchanged code")
@@ -297,6 +331,8 @@ def main():
     parser.add_argument("--slice-reader", action="store_true", help="qualify C2 preflight and Slice original-byte decoding")
     parser.add_argument("--production-writer", action="store_true",
                         help="also exercise D1 fetch writer/canary and Slice parity on synthetic files")
+    parser.add_argument("--production-readers", action="store_true",
+                        help="exercise D2 legacy stream, public canary and restore with original hashes")
     parser.add_argument("--output-parent", type=Path)
     parser.add_argument("--guarded-reader", action="store_true",
                         help="also qualify bounded parent/worker whole-frame transport")
@@ -307,7 +343,8 @@ def main():
         worker(args.worker, args.parent_pid)
     else:
         print(run(large=args.large, output_parent=args.output_parent, guarded_reader=args.guarded_reader,
-                  slice_reader=args.slice_reader, production_writer=args.production_writer))
+                  slice_reader=args.slice_reader, production_writer=args.production_writer,
+                  production_readers=args.production_readers))
 
 
 if __name__ == "__main__":

@@ -3094,3 +3094,25 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Fetch child startup, shared in-process execution adapter, writer canary and monitored-child cleanup; actual writer-to-Slice qualification. No changed archive format, catalog/approval schema, live deployment, retrieval, source fences or standalone StreamZNN policy. D2 remains mandatory for full production parity.
 - `docs_updated`: docs/decision_log.md, docs/codec-resource-qualification.md, docs/plans/codec-stage-d-progress.md
 - `related`: DEC-138, DEC-139, DEC-142, DEC-144
+
+### DEC-146: Guard legacy archive readers without narrowing their format contract
+- `id`: DEC-146
+- `date`: 2026-09-11
+- `status`: accepted
+- `triggered_by`: Operator approved D2 after PR #78; the caller inventory in DEC-145 found unknown original sizes and broader native/zstd acceptance outside Slice.
+- `decision`: Route external canary and restore through the existing shared worker lifetime/pipe supervisor with a separately versioned bounded streaming protocol. Run the legacy native-format adapter only under the same qualified memory policy and guarded startup; retain standalone StreamZNN framing, unknown original sizes and concatenated zstd compatibility. Parent callers retain source ownership, original hashing and atomic destination publication. Resource refusal, unavailable dependencies and incomplete/crashed execution mean verification UNKNOWN, not corruption; decoded mismatches and known invalid content remain failures.
+- `rationale`: Applying Slice's strict format allowlist to legacy readers would strand previously supported artifacts. Duplicating subprocess ownership or assigning destination paths to the decoder would weaken the lifecycle boundary. A shared resource/transport mechanism does not require identical format permissions in every delivery profile.
+- `impact`: Public compress.canary_ok/decompress_file, restore error text and deep verification evidence mapping. No catalog/approval migration, archive rewrite, live rollout or new RAM formula. Slice's v2 frame protocol and strict format contract remain unchanged; broader format consolidation is not claimed.
+- `docs_updated`: docs/decision_log.md, docs/codec-resource-qualification.md, docs/plans/codec-stage-d-progress.md
+- `related`: DEC-138, DEC-139, DEC-142, DEC-145
+
+### DEC-147: Leave the synthetic zstd window-refusal classification edge case unchanged
+- `id`: DEC-147
+- `date`: 2026-09-11
+- `status`: accepted
+- `triggered_by`: Operator said "Leave it then" after clarification that the D2 finding used an artificial2GiB window, not a real archived model exhausting RAM.
+- `decision`: Do not implement the proposed native-outcome classification correction for this edge case or start an additional local review cycle. Retain it as a disclosed limitation, not a resolved defect or clean Grok verdict.
+- `rationale`: The demonstrated refusal was the native decoder's configured window allowance. A fresh synthetic sample using the existing level3 streaming writer settings declared a2MiB window; no excessive memory use in ordinary archived artifacts was demonstrated. That sample is not a guarantee about every existing archive.
+- `impact`: Qualifies D2's resource-error classification claim: native zstd window/memory errors outside Python MemoryError can still become failed verification rather than UNKNOWN. Memory guards, format permissions and code remain unchanged. This disposition is specific to this finding; other findings, remaining Codex review rounds and operator merge authority are unchanged.
+- `docs_updated`: docs/decision_log.md, docs/codec-resource-qualification.md, docs/plans/codec-stage-d-progress.md
+- `related`: DEC-146, DEC-138, DEC-139
