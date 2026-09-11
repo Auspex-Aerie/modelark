@@ -85,6 +85,56 @@ def _invalid_constant(value):
     raise SerialIdentityUnproven(f'non-JSON identity proof value: {value}')
 
 
+def _identity_proof(text):
+    """Strict v1 parsing shared by both explicit legacy repair directions."""
+    if not isinstance(text, str):
+        raise SerialIdentityUnproven('identity proof must be JSON text')
+    try:
+        proof = json.loads(text, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+    except (ValueError, RecursionError) as exc:
+        raise SerialIdentityUnproven('malformed identity proof JSON') from exc
+    if not isinstance(proof, dict) or set(proof) != {'v', 'fs_uuid', 'annex_uuid', 'serial'}:
+        raise SerialIdentityUnproven('identity proof must contain exactly the v1 identity fields')
+    if type(proof['v']) is not int or proof['v'] != 1:
+        raise SerialIdentityUnproven('identity proof version must be integer 1')
+    for key in ('fs_uuid', 'annex_uuid', 'serial'):
+        _normalized_string(proof[key], 'proof ' + key, optional=True)
+    return proof
+
+
+def serialless_anchor_serial(*, fs_uuid, annex_uuid, fingerprint,
+                           filesystem_capacity_bytes, anchor_identity_proof,
+                           anchor_fence_proof, anchor_fingerprint,
+                           anchor_capacity_bytes, anchor_authority):
+    """Prove a serial-less registration's anchor; return its identity serial.
+
+    Non-null means the historical producer included observed serial implicitly.
+    Null means the anchor is already canonical. This cannot authorize a dirty
+    recovery or a live repair; callers must prove the exact current clean state.
+    """
+    _normalized_string(fs_uuid, 'fs_uuid', optional=True)
+    _normalized_string(annex_uuid, 'annex_uuid', optional=True)
+    if fs_uuid is None and annex_uuid is None:
+        raise SerialIdentityUnproven('filesystem or annex UUID required')
+    _capacity(filesystem_capacity_bytes, 'filesystem_capacity_bytes')
+    _capacity(anchor_capacity_bytes, 'anchor_capacity_bytes')
+    if anchor_capacity_bytes != filesystem_capacity_bytes or anchor_authority != 'dedicated_local':
+        raise SerialIdentityUnproven('anchor capacity or authority disagrees')
+    proof = _identity_proof(anchor_identity_proof)
+    fence = _identity_proof(anchor_fence_proof)
+    for document in (proof, fence):
+        if document['fs_uuid'] != fs_uuid or document['annex_uuid'] != annex_uuid:
+            raise SerialIdentityUnproven('proof UUIDs disagree with saved UUIDs')
+    if proof['serial'] is not None and fence != proof:
+        raise SerialIdentityUnproven('observed-serial identity and fence proofs disagree')
+    expected = identity_fingerprint_v1(fs_uuid=fs_uuid, annex_uuid=annex_uuid,
+                                     serial=proof['serial'],
+                                     filesystem_capacity_bytes=filesystem_capacity_bytes)
+    if fingerprint != expected or anchor_fingerprint != expected:
+        raise SerialIdentityUnproven('anchor does not reproduce the exact saved identity')
+    return proof['serial']
+
+
 def recognize_legacy_anchor(
     *, fs_uuid, annex_uuid, serial, fingerprint, filesystem_capacity_bytes,
     anchor_identity_proof, anchor_fingerprint, anchor_capacity_bytes, anchor_authority,
@@ -106,21 +156,7 @@ anchor, prove a drive is mounted, or grant authority to publish either identity.
         raise SerialIdentityUnproven('anchor fingerprint disagrees with saved null-serial identity')
     if anchor_authority != 'dedicated_local':
         raise SerialIdentityUnproven('anchor dedicated_local authority required')
-    if not isinstance(anchor_identity_proof, str):
-        raise SerialIdentityUnproven('identity proof must be JSON text')
-    try:
-        proof = json.loads(anchor_identity_proof, object_pairs_hook=_unique_object,
-                           parse_constant=_invalid_constant)
-    except SerialIdentityUnproven:
-        raise
-    except (ValueError, RecursionError) as exc:
-        raise SerialIdentityUnproven('malformed identity proof JSON') from exc
-    if not isinstance(proof, dict) or set(proof) != {'v', 'fs_uuid', 'annex_uuid', 'serial'}:
-        raise SerialIdentityUnproven('identity proof must contain exactly the v1 identity fields')
-    if type(proof['v']) is not int or proof['v'] != 1:
-        raise SerialIdentityUnproven('identity proof version must be integer 1')
-    _normalized_string(proof['fs_uuid'], 'proof fs_uuid', optional=True)
-    _normalized_string(proof['annex_uuid'], 'proof annex_uuid', optional=True)
+    proof = _identity_proof(anchor_identity_proof)
     if proof['serial'] is not None:
         raise SerialIdentityUnproven('identity proof serial must be null')
     if proof['fs_uuid'] != fs_uuid or proof['annex_uuid'] != annex_uuid:

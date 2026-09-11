@@ -93,10 +93,10 @@ def workflow(tmp_path, monkeypatch, hardware, native, request):
     canonical = identity_fingerprint_v1(fs_uuid=leaf["uuid"], annex_uuid=ANNEX,
                                         serial=disk["serial"], filesystem_capacity_bytes=capacity)
     mode = getattr(request, "param", "legacy")
-    stored_serial = None if mode == "serialless" else disk["serial"]
-    stored_fp = canonical if mode == "canonical" else old
+    stored_serial = None if mode in {"serialless", "observed_serial"} else disk["serial"]
+    stored_fp = canonical if mode in {"canonical", "observed_serial"} else old
     proof = json.dumps({"v": 1, "fs_uuid": leaf["uuid"], "annex_uuid": ANNEX,
-                        "serial": stored_serial if mode == "canonical" else None})
+                        "serial": disk["serial"] if mode in {"canonical", "observed_serial"} else None})
     con = sqlite3.connect(db.DB_PATH, isolation_level=None)
     con.executescript(db.SCHEMA_PATH.read_text())
     con.execute("PRAGMA user_version=7")
@@ -133,6 +133,25 @@ def _candidate(case):
     preview = domain.preview(spec, snapshot)
     assert preview.source_ready, preview.gaps
     return preview.closure[0].sources[0]
+
+
+@pytest.mark.parametrize('workflow', ['observed_serial'], indirect=True)
+def test_serialless_old_observed_anchor_repair_unblocks_public_slice(workflow):
+    case = workflow
+    blocked = operator.preview(case.path, case.parent / 'blocked-output', (REPO,), None)
+    assert blocked['state'] == 'blocked'
+    assert not (case.parent / 'blocked-output').exists()
+    intent = bootstrap.inspect_serial_identity(case.con, 'drive-00')
+    assert intent['status'] == 'observed_serial_clean'
+    report = bootstrap.repair_serial_identity(
+        case.con, 'drive-00', expected_binding=intent['binding'],
+        now='2026-09-11', writers_stopped=True)
+    assert report['canonical_fingerprint'] == case.old
+    assert case.con.execute('SELECT serial FROM drives').fetchone() == (None,)
+    preview = _preview(case, 'repaired-output')
+    _complete(case, preview, case.parent / 'repaired-output')
+    assert {str(p.relative_to(case.archive)): p.read_bytes()
+            for p in case.archive.rglob('*') if p.is_file()} == case.archive_bytes
 
 
 def _preview(case, name):

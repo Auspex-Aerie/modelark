@@ -3116,3 +3116,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Qualifies D2's resource-error classification claim: native zstd window/memory errors outside Python MemoryError can still become failed verification rather than UNKNOWN. Memory guards, format permissions and code remain unchanged. This disposition is specific to this finding; other findings, remaining Codex review rounds and operator merge authority are unchanged.
 - `docs_updated`: docs/decision_log.md, docs/codec-resource-qualification.md, docs/plans/codec-stage-d-progress.md
 - `related`: DEC-146, DEC-138, DEC-139
+
+### DEC-148: Repair proven observed-serial anchors without enriching serial-less registration
+- `id`: DEC-148
+- `date`: 2026-09-11
+- `status`: accepted
+- `triggered_by`: Operator approved a fresh reviewed repair PR after Drive-00 physical Slice preflight exposed catalog serial NULL with a current serial-bearing anchor and fingerprint.
+- `decision`: Extend explicit backup/rehearsal-first serial repair only to current clean anchors whose strict identity and fence proofs reproduce the saved fingerprint and match fresh attached hardware. Preserve catalog serial NULL; append a new generation with canonical null-serial identity and actual observed serial in fence evidence. Derive both compatible lock keys inside proven repair only, retaining strict ordinary reader/writer admission. Reject dirty inverse cases, malformed or contradictory proof, changed hardware and stale intent.
+- `rationale`: Historical producers could include observed serial in identity without registering it. The correction must restore the existing optional-serial contract, not infer a new registration or weaken all consumers. Reuse the existing transaction/backup/approval machinery rather than direct SQL or a parallel repair engine.
+- `impact`: Shared strict proof parser, explicit repair recognition and compatible exclusion, new qualification coverage, unchanged schema layout and reader floor 8. Preserve epoch, UUIDs, serial, archive bytes/provenance and old evidence; invalidate only affected approvals and require fresh Slice preview. No live catalog repair, NAS remount or service rollout in this implementation PR.
+- `docs_updated`: docs/decision_log.md, docs/archive-serial-repair.md, docs/plans/serialless-anchor-repair.md
+- `related`: DEC-133, DEC-137
