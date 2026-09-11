@@ -9,17 +9,17 @@ from __future__ import annotations
 from contextlib import contextmanager
 import json
 import os
-from pathlib import Path
 import selectors
 import subprocess
-import sys
 
 from .codec_resources import CodecMemoryPolicy, available_memory
+from .codec_process import isolated_command, validate_runtime
 from . import streamznn
 
 IO_BYTES = 64 << 10
 DIAGNOSTIC_BYTES = 8192
 ERROR_BYTES = 4096
+METADATA_BYTES = 8192
 POLL_SECONDS = 0.05  # Cancellation responsiveness, not a decode deadline.
 
 
@@ -46,20 +46,14 @@ class _Input:
 
 
 def _launch(request, output):
-    # -m alone resolves against cwd/PYTHONPATH again, which can select a different
-    # modelark than the parent imported. Isolate Python's search path, then bind
-    # the bootstrap to this package root. No caller/archive path is used as code.
-    root = str(Path(__file__).resolve().parent.parent)
-    bootstrap = ("import sys; sys.path.insert(0, sys.argv.pop(1)); "
-                 "from modelark.codec_worker import main; raise SystemExit(main(sys.argv))")
     return subprocess.Popen(
-        [sys.executable, "-I", "-c", bootstrap, root, str(output), str(os.getpid()),
-         json.dumps(request, separators=(",", ":"))],
+        isolated_command("modelark.codec_worker", output, os.getpid(),
+                         json.dumps(request, separators=(",", ":"))),
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         close_fds=True, pass_fds=(output,), bufsize=0)
 
 
-def _transfer(proc, output, source, header, check):
+def _transfer(proc, output, source, header, check, policy, admission, on_complete):
     """Nonblocking full-duplex supervision, bounded even for noisy native code."""
     original = int.from_bytes(header[16:24], "little")
     remaining = int.from_bytes(header[24:32], "little") - len(header)
@@ -67,6 +61,8 @@ def _transfer(proc, output, source, header, check):
     response = bytearray()
     detail = bytearray()
     diagnostics = bytearray()
+    metadata = bytearray()
+    runtime = None
     status = None
     left = None
     output_eof = False
@@ -129,16 +125,28 @@ def _transfer(proc, output, source, header, check):
                             continue
                         status = bytes(response[:1])
                         left = int.from_bytes(response[1:], "little")
-                        if status == b"O":
-                            if left != original or not proc.stdin.closed:
+                        if status == b"M":
+                            if runtime is not None or not 0 < left <= METADATA_BYTES or not proc.stdin.closed:
+                                raise WorkerRefusal("INVALID", "invalid worker metadata header")
+                        elif status == b"O":
+                            if runtime is None or left != original or not proc.stdin.closed:
                                 raise WorkerRefusal("INVALID", "invalid worker success header")
-                        elif status not in (b"R", b"I", b"U", b"L") or left > ERROR_BYTES:
+                        elif runtime is not None or status not in (b"R", b"I", b"U", b"L") or left > ERROR_BYTES:
                             raise WorkerRefusal("INVALID", "invalid worker error header")
                     else:
                         if len(data) > left:
                             raise WorkerRefusal("INVALID", "trailing worker output")
                         left -= len(data)
-                        if status == b"O":
+                        if status == b"M":
+                            metadata.extend(data)
+                            if left == 0:
+                                try:
+                                    runtime = validate_runtime(json.loads(metadata), policy)
+                                except (ValueError, UnicodeError, RecursionError) as exc:
+                                    raise WorkerRefusal("INVALID", "invalid worker runtime evidence") from exc
+                                status = None
+                                response.clear()
+                        elif status == b"O":
                             check()
                             yield data
                             check()
@@ -153,13 +161,15 @@ def _transfer(proc, output, source, header, check):
                     raise WorkerRefusal(kind, detail.decode("utf-8", errors="replace"))
                 if code != 0:
                     raise WorkerRefusal("WORKER_FAILED", f"worker failed after output (exit {code})")
+                check()
+                on_complete({"admission": admission, "worker": runtime})
                 return
 
 
 @contextmanager
 def guarded_zipnn_frame(source, *, policy: CodecMemoryPolicy, max_stored_bytes,
                         max_decoded_bytes, remaining_bytes, stored_length=None,
-                        prefix=b"", check=lambda: None):
+                        prefix=b"", check=lambda: None, on_complete=lambda evidence: None):
     """Yield a bounded iterator of original-byte chunks for exactly one frame.
 
     Consume to EOF for worker certification; context exit alone never certifies
@@ -168,6 +178,8 @@ def guarded_zipnn_frame(source, *, policy: CodecMemoryPolicy, max_stored_bytes,
     its fence. Input IO/check exceptions retain identity. No source is closed here.
     Memory observation/admission is identical to the writer qualification; a sample
     is not a reservation against unrelated processes. Only Linux is qualified.
+    on_complete receives the exact admission sample and validated child runtime
+    only after exact output, protocol EOF and zero child exit; never on early close.
     """
     if not isinstance(policy, CodecMemoryPolicy):
         raise ValueError("explicit codec memory policy required")
@@ -176,19 +188,27 @@ def guarded_zipnn_frame(source, *, policy: CodecMemoryPolicy, max_stored_bytes,
         checked, max_stored_bytes=max_stored_bytes, max_decoded_bytes=max_decoded_bytes,
         remaining_bytes=remaining_bytes, stored_length=stored_length, prefix=prefix,
         read_size=IO_BYTES)
-    policy.admit(available_memory()["available_bytes"])
+    admission = available_memory()
+    policy.admit(admission["available_bytes"])
     check()
-    request = {"version": "modelark.codec-worker.v1", "policy": policy.to_record(),
+    request = {"version": "modelark.codec-worker.v2", "policy": policy.to_record(),
                "stored_bytes": int.from_bytes(header[24:32], "little"),
                "original_bytes": int.from_bytes(header[16:24], "little")}
     output, writer = os.pipe()
     proc = chunks = None
     try:
         try:
+            # Popen replaces child stdio. A pipe allocated into a closed stdio
+            # slot must not be the protocol writer passed through that setup.
+            if writer < 3:
+                import fcntl
+                moved = fcntl.fcntl(writer, fcntl.F_DUPFD_CLOEXEC, 3)
+                os.close(writer)
+                writer = moved
             proc = _launch(request, writer)
         finally:
             os.close(writer)
-        chunks = _transfer(proc, output, checked, header, check)
+        chunks = _transfer(proc, output, checked, header, check, policy, admission, on_complete)
         yield chunks
     finally:
         # Kill first: no new source reads/output are attempted during unwinding.

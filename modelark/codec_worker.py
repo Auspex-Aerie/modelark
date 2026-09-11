@@ -1,42 +1,24 @@
 """One-shot, read-only ZipNN child; no archive paths or publication authority.
 
-Internal protocol v1: stdin is exactly one frame followed by EOF; a dedicated
-FD carries a one-byte status + uint64 length + payload. stdout/stderr are only
-diagnostics. Limits and parent-death handling precede every native import.
+Internal protocol v2: success is bounded runtime metadata followed by original
+bytes, each framed by status + uint64 length. Failure is one error frame.
+stdout/stderr are only diagnostics; dependency hooks run after the guards.
 """
 from __future__ import annotations
 
-import ctypes
 import json
 import os
-import signal
 import sys
 
 from modelark.codec_resources import CodecMemoryPolicy, CodecResourceRefusal
+from modelark.codec_process import (
+    WorkerInitializationError, initialize_worker, runtime_record, validate_runtime,
+)
 from modelark import streamznn
 
 IO_BYTES = 64 << 10
 ERROR_BYTES = 4096
-
-
-class WorkerInitializationError(RuntimeError):
-    """Parent-lifetime protection failed, distinct from memory admission."""
-
-
-def bind_parent(parent_pid):
-    """Linux kills the worker if its spawning thread dies, including mid-codec.
-
-    Check after prctl to cover death between spawn and installing the signal.
-    Linux PDEATHSIG follows the parent *thread*, not just the process; a caller
-    must keep that thread alive for the entire context-managed decode.
-    """
-    if sys.platform != "linux":
-        raise WorkerInitializationError("codec parent-death guard requires Linux")
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(1, signal.SIGKILL, 0, 0, 0) != 0:  # PR_SET_PDEATHSIG
-        raise WorkerInitializationError("could not install codec parent-death guard")
-    if os.getppid() != parent_pid:
-        raise WorkerInitializationError("codec parent exited before worker initialization")
+METADATA_BYTES = 8192
 
 
 def _send(fd, data):
@@ -48,17 +30,21 @@ def _send(fd, data):
         view = view[count:]
 
 
-def run(request, source):
-    """The process entrypoint is the only production caller of this function."""
+def _policy(request):
     if type(request) is not dict or set(request) != {
             "version", "policy", "stored_bytes", "original_bytes"}:
         raise ValueError("invalid worker request fields")
-    if request["version"] != "modelark.codec-worker.v1":
+    if request["version"] != "modelark.codec-worker.v2":
         raise ValueError("unknown worker protocol")
     for key in ("stored_bytes", "original_bytes"):
         if type(request[key]) is not int or request[key] <= 0:
             raise ValueError("invalid worker frame size")
-    CodecMemoryPolicy.from_record(request["policy"]).install_in_worker()
+    return CodecMemoryPolicy.from_record(request["policy"])
+
+
+def run(request, source):
+    """Called only after guarded initialization by the process entrypoint."""
+    _policy(request)
 
     def decode(blob):
         # Do not start native work until the parent has closed the input pipe.
@@ -80,11 +66,16 @@ def run(request, source):
 def main(argv):
     output, parent_pid = int(argv[1]), int(argv[2])
     try:
-        bind_parent(parent_pid)
         if len(argv[3]) > ERROR_BYTES:
             raise ValueError("oversize worker request")
         request = json.loads(argv[3])
+        policy = _policy(request)
+        initialize_worker(policy, parent_pid)
         restored = run(request, sys.stdin.buffer)
+        metadata = json.dumps(validate_runtime(runtime_record(), policy),
+                              separators=(",", ":")).encode("utf-8")
+        if not 0 < len(metadata) <= METADATA_BYTES:
+            raise ValueError("oversize worker runtime evidence")
     except WorkerInitializationError:
         status, detail = b"I", b"codec worker initialization failed"
     except (CodecResourceRefusal, MemoryError):
@@ -97,10 +88,12 @@ def main(argv):
         # No paths or arbitrary exception contents are sent across this boundary.
         status, detail = b"I", b"codec worker refused frame"
     else:
-        # A response is exactly one status frame. Once success emission begins,
+        # Success is metadata then bytes. Once either emission begins,
         # any output failure is represented only by an unsuccessful process exit;
         # never append an error frame where the parent expects original bytes.
         try:
+            _send(output, b"M" + len(metadata).to_bytes(8, "little"))
+            _send(output, metadata)
             _send(output, b"O" + len(restored).to_bytes(8, "little"))
             _send(output, restored)
             return 0

@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import os
 from pathlib import Path
 import random
 import resource
@@ -21,9 +22,7 @@ import sys
 import tempfile
 
 from modelark.codec_resources import CodecMemoryPolicy, available_memory
-
-
-
+from modelark.codec_process import isolated_command, initialize_worker, runtime_record, validate_runtime
 
 def _dump(path, record):
     with Path(path).open("x") as handle:
@@ -72,10 +71,10 @@ def _metrics():
     return result
 
 
-def worker(request_path):
+def worker(request_path, parent_pid):
     request = json.loads(Path(request_path).read_text())
     policy = CodecMemoryPolicy.from_record(request["policy"])
-    policy.install_in_worker()  # before native imports, same for every operation
+    initialize_worker(policy, parent_pid)  # same guarded startup as the decoder
     before = _metrics()
     if request["phase"] == "allocation-refusal":
         try:
@@ -123,6 +122,7 @@ def worker(request_path):
                               "codec": request["codec"],
                               "zipnn_version": importlib.metadata.version("zipnn"),
                               "torch_version": importlib.metadata.version("torch"),
+                              "worker": validate_runtime(runtime_record(), policy),
                               "zipnn_module": str(Path(zipnn.__file__).name)})
 
 
@@ -133,10 +133,12 @@ def _guarded_roundtrip(encoded, size, expected_hash, policy):
     before = _metrics()
     digest = hashlib.sha256()
     total = maximum_piece = 0
+    evidence = {}
     with encoded.open("rb") as source:
         with guarded_zipnn_frame(source, policy=policy,
                                   max_stored_bytes=encoded.stat().st_size,
-                                  max_decoded_bytes=size, remaining_bytes=size) as chunks:
+                                  max_decoded_bytes=size, remaining_bytes=size,
+                                  on_complete=evidence.update) as chunks:
             for piece in chunks:
                 maximum_piece = max(maximum_piece, len(piece))
                 total += len(piece)
@@ -148,6 +150,7 @@ def _guarded_roundtrip(encoded, size, expected_hash, policy):
     return {"passed": True, "phase": "guarded-reader", "codec": "zipnn-whole",
             "policy": policy.to_record(), "original_bytes": size,
             "original_sha256": digest.hexdigest(), "maximum_output_piece": maximum_piece,
+            **evidence,
             "parent_metrics_before": before, "parent_metrics_after": _metrics()}
 
 
@@ -164,6 +167,7 @@ def run(*, large=False, output_parent=None, guarded_reader=False):
         name: _sha(checkout / name) for name in (
             "modelark/codec_resources.py", "modelark/compress.py", "modelark/streamznn.py",
             "modelark/codec_worker.py", "modelark/codec_supervisor.py",
+            "modelark/codec_process.py",
             "scripts/qualify_codec_resources.py")}
     print(f"Qualification directory: {output}", flush=True)
     index = 0
@@ -180,8 +184,8 @@ def run(*, large=False, output_parent=None, guarded_reader=False):
         # Native libraries may print: protocol is an exclusive result file, not stdout.
         with (output / f"{index:02d}-stdout.txt").open("x") as out, \
                 (output / f"{index:02d}-stderr.txt").open("x") as err:
-            proc = subprocess.Popen([sys.executable, "-m", "scripts.qualify_codec_resources",
-                                     "--worker", str(request_path)], stdout=out, stderr=err,
+            proc = subprocess.Popen(isolated_command("scripts.qualify_codec_resources",
+                                     "--worker", request_path, "--parent-pid", os.getpid()), stdout=out, stderr=err,
                                     close_fds=True)
             try:
                 code = proc.wait()
@@ -238,9 +242,10 @@ def main():
     parser.add_argument("--guarded-reader", action="store_true",
                         help="also qualify bounded parent/worker whole-frame transport")
     parser.add_argument("--worker", type=Path, help=argparse.SUPPRESS)
+    parser.add_argument("--parent-pid", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.worker:
-        worker(args.worker)
+        worker(args.worker, args.parent_pid)
     else:
         print(run(large=args.large, output_parent=args.output_parent, guarded_reader=args.guarded_reader))
 

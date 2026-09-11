@@ -50,3 +50,14 @@ scope not covered by the described activity, or a genuinely required user choice
 Missing credentials or sudo access are execution blockers, not missing consent:
 provide the exact necessary command instead of asking for redundant authorization.
 This preference does not bypass tool permissions or safety boundaries.
+
+## Explicit merge handoff (2026-09-10)
+
+When required current-head reviews and CI establish that a PR is ready to
+merge, promptly lead with a **bold, explicit request for the operator to merge
+it**, including the PR link. Do not bury the merge request in a status summary.
+If a ready PR is still open when encountered again, stop advancing dependent
+work and **tell the operator clearly and in bold that it is awaiting their
+merge**. Do not silently let merge-ready PRs linger. Verify current readiness
+before repeating that claim; report actual blockers for PRs that are not ready.
+The operator retains merge authority unless explicitly delegated for that PR.

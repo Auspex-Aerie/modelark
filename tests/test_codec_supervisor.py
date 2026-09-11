@@ -18,6 +18,16 @@ pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux guard")
 POLICY = CodecMemoryPolicy(8 << 30, 0)
 
 
+def runtime():
+    return {"version": "modelark.codec-runtime.v1",
+            "startup": "isolated-no-site-guard-then-site.v1",
+            "python": "test", "executable": "/test/python", "prefix": "/test",
+            "base_prefix": "/base", "address_space_bytes": [8 << 30, 8 << 30],
+            "parent_death_signal": 9,
+            "zipnn": {"distribution_version": "test", "module": "/test/zipnn.py"},
+            "torch": {"distribution_version": "test", "module": "/test/torch.py"}}
+
+
 def header(original=4, stored=36):
     value = bytearray(32)
     value[:4] = b"ZN\x00\x05"
@@ -41,13 +51,26 @@ def decode(source=None, **kwargs):
                                   **{**defaults, **kwargs})
 
 
-def launch_fake(monkeypatch, body):
+def launch_fake(monkeypatch, body, *, add_metadata=True):
     children = []
     def launch(request, output):
         program = ("import os,sys,signal,time,json\n"
-                   "from modelark.codec_worker import bind_parent\n"
+                   "from modelark.codec_process import bind_parent\n"
                    "bind_parent(int(sys.argv[2]))\n"
-                   "output=int(sys.argv[1])\n" + body)
+                   "output=int(sys.argv[1])\n")
+        if add_metadata:
+            program += f"metadata={json.dumps(runtime()).encode()!r}\n" + '''
+real_write=os.write
+metadata_sent=False
+def write(fd, data):
+    global metadata_sent
+    if fd==output and data[:1]==b'O' and not metadata_sent:
+        real_write(fd,b'M'+len(metadata).to_bytes(8,'little')+metadata)
+        metadata_sent=True
+    return real_write(fd,data)
+os.write=write
+'''
+        program += body
         proc = subprocess.Popen([sys.executable, "-c", program, str(output), str(os.getpid())],
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, close_fds=True,
@@ -247,8 +270,9 @@ def test_real_writer_frame_decodes_hash_and_closes_without_source_ownership():
     # Give it an owned copy so the expected original remains an independent oracle.
     stored = zipnn.ZipNN(input_format="byte", bytearray_dtype="bfloat16", threads=1).compress(bytearray(original))
     source = io.BytesIO(stored)
+    evidence = []
     with decode(source, max_stored_bytes=len(stored), max_decoded_bytes=len(original),
-                remaining_bytes=len(original)) as parts:
+                remaining_bytes=len(original), on_complete=evidence.append) as parts:
         digest = hashlib.sha256()
         total = 0
         for block in parts:
@@ -258,6 +282,13 @@ def test_real_writer_frame_decodes_hash_and_closes_without_source_ownership():
     assert total == len(original)
     assert digest.digest() == hashlib.sha256(original).digest()
     assert not source.closed
+    assert len(evidence) == 1
+    assert evidence[0]["admission"] == {"available_bytes": 10 << 30}
+    actual = evidence[0]["worker"]
+    assert actual["executable"] == sys.executable
+    assert actual["prefix"] == sys.prefix
+    assert actual["zipnn"]["module"] == str(Path(zipnn.__file__).resolve())
+    assert actual["address_space_bytes"] == [POLICY.address_space_bytes] * 2
 
 
 def test_worker_origin_is_not_resolved_from_untrusted_cwd(monkeypatch, tmp_path):
@@ -295,12 +326,12 @@ if parent==0:
         if phase=='input':
             proc=real(request,output)
         else:
-            body="import ctypes,os,sys\nfrom modelark.codec_worker import bind_parent\nbind_parent(int(sys.argv[2]))\nsys.stdin.buffer.read()\n"
+            body="import ctypes,os,sys\nfrom modelark.codec_process import bind_parent\nbind_parent(int(sys.argv[2]))\nsys.stdin.buffer.read()\n"
             if phase=='compute':
                 body+="ctypes.CDLL(None).pause()\n"
             else:
-                body+="os.write(int(sys.argv[1]),b'O'+(1<<20).to_bytes(8,'little'))\nwhile True: os.write(int(sys.argv[1]),b'x'*65536)\n"
-            proc=subprocess.Popen([sys.executable,'-c',body,str(output),str(os.getpid())],
+                body+="import json\nm=sys.argv[3].encode()\nos.write(int(sys.argv[1]),b'M'+len(m).to_bytes(8,'little')+m)\nos.write(int(sys.argv[1]),b'O'+(1<<20).to_bytes(8,'little'))\nwhile True: os.write(int(sys.argv[1]),b'x'*65536)\n"
+            proc=subprocess.Popen([sys.executable,'-c',body,str(output),str(os.getpid()),sys.argv[2]],
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
                 close_fds=True,pass_fds=(output,),bufsize=0)
         os.write(w,str(proc.pid).encode()+b'\n')
@@ -323,7 +354,7 @@ pid,status=os.waitpid(worker,0)
 assert pid==worker and os.WIFSIGNALED(status) and os.WTERMSIG(status)==signal.SIGKILL
 print('parent-death-contained')
 '''
-    result = subprocess.run([sys.executable, "-c", program, phase], capture_output=True, text=True)
+    result = subprocess.run([sys.executable, "-c", program, phase, json.dumps(runtime())], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "parent-death-contained"
 
@@ -344,32 +375,174 @@ def test_launch_failure_closes_pipes(monkeypatch):
 def test_worker_request_is_closed_world():
     from modelark.codec_worker import run
     with pytest.raises(ValueError, match="fields"):
-        run({"version": "modelark.codec-worker.v1", "source_path": "/unauthorized"}, None)
+        run({"version": "modelark.codec-worker.v2", "source_path": "/unauthorized"}, None)
     assert json.loads(json.dumps(POLICY.to_record())) == POLICY.to_record()
 
 
 @pytest.mark.parametrize("failure", [BrokenPipeError(), MemoryError()])
-def test_worker_never_appends_error_after_success_header(monkeypatch, failure):
+@pytest.mark.parametrize("fail_at", [1, 2, 3, 4])
+def test_worker_never_appends_error_after_success_header(monkeypatch, failure, fail_at):
     from modelark import codec_worker as worker
-    monkeypatch.setattr(worker, "bind_parent", lambda pid: None)
+    monkeypatch.setattr(worker, "initialize_worker", lambda policy, pid: None)
+    monkeypatch.setattr(worker, "_policy", lambda request: POLICY)
     monkeypatch.setattr(worker, "run", lambda request, source: b"abcd")
+    monkeypatch.setattr(worker, "runtime_record", runtime)
     sent = []
     def send(fd, data):
         sent.append(data)
-        if len(sent) >= 2:
+        if len(sent) >= fail_at:
             raise failure
     monkeypatch.setattr(worker, "_send", send)
     assert worker.main(["worker", "99", str(os.getpid()), "{}"]) == 1
-    assert sent == [b"O" + (4).to_bytes(8, "little"), b"abcd"]
+    metadata = json.dumps(runtime(), separators=(",", ":")).encode()
+    assert sent == [b"M" + len(metadata).to_bytes(8, "little"), metadata,
+                    b"O" + (4).to_bytes(8, "little"), b"abcd"][:fail_at]
 
 
 def test_parent_guard_failure_is_not_reported_as_ram(monkeypatch):
     from modelark import codec_worker as worker
-    def fail(pid):
+    def fail(policy, pid):
         raise worker.WorkerInitializationError("no parent guard")
-    monkeypatch.setattr(worker, "bind_parent", fail)
+    monkeypatch.setattr(worker, "initialize_worker", fail)
+    monkeypatch.setattr(worker, "_policy", lambda request: POLICY)
     sent = []
     monkeypatch.setattr(worker, "_send", lambda fd, data: sent.append(data))
     assert worker.main(["worker", "99", str(os.getpid()), "{}"]) == 1
     assert len(sent) == 1 and sent[0][:1] == b"I"
     assert sent[0][9:] == b"codec worker initialization failed"
+
+
+@pytest.mark.parametrize("payload", [
+    b"", b"{}", b"[]", b"null", b"\xff", b"[" * 1500 + b"]" * 1500,
+    json.dumps({**runtime(), "address_space_bytes": [1, 1]}).encode(),
+    json.dumps({**runtime(), "parent_death_signal": True}).encode(),
+    json.dumps({**runtime(), "extra": "not permitted"}).encode(),
+    json.dumps({**runtime(), "zipnn": {"distribution_version": "x", "module": "relative"}}).encode(),
+])
+def test_malformed_metadata_never_reaches_original_output(monkeypatch, payload):
+    children = launch_fake(monkeypatch,
+        f"sys.stdin.buffer.read(); m={payload!r}\n"
+        "os.write(output,b'M'+len(m).to_bytes(8,'little')+m+b'O'+(4).to_bytes(8,'little')+b'abcd')",
+        add_metadata=False)
+    completed = []
+    yielded = []
+    with pytest.raises(cs.WorkerRefusal) as caught:
+        with decode(on_complete=completed.append) as parts:
+            for piece in parts:
+                yielded.append(piece)
+    assert caught.value.kind == "INVALID"
+    assert not completed and not yielded
+    assert_reaped(children)
+
+
+@pytest.mark.parametrize("suffix", [
+    "b'M'+(8193).to_bytes(8,'little')",
+    "b'M'+(2).to_bytes(8,'little')+b'{'",
+    "b'O'+(4).to_bytes(8,'little')+b'abcd'",  # missing metadata
+    "frame",  # no original response
+    "frame+frame",  # repeated metadata
+    "frame+b'R'+(3).to_bytes(8,'little')+b'ram'",  # error after metadata
+])
+def test_metadata_protocol_phase_failures(monkeypatch, suffix):
+    body = (f"sys.stdin.buffer.read(); m={json.dumps(runtime()).encode()!r}\n"
+            "frame=b'M'+len(m).to_bytes(8,'little')+m\n"
+            f"os.write(output,{suffix})")
+    children = launch_fake(monkeypatch, body, add_metadata=False)
+    completed = []
+    with pytest.raises(cs.WorkerRefusal):
+        with decode(on_complete=completed.append) as parts:
+            list(parts)
+    assert not completed
+    assert_reaped(children)
+
+
+@pytest.mark.parametrize("finish", ["close", "nonzero", "success"])
+def test_completion_evidence_requires_exhaustion_and_success(monkeypatch, finish):
+    children = launch_fake(monkeypatch,
+        "sys.stdin.buffer.read(); os.write(output,b'O'+(4).to_bytes(8,'little')+b'abcd')\n"
+        + ("sys.exit(2)" if finish == "nonzero" else ""))
+    sample = {"available_bytes": 10 << 30, "observations": {"sample": "this launch only"}}
+    monkeypatch.setattr(cs, "available_memory", lambda: sample)
+    completed = []
+    def consume():
+        with decode(on_complete=completed.append) as parts:
+            assert next(parts) == b"abcd"
+            assert not completed
+            if finish != "close":
+                assert list(parts) == []
+    if finish == "nonzero":
+        with pytest.raises(cs.WorkerRefusal):
+            consume()
+    else:
+        consume()
+    if finish == "success":
+        assert completed == [{"admission": sample, "worker": runtime()}]
+        assert completed[0]["admission"] is sample
+    else:
+        assert not completed
+    assert_reaped(children)
+
+
+@pytest.mark.parametrize("closed", [[], [0], [1], [2], [0, 1], [0, 2], [1, 2], [0, 1, 2]])
+def test_real_launch_with_closed_standard_descriptors(closed):
+    # Close only disposable process descriptors; preserve a private result FD.
+    program = r'''
+import io, os, sys
+from modelark import codec_supervisor as cs
+from modelark.codec_resources import CodecMemoryPolicy
+result=os.dup(1)
+assert result>2
+for fd in map(int, sys.argv[1:]): os.close(fd)
+cs.available_memory=lambda: {"available_bytes": 10<<30}
+real_launch=cs._launch
+def mismatch(request, writer):
+    # Force a deterministic header refusal before any native import/allocation;
+    # this test qualifies the real launch/FD path, not malformed codec behavior.
+    return real_launch({**request, 'stored_bytes':request['stored_bytes']+1}, writer)
+cs._launch=mismatch
+h=bytearray(32); h[:4]=b'ZN\x00\x05'; h[5]=10; h[8]=h[15]=1
+h[16:24]=(4).to_bytes(8,'little'); h[24:32]=(36).to_bytes(8,'little')
+try:
+    with cs.guarded_zipnn_frame(io.BytesIO(h+b'abcd'),policy=CodecMemoryPolicy(8<<30,0),
+            max_stored_bytes=36,max_decoded_bytes=4,remaining_bytes=4) as parts:
+        list(parts)
+except cs.WorkerRefusal as exc:
+    # Only the actual worker's typed refusal proves the result pipe survived.
+    assert exc.kind=='INVALID', exc
+else:
+    raise AssertionError('malformed frame accepted')
+os.write(result,b'closed-stdio-contained')
+os._exit(0)
+'''
+    result = subprocess.run([sys.executable, "-c", program, *map(str, closed)], capture_output=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == b"closed-stdio-contained"
+
+
+def test_descriptor_normalization_failure_closes_original_pipe(monkeypatch):
+    import fcntl
+    real_pipe = os.pipe
+    pipes = []
+    def pipe():
+        result = real_pipe()
+        pipes.extend(result)
+        return result
+    # Force this branch without changing the process's real stdio descriptors.
+    class LowDescriptor(int):
+        def __lt__(self, other):
+            return other == 3
+    def low_pipe():
+        read, write = pipe()
+        return read, LowDescriptor(write)
+    failure = OSError(errno.EMFILE, "no descriptors")
+    def fail(*args):
+        raise failure
+    monkeypatch.setattr(cs.os, "pipe", low_pipe)
+    monkeypatch.setattr(fcntl, "fcntl", fail)
+    with pytest.raises(OSError) as caught:
+        with decode():
+            pass
+    assert caught.value is failure
+    for fd in pipes:
+        with pytest.raises(OSError):
+            os.fstat(fd)
