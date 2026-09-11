@@ -22,6 +22,7 @@ import json
 from pathlib import Path, PurePosixPath
 
 from modelark import archive_hash, archive_manifest, compress, register
+from modelark.codec_resources import CodecReadUnavailable, CodecResourceRefusal
 
 _DISRUPTION_OUTCOMES = ("awaiting-drive", "compress-fallback", "error")
 _WINDOW_MIN = 15                    # an archive within ±this many minutes of a disruption is a suspect
@@ -241,6 +242,9 @@ def reverify(con, repo_id: str, deep: bool = True) -> dict:
                         ok = (compress.canary_ok(stored, expected) if c["compressed"]
                               else compress.sha256_file(stored) == expected)
                         deep_checks.append({"file": rf, "drive": c["drive"], "ok": bool(ok)})
+                except (CodecResourceRefusal, CodecReadUnavailable) as e:
+                    deep_checks.append({"file": rf, "drive": c["drive"], "ok": None,
+                                        "err": str(e)[:120], "reason": "decode-unavailable"})
                 except Exception as e:                                # a decompress error IS a failed check
                     deep_checks.append({"file": rf, "drive": c["drive"], "ok": False, "err": str(e)[:80]})
     checked_fail = any(d["ok"] is False for d in deep_checks)

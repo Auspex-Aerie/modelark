@@ -21,6 +21,7 @@ import hashlib
 import math
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Final, Union
 
@@ -206,44 +207,55 @@ def _head(path: StrPath, n: int = 8) -> bytes:
 
 
 def canary_ok(znn_path: StrPath, expected_sha256: str, dtype: str = "bfloat16") -> bool:
-    """Decompress + hash; must equal the expected original-byte sha256. Routes by stored magic:
-    StreamZNN + zstd stream (O(chunk) memory); whole/legacy ZipNN load the blob in RAM."""
+    """Hash legacy original bytes via the shared guarded child (no scratch file).
+
+    Resource/unavailable execution raises distinctly from a decoded hash mismatch
+    or malformed content. The production writer uses its non-spawning canary.
+    """
     if not expected_sha256:
         return False        # no expected hash to certify against → canary cannot pass (keep the original)
-    head = _head(znn_path)
-    if head.startswith(streamznn.MAGIC):
-        return streamznn.verify_sha256(znn_path, expected_sha256)
-    if head.startswith(_ZSTD_MAGIC):
-        return _zstd_verify_sha256(znn_path, expected_sha256)
-    out = _zipnn(dtype).decompress(Path(znn_path).read_bytes())       # whole / legacy ZipNN blob (self-describing)
-    return hashlib.sha256(bytes(out)).hexdigest() == expected_sha256
-
-
-def _zstd_verify_sha256(znn_path: StrPath, expected_sha256: str) -> bool:
-    zstd = _zstd()
-    if zstd is None:
-        raise RuntimeError("cannot verify a zstd file — `zstandard` is not installed")
+    # Preserve standalone StreamZNN's malformed-hash error convention.
+    if _head(znn_path).startswith(streamznn.MAGIC):
+        import re
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            raise ValueError("expected_sha256 must be 64 lowercase hex chars")
     hasher = hashlib.sha256()
-    with open(znn_path, "rb") as fi, zstd.ZstdDecompressor().stream_reader(fi) as reader:
-        for chunk in iter(lambda: reader.read(1 << 20), b""):
+    with _original_chunks(znn_path, dtype) as chunks:
+        for chunk in chunks:
             hasher.update(chunk)
     return hasher.hexdigest() == expected_sha256
 
 
 def decompress_file(znn_path: StrPath, dst: StrPath, dtype: str = "bfloat16") -> Path:
-    """Materialize a stored file back to original bytes (for loading). Byte-identical to what the
-    canary verified. Routes by magic; StreamZNN/zstd stream, whole/legacy load in RAM."""
-    head = _head(znn_path)
-    if head.startswith(streamznn.MAGIC):
-        return streamznn.decompress_file(znn_path, dst)
+    """Guarded legacy decode, with parent-owned atomic output for every format."""
     dst_path = Path(dst)
-    if head.startswith(_ZSTD_MAGIC):
-        zstd = _zstd()
-        if zstd is None:
-            raise RuntimeError("cannot decompress a zstd file — `zstandard` is not installed")
+    with _original_chunks(znn_path, dtype) as chunks:
         dst_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(znn_path, "rb") as fi, open(dst_path, "wb") as fo:
-            zstd.ZstdDecompressor().copy_stream(fi, fo)
-        return dst_path
-    _atomic_write_bytes(dst_path, bytes(_zipnn(dtype).decompress(Path(znn_path).read_bytes())))
+        fd, name = tempfile.mkstemp(dir=str(dst_path.parent), prefix=dst_path.name + ".", suffix=".out.tmp")
+        try:
+            with os.fdopen(fd, "wb") as output:
+                for chunk in chunks:
+                    output.write(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(name, dst_path)
+        finally:
+            Path(name).unlink(missing_ok=True)
     return dst_path
+
+
+@contextmanager
+def _original_chunks(path, dtype):
+    from .codec_resources import CodecReadUnavailable, CodecResourceRefusal
+    from .codec_supervisor import WorkerRefusal, guarded_legacy_stream
+    with open(path, "rb") as source:
+        try:
+            with guarded_legacy_stream(source, stored_bytes=os.fstat(source.fileno()).st_size,
+                                       dtype=dtype) as chunks:
+                yield chunks
+        except WorkerRefusal as exc:
+            if exc.kind == "CODEC_INVALID":
+                raise streamznn.StreamZnnError(exc.detail) from exc
+            if exc.kind in {"RESOURCE", "LIMIT"}:
+                raise CodecResourceRefusal(exc.detail) from exc
+            raise CodecReadUnavailable(str(exc)) from exc

@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from modelark import archive_hash, archive_manifest, compress, register
+from modelark.codec_resources import CodecReadUnavailable, CodecResourceRefusal
 
 
 class RestoreError(RuntimeError):
@@ -110,6 +111,8 @@ def _materialize(source: Path, destination: Path, row: dict, expected: str) -> N
                 compress.decompress_file(
                     source, temporary, dtype=compress.zipnn_dtype(row["quant"])
                 )
+            except (CodecResourceRefusal, CodecReadUnavailable) as exc:
+                raise RestoreError(f"decompression unavailable (not a corruption verdict): {exc}") from exc
             except Exception as exc:
                 raise RestoreError(f"decompression failed: {exc}") from exc
         else:

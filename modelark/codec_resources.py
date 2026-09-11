@@ -16,6 +16,10 @@ class CodecResourceRefusal(RuntimeError):
     """The requested resource envelope cannot be admitted or enforced."""
 
 
+class CodecReadUnavailable(RuntimeError):
+    """Decoder execution could not certify bytes; not evidence of corruption."""
+
+
 def available_memory() -> dict:
     """Conservative visible Linux memory headroom; unknown accounting refuses."""
     try:

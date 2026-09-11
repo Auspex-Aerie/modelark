@@ -21,6 +21,17 @@ ERROR_BYTES = 4096
 METADATA_BYTES = 8192
 
 
+class _OutputFailed(Exception):
+    """A packet may be partial; no subsequent error frame can be sent safely."""
+
+
+def _packet(fd, data):
+    try:
+        _send(fd, data)
+    except Exception as exc:
+        raise _OutputFailed from exc
+
+
 def _send(fd, data):
     view = memoryview(data)
     while view:
@@ -31,6 +42,12 @@ def _send(fd, data):
 
 
 def _policy(request):
+    if type(request) is dict and request.get("version") == "modelark.codec-worker.v3-legacy":
+        if (set(request) != {"version", "policy", "stored_bytes", "dtype"}
+                or type(request["stored_bytes"]) is not int or request["stored_bytes"] < 0
+                or type(request["dtype"]) is not str or not 0 < len(request["dtype"]) <= 128):
+            raise ValueError("invalid legacy worker request")
+        return CodecMemoryPolicy.from_record(request["policy"])
     if type(request) is not dict or set(request) != {
             "version", "policy", "stored_bytes", "original_bytes"}:
         raise ValueError("invalid worker request fields")
@@ -63,6 +80,39 @@ def run(request, source):
     return restored
 
 
+def _legacy(request, source, output, policy):
+    from modelark.codec_legacy import chunks
+    from modelark.artifact_policy import qualified_policy
+    decode_policy = qualified_policy()
+    if policy != decode_policy.memory:
+        raise CodecResourceRefusal("legacy worker requires the shared qualified policy")
+    metadata = json.dumps(validate_runtime(runtime_record(), policy), separators=(",", ":")).encode()
+    if not 0 < len(metadata) <= METADATA_BYTES:
+        raise ValueError("oversize worker runtime evidence")
+    _packet(output, b"M" + len(metadata).to_bytes(8, "little") + metadata)
+    total = 0
+
+    class Counted:
+        remaining = request["stored_bytes"]
+
+        def read(self, size):
+            data = source.read(min(size, IO_BYTES, self.remaining))
+            if not data and self.remaining:
+                raise streamznn.StreamZnnError("truncated legacy worker input")
+            self.remaining -= len(data)
+            return data
+
+    counted = Counted()
+    for data in chunks(counted, request["dtype"], decode_policy):
+        for offset in range(0, len(data), IO_BYTES):
+            piece = data[offset:offset + IO_BYTES]
+            _packet(output, b"D" + len(piece).to_bytes(8, "little") + piece)
+            total += len(piece)
+    if counted.remaining or source.read(1):
+        raise streamznn.StreamZnnError("legacy worker did not consume exact input")
+    _packet(output, b"E" + total.to_bytes(8, "little"))
+
+
 def main(argv):
     output, parent_pid = int(argv[1]), int(argv[2])
     try:
@@ -71,15 +121,23 @@ def main(argv):
         request = json.loads(argv[3])
         policy = _policy(request)
         initialize_worker(policy, parent_pid)
+        if request["version"] == "modelark.codec-worker.v3-legacy":
+            _legacy(request, sys.stdin.buffer, output, policy)
+            return 0
         restored = run(request, sys.stdin.buffer)
         metadata = json.dumps(validate_runtime(runtime_record(), policy),
                               separators=(",", ":")).encode("utf-8")
         if not 0 < len(metadata) <= METADATA_BYTES:
             raise ValueError("oversize worker runtime evidence")
+    except _OutputFailed:
+        return 1
     except WorkerInitializationError:
-        status, detail = b"I", b"codec worker initialization failed"
+        status = b"U" if request.get("version") == "modelark.codec-worker.v3-legacy" else b"I"
+        detail = b"codec worker initialization failed"
     except (CodecResourceRefusal, MemoryError):
         status, detail = b"R", b"codec memory guard refused work"
+    except ImportError:
+        status, detail = b"U", b"required codec dependency is unavailable"
     except streamznn.DecodeLimitExceeded:
         status, detail = b"L", b"codec frame exceeds bound"
     except streamznn.UnsupportedFrame:

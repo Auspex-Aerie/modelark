@@ -10,6 +10,7 @@ from unittest import mock
 
 from modelark.core import db
 from modelark import fetch, verifier
+from modelark.codec_resources import CodecReadUnavailable, CodecResourceRefusal
 
 
 def _mem():
@@ -93,6 +94,31 @@ def _raw_file(root: Path, repo: str, rel: str, data=b"weights") -> str:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(data)
     return hashlib.sha256(data).hexdigest()
+
+
+def test_decode_unavailable_is_unknown_but_independent_failure_still_wins(tmp_path):
+    con = _mem()
+    digest = hashlib.sha256(b"original").hexdigest()
+    con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format,quant,sha256) "
+                "VALUES('A','m.safetensors',8,'safetensors','bf16',?)", [digest])
+    _archive(con, "A", "m.safetensors", "drive-00", digest, compressed=True)
+    _raw_file(tmp_path, "A", "m.safetensors.znn")
+    before = con.iterdump()
+    original_db = list(before)
+    for problem in (CodecResourceRefusal("RAM unavailable"), CodecReadUnavailable("worker exited")):
+        with mock.patch.object(verifier.register, "archive_path", return_value=tmp_path), \
+             mock.patch.object(verifier.compress, "canary_ok", side_effect=problem):
+            result = verifier.reverify(con, "A")
+        assert result["status"] == "unknown" and not result["ok"]
+        assert result["deep_checks"][0]["ok"] is None
+        assert result["deep_checks"][0]["reason"] == "decode-unavailable"
+        assert result["insufficient"] == []
+        assert list(con.iterdump()) == original_db
+    con.execute("UPDATE archived SET orig_sha256=?", ["0" * 64])
+    with mock.patch.object(verifier.register, "archive_path", return_value=tmp_path), \
+         mock.patch.object(verifier.compress, "canary_ok", side_effect=CodecResourceRefusal("RAM")):
+        result = verifier.reverify(con, "A")
+    assert result["status"] == "failed" and result["sha_mismatch"]
 
 
 def test_mounted_missing_and_broken_annex_are_hard_failures():

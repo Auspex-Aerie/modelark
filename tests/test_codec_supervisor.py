@@ -90,6 +90,107 @@ def assert_reaped(children):
             os.waitpid(child.pid, os.WNOHANG)
 
 
+def legacy(source=None, **kwargs):
+    return cs.guarded_legacy_stream(io.BytesIO(b"abcd") if source is None else source,
+                                    stored_bytes=4, **kwargs)
+
+
+def legacy_metadata():
+    data = json.dumps(runtime()).encode()
+    return f"os.write(output, {b'M' + len(data).to_bytes(8, 'little') + data!r})\n"
+
+
+def test_legacy_full_duplex_bounded_output_and_exact_completion(monkeypatch):
+    children = launch_fake(monkeypatch, legacy_metadata() + '''
+os.write(output,b'D'+(2).to_bytes(8,'little')+b'ab')
+assert sys.stdin.buffer.read()==b'abcd'
+os.write(output,b'D'+(2).to_bytes(8,'little')+b'cd')
+os.write(output,b'E'+(4).to_bytes(8,'little'))
+''', add_metadata=False)
+    evidence = []
+    with legacy(on_complete=evidence.append) as parts:
+        assert b"".join(parts) == b"abcd"
+    assert len(evidence) == 1
+    assert_reaped(children)
+
+
+@pytest.mark.parametrize("body,kind", [
+    ("os.write(output,b'D'+(65537).to_bytes(8,'little'))", "INVALID"),
+    ("os.write(output,b'D'+bytes(8))", "INVALID"),
+    ("os.write(output,b'D'+(4).to_bytes(8,'little')+b'ab')", "WORKER_FAILED"),
+    ("os.write(output,b'D'+(2).to_bytes(8,'little')+b'ab')", "WORKER_FAILED"),
+    ("os.write(output,b'E'+(4).to_bytes(8,'little'))", "INVALID"),
+    ("os.write(output,b'E'+bytes(8)+b'x')", "INVALID"),
+    ("os.write(output,b'E'+bytes(8));sys.exit(2)", "WORKER_FAILED"),
+    ("os.write(output,b'D'+(2).to_bytes(8,'little')+b'ab'+b'R'+(3).to_bytes(8,'little')+b'ram')", "RESOURCE"),
+    ("os.write(output,b'I'+(3).to_bytes(8,'little')+b'bad')", "CODEC_INVALID"),
+    ("os.write(output,b'U'+(3).to_bytes(8,'little')+b'dep')", "UNSUPPORTED"),
+])
+def test_legacy_protocol_never_certifies_partial_or_unavailable(monkeypatch, body, kind):
+    children = launch_fake(monkeypatch, legacy_metadata() + "sys.stdin.buffer.read()\n" + body,
+                           add_metadata=False)
+    evidence = []
+    with pytest.raises(cs.WorkerRefusal) as caught:
+        with legacy(on_complete=evidence.append) as parts:
+            list(parts)
+    assert caught.value.kind == kind
+    assert evidence == []
+    assert_reaped(children)
+
+
+def test_legacy_destination_error_reaps_and_preserves_identity(monkeypatch):
+    children = launch_fake(monkeypatch, legacy_metadata() + '''
+sys.stdin.buffer.read()
+while True: os.write(output,b'D'+(65536).to_bytes(8,'little')+bytes(65536))
+''', add_metadata=False)
+    failure = OSError(errno.ENOSPC, "destination full")
+    with pytest.raises(OSError) as caught:
+        with legacy() as parts:
+            assert next(parts)
+            raise failure
+    assert caught.value is failure
+    assert_reaped(children)
+
+
+@pytest.mark.parametrize("phase", ["input", "compute", "output"])
+def test_legacy_cancel_kills_reaps_before_return(monkeypatch, phase):
+    body = {"input": "while True: time.sleep(.02)",
+            "compute": "sys.stdin.buffer.read()\nwhile True: time.sleep(.02)",
+            "output": "sys.stdin.buffer.read()\nwhile True: os.write(output,b'D'+(65536).to_bytes(8,'little')+bytes(65536))"}[phase]
+    children = launch_fake(monkeypatch, legacy_metadata() + body, add_metadata=False)
+    failure, started = RuntimeError("operator stop"), time.monotonic()
+    def check():
+        if time.monotonic() - started > .25:
+            raise failure
+    with pytest.raises(RuntimeError) as caught:
+        with cs.guarded_legacy_stream(io.BytesIO(bytes(1 << 20)), stored_bytes=1 << 20,
+                                     check=check) as parts:
+            list(parts)
+    assert caught.value is failure
+    assert_reaped(children)
+
+
+@pytest.mark.parametrize("failure", [BrokenPipeError(), MemoryError()])
+@pytest.mark.parametrize("fail_at", [1, 2, 3])
+def test_legacy_worker_never_appends_error_after_partial_packet(monkeypatch, failure, fail_at):
+    from modelark import codec_worker as worker, codec_legacy
+    from modelark.artifact_policy import qualified_policy
+    monkeypatch.setattr(worker, "initialize_worker", lambda *a: None)
+    monkeypatch.setattr(worker, "runtime_record", runtime)
+    monkeypatch.setattr(codec_legacy, "chunks", lambda source, *a: (b"abcd",))
+    monkeypatch.setattr(sys, "stdin", type("Input", (), {"buffer": io.BytesIO(b"")})())
+    request = {"version": "modelark.codec-worker.v3-legacy", "stored_bytes": 0,
+               "dtype": "bfloat16", "policy": qualified_policy().memory.to_record()}
+    sent = []
+    def send(fd, data):
+        sent.append(data)
+        if len(sent) == fail_at:
+            raise failure
+    monkeypatch.setattr(worker, "_send", send)
+    assert worker.main(["worker", "99", str(os.getpid()), json.dumps(request)]) == 1
+    assert [s[:1] for s in sent] == [b"M", b"D", b"E"][:fail_at]
+
+
 def test_success_short_input_and_diagnostic_flood(monkeypatch):
     children = launch_fake(monkeypatch, '''
 data=sys.stdin.buffer.read()
@@ -258,9 +359,10 @@ def test_real_worker_guard_refuses_before_native_import():
     with pytest.raises(cs.WorkerRefusal) as caught:
         with decode(policy=CodecMemoryPolicy(32 << 20, 0)) as parts:
             list(parts)
-    assert caught.value.kind in {"RESOURCE", "INVALID", "WORKER_FAILED"}
+    assert caught.value.kind in {"RESOURCE", "INVALID", "WORKER_FAILED", "UNSUPPORTED"}
     # Native dependencies may raise ImportError after guard-denied mappings;
-    # none of these failure paths may retry unguarded or certify success.
+    # the explicit unavailable-dependency result is also fail-closed. None of
+    # these paths may retry unguarded or certify success.
 
 
 def test_real_writer_frame_decodes_hash_and_closes_without_source_ownership():
@@ -393,7 +495,7 @@ def test_worker_never_appends_error_after_success_header(monkeypatch, failure, f
         if len(sent) >= fail_at:
             raise failure
     monkeypatch.setattr(worker, "_send", send)
-    assert worker.main(["worker", "99", str(os.getpid()), "{}"]) == 1
+    assert worker.main(["worker", "99", str(os.getpid()), '{"version":"modelark.codec-worker.v2"}']) == 1
     metadata = json.dumps(runtime(), separators=(",", ":")).encode()
     assert sent == [b"M" + len(metadata).to_bytes(8, "little"), metadata,
                     b"O" + (4).to_bytes(8, "little"), b"abcd"][:fail_at]

@@ -3,8 +3,8 @@
 DEC-138 requires one RAM-admission methodology for compression, canary, restore
 and Slice. Stage A implements an operation-neutral `CodecMemoryPolicy` and a
 disposable qualification runner. C2 subsequently adopted it in Slice. D1 adds
-production fetch compression and its in-child canary; public legacy canary/deep
-verification and restore still await D2. This is code adoption, not deployment
+production fetch compression and its in-child canary; D2 adds public legacy
+canary/deep verification and restore under the same guard. This is code adoption, not deployment
 or a claim that the complete parity/physical qualification arc is finished.
 
 ## What the policy means
@@ -53,6 +53,7 @@ From the checkout, with its dev Python:
 python -m pytest -q tests/test_codec_resources.py tests/test_codec_qualification.py
 python -m scripts.qualify_codec_resources --large --output-parent /tmp
 python -m scripts.qualify_codec_resources --large --production-writer --output-parent /tmp
+python -m scripts.qualify_codec_resources --large --production-writer --production-readers --output-parent /tmp
 ```
 
 Without `--large`, the runner uses 2 MiB inputs. Large mode uses exactly
@@ -71,6 +72,37 @@ The production-writer option exercises the actual fetch child plus canary and
 then Slice on its output, retaining actual worker/admission evidence. The
 `production_adoption: false` report field refers to incomplete overall D adoption;
 `production_writer_exercised` distinguishes this new D1 path.
+The D2 `production_readers_exercised` option also checks the public legacy canary
+and restore and records a separate actual legacy-stream child's guard/admission
+evidence. It tests original hashes/sizes on the production writer's artifacts.
+The old per-phase qualification child may now supervise a legacy-read child;
+its outer metrics/runtime are not mislabeled as the inner decoder's evidence.
+
+## Legacy reader compatibility (D2 / DEC-146)
+
+The public archive readers use the same8GiB AS+2GiB headroom policy and worker
+startup/lifetime supervisor as Slice, with a separate byte-stream protocol for
+unknown original sizes. Native work stays in the child; caller pipes and output
+pieces are bounded to64KiB. Format permissions remain caller-specific: standalone
+StreamZNN/native ZipNN and multi-frame zstd acceptance are preserved rather than
+silently imposing Slice's strict allowlist. The independent MIT StreamZNN API
+remains unchanged. No nested process is added to the production writer's canary.
+
+Restore owns retrieval, temporary output, hash verification and publication.
+External canary hashes bounded output without a scratch file. Resource refusal,
+missing dependencies or incomplete/crashed workers produce unavailable execution,
+which deep verification reports as UNKNOWN. A hash mismatch or known malformed
+input still fails. This makes no new claim about existing catalog evidence and
+requires no data or approval migration. Native-binary attestation, every historical
+format and physical USB qualification remain outside these synthetic checks.
+
+Known exception retained by operator direction (DEC-147): a native zstd rejection
+of an excessive declared window can raise ZstdError rather than MemoryError and
+still be classified as a failed verification, not UNKNOWN. The reproduced case
+was an artificial2GiB window; it did not demonstrate host RAM exhaustion or a
+problem with an existing archived artifact. This limits the classification claim
+above, not the installed memory guard. The local Grok verdict remains NOT ACCEPT
+for this disclosed finding; it is not recorded as fixed or reviewer-approved.
 
 ## Limits and next gates
 
