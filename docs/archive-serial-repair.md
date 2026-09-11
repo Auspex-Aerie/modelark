@@ -1,10 +1,17 @@
 # Archive serial-identity repair: attended handoff
 
-This repairs one evidence mismatch: the catalog already holds the correct disk
+This repairs two narrowly proven historical evidence mismatches. In the first,
+the catalog already holds the correct disk
 serial, but an older partition-only observation recorded a `serial: null` archive
 fingerprint. It does not change the saved serial or adopt a different disk.
-Registration without a canonical serial remains supported and is not eligible
-for this particular repair.
+In the second, the catalog serial is **NULL**, but a current clean anchor and its
+fingerprint include an observed serial. Older bootstrap code could produce this
+inconsistency without ever erasing a catalog serial. Explicit repair requires the
+old identity and fence proofs to agree, and fresh hardware to match that exact
+serial, UUIDs and capacity. It publishes a new **null-serial** identity/anchor,
+retaining actual observed serial separately as fence evidence. Registration stays
+serial-optional; no catalog serial is filled in. Dirty generations, empty-string
+serials, absent or contradictory proof are outside this second repair case.
 
 Implementation/review approval is not permission to deploy or repair an operating
 installation. Schedule a separate attended window. Replace the executable,
@@ -15,7 +22,7 @@ data/state/config paths and drive label in the examples with approved targets.
 | Item | Result |
 | --- | --- |
 | Identity epoch | Unchanged; this is not replacement or capacity transition |
-| Archive evidence | New generation and serial-bearing fingerprint/clean anchor |
+| Archive evidence | New generation and fingerprint/clean anchor matching the existing registration's serial contract |
 | Old generations, anchors and owner/session history | Retained |
 | Catalog reader floor | Explicitly becomes 8 during enrichment; table layout stays unchanged |
 | Affected Fill approvals | Superseded; fresh Preview → Approve → Start required |
@@ -66,6 +73,9 @@ attempt for live repair.
 - `legacy_clean`: eligible for fresh verification and enrichment.
 - `legacy_dirty`: requires the guarded legacy recovery bridge first. Prior proof,
   ended owner/child state and claims must remain provable.
+- `observed_serial_clean`: serial-less registration with a proven old serial-bearing
+  anchor. `required_live_serial` identifies the historical serial that must match
+  fresh observations. Repair keeps catalog serial NULL and does not bridge dirty state.
 - `already_correct`: no further identity correction needed.
 - `correct_identity_dirty`: not this legacy transition; use its appropriate
   ordinary recovery path without rewriting proof, fingerprint or owner fields.
