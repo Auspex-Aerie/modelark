@@ -41,6 +41,9 @@ from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNot
 from modelark.core import db
 from modelark import archive_hash, archive_manifest, capacity_evidence, compress, drive_mutation
 from modelark import register, wishlist
+from modelark.artifact_policy import qualified_policy
+from modelark.codec_process import isolated_command, validate_runtime
+from modelark.codec_resources import CodecResourceRefusal, available_memory
 
 # Download-stall resilience (INC-004 + the DEC-023 stage-2 watchdog). The built-in read timeout did
 # NOT catch a multi-hour hang (hf blocked/retried internally and never returned control; on 2026-07-09
@@ -468,22 +471,29 @@ def _run_monitored(cmd: list[str], progress: Callable[[], int], stall_secs: floa
         with open(err_path, "w") as errf:
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=errf,
                                     pass_fds=tuple(inherit_fds))
-            best, last_grow = -1, time.monotonic()
-            while True:
-                try:
-                    rc = proc.wait(timeout=_MONITOR_POLL)   # NOT a deadline — just the sample interval
-                    break                                    # the child exited on its own
-                except subprocess.TimeoutExpired:
-                    pass
-                if should_stop():
-                    proc.kill(); proc.wait(); outcome = "stopped"; break
-                cur = progress()
-                now = time.monotonic()
-                if cur > best:
-                    best, last_grow = cur, now
-                elif now - last_grow >= stall_secs:
-                    proc.kill(); proc.wait(); outcome = "stalled"; break
-        stderr = Path(err_path).read_text(errors="replace").strip()[-2000:]   # after errf closed → flushed
+            try:
+                best, last_grow = -1, time.monotonic()
+                while True:
+                    try:
+                        rc = proc.wait(timeout=_MONITOR_POLL)   # NOT a deadline — just the sample interval
+                        break                                    # the child exited on its own
+                    except subprocess.TimeoutExpired:
+                        pass
+                    if should_stop():
+                        proc.kill(); proc.wait(); outcome = "stopped"; break
+                    cur = progress()
+                    now = time.monotonic()
+                    if cur > best:
+                        best, last_grow = cur, now
+                    elif now - last_grow >= stall_secs:
+                        proc.kill(); proc.wait(); outcome = "stalled"; break
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                proc.wait()  # callbacks/interrupts must not release a still-writing child
+        with open(err_path, "rb") as tail:
+            tail.seek(max(0, os.fstat(tail.fileno()).st_size - 8192))
+            stderr = tail.read(8192).decode(errors="replace").strip()[-2000:]
     finally:
         Path(err_path).unlink(missing_ok=True)
     return {"outcome": outcome, "rc": rc, "stderr": stderr}
@@ -500,13 +510,28 @@ def _compress_isolated(local: Path, dtype: str, codec: str, threads: int,
         "crash"   — child died from a signal (e.g. SIGABRT double-free) → caller stores the shard RAW
         "stalled" — child made no progress for the (size-scaled) stall window, killed → caller stores RAW
         "over-cap"— compressed output would exceed the guaranteed disk ceiling → caller stores RAW
+        "resource"/"decode-refused" — shared guard/reader admission refused → caller stores RAW
         "error"   — child exited non-zero without a signal (unexpected; surface it)
     Raises _StopRequested if a stop is requested mid-compress (the child is killed first)."""
+    if should_stop():
+        raise _StopRequested()
+    policy = qualified_policy()
+    try:
+        admission = available_memory()
+        policy.memory.admit(admission["available_bytes"])
+    except CodecResourceRefusal as exc:
+        if should_stop():
+            raise _StopRequested()
+        return {"status": "resource", "detail": str(exc), "stderr": ""}
+    if should_stop():
+        raise _StopRequested()
     dst = local.with_name(local.name + compress.ZNN_SUFFIX)
     res_fd, res_path = tempfile.mkstemp(dir=str(dst.parent), prefix=dst.name + ".", suffix=".result")
     os.close(res_fd)                                     # the child writes it; we just reserve the name
     request = json.dumps({"src": str(local), "dst": str(dst), "dtype": dtype, "codec": codec,
-                          "threads": threads, "expected_sha256": expected_sha256, "result": res_path})
+                          "threads": threads, "expected_sha256": expected_sha256, "result": res_path,
+                          "expected_bytes": local.stat().st_size,
+                          "decode_policy": policy.to_record(), "parent_pid": os.getpid()})
 
     def progress() -> int:                               # the growing .znn temp = compress liveness
         try:
@@ -517,13 +542,19 @@ def _compress_isolated(local: Path, dtype: str, codec: str, threads: int,
     # Window must cover the child's canary (which READS the .znn → temp flat, watchdog blind), so scale
     # it to the shard size; floor at _COMPRESS_STALL_SECS for small shards. See INC-011.
     stall = max(_COMPRESS_STALL_SECS, int(local.stat().st_size / 1e9 * _COMPRESS_STALL_PER_GB))
-    mon = _run_monitored([sys.executable, "-m", "modelark.compress_worker", request],
-                         progress, stall, should_stop, inherit_fds=inherit_fds)
     try:
+        mon = _run_monitored(isolated_command("modelark.compress_worker", request),
+                             progress, stall, should_stop, inherit_fds=inherit_fds)
         if mon["outcome"] == "exited" and mon["rc"] == 0:
             result = json.loads(Path(res_path).read_text())
+            if result["ok"]:
+                validate_runtime(result["worker"], policy.memory)
+                result["admission"] = admission
             result["status"] = ("ok" if result["ok"] else
-                                ("over-cap" if result.get("over_cap") else "canary"))
+                                ("over-cap" if result.get("over_cap") else
+                                 "resource" if result.get("resource_refused") else
+                                 "decode-refused" if result.get("decode_refused") else "canary"))
+            result.setdefault("stderr", "")
             return result
         for tmp in dst.parent.glob(dst.name + ".*.tmp"):  # sweep the half-written temp the dead/killed child left
             tmp.unlink(missing_ok=True)
@@ -950,7 +981,7 @@ def fetch_model(
                 dtype = compress.zipnn_dtype(f["quant"])
                 res = _compress_isolated(local, dtype, codec, compress_cfg["threads"], got,
                                          ctx.should_stop, inherit_fds=inherit_fds)
-                if res["status"] in ("crash", "stalled", "over-cap"):
+                if res["status"] in ("crash", "stalled", "over-cap", "resource", "decode-refused"):
                     # INC-005: the compressor died natively (ZipNN double-free) or hung on this shard. The
                     # child absorbed it — store the shard RAW so the fill routes around it instead of
                     # core-dumping the portal or looping. (A stop mid-compress raises _StopRequested.)
@@ -959,8 +990,10 @@ def fetch_model(
                         why = f"CRASHED (signal {res['signal']})"
                     elif res["status"] == "stalled":
                         why = f"HUNG ({_COMPRESS_STALL_SECS}s no progress)"
-                    else:
+                    elif res["status"] == "over-cap":
                         why = f"OUTPUT CAP ({res.get('detail', 'compressed data expanded')})"
+                    else:
+                        why = f"RESOURCE/DECODE REFUSAL ({res.get('detail', 'not admitted')})"
                     print(f"    [raw-fallback] {f['rfilename']} ({gb:.2f} GB) — compressor {why}, "
                           f"stored uncompressed :: {res['stderr']}")
                     ctx.on_progress({**base, "file_phase": "compress-crashed", "codec": "raw-fallback"})

@@ -87,9 +87,10 @@ def _zstd_header(stream, prefix, expected, limits, *, qualified=False):
     return zstd, header
 
 
-def _chunks(stream, compressed, expected, limits, policy, check, on_frame_complete):
+def _chunks(stream, compressed, expected, limits, policy, check, on_frame_complete, frame_stream):
     try:
-        yield from _decoded_chunks(stream, compressed, expected, limits, policy, check, on_frame_complete)
+        yield from _decoded_chunks(stream, compressed, expected, limits, policy, check,
+                                   on_frame_complete, frame_stream)
     except streamznn.DecodeLimitExceeded as exc:
         raise DecodeError("LIMIT", str(exc)) from exc
     except streamznn.UnsupportedFrame as exc:
@@ -102,7 +103,8 @@ def _chunks(stream, compressed, expected, limits, policy, check, on_frame_comple
         raise DecodeError("RESOURCE", str(exc)) from exc
 
 
-def _decoded_chunks(stream, compressed, expected, limits, policy, check, on_frame_complete):
+def _decoded_chunks(stream, compressed, expected, limits, policy, check, on_frame_complete,
+                    frame_stream):
     if not compressed:
         while chunk := stream.read(min(limits.read_bytes, 1 << 20)):
             yield chunk
@@ -117,6 +119,8 @@ def _decoded_chunks(stream, compressed, expected, limits, policy, check, on_fram
             read_size=min(limits.read_bytes, 1 << 20))
 
     def guarded(source, stored_length, remaining, prefix=b""):
+        if frame_stream is not None:
+            return frame_stream(source, stored_length, remaining, prefix=prefix)
         from .codec_supervisor import guarded_zipnn_frame
         return guarded_zipnn_frame(
             source, policy=policy.memory, max_stored_bytes=limits.stored_frame_bytes,
@@ -188,9 +192,11 @@ class _CheckedInput:
 
 
 class _OriginalStream:
-    def __init__(self, stream, compressed, expected, limits, check, policy, on_frame_complete):
+    def __init__(self, stream, compressed, expected, limits, check, policy, on_frame_complete,
+                 frame_stream):
         self._chunks = iter(_chunks(_CheckedInput(stream, limits.read_bytes, check),
-                                    compressed, expected, limits, policy, check, on_frame_complete))
+                                    compressed, expected, limits, policy, check, on_frame_complete,
+                                    frame_stream))
         self._pending = b""
         self._offset = 0
         self._total = 0
@@ -228,7 +234,8 @@ class _OriginalStream:
 
 
 def original_stream(stream, *, compressed, expected_bytes, limits: DecodeLimits,
-                    check=lambda: None, policy=None, on_frame_complete=lambda evidence: None):
+                    check=lambda: None, policy=None, on_frame_complete=lambda evidence: None,
+                    frame_stream=None):
     """Decode caller-owned bytes; no paths, source authority or output publication.
 
     Original length is enforced here; the caller must verify the original digest.
@@ -236,13 +243,19 @@ def original_stream(stream, *, compressed, expected_bytes, limits: DecodeLimits,
     selects the guarded ZipNN helper and qualified byte-valued zstd window.
     Close this reader on early termination before releasing source ownership.
     on_frame_complete is per-child evidence, not artifact/destination success.
+    An explicit frame_stream may supply a non-spawning frame context for an
+    already-guarded caller. It owns enforcement of the same policy; it is never
+    selected implicitly and is not exposed by Slice's approval/reader adapters.
     """
     if type(expected_bytes) is not int or expected_bytes < 0:
         raise ValueError("nonnegative original size required")
     if not isinstance(limits, DecodeLimits):
         raise ValueError("explicit DecodeLimits required")
+    if frame_stream is not None and (policy is None or not callable(frame_stream)):
+        raise ValueError("a frame execution adapter requires an explicit policy")
     if policy is not None:
         from .artifact_policy import DecodePolicy
         if not isinstance(policy, DecodePolicy) or policy.limits != limits:
             raise ValueError("decode policy differs from supplied limits")
-    return _OriginalStream(stream, compressed, expected_bytes, limits, check, policy, on_frame_complete)
+    return _OriginalStream(stream, compressed, expected_bytes, limits, check, policy,
+                           on_frame_complete, frame_stream)

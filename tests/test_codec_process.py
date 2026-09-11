@@ -33,7 +33,8 @@ def hooked_venv(tmp_path):
     return target, packages, record
 
 
-@pytest.mark.parametrize("module", ["modelark.codec_worker", "scripts.qualify_codec_resources"])
+@pytest.mark.parametrize("module", ["modelark.codec_worker", "scripts.qualify_codec_resources",
+                                  "modelark.compress_worker"])
 def test_both_workers_guard_before_site_hooks_and_restore_venv(hooked_venv, tmp_path, module, monkeypatch):
     target, packages, record = hooked_venv
     monkeypatch.setattr(sys, "executable", str(target / "bin/python"))
@@ -51,6 +52,20 @@ def test_both_workers_guard_before_site_hooks_and_restore_venv(hooked_venv, tmp_
         os.close(read)
         assert result.returncode == 1
         assert response[:1] == b"I", result.stderr
+    elif module == "modelark.compress_worker":
+        from modelark.artifact_policy import qualified_policy
+        from dataclasses import replace
+        from modelark.codec_resources import CodecMemoryPolicy
+        decode_policy = replace(qualified_policy(), memory=CodecMemoryPolicy.from_record(policy),
+                                limits=cs_test_limits())
+        source = tmp_path / "source"
+        source.write_bytes(b"1234")
+        request = {"src": str(source), "dst": str(tmp_path / "encoded"), "dtype": "bfloat16",
+                   "codec": "zipnn-whole", "threads": 1, "expected_sha256": "0" * 64,
+                   "expected_bytes": 4, "parent_pid": os.getpid(),
+                   "decode_policy": decode_policy.to_record(), "result": str(tmp_path / "result")}
+        result = subprocess.run(isolated_command(module, json.dumps(request)), capture_output=True)
+        assert result.returncode == 1  # this hook-only venv deliberately lacks ZipNN
     else:
         request = tmp_path / "request.json"
         output = tmp_path / "result.json"
@@ -63,6 +78,11 @@ def test_both_workers_guard_before_site_hooks_and_restore_venv(hooked_venv, tmp_
     assert records
     assert all(r["as"] == [128 << 20] * 2 and r["signal"] == 9 for r in records)
     assert all(r["prefix"] == str(target) for r in records)
+
+
+def cs_test_limits():
+    from modelark.artifact_io import DecodeLimits
+    return DecodeLimits(128 << 20, 128 << 20, 1 << 20, 64 << 20)
 
 
 def test_parent_death_during_actual_site_hook(hooked_venv):

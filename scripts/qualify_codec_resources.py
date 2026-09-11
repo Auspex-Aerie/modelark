@@ -185,7 +185,8 @@ def _slice_roundtrip(encoded, codec, size, expected_hash, memory):
             "frames": evidence, "parent_metrics_before": before, "parent_metrics_after": _metrics()}
 
 
-def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=False):
+def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=False,
+        production_writer=False):
     policy = CodecMemoryPolicy(8 << 30, 2 << 30)
     policy.admit(available_memory()["available_bytes"])
     output = Path(tempfile.mkdtemp(prefix="modelark-codec-qualification-", dir=output_parent))
@@ -193,6 +194,7 @@ def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=F
               "policy": policy.to_record(), "results": [], "large": large,
               "guarded_reader": guarded_reader,
               "slice_reader": slice_reader,
+              "production_writer_exercised": production_writer,
               "production_adoption": False, "physical_USB_or_archive_test": False}
     checkout = Path(__file__).resolve().parent.parent
     report["implementation_sha256"] = {
@@ -200,6 +202,7 @@ def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=F
             "modelark/codec_resources.py", "modelark/compress.py", "modelark/streamznn.py",
             "modelark/codec_worker.py", "modelark/codec_supervisor.py",
             "modelark/codec_process.py",
+            "modelark/codec_inprocess.py", "modelark/compress_worker.py", "modelark/fetch.py",
             "modelark/artifact_io.py", "modelark/artifact_policy.py", "modelark/artifact_preflight.py",
             "modelark/slice/decoding.py",
             "scripts/qualify_codec_resources.py")}
@@ -238,7 +241,7 @@ def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=F
     try:
         launch({"phase": "allocation-refusal"})
         sizes = [99_630_640, 409_993_344] if large else [2 << 20]
-        if large and (guarded_reader or slice_reader):
+        if large and (guarded_reader or slice_reader or production_writer):
             sizes.insert(0, 64 << 20)  # Default StreamZNN-sized native work unit too.
         with tempfile.TemporaryDirectory(prefix="synthetic-", dir=output) as scratch:
             for size in sizes:
@@ -260,6 +263,21 @@ def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=F
                         result = _slice_roundtrip(case / "misleading.blob", codec, size, digest, policy)
                         report["results"].append(result)
                         print(f"passed Slice reader: {codec} {size} original bytes", flush=True)
+                    if production_writer:
+                        from modelark import fetch
+                        result = fetch._compress_isolated(source, "bfloat16", codec, 1, digest, lambda: False)
+                        if result["status"] != "ok" or _sha(source) != digest:
+                            raise RuntimeError(f"production writer did not certify fixture: {result}")
+                        encoded = Path(result["znn_path"])
+                        stored_digest = _sha(encoded)
+                        if result["znn_sha256"] != stored_digest:
+                            raise RuntimeError("production stored identity differs")
+                        check = _slice_roundtrip(encoded, codec, size, digest, policy)
+                        report["results"].append({
+                            **check, "phase": "production-writer-to-slice",
+                            "writer_admission": result["admission"], "writer_runtime": result["worker"],
+                            "stored_sha256": stored_digest, "stored_bytes": encoded.stat().st_size})
+                        print(f"passed production writer/canary to Slice: {codec} {size} bytes", flush=True)
         if any(_sha(checkout / name) != digest
                for name, digest in report["implementation_sha256"].items()):
             raise RuntimeError("implementation changed during qualification; rerun unchanged code")
@@ -277,6 +295,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--large", action="store_true", help="qualify the two real failure sizes")
     parser.add_argument("--slice-reader", action="store_true", help="qualify C2 preflight and Slice original-byte decoding")
+    parser.add_argument("--production-writer", action="store_true",
+                        help="also exercise D1 fetch writer/canary and Slice parity on synthetic files")
     parser.add_argument("--output-parent", type=Path)
     parser.add_argument("--guarded-reader", action="store_true",
                         help="also qualify bounded parent/worker whole-frame transport")
@@ -287,7 +307,7 @@ def main():
         worker(args.worker, args.parent_pid)
     else:
         print(run(large=args.large, output_parent=args.output_parent, guarded_reader=args.guarded_reader,
-                  slice_reader=args.slice_reader))
+                  slice_reader=args.slice_reader, production_writer=args.production_writer))
 
 
 if __name__ == "__main__":
