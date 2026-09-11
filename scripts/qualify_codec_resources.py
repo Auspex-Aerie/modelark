@@ -154,13 +154,45 @@ def _guarded_roundtrip(encoded, size, expected_hash, policy):
             "parent_metrics_before": before, "parent_metrics_after": _metrics()}
 
 
-def run(*, large=False, output_parent=None, guarded_reader=False):
+def _slice_roundtrip(encoded, codec, size, expected_hash, memory):
+    from modelark.artifact_policy import qualified_policy
+    from modelark.artifact_preflight import inspect_original
+    from modelark.slice.decoding import original_stream
+    policy = qualified_policy()
+    if policy.memory != memory:
+        raise RuntimeError("Slice and writer qualification memory envelopes differ")
+    digest, total, maximum = hashlib.sha256(), 0, 0
+    evidence = []
+    before = _metrics()
+    with encoded.open("rb") as source:
+        inspect_original(source, compressed=True, stored_bytes=encoded.stat().st_size,
+                         expected_bytes=size, policy=policy)
+    with encoded.open("rb") as source:
+        reader = original_stream(source, compressed=True, expected_bytes=size,
+                                 policy=policy, on_frame_complete=evidence.append)
+        try:
+            while piece := reader.read(1 << 20):
+                total += len(piece)
+                maximum = max(maximum, len(piece))
+                digest.update(piece)
+        finally:
+            reader.close()
+    if total != size or digest.hexdigest() != expected_hash or maximum > 64 << 10 or not evidence:
+        raise RuntimeError("Slice original-byte round trip did not certify its bounded output")
+    return {"passed": True, "phase": "slice-reader", "codec": codec,
+            "decode_policy": policy.to_record(), "original_bytes": total,
+            "original_sha256": digest.hexdigest(), "maximum_output_piece": maximum,
+            "frames": evidence, "parent_metrics_before": before, "parent_metrics_after": _metrics()}
+
+
+def run(*, large=False, output_parent=None, guarded_reader=False, slice_reader=False):
     policy = CodecMemoryPolicy(8 << 30, 2 << 30)
     policy.admit(available_memory()["available_bytes"])
     output = Path(tempfile.mkdtemp(prefix="modelark-codec-qualification-", dir=output_parent))
     report = {"status": "running", "scope": "synthetic-codec-resource-qualification-only",
               "policy": policy.to_record(), "results": [], "large": large,
               "guarded_reader": guarded_reader,
+              "slice_reader": slice_reader,
               "production_adoption": False, "physical_USB_or_archive_test": False}
     checkout = Path(__file__).resolve().parent.parent
     report["implementation_sha256"] = {
@@ -168,6 +200,8 @@ def run(*, large=False, output_parent=None, guarded_reader=False):
             "modelark/codec_resources.py", "modelark/compress.py", "modelark/streamznn.py",
             "modelark/codec_worker.py", "modelark/codec_supervisor.py",
             "modelark/codec_process.py",
+            "modelark/artifact_io.py", "modelark/artifact_policy.py", "modelark/artifact_preflight.py",
+            "modelark/slice/decoding.py",
             "scripts/qualify_codec_resources.py")}
     print(f"Qualification directory: {output}", flush=True)
     index = 0
@@ -204,7 +238,7 @@ def run(*, large=False, output_parent=None, guarded_reader=False):
     try:
         launch({"phase": "allocation-refusal"})
         sizes = [99_630_640, 409_993_344] if large else [2 << 20]
-        if large and guarded_reader:
+        if large and (guarded_reader or slice_reader):
             sizes.insert(0, 64 << 20)  # Default StreamZNN-sized native work unit too.
         with tempfile.TemporaryDirectory(prefix="synthetic-", dir=output) as scratch:
             for size in sizes:
@@ -222,6 +256,10 @@ def run(*, large=False, output_parent=None, guarded_reader=False):
                         result = _guarded_roundtrip(case / "misleading.blob", size, digest, policy)
                         report["results"].append(result)
                         print(f"passed guarded reader: {size} original bytes", flush=True)
+                    if slice_reader:
+                        result = _slice_roundtrip(case / "misleading.blob", codec, size, digest, policy)
+                        report["results"].append(result)
+                        print(f"passed Slice reader: {codec} {size} original bytes", flush=True)
         if any(_sha(checkout / name) != digest
                for name, digest in report["implementation_sha256"].items()):
             raise RuntimeError("implementation changed during qualification; rerun unchanged code")
@@ -238,6 +276,7 @@ def run(*, large=False, output_parent=None, guarded_reader=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--large", action="store_true", help="qualify the two real failure sizes")
+    parser.add_argument("--slice-reader", action="store_true", help="qualify C2 preflight and Slice original-byte decoding")
     parser.add_argument("--output-parent", type=Path)
     parser.add_argument("--guarded-reader", action="store_true",
                         help="also qualify bounded parent/worker whole-frame transport")
@@ -247,7 +286,8 @@ def main():
     if args.worker:
         worker(args.worker, args.parent_pid)
     else:
-        print(run(large=args.large, output_parent=args.output_parent, guarded_reader=args.guarded_reader))
+        print(run(large=args.large, output_parent=args.output_parent, guarded_reader=args.guarded_reader,
+                  slice_reader=args.slice_reader))
 
 
 if __name__ == "__main__":

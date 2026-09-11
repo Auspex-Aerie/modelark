@@ -3061,3 +3061,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: C1 worker protocol moves to internal v2; no archive-format, live data, old-seal, production Slice or compression rollout changes. The approved fix may proceed locally despite the partial first remote round; both reviewers remain required, cumulative review caps remain unchanged and the operator retains merge authority.
 - `docs_updated`: docs/decision_log.md, docs/guarded-codec-worker.md, docs/plans/slice-representation-architecture.md
 - `related`: DEC-138, DEC-139, DEC-140, DEC-141, HYP-002
+
+### DEC-143: Suspend reviewer triggers while its credits are exhausted
+- `id`: DEC-143
+- `date`: 2026-09-10
+- `status`: accepted
+- `triggered_by`: Operator corrected the PR #76 workflow after a new-head Greptile tag was posted despite its known exhausted-credit state.
+- `decision`: The every-push review requirement does not mean repeatedly tagging an unavailable reviewer. While credits are exhausted, leave that review pending and continue available reviewers and CI. Resume the canonical trigger only after restored credits or the announced reset; stop and report if a single post-reset retry still refuses. Do not enable paid usage without explicit authorization.
+- `rationale`: A known quota failure cannot produce a review; another push does not restore credits. Preserve the review gate without generating ineffective requests.
+- `impact`: Clarifies DEC-140 with a quota-aware trigger exception, not an acceptance waiver or counter reset. AGENTS.md and the active review watcher carry the same rule. The already-posted round-2 request is historical; no further exhausted-quota tags are authorized.
+- `docs_updated`: AGENTS.md, docs/decision_log.md
+- `related`: DEC-140, DEC-141, DEC-142

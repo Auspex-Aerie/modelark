@@ -145,14 +145,15 @@ def _open_content(tree, candidate):
 class LocalArchiveReader:
     """Internal reader with full per-artifact and lightweight per-read attachment proofs."""
 
-    def __init__(self, attachments, *, observer, max_decode_bytes=64 << 20):
+    def __init__(self, attachments, *, observer, max_decode_bytes=64 << 20, policy=None):
         self.attachments = {label: canonical_attachment(path)
                             for label, path in attachments.items()}
         self.observer = observer
         self.max_decode_bytes = max_decode_bytes
+        self.policy = policy
 
     @contextmanager
-    def open(self, candidate):
+    def _stored(self, candidate, boundary):
         from .linux import BoundTree
         label = candidate.drive.drive_label
         if label not in self.attachments:
@@ -198,12 +199,16 @@ class LocalArchiveReader:
                     # annex identity are checked at artifact-open boundaries;
                     # each read retains kernel attachment/backing-device proof
                     # without spawning a complete inventory for every chunk.
-                    self.observer.check_attachment(tree, confirmed)
+                    boundary()
+                    try:
+                        self.observer.check_attachment(tree, confirmed)
+                    except TransferRefusal as exc:
+                        raise _translate_confinement(exc) from exc
+                    except OSError as exc:
+                        raise _translate_confinement(classify_io(
+                            exc, recheck, _translate_io(exc, label))) from exc
+                    boundary()
 
-                check()
-                decoded = original_stream(stream, compressed=candidate.copy.compressed,
-                                          expected_bytes=candidate.copy.orig_bytes,
-                                          max_decode_bytes=self.max_decode_bytes, check=check)
             except OSError as exc:
                 raise _translate_confinement(classify_io(exc, recheck, _translate_io(exc, label))) from exc
             except TransferRefusal as exc:
@@ -213,4 +218,36 @@ class LocalArchiveReader:
                 raise translated from exc
             # Consumer exceptions (particularly destination ENOSPC/EIO) must
             # never be attributed to the source by this context manager.
-            yield _SourceErrors(decoded, label, recheck)
+            check()
+            yield _SourceErrors(stream, label, recheck), check
+
+    @contextmanager
+    def open(self, candidate, *, check=lambda: None):
+        with self._stored(candidate, check) as (stream, attachment_check):
+            decoded = original_stream(stream, compressed=candidate.copy.compressed,
+                                      expected_bytes=candidate.copy.orig_bytes,
+                                      max_decode_bytes=self.max_decode_bytes,
+                                      check=attachment_check, policy=self.policy)
+            try:
+                yield decoded
+            finally:
+                # Reap an interrupted helper BEFORE closing its retained source
+                # descriptor/tree and BEFORE the enclosing archive fence releases.
+                decoded.close()
+
+    @contextmanager
+    def inspect(self, candidate, *, check=lambda: None):
+        from modelark.artifact_preflight import inspect_original
+        from modelark.artifact_io import DecodeError
+        from modelark.codec_resources import CodecResourceRefusal
+        with self._stored(candidate, check) as (stream, attachment_check):
+            try:
+                inspect_original(stream, compressed=candidate.copy.compressed,
+                                 expected_bytes=candidate.copy.orig_bytes,
+                                 stored_bytes=candidate.copy.stored_bytes,
+                                 policy=self.policy, check=attachment_check)
+            except DecodeError as exc:
+                raise TransferRefusal(f"SOURCE_DECODE_{exc.kind}", exc.detail) from exc
+            except CodecResourceRefusal as exc:
+                raise TransferRefusal("SOURCE_DECODE_RESOURCE", str(exc)) from exc
+            yield None

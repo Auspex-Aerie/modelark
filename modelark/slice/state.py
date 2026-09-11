@@ -32,9 +32,9 @@ def _load_plan(payload):
         record = _decode(payload)
         if type(record) is not dict:
             raise ValueError("plan envelope required")
-        if record.get("version") == "modelark.slice.native-transaction.v1":
+        if record.get("version") in {"modelark.slice.native-transaction.v1", "modelark.slice.native-transaction.v2"}:
             return NativePlan.from_json(payload)
-        if record.get("version") == "modelark.slice.fat32-transaction.v1":
+        if record.get("version") in {"modelark.slice.fat32-transaction.v1", "modelark.slice.fat32-transaction.v2"}:
             return Fat32Plan.from_json(payload)
         return TransferPlan.from_json(payload)
     except (ValueError, TypeError) as exc:
@@ -229,16 +229,22 @@ class Store:
     def _validate_admission(plan, admission):
         from .transaction import TransferRefusal
         try:
-            valid = (type(admission) is dict and set(admission) == {"version", "catalog", "capacity"}
-                     and admission["version"] == "modelark.slice.direct.v1"
+            from modelark.artifact_policy import DecodePolicy
+            guarded = type(admission) is dict and admission.get("version") == "modelark.slice.direct.v2"
+            keys = {"version", "catalog", "capacity"} | ({"decode_policy"} if guarded else set())
+            valid = (type(admission) is dict and set(admission) == keys
+                     and admission["version"] in {"modelark.slice.direct.v1", "modelark.slice.direct.v2"}
                      and isinstance(admission["catalog"], str) and Path(admission["catalog"]).is_absolute()
                      and "\0" not in admission["catalog"]
                      and os.path.normpath(admission["catalog"]) == admission["catalog"]
                      and type(admission["capacity"]) is dict)
             digest = hashlib.sha256(_json(admission)).hexdigest()
+            if guarded:
+                DecodePolicy.from_record(admission.get("decode_policy"))
         except (TypeError, ValueError) as exc:
             raise TransferRefusal("ADMISSION_CORRUPT", "invalid direct admission record") from exc
-        if not valid or plan.destination.mount_id != "direct-v1:" + digest:
+        prefix = "direct-v2:" if guarded else "direct-v1:"
+        if not valid or plan.destination.mount_id != prefix + digest:
             raise TransferRefusal("ADMISSION_CORRUPT", "direct admission differs from sealed binding")
 
     def load_admission(self, tx):
@@ -348,6 +354,42 @@ class Store:
             row = con.execute("SELECT consumed_attempt FROM transactions WHERE id=?", (tx,)).fetchone()
         return bool(row and row[0] is not None)
 
+    def guard_preclaim(self, tx, device, reservation):
+        """Read-only stop check while the caller holds device exclusion, before claim."""
+        from .transaction import TransferRefusal
+        with self._connection(write=False) as con:
+            state, stop, serial, acknowledged = con.execute(
+                "SELECT state,stop,stop_serial,acknowledged_stop_serial FROM transactions WHERE id=?", (tx,)).fetchone()
+            owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
+        if owner != (tx,):
+            raise TransferRefusal("EXECUTION_FENCE_LOST")
+        resume = (reservation.state == state == "stopped"
+                  and reservation.stop_serial == reservation.acknowledged_stop_serial == serial == acknowledged)
+        if stop and not resume:
+            raise TransferRefusal("STOPPED")
+        if state not in RESUMABLE_STATES:
+            raise TransferRefusal("NOT_RESUMABLE", state)
+
+    def refuse_preclaim(self, tx, device, refusal):
+        """Record read-only admission failure under exclusion; consume no FAT attempt.
+
+        Only DeliveryAuthority calls this before publishing an attempt. Never
+        clears a stop: acknowledge it and let a later explicit Start resume.
+        """
+        from .authority import refusal_state
+        from .transaction import TransferRefusal
+        with self._connection() as con:
+            owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
+            if owner != (tx,):
+                raise TransferRefusal("EXECUTION_FENCE_LOST")
+            stop, serial = con.execute("SELECT stop,stop_serial FROM transactions WHERE id=?", (tx,)).fetchone()
+            state = "stopped" if stop else refusal_state(refusal.code)
+            if stop:
+                con.execute("UPDATE transactions SET state='stopped',reason='STOPPED',"
+                            "acknowledged_stop_serial=? WHERE id=?", (serial, tx))
+            else:
+                con.execute("UPDATE transactions SET state=?,reason=? WHERE id=?", (state, str(refusal), tx))
+
     def claim(self, tx, device, attempt, reservation):
         """Publish an attempt only while its caller holds exclusion and its live marker."""
         from .transaction import TransferRefusal, Status
@@ -369,7 +411,6 @@ class Store:
             if getattr(plan, "session_only", False):
                 if consumed is not None:
                     raise TransferRefusal("FAT32_NEW_ROOT_REQUIRED", "this intent has spent its only attempt")
-                con.execute("UPDATE transactions SET consumed_attempt=? WHERE id=?", (attempt.token, tx))
             con.execute("UPDATE owners SET attempt=? WHERE device=? AND tx=?", (attempt.token, device, tx))
             # Only a Start issued AFTER this exact stop was acknowledged may clear it.
             resume = (reservation.state == state == "stopped"
@@ -378,6 +419,10 @@ class Store:
                 con.execute("UPDATE transactions SET state='stopped',reason='STOPPED',"
                             "acknowledged_stop_serial=stop_serial WHERE id=?", (tx,))
                 return Status(tx, "stopped", "STOPPED")
+            if getattr(plan, "session_only", False):
+                # A stop observed in this same atomic claim must not spend the
+                # one-shot authority before any destination session can begin.
+                con.execute("UPDATE transactions SET consumed_attempt=? WHERE id=?", (attempt.token, tx))
             con.execute("UPDATE transactions SET state='starting',reason='',stop=0 WHERE id=?", (tx,))
             return Status(tx, "starting")
 

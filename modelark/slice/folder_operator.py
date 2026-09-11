@@ -18,6 +18,8 @@ from .linux import BoundTree
 from .local_source import LocalArchiveReader
 from .paths import canonical_attachment, utf8_size
 from .sources import FencedSources
+from modelark.artifact_policy import qualified_policy
+from .folder_plan import POLICY_VERSION
 
 
 def _protected(catalog):
@@ -81,11 +83,12 @@ def preview(catalog_path, destination_path, repo_ids):
     evidence = observer.observe(destination, archives=archives, protected_paths=_protected(catalog))
     proposal = d.preview(replace(spec, destination_id=evidence.target.target_id), snapshot)
     _layout(proposal, evidence)
-    binding = binding_for(evidence.target, catalog, evidence.parent_path, evidence.backing_ids)
+    policy = qualified_policy()
+    binding = binding_for(evidence.target, catalog, evidence.parent_path, evidence.backing_ids, policy)
     reserve = estimate_metadata(proposal, binding, catalog, evidence.parent_path, evidence.backing_ids,
-                                evidence.capacity, private_state.HOST_STATE_DIR)
+                                evidence.capacity, private_state.HOST_STATE_DIR, policy)
     plan = NativePlan(proposal, binding, catalog, evidence.parent_path, evidence.backing_ids,
-                      evidence.capacity, reserve)
+                      evidence.capacity, reserve, POLICY_VERSION, policy)
     with io_boundary(None, "DESTINATION_UNPROVEN", "native folder preview setup/teardown failed"), \
             BoundTree(evidence.parent_path, writable=True) as tree:
         fresh = observer.recheck(tree, evidence, archives=_archives(catalog))
@@ -133,7 +136,8 @@ def start(store, tx, plan, destination_path, attachments):
             recheck(tree)
             destination = NativeFolderDestination(tree, plan.destination, store, tx, recheck=recheck)
             # Destination folder eligibility does not replace archive source proof.
-            sources = FencedSources(plan.catalog, LocalArchiveReader(attachments, observer=LinuxObserver()))
+            options = {"policy": plan.decode_policy} if plan.decode_policy is not None else {}
+            sources = FencedSources(plan.catalog, LocalArchiveReader(attachments, observer=LinuxObserver(), **options))
             try:
                 session = t.start(store, tx, destination, sources)
             except KeyboardInterrupt:

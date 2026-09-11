@@ -55,6 +55,7 @@ DEALINGS IN THE SOFTWARE.
 from __future__ import annotations
 
 import hashlib
+from contextlib import nullcontext
 import os
 import re
 import struct
@@ -189,36 +190,16 @@ def read_zipnn_frame(stream: BinaryIO, *, max_stored_bytes: int, max_decoded_byt
     return bytes(decoded)
 
 
-def iter_decompress(stream: BinaryIO, *, max_stored_frame_bytes: int = _MAX_BLOB,
-                    max_decoded_frame_bytes: int | None = None,
-                    max_total_bytes: int | None = None, read_size: int = _HASH_READ,
-                    prefix: bytes = b"",
-                    frame_reader: Callable[[BinaryIO, int, int | None], bytes] | None = None):
-    """Yield restored frames from a caller-owned, possibly non-seekable stream.
-
-    Handles short reads and bounds each input request by `read_size`. `prefix`
-    is container magic already consumed by a dispatcher. Closing the iterator
-    never closes the supplied stream. IO and frame-reader exceptions propagate.
-
-    Default decoding preserves the historical standalone ZipNN acceptance and
-    exception behavior. Optional decoded/total limits are checked AFTER default
-    native decoding, not a native RAM guard. For untrusted byte frames, inject a
-    reader using `read_zipnn_frame` to validate headers before native allocation.
-    The callback receives (stream, stored_length, remaining_total_or_None), must
-    consume exactly that frame, and retains its own input-read/resource policy.
-    """
+def iter_frame_lengths(stream: BinaryIO, *, max_stored_frame_bytes: int = _MAX_BLOB,
+                       read_size: int = _HASH_READ, prefix: bytes = b""):
+    """Shared container framing. Caller consumes each yielded frame before next()."""
     _positive_bound(max_stored_frame_bytes, "stored frame bound")
     _positive_bound(read_size, "read size")
-    for value, name in ((max_decoded_frame_bytes, "decoded frame bound"),
-                        (max_total_bytes, "total bound")):
-        if value is not None:
-            _positive_bound(value, name, zero=True)
     if not isinstance(prefix, bytes) or len(prefix) > len(MAGIC):
         raise ValueError("invalid container prefix")
     magic = prefix + _read_exact(stream, len(MAGIC) - len(prefix), read_size=read_size)
     if magic != MAGIC:
         raise StreamZnnError(f"bad magic {magic!r}: not a StreamZNN container")
-    total = 0
     while True:
         head = stream.read(1)
         if head == b"":
@@ -231,20 +212,64 @@ def iter_decompress(stream: BinaryIO, *, max_stored_frame_bytes: int = _MAX_BLOB
             raise StreamZnnError("implausible frame length 0")
         if blob_len > max_stored_frame_bytes:
             raise DecodeLimitExceeded("stored StreamZNN frame exceeds bound")
+        yield blob_len
+
+
+def iter_decompress(stream: BinaryIO, *, max_stored_frame_bytes: int = _MAX_BLOB,
+                    max_decoded_frame_bytes: int | None = None,
+                    max_total_bytes: int | None = None, read_size: int = _HASH_READ,
+                    prefix: bytes = b"",
+                    frame_reader: Callable[[BinaryIO, int, int | None], bytes] | None = None,
+                    frame_stream=None):
+    """Yield restored frames from a caller-owned, possibly non-seekable stream.
+
+    Handles short reads and bounds each input request by `read_size`. `prefix`
+    is container magic already consumed by a dispatcher. Closing the iterator
+    never closes the supplied stream. IO and frame-reader exceptions propagate.
+
+    Default decoding preserves the historical standalone ZipNN acceptance and
+    exception behavior. Optional decoded/total limits are checked AFTER default
+    native decoding, not a native RAM guard. For untrusted byte frames, inject a
+    reader using `read_zipnn_frame` to validate headers before native allocation.
+    The callback receives (stream, stored_length, remaining_total_or_None), must
+    consume exactly that frame, and retains its own input-read/resource policy.
+    Alternatively, frame_stream returns a context manager yielding bounded byte
+    pieces for one frame. Its context closes before advancing to the next frame,
+    including on iterator close/failure. The two hooks are mutually exclusive.
+    """
+    _positive_bound(max_stored_frame_bytes, "stored frame bound")
+    if frame_reader is not None and frame_stream is not None:
+        raise ValueError("choose one frame reader")
+    _positive_bound(read_size, "read size")
+    for value, name in ((max_decoded_frame_bytes, "decoded frame bound"),
+                        (max_total_bytes, "total bound")):
+        if value is not None:
+            _positive_bound(value, name, zero=True)
+    total = 0
+    for blob_len in iter_frame_lengths(stream, max_stored_frame_bytes=max_stored_frame_bytes,
+                                      read_size=read_size, prefix=prefix):
         remaining = None if max_total_bytes is None else max_total_bytes - total
-        if frame_reader is None:
+        if frame_stream is not None:
+            context = frame_stream(stream, blob_len, remaining)
+        elif frame_reader is None:
             blob = _read_exact(stream, blob_len, read_size=read_size)
             restored = bytes(_zipnn().decompress(blob))
+            context = nullcontext((restored,))
         else:
             restored = frame_reader(stream, blob_len, remaining)
-        if not isinstance(restored, bytes):
-            raise StreamZnnError("frame reader must return bytes")
-        if max_decoded_frame_bytes is not None and len(restored) > max_decoded_frame_bytes:
-            raise DecodeLimitExceeded("decoded StreamZNN frame exceeds bound")
-        total += len(restored)
-        if max_total_bytes is not None and total > max_total_bytes:
-            raise DecodeLimitExceeded("decoded total exceeds bound")
-        yield restored
+            context = nullcontext((restored,))
+        frame_total = 0
+        with context as pieces:
+            for restored in pieces:
+                if not isinstance(restored, bytes):
+                    raise StreamZnnError("frame reader must return bytes")
+                frame_total += len(restored)
+                if max_decoded_frame_bytes is not None and frame_total > max_decoded_frame_bytes:
+                    raise DecodeLimitExceeded("decoded StreamZNN frame exceeds bound")
+                total += len(restored)
+                if max_total_bytes is not None and total > max_total_bytes:
+                    raise DecodeLimitExceeded("decoded total exceeds bound")
+                yield restored
 
 
 def compress_file(

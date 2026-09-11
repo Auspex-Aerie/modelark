@@ -379,3 +379,12 @@ archive formats nor old Slice approvals; C2 and production writer adoption remai
 separate gates. The operator approved implementing this correction while the
 first remote pass remains partial due to Greptile quota; that does not waive
 either reviewer, grant merge authority or reset the stage's counters.
+
+C1 subsequently merged as PR #76 (`5799635`), after Grok round 3 and Codex
+round 2 accepted final head `63089b3` and CI passed. Greptile remained quota-
+blocked, not accepted. The operator authorized a new scoped C2 cycle after that
+merge: local Grok, then Codex on a new PR, no Greptile. This is explicit new
+authorization, not an automatic counter reset. See [C2 work and review tracker](slice-c2-progress.md)
+for implementation, compatibility and current validation state. Production
+writer/canary/restore adoption and the full public CLI qualification remain
+separate D/E gates; no physical acceptance is implied.

@@ -91,7 +91,7 @@ class DeliveryAuthority:
         self.attempt = lease.attempt
 
     @classmethod
-    def acquire(cls, store, tx, device, reservation):
+    def acquire(cls, store, tx, device, reservation, *, preflight=None):
         from .transaction import TransferRefusal
         try:
             lease = Lease(device, tx)
@@ -110,6 +110,18 @@ class DeliveryAuthority:
             if current.state == "complete":
                 lease.close()
                 return current
+            if preflight is not None:
+                def check():
+                    lease.check()
+                    store.guard_preclaim(tx, device, reservation)
+                try:
+                    check()
+                    preflight(check)
+                    check()
+                except TransferRefusal as exc:
+                    lease.check()
+                    store.refuse_preclaim(tx, device, exc)
+                    raise
             outcome = store.claim(tx, device, lease.attempt, reservation)
             if outcome.state in {"complete", "stopped"}:
                 lease.close()
