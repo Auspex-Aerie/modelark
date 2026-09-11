@@ -200,10 +200,14 @@ def test_cli_failure_never_claims_complete_or_changes_archive(public, monkeypatc
     expected_code = {
         "missing_attachment": "WAITING_SOURCE", "resource": "SOURCE_DECODE_RESOURCE",
         "truncated": "SOURCE_DECODE_INVALID", "trailing": "SOURCE_DECODE_INVALID",
-        "digest": "SOURCE_DIGEST_MISMATCH", "worker_crash": "SOURCE_DECODE_",
+        "digest": "SOURCE_DIGEST_MISMATCH", "worker_crash": "SOURCE_DECODE_WORKER_FAILED",
         "wrong_destination": "DESTINATION_CHANGED",
     }[fault]
-    assert expected_code in result.get("reason", "") + result.get("code", ""), result
+    if fault == "wrong_destination":
+        assert result["code"] == expected_code
+    else:
+        details = json.loads(result["reason"].partition(": ")[2])
+        assert [candidate["code"] for candidate in details["candidates"]] == [expected_code]
     assert state.Store().status(case.tx).state != "complete"
     assert not (case.destination / ".modelark-slice-receipt.json").exists()
     assert not (case.destination / REPO / NAME).exists()

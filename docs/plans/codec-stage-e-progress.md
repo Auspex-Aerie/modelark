@@ -65,3 +65,18 @@ within test isolation, assertion strength and truthful evidence reporting.
 Stage E local2/3 used, remote0/3 before publication. New PR/Codex review is next;
 operator merges after exact-head acceptance and CI. No Greptile or live changes.
 This checkpoint is not remote approval, deployment or physical USB acceptance.
+
+## PR #80 remote round1
+
+Codex found one P2: the killed-worker test's `SOURCE_DECODE_` prefix could accept
+an incorrect invalid/resource classification. Require the exact
+`SOURCE_DECODE_WORKER_FAILED` code instead. All candidate failure assertions now
+parse the structured reason and compare the complete code, not a substring.
+This strengthens test assertions;
+production supervisor behavior is unchanged. Validate before pushing and request
+Codex round2 on the new head. This is assertion precision, not a newly discovered
+production architecture defect or a reason to reopen DEC-147.
+
+Exact-code installed-package failure matrix: 7 passed, 8 deselected, 2 warnings
+in31.27s. Ruff and diff checks passed. Local review remains2/3; the remote
+test-only correction is submitted to Codex round2/3 on its new pushed head.
