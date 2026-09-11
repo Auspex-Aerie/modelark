@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 from . import domain as d, state as private_state, transaction as t
+from .authority import PreclaimInterrupted
 from .catalog import read_catalog
 from .fat32_destination import Fat32Destination
 from .fat32_observation import Fat32FolderObserver, Fat32Tree
@@ -102,6 +103,9 @@ def start(store, tx, plan, destination_path, attachments):
             sources = FencedSources(plan.catalog, LocalArchiveReader(attachments, observer=LinuxObserver(), **options))
             try:
                 session = t.start(store, tx, destination, sources)
+            except PreclaimInterrupted as exc:
+                return {**_result(exc.outcome, stop_requested=True), "ok": False,
+                        "new_root_required": False}
             except KeyboardInterrupt:
                 _request_stop_once(store, tx)
                 # Never use native's fresh-Start interrupt acknowledgment path:

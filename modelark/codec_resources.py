@@ -114,6 +114,25 @@ class CodecMemoryPolicy:
         if available_bytes < required:
             raise CodecResourceRefusal(
                 f"headroom {available_bytes} is below policy requirement {required}")
+        self.check_worker_environment()
+
+    def check_worker_environment(self) -> None:
+        """Read-only prerequisites shared by admission and actual guard install.
+
+        Inherited soft AND hard ceilings must permit this exact policy. This is
+        not proof of later setrlimit success; the fresh child still installs and
+        verifies its guard. Never lower or relax the caller's process limits.
+        """
+        if sys.platform != "linux":
+            raise CodecResourceRefusal("codec AS guard is only qualified on Linux")
+        try:
+            import resource
+            inherited = resource.getrlimit(resource.RLIMIT_AS)
+        except (ImportError, OSError, ValueError, OverflowError) as exc:
+            raise CodecResourceRefusal("could not inspect inherited codec memory guard") from exc
+        if any(limit != resource.RLIM_INFINITY and limit < self.address_space_bytes
+               for limit in inherited):
+            raise CodecResourceRefusal("inherited AS ceiling is below requested policy")
 
     def install_in_worker(self) -> None:
         """Irreversibly constrain THIS process; call only in a fresh child.
@@ -123,15 +142,10 @@ class CodecMemoryPolicy:
         do not fall back to an unguarded decode. Set the core-file limit to zero;
         this does not change the host's separate crash-reporting policy.
         """
-        if sys.platform != "linux":
-            raise CodecResourceRefusal("codec AS guard is only qualified on Linux")
+        self.check_worker_environment()
         import resource
 
         try:
-            inherited = resource.getrlimit(resource.RLIMIT_AS)
-            if any(limit != resource.RLIM_INFINITY and limit < self.address_space_bytes
-                   for limit in inherited):
-                raise CodecResourceRefusal("inherited AS ceiling is below requested policy")
             resource.setrlimit(resource.RLIMIT_AS,
                                (self.address_space_bytes, self.address_space_bytes))
             resource.setrlimit(resource.RLIMIT_CORE, (0, 0))

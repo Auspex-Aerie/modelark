@@ -189,6 +189,22 @@ def test_direct_preflight_returns_source_status_without_output(assembled, monkey
     assert operator.start(tx, destination.root, {})["state"] == "complete"
 
 
+def test_direct_preflight_interrupt_does_not_reclaim_or_request_stop_twice(assembled, monkeypatch):
+    operator, tx, store, _, destination, sources, _, _ = assembled
+    def interrupted(proposal, check):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(sources, "preflight", interrupted, raising=False)
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "claim", lambda *a: pytest.fail("interrupted preflight claimed an attempt"))
+        result = operator.start(tx, destination.root, {})
+    assert result["state"] == "stopped" and result["stop_requested"]
+    assert not result["can_write"] and store.events(tx) == [] and not list(destination.root.iterdir())
+    with store._connection(write=False) as con:
+        assert con.execute("SELECT stop_serial,acknowledged_stop_serial FROM transactions WHERE id=?", (tx,)).fetchone() == (1, 1)
+    monkeypatch.setattr(sources, "preflight", lambda proposal, check: check())
+    assert operator.start(tx, destination.root, {})["state"] == "complete"
+
+
 def test_unsealed_attachment_label_never_observes(assembled):
     operator, tx, _, _, destination, _, _, calls = assembled
     with pytest.raises(t.TransferRefusal, match="SOURCE_ATTACHMENT_UNSEALED"):

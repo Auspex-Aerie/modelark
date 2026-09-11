@@ -140,8 +140,8 @@ def start(store, tx, plan, destination_path, attachments):
             sources = FencedSources(plan.catalog, LocalArchiveReader(attachments, observer=LinuxObserver(), **options))
             try:
                 session = t.start(store, tx, destination, sources)
-            except KeyboardInterrupt:
-                return _result(_acknowledge_interrupt(store, tx, destination, sources),
+            except KeyboardInterrupt as exc:
+                return _result(_acknowledge_interrupt(store, tx, destination, sources, error=exc),
                                stop_requested=True)
             except t.TransferRefusal as exc:
                 if exc.code == "DESTINATION_CAPACITY_WAIT":

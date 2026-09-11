@@ -144,6 +144,23 @@ def test_native_preflight_returns_source_status_without_output(setup, monkeypatc
     assert operator.start(tx, parent / "delivery", {})["state"] == "complete"
 
 
+def test_native_preflight_interrupt_returns_acknowledged_stop_without_reclaim(setup, monkeypatch):
+    parent, _, _ = setup
+    tx = approved(setup)["transaction_id"]
+    def interrupted(self, proposal, check):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(Sources, "preflight", interrupted, raising=False)
+    with monkeypatch.context() as patch:
+        patch.setattr(state.Store, "claim", lambda *a: pytest.fail("interrupted preflight claimed an attempt"))
+        outcome = operator.start(tx, parent / "delivery", {})
+    assert outcome["state"] == "stopped" and outcome["stop_requested"] and not outcome["can_write"]
+    assert state.Store().events(tx) == [] and not (parent / "delivery").exists()
+    with state.Store()._connection(write=False) as con:
+        assert con.execute("SELECT stop_serial,acknowledged_stop_serial FROM transactions WHERE id=?", (tx,)).fetchone() == (1, 1)
+    monkeypatch.setattr(Sources, "preflight", lambda self, proposal, check: check())
+    assert operator.start(tx, parent / "delivery", {})["state"] == "complete"
+
+
 def test_unapproved_native_plan_refuses_before_observation(setup, monkeypatch):
     parent, catalog, _ = setup
     result = operator.preview(catalog, parent / "delivery", ("org/model",), None)

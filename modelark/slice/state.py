@@ -70,6 +70,11 @@ class Reservation(NamedTuple):
     stop_serial: int
     acknowledged_stop_serial: int
 
+    def resumes(self, state, serial, acknowledged):
+        """Only a Start issued after this exact Stop acknowledgment may resume."""
+        return (self.state == state == "stopped"
+                and self.stop_serial == self.acknowledged_stop_serial == serial == acknowledged)
+
 
 def _private_directory(path):
     for ancestor in (path, *path.parents):
@@ -363,32 +368,46 @@ class Store:
             owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
         if owner != (tx,):
             raise TransferRefusal("EXECUTION_FENCE_LOST")
-        resume = (reservation.state == state == "stopped"
-                  and reservation.stop_serial == reservation.acknowledged_stop_serial == serial == acknowledged)
+        resume = reservation.resumes(state, serial, acknowledged)
         if stop and not resume:
             raise TransferRefusal("STOPPED")
         if state not in RESUMABLE_STATES:
             raise TransferRefusal("NOT_RESUMABLE", state)
 
-    def refuse_preclaim(self, tx, device, refusal):
+    def refuse_preclaim(self, tx, device, reservation, refusal, *, interrupted=False):
         """Record read-only admission failure under exclusion; consume no FAT attempt.
 
         Only DeliveryAuthority calls this before publishing an attempt. Never
-        clears a stop: acknowledge it and let a later explicit Start resume.
+        clears a new Stop. The reservation may consume only its already
+        acknowledged Stop; a later serial always wins over a source outcome.
+        An interrupt requests and acknowledges Stop in this same transaction.
         """
         from .authority import refusal_state
-        from .transaction import TransferRefusal
+        from .transaction import TransferRefusal, Status
         with self._connection() as con:
             owner = con.execute("SELECT tx FROM owners WHERE device=?", (device,)).fetchone()
             if owner != (tx,):
                 raise TransferRefusal("EXECUTION_FENCE_LOST")
-            stop, serial = con.execute("SELECT stop,stop_serial FROM transactions WHERE id=?", (tx,)).fetchone()
-            state = "stopped" if stop else refusal_state(refusal.code)
-            if stop:
-                con.execute("UPDATE transactions SET state='stopped',reason='STOPPED',"
-                            "acknowledged_stop_serial=? WHERE id=?", (serial, tx))
+            current, stop, serial, acknowledged = con.execute(
+                "SELECT state,stop,stop_serial,acknowledged_stop_serial FROM transactions WHERE id=?", (tx,)).fetchone()
+            if current not in RESUMABLE_STATES:
+                raise TransferRefusal("NOT_RESUMABLE", current)
+            resume = reservation.resumes(current, serial, acknowledged)
+            pending_stop = bool(stop) and not resume
+            if interrupted:
+                # Reuse an outstanding new Stop, but never confuse an old
+                # acknowledged resume with this interrupt's new request.
+                serial += not pending_stop
+            if pending_stop or interrupted or refusal.code == "STOPPED":
+                state, reason = "stopped", "STOPPED"
+                con.execute("UPDATE transactions SET state=?,reason=?,stop=1,stop_serial=?,"
+                            "acknowledged_stop_serial=? WHERE id=?", (state, reason, serial, serial, tx))
             else:
-                con.execute("UPDATE transactions SET state=?,reason=? WHERE id=?", (state, str(refusal), tx))
+                state, reason = refusal_state(refusal.code), str(refusal)
+                # State moves away from stopped, so consume the authorized old
+                # stop flag now. The serials retain the historical evidence.
+                con.execute("UPDATE transactions SET state=?,reason=?,stop=0 WHERE id=?", (state, reason, tx))
+            return Status(tx, state, reason)
 
     def claim(self, tx, device, attempt, reservation):
         """Publish an attempt only while its caller holds exclusion and its live marker."""
@@ -413,8 +432,7 @@ class Store:
                     raise TransferRefusal("FAT32_NEW_ROOT_REQUIRED", "this intent has spent its only attempt")
             con.execute("UPDATE owners SET attempt=? WHERE device=? AND tx=?", (attempt.token, device, tx))
             # Only a Start issued AFTER this exact stop was acknowledged may clear it.
-            resume = (reservation.state == state == "stopped"
-                      and reservation.stop_serial == reservation.acknowledged_stop_serial == serial == acknowledged)
+            resume = reservation.resumes(state, serial, acknowledged)
             if stop and not resume:
                 con.execute("UPDATE transactions SET state='stopped',reason='STOPPED',"
                             "acknowledged_stop_serial=stop_serial WHERE id=?", (tx,))

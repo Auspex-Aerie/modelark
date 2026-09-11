@@ -7,6 +7,13 @@ claim that Slice's 64 MiB incompatibility is fixed.
 
 ## What the policy means
 
+DEC-144 also makes platform/inherited-limit compatibility part of shared
+read-only admission. The current Linux process's soft and hard AS ceilings must
+both permit the requested envelope; no existing lower ceiling is relaxed.
+The same checker runs again before worker installation. Admission never calls
+`setrlimit` in the parent, and does not guarantee that a later child can install
+its guard: installation and verification still fail closed in the child.
+
 The same versioned record controls all three qualification operations. It has an
 explicit address-space ceiling and a headroom reserve; no separate compression
 multiplier, decoder cap, implicit environment variable or Slice default.

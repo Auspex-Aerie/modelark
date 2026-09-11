@@ -12,6 +12,32 @@ are stage-wide counters, not fresh allowances per push. The operator merges;
 hand off readiness explicitly in bold after current-head review and CI pass.
 This review exception is recorded here, not in the decision ledger, as requested.
 
+## Approved preclaim follow-up (DEC-144)
+
+After the original CI fix (`49e2a3c`), all CI checks passed (3,487 tests on both
+Python versions), but Codex round 2 found three confirmed preclaim gaps: Ctrl+C
+before FAT claim was unacknowledged, an old acknowledged Stop hid a resumed
+source wait/block, and an inherited AS limit was not checked until the child.
+The operator approved a bounded shared-lifecycle/resource-admission correction
+and an additional local review budget. Original local Grok 3/3 remains recorded;
+this follow-up permits up to three additional local passes. Codex remains 2/3,
+with one remote round left. No Greptile and no merge authority are added.
+
+The implementation shares the exact acknowledged-resume predicate across
+preflight and claim. Preflight refusal/interrupt publishes under retained
+exclusion, never consumes FAT's attempt, and returns the committed outcome.
+An interrupted preflight carries that already-acknowledged outcome to the
+public adapters, avoiding a second Stop/claim. A resumed source wait consumes
+only the reservation-authorized old Stop; new Stop serials always take priority.
+
+Codec admission now shares a read-only environment check with child guard
+installation: qualified Linux and inherited soft/hard AS ceilings compatible
+with the sealed policy. All existing admission callers (Slice preflight,
+guarded frame decode and writer qualification) get the same check. No parent
+limits are changed; the child still installs and verifies its guard. This
+detects known incompatibilities, not every possible launch failure or later
+resource race. Legacy approvals, policy bytes and private schema are unchanged.
+
 ## Local implementation checkpoint before PR review
 
 - Branch: `codex/slice-guarded-decoding`, based on merged PR #76 (`5799635`).

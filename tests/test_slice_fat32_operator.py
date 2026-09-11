@@ -152,6 +152,24 @@ def test_fat_preflight_returns_source_status_without_spending_attempt(setup, mon
     assert operator.start(tx, setup.parent / "delivery", {})["state"] == "complete"
 
 
+def test_fat_preflight_interrupt_returns_acknowledged_stop_without_reclaim(setup, monkeypatch):
+    tx = approved(setup)["transaction_id"]
+    def interrupted(self, proposal, check):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(Sources, "preflight", interrupted, raising=False)
+    with monkeypatch.context() as patch:
+        patch.setattr(state.Store, "claim", lambda *a: pytest.fail("interrupted preflight claimed an attempt"))
+        outcome = operator.start(tx, setup.parent / "delivery", {})
+    assert outcome["state"] == "stopped" and outcome["stop_requested"]
+    assert not outcome["ok"] and not outcome["can_write"] and not outcome["new_root_required"]
+    assert not state.Store().attempt_consumed(tx)
+    assert state.Store().events(tx) == [] and not (setup.parent / "delivery").exists()
+    with state.Store()._connection(write=False) as con:
+        assert con.execute("SELECT stop_serial,acknowledged_stop_serial FROM transactions WHERE id=?", (tx,)).fetchone() == (1, 1)
+    monkeypatch.setattr(Sources, "preflight", lambda self, proposal, check: check())
+    assert operator.start(tx, setup.parent / "delivery", {})["state"] == "complete"
+
+
 def test_unapproved_plan_refuses_before_observation(setup, monkeypatch):
     result = preview(setup)
     monkeypatch.setattr(fat, "Fat32FolderObserver", lambda: pytest.fail("unapproved Start observed destination"))

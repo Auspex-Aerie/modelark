@@ -171,7 +171,10 @@ class _CheckedDestination(UsbDestination):
         self._observer.recheck_attachment(self.tree, self._evidence)
 
 
-def _acknowledge_interrupt(store, tx, destination, sources, session=None):
+def _acknowledge_interrupt(store, tx, destination, sources, session=None, *, error=None):
+    from .authority import PreclaimInterrupted
+    if isinstance(error, PreclaimInterrupted):
+        return error.outcome  # Already acknowledged while preclaim exclusion was held.
     store.request_stop(tx)
     try:
         if session is not None:
@@ -229,8 +232,8 @@ def start(tx, destination_path, attachments):
             sources = FencedSources(admission["catalog"], LocalArchiveReader(attachments, observer=observer, **options))
             try:
                 session = t.start(store, tx, destination, sources)
-            except KeyboardInterrupt:
-                return _result(_acknowledge_interrupt(store, tx, destination, sources), stop_requested=True)
+            except KeyboardInterrupt as exc:
+                return _result(_acknowledge_interrupt(store, tx, destination, sources, error=exc), stop_requested=True)
             if isinstance(session, t.Status):
                 return _result(session)
             with session:
