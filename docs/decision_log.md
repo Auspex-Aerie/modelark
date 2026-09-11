@@ -3019,3 +3019,16 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: AGENTS.md carries the ongoing rule. PR #74's remaining third round must cover reconciliation and this policy record. The explicit no-review-wait merge exception for already-merged PR #73 does not apply to #74 or future PRs; merge authority remains separately scoped.
 - `docs_updated`: AGENTS.md, docs/decision_log.md
 - `related`: DEC-139, BOT-008
+
+### INC-064: Slice's zstd native window setting uses a mismatched unit conversion
+- `id`: INC-064
+- `date`: 2026-09-10
+- `status`: open
+- `triggered_by`: DEC-139 Stage B expanded real optional-zstd short-read/window coverage.
+- `symptom`: A synthetic 256 KiB unknown-content-size zstd frame passes the legacy 64 MiB header-window check but returns SOURCE_DECODE_INVALID from the native decoder with zstandard 0.25.0. Direct decoding with a bytes-valued 64 MiB setting succeeds completely.
+- `root_cause`: Existing Slice code divides its byte ceiling by 1024 before passing max_window_size. The tested dependency passes that setting directly to ZSTD_DCtx_setMaxWindowSize in bytes, despite its Python documentation describing KiB; the effective native ceiling is 64 KiB under the default Slice bound.
+- `blast_radius`: Some otherwise valid zstd Slice sources refuse; this observation does not imply corruption, an unsafe allocation or a failed physical test. Existing whole/StreamZNN and standalone compression/restore policies are separate.
+- `why_not_caught_earlier`: Earlier optional-codec tests either skipped locally or used smaller windows; they checked header refusal without testing a larger accepted header against the native setting.
+- `planned_remediation`: Stage B preserves existing refusal behavior and records an executable regression. Stage C's new explicit policy must qualify the units repair, known/unknown-content windows and supported backends without widening old sealed approvals. The work item and test gate are in docs/streamznn-reader-adapter.md.
+- `docs_updated`: docs/decision_log.md, docs/streamznn-reader-adapter.md, docs/plans/slice-representation-architecture.md
+- `related`: DEC-138, DEC-139, modelark/artifact_io.py, tests/test_artifact_io.py

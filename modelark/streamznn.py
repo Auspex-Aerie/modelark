@@ -81,6 +81,14 @@ class OutputCapExceeded(StreamZnnError):
     """Compression would exceed the caller's guaranteed on-disk output ceiling."""
 
 
+class DecodeLimitExceeded(StreamZnnError):
+    """A frame or decoded total exceeds an explicit reader bound."""
+
+
+class UnsupportedFrame(StreamZnnError):
+    """A frame is outside the supported lossless byte-header contract."""
+
+
 def _zipnn(*, dtype: str | None = None, threads: int = 0):
     # Import only on an actual codec operation. Planning imports this module for
     # constants and must not initialize Torch or surface its dependency warnings.
@@ -92,18 +100,135 @@ def _zipnn(*, dtype: str | None = None, threads: int = 0):
     return ZipNN(**kwargs)
 
 
-def _read_exact(fh: BinaryIO, n: int) -> bytes:
+def _read_exact(fh: BinaryIO, n: int, *, read_size: int = _HASH_READ) -> bytes:
     """Read exactly `n` bytes from `fh` or raise StreamZnnError. A short read means a
     truncated/corrupt container — it is never returned as a silently-short slice."""
     if n < 0:
         raise StreamZnnError(f"negative read length {n}")
     buf = bytearray()
     while len(buf) < n:
-        piece = fh.read(n - len(buf))
+        piece = fh.read(min(read_size, n - len(buf)))
         if not piece:
             raise StreamZnnError(f"truncated container: wanted {n} bytes, got {len(buf)}")
+        if len(piece) > min(read_size, n - len(buf)):
+            raise StreamZnnError("source returned more bytes than requested")
         buf.extend(piece)
     return bytes(buf)
+
+
+def _positive_bound(value, name, *, zero=False):
+    if type(value) is not int or value < (0 if zero else 1):
+        raise ValueError(f"invalid {name}")
+
+
+def read_zipnn_frame(stream: BinaryIO, *, max_stored_bytes: int, max_decoded_bytes: int,
+                     remaining_bytes: int, stored_length: int | None = None,
+                     prefix: bytes = b"", read_size: int = _HASH_READ,
+                     decode_frame: Callable[[bytes], object] | None = None) -> bytes:
+    """Read one validated, non-streaming ZipNN 0.5 lossless byte frame.
+
+    Validate declared sizes/modes before reading the payload or calling native code.
+    `prefix` contains bytes already consumed from this frame. The optional decoder
+    receives the complete validated blob; its exceptions propagate unchanged.
+    This bounds buffers, NOT native working memory. Caller owns the input stream.
+    This deliberately narrower API does not change legacy path-wrapper support.
+    """
+    for value, name in ((max_stored_bytes, "stored bound"),
+                        (max_decoded_bytes, "decoded bound"), (read_size, "read size")):
+        _positive_bound(value, name)
+    _positive_bound(remaining_bytes, "remaining bytes", zero=True)
+    if not isinstance(prefix, bytes) or len(prefix) > 32:
+        raise ValueError("invalid frame prefix")
+    if stored_length is not None:
+        _positive_bound(stored_length, "stored length")
+        if stored_length > max_stored_bytes:
+            raise DecodeLimitExceeded("stored ZipNN frame exceeds bound")
+        if stored_length < 32:
+            raise StreamZnnError("short ZipNN frame")
+    header = prefix + _read_exact(stream, 32 - len(prefix), read_size=read_size)
+    original = int.from_bytes(header[16:24], "little")
+    stored = int.from_bytes(header[24:32], "little")
+    if original > max_decoded_bytes or stored > max_stored_bytes or original > remaining_bytes:
+        raise DecodeLimitExceeded("ZipNN frame exceeds configured or artifact bound")
+    if (header[:4] != b"ZN\x00\x05" or header[8] != 1
+            or any(header[9:14]) or header[15] not in (1, 2, 4, 5, 6)
+            or header[7] not in (0, 1) or header[6] not in (0, 1)
+            or header[5] not in (10, 220)):
+        raise UnsupportedFrame("unsupported ZipNN header")
+    if (stored < 32 or original == 0 or (stored_length is not None and stored != stored_length)
+            or header[14] > 26):
+        raise StreamZnnError("inconsistent ZipNN frame header")
+    blob = header + _read_exact(stream, stored - 32, read_size=read_size)
+    if decode_frame is None:
+        from zipnn import ZipNN
+        try:
+            decoded = ZipNN(input_format="byte", threads=1).decompress(blob)
+        except Exception as exc:
+            raise StreamZnnError("ZipNN decoder refused frame") from exc
+    else:
+        decoded = decode_frame(blob)
+    if (not isinstance(decoded, (bytes, bytearray, memoryview))
+            or (decoded.nbytes if isinstance(decoded, memoryview) else len(decoded)) != original):
+        raise StreamZnnError("ZipNN decoded size differs from header")
+    return bytes(decoded)
+
+
+def iter_decompress(stream: BinaryIO, *, max_stored_frame_bytes: int = _MAX_BLOB,
+                    max_decoded_frame_bytes: int | None = None,
+                    max_total_bytes: int | None = None, read_size: int = _HASH_READ,
+                    prefix: bytes = b"",
+                    frame_reader: Callable[[BinaryIO, int, int | None], bytes] | None = None):
+    """Yield restored frames from a caller-owned, possibly non-seekable stream.
+
+    Handles short reads and bounds each input request by `read_size`. `prefix`
+    is container magic already consumed by a dispatcher. Closing the iterator
+    never closes the supplied stream. IO and frame-reader exceptions propagate.
+
+    Default decoding preserves the historical standalone ZipNN acceptance and
+    exception behavior. Optional decoded/total limits are checked AFTER default
+    native decoding, not a native RAM guard. For untrusted byte frames, inject a
+    reader using `read_zipnn_frame` to validate headers before native allocation.
+    The callback receives (stream, stored_length, remaining_total_or_None), must
+    consume exactly that frame, and retains its own input-read/resource policy.
+    """
+    _positive_bound(max_stored_frame_bytes, "stored frame bound")
+    _positive_bound(read_size, "read size")
+    for value, name in ((max_decoded_frame_bytes, "decoded frame bound"),
+                        (max_total_bytes, "total bound")):
+        if value is not None:
+            _positive_bound(value, name, zero=True)
+    if not isinstance(prefix, bytes) or len(prefix) > len(MAGIC):
+        raise ValueError("invalid container prefix")
+    magic = prefix + _read_exact(stream, len(MAGIC) - len(prefix), read_size=read_size)
+    if magic != MAGIC:
+        raise StreamZnnError(f"bad magic {magic!r}: not a StreamZNN container")
+    total = 0
+    while True:
+        head = stream.read(1)
+        if head == b"":
+            return
+        if len(head) != 1:
+            raise StreamZnnError("source returned more bytes than requested")
+        head += _read_exact(stream, _LEN.size - 1, read_size=read_size)
+        (blob_len,) = _LEN.unpack(head)
+        if blob_len == 0:
+            raise StreamZnnError("implausible frame length 0")
+        if blob_len > max_stored_frame_bytes:
+            raise DecodeLimitExceeded("stored StreamZNN frame exceeds bound")
+        remaining = None if max_total_bytes is None else max_total_bytes - total
+        if frame_reader is None:
+            blob = _read_exact(stream, blob_len, read_size=read_size)
+            restored = bytes(_zipnn().decompress(blob))
+        else:
+            restored = frame_reader(stream, blob_len, remaining)
+        if not isinstance(restored, bytes):
+            raise StreamZnnError("frame reader must return bytes")
+        if max_decoded_frame_bytes is not None and len(restored) > max_decoded_frame_bytes:
+            raise DecodeLimitExceeded("decoded StreamZNN frame exceeds bound")
+        total += len(restored)
+        if max_total_bytes is not None and total > max_total_bytes:
+            raise DecodeLimitExceeded("decoded total exceeds bound")
+        yield restored
 
 
 def compress_file(
@@ -183,20 +308,7 @@ def decompress_to(src: StrPath, sink: Sink) -> None:
     problem; propagates ZipNN's own error on a corrupt blob.
     """
     with open(src, "rb") as fi:
-        magic = _read_exact(fi, len(MAGIC))
-        if magic != MAGIC:
-            raise StreamZnnError(f"bad magic {magic!r}: not a StreamZNN container")
-        while True:
-            head = fi.read(_LEN.size)
-            if head == b"":
-                return                          # clean EOF exactly at a frame boundary
-            if len(head) != _LEN.size:
-                raise StreamZnnError(f"truncated frame length: got {len(head)} of {_LEN.size} bytes")
-            (blob_len,) = _LEN.unpack(head)
-            if blob_len == 0 or blob_len > _MAX_BLOB:
-                raise StreamZnnError(f"implausible frame length {blob_len}")
-            blob = _read_exact(fi, blob_len)
-            restored: bytes = bytes(_zipnn().decompress(blob))
+        for restored in iter_decompress(fi):
             sink(restored)
 
 
