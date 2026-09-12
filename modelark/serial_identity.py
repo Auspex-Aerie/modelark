@@ -1,4 +1,4 @@
-"""Pure recognition of the narrowly repairable v1 null-serial anchor (DEC-133).
+"""Pure recognition of narrowly repairable v1 serial anchors (DEC-133/148/153).
 
 Recognition is only one prerequisite for repair. The workflow must independently
 bind the anchor to the exact epoch/generation, prove live media and cleanliness,
@@ -19,6 +19,11 @@ class SerialIdentityUnproven(ValueError):
 class SerialCorrection:
     old_fingerprint: str
     new_fingerprint: str
+
+
+@dataclass(frozen=True)
+class BridgeSerialCorrection(SerialCorrection):
+    observed_serial: str
 
 
 def _normalized_string(value, name, *, optional=False):
@@ -100,6 +105,43 @@ def _identity_proof(text):
     for key in ('fs_uuid', 'annex_uuid', 'serial'):
         _normalized_string(proof[key], 'proof ' + key, optional=True)
     return proof
+
+
+def recognize_bridge_anchor(
+    *, fs_uuid, annex_uuid, serial, fingerprint, filesystem_capacity_bytes,
+    anchor_identity_proof, anchor_fence_proof, anchor_fingerprint,
+    anchor_capacity_bytes, anchor_authority,
+) -> BridgeSerialCorrection:
+    """Recognize one historical ASCII-hex bridge observation, never admit IO.
+
+    Both UUIDs, the exact raw spelling and both strict proofs are required. The
+    workflow must additionally prove the CURRENT clean generation and fresh
+    attachment, hold compatible fences, and revalidate before committing. This
+    is not a general serial-equivalence rule or an authorized observation alias.
+    """
+    _normalized_string(fs_uuid, 'fs_uuid')
+    _normalized_string(annex_uuid, 'annex_uuid')
+    _normalized_string(serial, 'serial')
+    if len(serial) > 128 or any(not 33 <= ord(char) <= 126 for char in serial):
+        raise SerialIdentityUnproven('bridge repair requires bounded printable ASCII serial')
+    _capacity(filesystem_capacity_bytes, 'filesystem_capacity_bytes')
+    _capacity(anchor_capacity_bytes, 'anchor_capacity_bytes')
+    if anchor_capacity_bytes != filesystem_capacity_bytes or anchor_authority != 'dedicated_local':
+        raise SerialIdentityUnproven('anchor capacity or authority disagrees')
+    proof = _identity_proof(anchor_identity_proof)
+    fence = _identity_proof(anchor_fence_proof)
+    if proof != fence or proof['fs_uuid'] != fs_uuid or proof['annex_uuid'] != annex_uuid:
+        raise SerialIdentityUnproven('bridge identity and fence proofs disagree with saved UUIDs')
+    raw = proof['serial']
+    if not isinstance(raw, str) or raw.lower() != serial.encode('ascii').hex():
+        raise SerialIdentityUnproven('proof is not the exact ASCII-hex encoding of registered serial')
+    old = identity_fingerprint_v1(fs_uuid=fs_uuid, annex_uuid=annex_uuid, serial=raw,
+                                  filesystem_capacity_bytes=filesystem_capacity_bytes)
+    if fingerprint != old or anchor_fingerprint != old:
+        raise SerialIdentityUnproven('bridge anchor does not reproduce the exact saved identity')
+    new = identity_fingerprint_v1(fs_uuid=fs_uuid, annex_uuid=annex_uuid, serial=serial,
+                                  filesystem_capacity_bytes=filesystem_capacity_bytes)
+    return BridgeSerialCorrection(old, new, raw)
 
 
 def serialless_anchor_serial(*, fs_uuid, annex_uuid, fingerprint,

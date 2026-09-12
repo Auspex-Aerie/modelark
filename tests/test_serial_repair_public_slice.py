@@ -95,8 +95,12 @@ def workflow(tmp_path, monkeypatch, hardware, native, request):
     mode = getattr(request, "param", "legacy")
     stored_serial = None if mode in {"serialless", "observed_serial"} else disk["serial"]
     stored_fp = canonical if mode in {"canonical", "observed_serial"} else old
+    if mode == 'bridge':
+        disk['serial'] = stored_serial.encode('ascii').hex().upper()
+        stored_fp = identity_fingerprint_v1(fs_uuid=leaf['uuid'], annex_uuid=ANNEX,
+                                            serial=disk['serial'], filesystem_capacity_bytes=capacity)
     proof = json.dumps({"v": 1, "fs_uuid": leaf["uuid"], "annex_uuid": ANNEX,
-                        "serial": disk["serial"] if mode in {"canonical", "observed_serial"} else None})
+                        "serial": disk["serial"] if mode in {"canonical", "observed_serial", "bridge"} else None})
     con = sqlite3.connect(db.DB_PATH, isolation_level=None)
     con.executescript(db.SCHEMA_PATH.read_text())
     con.execute("PRAGMA user_version=7")
@@ -120,7 +124,7 @@ def workflow(tmp_path, monkeypatch, hardware, native, request):
     try:
         yield SimpleNamespace(con=con, path=db.DB_PATH, archive=archive, source=source,
                               parent=parent, observer=source_observer, old=old, canonical=canonical,
-                              commands=commands, serial=disk["serial"],
+                              commands=commands, serial=stored_serial if mode == 'bridge' else disk["serial"],
                               archive_bytes={str(p.relative_to(archive)): p.read_bytes()
                                              for p in archive.rglob("*") if p.is_file()})
     finally:

@@ -1340,6 +1340,14 @@ def _fence_facts(con, labels: Sequence[str]):
             identity = FenceIdentity(*row)
             identity.lock_keys()
         except UnprovenFenceIdentity as exc:
+            from modelark.drive_bootstrap import bridge_repair_required
+            if bridge_repair_required(con, label):
+                raise Refusal(
+                    'DRIVE_SERIAL_REPAIR_REQUIRED',
+                    {'drive': label, 'reason': 'Historical USB-bridge serial evidence needs explicit repair. '
+                     'Attach this drive, inspect serial identity, then use the guarded repair; preview again afterward.'},
+                    ('inspect_serial_identity', 'repair_serial_identity', 'preview_again'),
+                ) from exc
             raise Refusal(
                 "DRIVE_IDENTITY_UNPROVEN",
                 {"drive": label, "reason": str(exc)},

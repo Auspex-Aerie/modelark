@@ -721,6 +721,13 @@ def _observe_drive(con, label: str) -> drive_mutation.Observation:
     from modelark.serial_identity import serial_for_identity, SerialIdentityUnproven
     try:
         identity_serial = serial_for_identity(saved[2] if saved else None, ev["serial"])
+        if saved and saved[2] and saved[2] != ev['serial']:
+            from modelark.serial_evidence import bridge_serial_for_observation
+            try:
+                identity_serial = bridge_serial_for_observation(
+                    con, label, ev['fs_uuid'], ev['annex_uuid'], ev['serial'], ev['filesystem_capacity_bytes'])
+            except SerialIdentityUnproven:
+                pass  # Keep the raw mismatch; never fall back to canonical serial.
     except SerialIdentityUnproven:
         return drive_mutation.Observation(
             False, ev["free_bytes"], ev["filesystem_capacity_bytes"], None, "", "",
@@ -737,7 +744,7 @@ def _observe_drive(con, label: str) -> drive_mutation.Observation:
     refusal_code = None
     if saved is None:
         refusal_code = "DRIVE_IDENTITY_UNPROVEN"
-    elif saved[2] and saved[2] != ev["serial"]:
+    elif saved[2] and saved[2] != identity_serial:
         # In particular, the old null-serial fingerprint must not turn failure
         # to confirm a KNOWN physical serial into an accepted identity.
         refusal_code = "DRIVE_IDENTITY_MISMATCH"

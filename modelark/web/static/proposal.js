@@ -13,6 +13,8 @@
   function refusalText(result) {
     if (!result) return "The proposal request failed.";
     const bits = [result.code || result.error || "PROPOSAL_REFUSED"];
+    if (result.evidence && typeof result.evidence.drive === "string") bits.push(result.evidence.drive);
+    if (result.evidence && typeof result.evidence.reason === "string") bits.push(result.evidence.reason);
     if (result.actions && result.actions.length) bits.push(`next: ${result.actions.join(" · ")}`);
     return bits.join(" — ");
   }

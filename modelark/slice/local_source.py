@@ -145,6 +145,8 @@ def _open_content(tree, candidate):
 class LocalArchiveReader:
     """Internal reader with full per-artifact and lightweight per-read attachment proofs."""
 
+    supports_serial_evidence = True
+
     def __init__(self, attachments, *, observer, max_decode_bytes=64 << 20, policy=None):
         self.attachments = {label: canonical_attachment(path)
                             for label, path in attachments.items()}
@@ -153,7 +155,7 @@ class LocalArchiveReader:
         self.policy = policy
 
     @contextmanager
-    def _stored(self, candidate, boundary):
+    def _stored(self, candidate, boundary, serial_evidence=None):
         from .linux import BoundTree
         label = candidate.drive.drive_label
         if label not in self.attachments:
@@ -180,13 +182,15 @@ class LocalArchiveReader:
                 from modelark.serial_identity import serial_for_identity, SerialIdentityUnproven
                 try:
                     identity_serial = serial_for_identity(drive.serial, expected[1])
+                    if drive.serial and expected[1] != drive.serial and serial_evidence is not None:
+                        identity_serial = serial_evidence.match(expected[0], annex, expected[1], expected[2])
                 except SerialIdentityUnproven as exc:
                     raise TransferRefusal("SOURCE_IDENTITY_UNPROVEN", label) from exc
                 fingerprint = identity_fingerprint_v1(
                     fs_uuid=expected[0], annex_uuid=annex, serial=identity_serial,
                     filesystem_capacity_bytes=expected[2])
                 if ((expected[0], expected[2]) != (drive.fs_uuid, drive.filesystem_capacity_bytes)
-                        or (bool(drive.serial) and expected[1] != drive.serial)
+                        or (bool(drive.serial) and identity_serial != drive.serial)
                         or annex != drive.annex_uuid or fingerprint != drive.identity_fingerprint):
                     raise TransferRefusal("SOURCE_CHANGED", label)
                 stream = stack.enter_context(os.fdopen(_open_content(tree, candidate), "rb"))
@@ -222,8 +226,8 @@ class LocalArchiveReader:
             yield _SourceErrors(stream, label, recheck), check
 
     @contextmanager
-    def open(self, candidate, *, check=lambda: None):
-        with self._stored(candidate, check) as (stream, attachment_check):
+    def open(self, candidate, *, check=lambda: None, _serial_evidence=None):
+        with self._stored(candidate, check, _serial_evidence) as (stream, attachment_check):
             decoded = original_stream(stream, compressed=candidate.copy.compressed,
                                       expected_bytes=candidate.copy.orig_bytes,
                                       max_decode_bytes=self.max_decode_bytes,
@@ -236,11 +240,11 @@ class LocalArchiveReader:
                 decoded.close()
 
     @contextmanager
-    def inspect(self, candidate, *, check=lambda: None):
+    def inspect(self, candidate, *, check=lambda: None, _serial_evidence=None):
         from modelark.artifact_preflight import inspect_original
         from modelark.artifact_io import DecodeError
         from modelark.codec_resources import CodecResourceRefusal
-        with self._stored(candidate, check) as (stream, attachment_check):
+        with self._stored(candidate, check, _serial_evidence) as (stream, attachment_check):
             try:
                 inspect_original(stream, compressed=candidate.copy.compressed,
                                  expected_bytes=candidate.copy.orig_bytes,
