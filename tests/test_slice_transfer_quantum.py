@@ -162,3 +162,68 @@ def test_checked_only_source_retains_full_destination_callback(setup):
     with start(setup) as session:
         assert session.run().state == 'complete'
     assert called
+
+
+@pytest.mark.parametrize('condition', ['complete', 'detached', 'changed'])
+def test_final_eof_rechecks_destination_before_flush(setup, condition):
+    t, store, plan, tx, dest, sources = setup
+    appends, after_eof = [], []
+    append, check, flush = dest.append, dest.check, dest.flush
+
+    def appended(path, token, data):
+        if sources.fenced:
+            appends.append(bytes(data))
+        return append(path, token, data)
+
+    def checked(*args):
+        if after_eof:
+            after_eof.append('check')
+        return check(*args)
+
+    def flushed(path):
+        if after_eof:
+            after_eof.append('flush')
+        return flush(path)
+
+    dest.append, dest.check, dest.flush = appended, checked, flushed
+
+    @contextmanager
+    def polled(candidate, poll):
+        sources.fenced = True
+
+        class FinalEOF(io.BytesIO):
+            def read(self, size):
+                data = super().read(size)
+                # The first gather includes a short tail and EOF. Change the
+                # destination only at the next empty gather, after its append.
+                if not data and appends:
+                    assert not after_eof
+                    after_eof.append('eof')
+                    if condition == 'detached':
+                        dest.available = False
+                    elif condition == 'changed':
+                        dest.changed = True
+                return data
+
+        try:
+            yield sources.snapshot, FinalEOF(DATA)
+        finally:
+            sources.fenced = False
+
+    sources.open_polled = polled
+    with start(setup) as session:
+        if condition == 'changed':
+            with pytest.raises(TransferRefusal) as caught:
+                session.run()
+            assert caught.value.code == 'DESTINATION_CHANGED'
+        else:
+            expected = 'complete' if condition == 'complete' else 'waiting_destination'
+            assert session.run().state == expected
+    assert appends == [DATA]
+    assert after_eof[:2] == ['eof', 'check']
+    if condition == 'complete':
+        assert after_eof[2] == 'flush'
+    else:
+        assert 'flush' not in after_eof
+        assert not (dest.root / 'models/org/model/model.safetensors').exists()
+    assert (store.receipt(tx) is not None) == (condition == 'complete')

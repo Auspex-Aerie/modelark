@@ -614,6 +614,7 @@ class Session:
             del data  # Do not retain the previous quantum while gathering the next.
         if size != op["size"] or digest.hexdigest() != op["sha"]:
             raise TransferRefusal("SOURCE_DIGEST_MISMATCH")
+        self._boundary()  # EOF is source-only work; recheck before destination flush.
         self.destination.flush(temp)
         self._fault(kind + "_flushed")
         op = self._record(dict(op, source=source), "prepared")

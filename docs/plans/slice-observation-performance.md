@@ -169,7 +169,21 @@ lifecycle qualification. Neither suggestion is implemented or accepted here.
 
 The local review boundary was reached and summarized. DEC-151 now permits the
 existing PR workflow to proceed after tests; no fourth local review or new
-performance architecture changes are part of this stage. Cloud Codex: 0/3 so far.
+performance architecture changes are part of this stage.
+
+Cloud Codex round 1 found an EOF-to-flush boundary omission: an empty gathered
+read bypassed the append-loop destination check, permitting the final flush
+before the next full proof. The fix adds the full boundary immediately before
+that flush. Regression cases cover successful completion, detached destination
+and changed destination after a prior append; all three failed on the unfixed
+code because flush preceded the check. Failure cases must not flush, publish
+the output or create a receipt. This closes a missed transition in DEC-150's
+existing contract, not a new guard architecture. The 80.252-second physical
+measurement predates this added final check and has not been remeasured.
+Post-fix local validation: transfer/transaction/guarded-decoding suites 200 passed,
+11 skipped; native/FAT32 transaction and public-gate suites 91 passed. Repository
+lint and diff whitespace checks passed. Full remote CI must pass the pushed fix.
+Subsequent exact-head review state is kept in the ignored operator evidence.
 
 Operator evidence: `claudedocs/operator-scratch/slice-performance-2MUAJY/` in the
 primary checkout, including per-run JSON, profiler data, review prompts/state,
