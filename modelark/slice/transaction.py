@@ -391,10 +391,14 @@ class Session:
             if getattr(self.plan, "session_only", False):
                 self.destination.end_session()
 
-    def _boundary(self):
+    def _poll(self):
+        """Session liveness without destination I/O, for source/codec callbacks."""
         head = self.authority.boundary()
         if head != self.head:
             raise TransferRefusal("JOURNAL_CORRUPT", "journal changed outside its fenced writer")
+
+    def _boundary(self):
+        self._poll()
         self.destination.check(self.plan.destination, self._allocated_bytes, self._required_bytes)
 
     def _check(self):
@@ -559,6 +563,26 @@ class Session:
             self._verified_files.add(op["token"])
         return op
 
+    def _read_chunk(self, stream):
+        """Gather short reads into the existing 1 MiB destination-write quantum.
+
+        Reader-owned source guards still bracket each actual read. Polls here
+        guard authority, including EOF, but perform no destination accounting.
+        The returned buffer is owned by this call and is never reused/mutated.
+        """
+        data = bytearray()
+        while len(data) < 1024 * 1024:
+            remaining = 1024 * 1024 - len(data)
+            self._poll()
+            piece = stream.read(remaining)
+            self._poll()
+            if not isinstance(piece, bytes) or len(piece) > remaining:
+                raise TransferRefusal("SOURCE_READ_FAILED", "source violated bounded binary read")
+            if not piece:
+                break
+            data.extend(piece)
+        return data
+
     def _write(self, op, stream, source=None):
         path, temp, kind = op["path"], op["temporary"], op["kind"]
         self._check()
@@ -576,7 +600,7 @@ class Session:
         self._refresh_parent(temp)
         self._fault("temporary_created" if kind == "file" else kind + "_created")
         digest, size = hashlib.sha256(), 0
-        while data := stream.read(1024 * 1024):
+        while data := self._read_chunk(stream):
             self._boundary()
             self._check_parents(temp)
             size += len(data)
@@ -587,8 +611,10 @@ class Session:
             digest.update(data)
             # Intent and ownership certificate authenticate actual in-flight allocation on recovery.
             self._fault("chunk_written" if kind == "file" else kind + "_chunk_written")
+            del data  # Do not retain the previous quantum while gathering the next.
         if size != op["size"] or digest.hexdigest() != op["sha"]:
             raise TransferRefusal("SOURCE_DIGEST_MISMATCH")
+        self._boundary()  # EOF is source-only work; recheck before destination flush.
         self.destination.flush(temp)
         self._fault(kind + "_flushed")
         op = self._record(dict(op, source=source), "prepared")
@@ -608,8 +634,10 @@ class Session:
         errors = []
         for source in artifact.sources:
             try:
+                polled = getattr(self.sources, "open_polled", None)
                 checked = getattr(self.sources, "open_checked", None)
-                context = (checked(source, self._boundary) if checked is not None
+                context = (polled(source, self._poll) if polled is not None else
+                           checked(source, self._boundary) if checked is not None
                            else self.sources.open(source))
                 with context as (snapshot, stream):
                     if not _same_source(artifact, source, snapshot):

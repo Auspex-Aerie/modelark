@@ -323,7 +323,8 @@ def test_frame_bounds_come_from_shared_address_space_envelope():
 
 
 @pytest.mark.parametrize("outcome", ["complete", "stop", "unplug", "destination"])
-def test_actual_fenced_archive_reader_reaps_child_before_fence_release(archive, attachment, monkeypatch, outcome):
+@pytest.mark.parametrize("opener", ["open_checked", "open_polled"])
+def test_actual_fenced_archive_reader_reaps_child_before_fence_release(archive, attachment, monkeypatch, outcome, opener):
     from modelark import drive_fence
     from modelark.drive_identity import FenceIdentity
     from modelark.slice import domain as d
@@ -375,7 +376,7 @@ def test_actual_fenced_archive_reader_reaps_child_before_fence_release(archive, 
     sources = FencedSources(path, LocalArchiveReader({"drive-a": root}, observer=observer,
                                                      policy=qualified_policy()))
     def consume():
-        with sources.open_checked(candidate, check) as (_, source):
+        with getattr(sources, opener)(candidate, check) as (_, source):
             data = source.read(1)
             if outcome == "destination":
                 raise error
