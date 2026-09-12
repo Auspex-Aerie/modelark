@@ -38,9 +38,28 @@ jobs:
       - name: Static correctness checks
         run: ruff check modelark scripts tests
 
-      - name: Build distribution wheel
+      - name: Build source archive and wheel from that archive
         if: matrix.python-version == '3.12'
-        run: python -m pip wheel . --no-deps --wheel-dir /tmp/modelark-wheel
+        run: python -m build --outdir /tmp/modelark-wheel
+
+      - name: Check source archive includes public documentation and linked assets
+        if: matrix.python-version == '3.12'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tarfile
+          archives = list(Path('/tmp/modelark-wheel').glob('modelark-*.tar.gz'))
+          assert len(archives) == 1, archives
+          required = [Path(p) for p in ('README.md', 'CHANGELOG.md', 'SECURITY.md', 'CODE_OF_CONDUCT.md')]
+          required += [p for folder in ('docs', 'contributing') for p in Path(folder).rglob('*') if p.is_file()]
+          with tarfile.open(archives[0]) as archive:
+              prefix = archives[0].name.removesuffix('.tar.gz') + '/'
+              for path in required:
+                  member = archive.extractfile(prefix + path.as_posix())
+                  assert member is not None and member.read() == path.read_bytes(), path
+              assert not any('/claudedocs/' in name for name in archive.getnames())
+          print(f'Validated {len(required)} public documentation files and assets in source archive')
+          PY
 
       - name: Smoke-test the installed wheel and packaged resources
         if: matrix.python-version == '3.12'

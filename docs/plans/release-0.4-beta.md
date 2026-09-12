@@ -44,3 +44,9 @@ schema, executable policy, codec behavior, archive bytes or deployed service.
 
 No Git tag or release has been published by preparation of this file. If merge or
 publication authority is unclear at execution time, ask rather than infer it.
+
+Keep the prepared changelog's `0.4.0 - Unreleased` heading until publication has
+actually occurred. Record the actual publication date in the GitHub release;
+date the changelog in a subsequent reviewed documentation update. Do not invent
+a release date during preparation or add an unreviewed date-only commit to the
+verified tag target.

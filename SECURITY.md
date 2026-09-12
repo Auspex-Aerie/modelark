@@ -2,7 +2,7 @@
 
 ModelArk is pre-1.0 and built in public.
 
-During alpha, security fixes target the latest reviewed `main`; include the exact commit in every
+During pre-1.0 development, including Beta, security fixes target the latest reviewed `main`; include the exact commit in every
 report. Older commits are not maintained as separate supported release lines.
 
 ModelArk has no Auspex-operated application backend. The portal binds only to loopback; Hub fetches

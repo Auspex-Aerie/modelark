@@ -39,3 +39,10 @@ def test_current_release_is_beta_not_alpha():
     assert f"ModelArk {CURRENT_RELEASE} is a public beta" in readme
     assert f"Release: v{CURRENT_RELEASE} Public Beta" in readme
     assert f"ModelArk v{CURRENT_RELEASE} — Public Beta" in release
+
+
+def test_security_support_policy_covers_beta():
+    policy = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    assert "During pre-1.0 development, including Beta" in policy
+    assert "security fixes target the latest reviewed `main`" in policy
+    assert "During alpha," not in policy

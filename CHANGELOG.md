@@ -4,7 +4,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## Unreleased
 
-## 0.4.0 - 2026-09-11
+## 0.4.0 - Unreleased
 
 ModelArk 0.4.0 begins the **Public Beta** line. Linux storage operations remain
 operator-attended, and Beta is not a promise of stable pre-1.0 interfaces or support

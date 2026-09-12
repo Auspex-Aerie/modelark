@@ -1,3 +1,3 @@
-include CHANGELOG.md SECURITY.md
-recursive-include docs *.md
+include CHANGELOG.md SECURITY.md CODE_OF_CONDUCT.md
+recursive-include docs *.md *.png *.svg *.json
 recursive-include contributing *.md
