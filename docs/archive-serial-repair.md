@@ -1,6 +1,6 @@
 # Archive serial-identity repair: attended handoff
 
-This repairs two narrowly proven historical evidence mismatches. In the first,
+This repairs three narrowly proven historical evidence mismatches. In the first,
 the catalog already holds the correct disk
 serial, but an older partition-only observation recorded a `serial: null` archive
 fingerprint. It does not change the saved serial or adopt a different disk.
@@ -12,6 +12,17 @@ serial, UUIDs and capacity. It publishes a new **null-serial** identity/anchor,
 retaining actual observed serial separately as fence evidence. Registration stays
 serial-optional; no catalog serial is filled in. Dirty generations, empty-string
 serials, absent or contradictory proof are outside this second repair case.
+
+In the third, the registered serial is literal text but the current clean anchor
+records its exact ASCII-hex representation from a USB bridge. Both historical
+proofs must agree, and the freshly attached drive must report that exact recorded
+string with both UUIDs and capacity unchanged. Repair retains the registered
+serial, publishes canonical identity plus truthful raw fence evidence, and records
+one explicit transition per epoch. Later reads accept that one proven bridge
+readout through the shared evidence resolver, not through general hex decoding.
+Dirty state, a prior serial repair in the epoch, different fresh spelling or
+changed capacity/epoch are not supported by this third repair. See the
+[bridge repair contract](bridge-serial-repair-plan.md) (DEC-153).
 
 Implementation/review approval is not permission to deploy or repair an operating
 installation. Schedule a separate attended window. Replace the executable,
@@ -76,6 +87,10 @@ attempt for live repair.
 - `observed_serial_clean`: serial-less registration with a proven old serial-bearing
   anchor. `required_live_serial` identifies the historical serial that must match
   fresh observations. Repair keeps catalog serial NULL and does not bridge dirty state.
+- `bridge_encoded_clean`: known serial with exact historical ASCII-hex bridge
+  proofs. `required_live_serial` is the raw encoded spelling that must be freshly
+  observed. Requires both UUIDs and a current clean anchor; no dirty recovery or
+  additional alias registration. A mere reconnect/reconcile does not repair it.
 - `already_correct`: no further identity correction needed.
 - `correct_identity_dirty`: not this legacy transition; use its appropriate
   ordinary recovery path without rewriting proof, fingerprint or owner fields.
@@ -97,6 +112,9 @@ Use the binding from the immediately reviewed inspection of this installation:
 this mode with `--dedicated` or `--accept-drift`; it cannot adopt authority or accept
 changed capacity/identity. Known serial, UUIDs and capacity must match fresh
 attachment-bound observations. Compatible old/new physical locks remain mandatory.
+For `bridge_encoded_clean`, the exact historical raw serial must match; the
+registered literal spelling remains the canonical identity, not a replacement
+for what the hardware actually reported.
 Contention, stale intent, ambiguous topology and failed observations refuse.
 
 Inventory is report-only presence evidence, not full-byte verification. Extras and
@@ -134,6 +152,16 @@ separately. Preserve existing output and completed receipts. Begin with a tiny
 disposable output folder only after physical acceptance is separately approved.
 Software fixtures and copied-catalog rehearsal are not USB qualification or
 permission to format a device.
+
+For a bridge repair, verify a same-bridge read and preserve the raw encoded serial
+in its fence evidence. Slice keeps its existing format: the source gate resolves
+the unique repair transition, then verifies the exact already-sealed clean anchor
+and generation before granting encoded matching. A pre-repair or stale source seal cannot gain this
+permission. Standalone readers without the gate remain strict literal-serial readers.
+This extra proof is optional for ordinary literal/serial-less matching: missing,
+stale or invalid bridge proof grants no encoded-serial permission, but does not
+add a new rule to those ordinary read paths. Existing transaction-level stale-plan
+checks remain mandatory, and rejected serials retain their raw diagnostic evidence.
 
 ## Stop conditions and rollback
 

@@ -3171,3 +3171,50 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Follow-up release checklist in claudedocs/HANDOFF.md covers README/badge, package and runtime versions, development-status classifier, changelog, release notes, upgrade guidance, release-identity tests, build verification, Git tag and GitHub release. Preserve supported-platform and operator-attended safety limits; future P2P work remains future work. This decision does not itself publish a release, merge PR #82, deploy a runtime or authorize live-data changes.
 - `docs_updated`: docs/decision_log.md, claudedocs/HANDOFF.md
 - `related`: DEC-083, DEC-091, DEC-095, DEC-151
+
+### INC-065: Historical bridge-encoded identity blocks exact placement approval
+- `id`: INC-065
+- `date`: 2026-09-12
+- `status`: open
+- `triggered_by`: Operator reported DRIVE_IDENTITY_UNPROVEN while approving draft 4c0d2ec8-14e7-4900-8f7a-e016f14e27c9 after the local 0.4.0 upgrade; read-only fence-fact inspection isolated drive-01.
+- `symptom`: Drive 01's baseline-only requirements still participate in approval fencing. Its saved fingerprint does not bind the registered literal serial, and the suggested ordinary reconciliation path also rejects those persisted facts.
+- `root_cause`: The August 29 clean anchor contains raw bridge serial 5652314B56344C4B, the ASCII-hex representation of registered VR1KV4LK. That exact raw serial reproduces the saved fingerprint; registered-literal and NULL forms do not. Strict FenceIdentity supports current/NULL forms, not this historical representation. INC-048/DEC-079 addressed passive drive correlation but did not repair the stored identity evidence or establish a shared active-consumer rule.
+- `blast_radius`: Exact placement approval involving this drive, and subsequent reconciliation/source admission until explicitly repaired. A fingerprint-only rewrite would still leave same-bridge reads failing. This is not a fresh offline disk change, proof of archive loss, or a recurrence of partition-versus-parent serial probing.
+- `why_not_caught_earlier`: Existing repair qualifications covered missing/observed serial bindings but omitted the already-documented bridge-encoding case across approval and actual consumers.
+- `planned_remediation`: DEC-153; bounded design and qualification in docs/bridge-serial-repair-plan.md.
+- `docs_updated`: docs/decision_log.md, docs/bridge-serial-repair-plan.md
+- `related`: INC-048, DEC-079, DEC-133, DEC-148, OUT-003
+
+### OUT-003: Drive 01 identity evidence prevents approving the current Fill proposal
+- `id`: OUT-003
+- `date`: 2026-09-12
+- `status`: open
+- `severity`: Medium
+- `triggered_by`: INC-065
+- `summary`: Operator cannot approve the current exact placement proposal. Duration remains open; the portal is available and Fill is idle. No archive loss was observed, and post-upgrade verification found all 18 catalog tables unchanged before the operator created this new draft.
+- `remediation`: Pending the reviewed explicit repair and physical Drive 01 qualification, followed by a fresh preview and operator approval. Do not bypass fencing or restore an older catalog over the new draft.
+- `detail`: docs/bridge-serial-repair-plan.md
+- `docs_updated`: docs/decision_log.md, docs/bridge-serial-repair-plan.md
+- `related`: INC-065, DEC-153
+
+### DEC-153: Guard bridge-serial repair with explicit evidence and consistent consumers
+- `id`: DEC-153
+- `date`: 2026-09-12
+- `status`: accepted
+- `triggered_by`: Operator approved the scoped repair following INC-065 diagnosis.
+- `decision`: Permit an explicit repair only for the exact supported historical encoding relationship with matching historical proofs, a current clean anchor and fresh attached filesystem/annex UUID and capacity evidence. Preserve registered serial, raw observations, old evidence and archive bytes. Retain backup/rehearsal, inventory, controller/physical fences, final observation and atomic approval invalidation. Require one consistent post-repair matching boundary across approval, reconciliation and reads; generic hexadecimal serial equivalence is not authorized. Report the affected drive and an actionable guarded recovery path.
+- `rationale`: Neither a manual hash rewrite nor global serial normalization repairs the complete contract. Canonical identity and physical readout are different representations; accepting their relationship must remain evidence-bound and must not silently enlarge existing Slice approval authority.
+- `impact`: Proof recognition, repair workflow, shared consumer matching and operator diagnostics. The precise Slice evidence-binding design remains subject to review; a necessary new serialized authority format requires separate scope confirmation. Implement in a fresh PR with the approved bounded local Grok/cloud Codex review cycle, no Greptile. Physical repair follows reviewed merge, fresh backup and Drive 01 reconnection; never automatically approve or start Fill.
+- `docs_updated`: docs/decision_log.md, docs/bridge-serial-repair-plan.md, docs/archive-serial-repair.md
+- `related`: INC-065, OUT-003, DEC-133, DEC-148
+
+### DEC-154: Keep bridge compatibility optional and preserve ordinary observation evidence
+- `id`: DEC-154
+- `date`: 2026-09-12
+- `status`: accepted
+- `triggered_by`: Operator approved the bounded correction and one additional local review after DEC-153's three-round stop; final Grok findings and baseline/branch regression tests exposed an optional-match boundary error.
+- `decision`: Missing, stale, malformed or ambiguous bridge proof grants no encoded-serial matching permission; it must not introduce a new refusal for ordinary literal/serial-less source reads. Apply exact sealed generation/anchor checks only before granting bridge compatibility. Preserve raw observed fingerprints when optional matching fails, retaining unproven identity and all existing admission/fence checks. Catalog access errors remain errors, not permission to assume a match.
+- `rationale`: Failure to establish an optional compatibility relationship is different from failure to observe hardware or satisfy ordinary identity rules. Keeping these outcomes separate avoids both broader serial acceptance and accidental refusal of unaffected reads.
+- `impact`: Shared evidence resolver, bootstrap diagnostic preservation and regressions for ordinary reads plus unchanged stale-plan refusal. No new Slice fields, schema, alias registry or live-data changes. Authorize exactly one additional local Grok correction review, not a reset of the default three-round policy; the already-approved cloud Codex cycle remains capped at three rounds, with no Greptile.
+- `docs_updated`: docs/decision_log.md, docs/bridge-serial-repair-plan.md, docs/archive-serial-repair.md
+- `related`: DEC-153, INC-065

@@ -1,6 +1,8 @@
 """Read-only source-use gate sharing the archive writer's nonblocking drive fence."""
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 import json
+from pathlib import Path
+import sqlite3
 
 from modelark import drive_fence
 from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity
@@ -76,15 +78,31 @@ class FencedSources:
                               if drive.drive_label == candidate.drive.drive_label), None)
                 if fresh is None or identity(fresh) != captured:
                     raise TransferRefusal("SOURCE_EVIDENCE_UNAVAILABLE", "source identity changed")
+                serial_args = {}
+                if getattr(self.reader, 'supports_serial_evidence', False):
+                    from modelark.serial_evidence import load_bridge_binding
+                    from modelark.serial_identity import SerialIdentityUnproven
+                    # No caller-provided alias or serialized extension. Resolve
+                    # only against the exact source anchor already in the seal,
+                    # under these same physical fences and one read transaction.
+                    try:
+                        with closing(sqlite3.connect(
+                                Path(self.catalog_path).resolve().as_uri() + '?mode=ro', uri=True)) as con:
+                            con.execute('BEGIN')
+                            binding = load_bridge_binding(con, candidate.drive.drive_label,
+                                                          sealed_source=candidate)
+                    except (sqlite3.Error, SerialIdentityUnproven) as exc:
+                        raise TransferRefusal('SOURCE_EVIDENCE_UNAVAILABLE', str(exc)) from exc
+                    serial_args['_serial_evidence'] = binding
                 if inspect:
                     from .transaction import _same_source
                     if artifact is None or not _same_source(artifact, candidate, snapshot):
                         raise TransferRefusal("SOURCE_CHANGED", candidate.drive.drive_label)
-                    stream = stack.enter_context(self.reader.inspect(candidate, check=check))
+                    stream = stack.enter_context(self.reader.inspect(candidate, check=check, **serial_args))
                 elif check is not None and getattr(self.reader, "policy", None) is not None:
-                    stream = stack.enter_context(self.reader.open(candidate, check=check))
+                    stream = stack.enter_context(self.reader.open(candidate, check=check, **serial_args))
                 else:
-                    stream = stack.enter_context(self.reader.open(candidate))
+                    stream = stack.enter_context(self.reader.open(candidate, **serial_args))
             except UnprovenFenceIdentity as exc:
                 raise TransferRefusal("SOURCE_EVIDENCE_UNAVAILABLE", str(exc)) from exc
             except drive_fence.FenceUnavailable as exc:
