@@ -48,6 +48,17 @@ class FencedSources:
             yield result
 
     @contextmanager
+    def open_polled(self, candidate, poll):
+        """Poll caller authority without destination I/O while reading/decoding.
+
+        Source guards/fences are unchanged. The consumer must perform full
+        destination checks before its next destination access; destination loss
+        during a source-only wait is not promised immediate detection here.
+        """
+        with self._open(candidate, check=poll) as result:
+            yield result
+
+    @contextmanager
     def _open(self, candidate, *, check=None, inspect=False, artifact=None):
         def identity(drive):
             return FenceIdentity(drive.fs_uuid, drive.annex_uuid, drive.serial,

@@ -5,6 +5,7 @@ This is NOT attachment confinement: destination/archive BoundTree roots remain n
 IO failures stay OSError for the caller's attachment-aware classification boundary.
 """
 from dataclasses import dataclass
+from functools import lru_cache
 import os
 from pathlib import Path
 import re
@@ -50,7 +51,29 @@ class Mount:
     source: str
 
 
+_MOUNT_CACHE_MAX_CHARS = 262144
+
+
 def parse_mounts(text):
+    """Interpret fresh mountinfo text, never cache the observation itself.
+
+    Only exact built-in strings can be keys. Bound retained inputs as well as
+    entry count; unusually large tables still receive the same full validation.
+    Callers must continue reading procfs and checking live descriptors each time.
+    """
+    if type(text) is str and len(text) <= _MOUNT_CACHE_MAX_CHARS:
+        return _cached_mounts(text)
+    return _parse_mounts(text)
+
+
+@lru_cache(maxsize=2)
+def _cached_mounts(text):
+    # Successful tuples contain only frozen Mount records and immutable fields.
+    # Exceptions are not cached; changed/malformed input cannot reuse a proof.
+    return _parse_mounts(text)
+
+
+def _parse_mounts(text):
     result = []
     try:
         for line in proc_lines(text):

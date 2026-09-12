@@ -3127,3 +3127,36 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Shared strict proof parser, explicit repair recognition and compatible exclusion, new qualification coverage, unchanged schema layout and reader floor 8. Preserve epoch, UUIDs, serial, archive bytes/provenance and old evidence; invalidate only affected approvals and require fresh Slice preview. No live catalog repair, NAS remount or service rollout in this implementation PR.
 - `docs_updated`: docs/decision_log.md, docs/archive-serial-repair.md, docs/plans/serialless-anchor-repair.md
 - `related`: DEC-133, DEC-137
+
+### DEC-149: Reuse mount syntax only for exact freshly read inventory text
+- `id`: DEC-149
+- `date`: 2026-09-11
+- `status`: accepted
+- `triggered_by`: Operator approved performance work after a correct 91 MB physical Slice took about 18 minutes; source profiling attributed 157 of 204 instrumented seconds to 75,982 repeated mount parses. Local Grok accepted the narrow design on its first pass.
+- `decision`: Memoize only the pure mount parser's successful immutable results, keyed by complete exact built-in strings, with two entries and a 262,144-character per-input retention bound. Oversized or non-exact-string inputs follow the unchanged uncached parser. Retain every fresh procfs read, descriptor/attachment check, source-read guard, authority callback and durable publication boundary.
+- `rationale`: Nested checks multiply syntax work although the freshly observed text rarely changes. Syntax reuse is not cached admission or attachment evidence. Start with this shared narrow fix, not time-based observation reuse or weaker codec callbacks; qualification must establish whether it is sufficient.
+- `impact`: Central host-observation parser and regression tests only; no schema, sealed policy, archive format, live catalog repair, NAS writes or service rollout. Require installed-runtime physical timing and exact hashes/receipts before cloud PR review; any remaining bottleneck returns to profiling and the scoped design review.
+- `docs_updated`: docs/decision_log.md, docs/plans/slice-observation-performance.md
+- `related`: DEC-138, DEC-142, DEC-145, DEC-146
+
+### DEC-150: Separate transfer liveness from destination I/O and normalize write quanta
+- `id`: DEC-150
+- `date`: 2026-09-11
+- `status`: accepted
+- `triggered_by`: DEC-149 physical qualification remained correct but took 395.65 seconds, missing the 60-second gate; operator authorized continued local design/code iterations and Grok accepted this second design pass.
+- `decision`: Expose an explicit polled source-use contract carrying only the existing attempt/Stop/journal-head guard while all source attachment and codec callbacks remain intact. Perform full destination checks before destination I/O, not inside source/pipe events. Gather short original reads into independently owned, at-most-1-MiB append quanta, polling before/after each read and retaining existing append/fsync/accounting/hash/publication ordering.
+- `rationale`: Codec pipe chunks are neither destination I/O nor allocation events. Passing the complete destination census through every decoder callback, then treating each short read as a separate durable append, multiplies independent work. Preserve the boundaries by responsibility rather than weakening or time-caching their evidence.
+- `impact`: Shared Slice session and fenced source adapter; no codec policy, actual-source-read guard, schema, archive or service change. Destination detachment during source-only waits is detected before the next destination access, not promised immediately at each pipe event; Stop/source guards retain existing polling. Existing checked-source callers keep their conservative behavior. Performance gate and final local/code review remain required in the work plan.
+- `docs_updated`: docs/decision_log.md, docs/plans/slice-observation-performance.md
+- `related`: DEC-149, DEC-142, DEC-144
+
+### DEC-151: Accept the measured 80-second Slice result and retain this implementation
+- `id`: DEC-151
+- `date`: 2026-09-11
+- `status`: accepted
+- `triggered_by`: Operator said "80s? that's fine - just keep it then" after reviewing the 80.252-second physical result, three local Grok passes, remaining overhead and possible parallelism.
+- `decision`: Accept the current correct 12-file, 91,306,390-byte NAS-to-USB result for this stage. Replace the exploratory 30-second aim / three-runs-within-60-second release gate with explicit acceptance of the measured result. Keep DEC-149/DEC-150 code; do not add threading, file parallelism, further guard refactoring or another local Grok round. Finish ordinary tests and the already-authorized cloud Codex PR review, with Greptile excluded under the current operator instruction.
+- `rationale`: The measured improvement from approximately 18 minutes to 80 seconds is sufficient for the operator's present use. Further optimization adds scope that is not needed to accept this bounded change.
+- `impact`: Acceptance criterion and work-plan status only; no additional implementation or live deployment. Preserve historical target misses, all correctness evidence and disclosed local-review notes. This is not a claim that the original target passed, that three uninstrumented runs met a new ceiling, or that larger/P2P workloads are performance-qualified. Operator retains merge authority.
+- `docs_updated`: docs/decision_log.md, docs/plans/slice-observation-performance.md
+- `related`: DEC-149, DEC-150
