@@ -4,6 +4,46 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) wh
 
 ## Unreleased
 
+## 0.4.0 - Unreleased
+
+ModelArk 0.4.0 begins the **Public Beta** line. Linux storage operations remain
+operator-attended, and Beta is not a promise of stable pre-1.0 interfaces or support
+for arbitrary filesystems and models. See [release notes](docs/releases/v0.4.0.md).
+
+### Added
+
+- Usable Slice preview, exact approval, original-byte folder delivery and verified
+  receipts, with qualified native ext4 authenticated resume and a separate,
+  narrowly admitted one-attempt FAT32 USB profile. Existing sibling files stay outside
+  the owned output folder; Slice does not fetch missing archive content.
+- Guarded whole-file ZipNN and StreamZNN decoding, sealed resource admission and
+  preflight, shared with production compression/canary and legacy original-byte readers.
+- Explicit backup/rehearsal-first repair of proven archive serial-evidence mismatches,
+  preserving optional serial registration, historical evidence and archive bytes.
+
+### Changed
+
+- Package/runtime version, README and development-status metadata now identify Beta.
+- Application launches use host-local singleton exclusion; attachment-bound source
+  observations follow qualified partition-to-parent identity rather than inferring it.
+- Pure mount parsing is memoized only for exact freshly read text; authority polling
+  is separated from destination checks, and short reads gather into bounded writes.
+
+### Fixed
+
+- Source archives now include the changelog, release notes and operator documentation.
+- Slice rechecks destination authority and identity after EOF before the final flush.
+- Source preflight, Stop handling, guarded worker lifetime and refusal reporting retain
+  their safety boundaries across direct, native and FAT32 delivery.
+
+### Compatibility
+
+- Catalog layout remains v7; readers accept catalog versions 7 and 8. Only explicit
+  serial repair raises an existing catalog's reader floor to 8; ordinary open does not.
+- Private Slice state version 8 and versioned approval envelopes are independent of
+  catalog versions. Back up private state before upgrading; older readers may refuse
+  new records. Do not lower version stamps or reinterpret existing approvals.
+
 ## 0.3.3 - 2026-09-03
 
 ModelArk 0.3.3 is an application-only safety patch over schema v7. It makes an interrupted exact

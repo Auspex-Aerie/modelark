@@ -1,4 +1,4 @@
-"""Release surfaces must identify one package/runtime artifact line (DEC-095)."""
+"""Release surfaces must identify one package/runtime artifact line (DEC-152)."""
 from __future__ import annotations
 
 import re
@@ -8,7 +8,7 @@ import modelark
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CURRENT_RELEASE = "0.3.3"
+CURRENT_RELEASE = "0.4.0"
 
 
 def _project_version() -> str:
@@ -28,3 +28,21 @@ def test_release_identity_surfaces_agree():
     release = ROOT / "docs" / "releases" / f"v{expected}.md"
     assert release.is_file()
     assert f"ModelArk v{expected}" in release.read_text(encoding="utf-8")
+
+
+def test_current_release_is_beta_not_alpha():
+    metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    release = (ROOT / "docs" / "releases" / f"v{CURRENT_RELEASE}.md").read_text(encoding="utf-8")
+    assert '"Development Status :: 4 - Beta"' in metadata
+    assert '"Development Status :: 3 - Alpha"' not in metadata
+    assert f"ModelArk {CURRENT_RELEASE} is a public beta" in readme
+    assert f"Release: v{CURRENT_RELEASE} Public Beta" in readme
+    assert f"ModelArk v{CURRENT_RELEASE} — Public Beta" in release
+
+
+def test_security_support_policy_covers_beta():
+    policy = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+    assert "During pre-1.0 development, including Beta" in policy
+    assert "security fixes target the latest reviewed `main`" in policy
+    assert "During alpha," not in policy

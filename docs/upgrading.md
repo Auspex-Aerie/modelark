@@ -4,14 +4,42 @@ ModelArk upgrades application code normally, but it never silently rewrites an e
 schema is older than the installed release. Existing data is migrated through an explicit,
 backup-first, side-by-side procedure so the old runtime remains a usable rollback point.
 
+## The 0.3.x → 0.4.0 Beta boundary
+
+ModelArk 0.4.0 includes the reviewed Slice, guarded-codec and serial-evidence work.
+An ordinary application update preserves an existing v7 or v8 catalog version;
+it does not run serial repair, rewrite archive bytes, approve work or start Fill.
+Pre-v7 catalogs still require the separate provenance migration described below.
+
+Stop all ModelArk writers, retain a consistent backup of the catalog and its
+SQLite sidecars, application/configuration, and private Slice state before updating.
+Slice journals live separately in `~/.local/state/modelark/slice`, not just in the
+configured catalog data directory. Its private store version 8 and new approval
+envelopes require compatible readers; an old executable is not necessarily a
+safe rollback after opening or creating newer Slice state. Preserve the old
+runtime and state together, and do not discard later work to force a downgrade.
+
+Deploy the reviewed release against the same explicit data/state/config paths,
+without automatic Fill resume. Check `modelark --version` reports `0.4.0`, verify
+the installed catalog reader, and review the plan, drives, pending approvals and
+idle Fill state. Stop the portal before using the separately guarded Slice CLI.
+Fresh Slice previews are needed for the new decode policy; existing seals retain
+their old policy and are never silently rewritten.
+
+Only use [explicit serial repair](archive-serial-repair.md) for a proven matching
+legacy condition after its backup/rehearsal and stopped-writer gates. Repair may
+invalidate affected approvals and raises the catalog reader floor to 8. Rolling
+back the application alone after that repair is unsafe. Beta does not remove
+these boundaries or promise compatibility with arbitrary older development builds.
+
 ## Explicit archive serial repair and reader floor 8
 
 Builds carrying the reviewed serial-identity repair support the unchanged catalog
 layout at versions 7 and 8. Normal open leaves the version alone; only explicit
 repair raises the reader floor to 8 atomically with corrected identity evidence.
 This is distinct from the older provenance/table-layout migration below. Verify
-the exact installed build's read-only opener; the original 0.3.3 package version
-alone cannot identify a reader with this capability.
+the exact installed build's read-only opener. Version 0.4.0 carries this support;
+the original 0.3.3 package version alone cannot identify a development build with it.
 
 Follow [archive-serial-repair.md](archive-serial-repair.md) for quiescence, backups,
 copied rehearsal, bound inspection/repair and fresh approvals. Old binaries must
@@ -66,8 +94,8 @@ record behind that public procedure; ordinary upgrades should begin with the liv
 
 | Existing installation | Required action |
 |---|---|
-| Fresh install with no catalog | None. The current schema is created on first use. |
-| Existing catalog already at the current schema | Update/redeploy normally. |
+| Fresh install with no catalog | No migration. A fresh catalog is created at v7; only explicit serial repair raises its reader floor to 8. |
+| Catalog v7 or explicitly repaired v8 moving to 0.4.0 | Follow the 0.4.0 boundary above; preserve private Slice state and do not perform blanket serial repair. |
 | SQLite catalog at schema v1–v6, including catalogs created by the released ModelArk 0.2.0 | Run the one-time provenance migration before starting the new service. |
 | Legacy checkout with DuckDB or pre-canonical runtime layout | Follow [`legacy-cutover.md`](legacy-cutover.md) first; install the `migration` extra when DuckDB conversion is required. |
 

@@ -3160,3 +3160,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Acceptance criterion and work-plan status only; no additional implementation or live deployment. Preserve historical target misses, all correctness evidence and disclosed local-review notes. This is not a claim that the original target passed, that three uninstrumented runs met a new ceiling, or that larger/P2P workloads are performance-qualified. Operator retains merge authority.
 - `docs_updated`: docs/decision_log.md, docs/plans/slice-observation-performance.md
 - `related`: DEC-149, DEC-150
+
+### DEC-152: Move the next release line to 0.4 Beta after the Slice performance change lands
+- `id`: DEC-152
+- `date`: 2026-09-11
+- `status`: accepted
+- `triggered_by`: Operator stated that after the next change lands, ModelArk moves to 0.4 Beta, no longer Alpha, with README and Git release updates required.
+- `decision`: Make the release following PR #82 the 0.4 Beta line. Prepare synchronized release identity, Beta maturity labeling and release documentation after the current performance change lands; keep that release work separate from PR #82's in-progress review.
+- `rationale`: The operator is explicitly advancing the product's maturity designation. Version output, package metadata, public documentation and the Git release must agree rather than retaining the 0.3.3 public-alpha identity.
+- `impact`: Follow-up release checklist in claudedocs/HANDOFF.md covers README/badge, package and runtime versions, development-status classifier, changelog, release notes, upgrade guidance, release-identity tests, build verification, Git tag and GitHub release. Preserve supported-platform and operator-attended safety limits; future P2P work remains future work. This decision does not itself publish a release, merge PR #82, deploy a runtime or authorize live-data changes.
+- `docs_updated`: docs/decision_log.md, claudedocs/HANDOFF.md
+- `related`: DEC-083, DEC-091, DEC-095, DEC-151

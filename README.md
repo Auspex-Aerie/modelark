@@ -2,13 +2,13 @@
 
 <p align="center">
   <a href="https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Auspex-Aerie/modelark/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="CHANGELOG.md#033---2026-09-03"><img alt="Release: v0.3.3 Public Alpha" src="https://img.shields.io/badge/release-v0.3.3%20Public%20Alpha-orange"></a>
+  <a href="docs/releases/v0.4.0.md"><img alt="Release: v0.4.0 Public Beta" src="https://img.shields.io/badge/release-v0.4.0%20Public%20Beta-blue"></a>
   <a href="pyproject.toml"><img alt="Python 3.10–3.12" src="https://img.shields.io/badge/python-3.10%E2%80%933.12-3776AB?logo=python&amp;logoColor=white"></a>
   <a href="docs/deployment.md"><img alt="Linux" src="https://img.shields.io/badge/platform-Linux-FCC624?logo=linux&amp;logoColor=black"></a>
   <a href="LICENSE"><img alt="Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue"></a>
 </p>
 
-> **ModelArk 0.3.3 is a public alpha.** It is usable today as an operator-attended archive and
+> **ModelArk 0.4.0 is a public beta.** It is usable today as an operator-attended archive and
 > disaster-recovery system for open model artifacts. Storage work remains explicit and reviewable,
 > and interfaces can still change before 1.0.
 
@@ -35,8 +35,8 @@ Approval and execution are separate. Approving an exact placement never starts F
 | Install ModelArk on a new Linux host and create the first archive | [Fresh install and first archive](docs/getting-started.md) |
 | Operate plans, drives, Fill, verification, and restore | [Operating ModelArk](docs/operations.md) |
 | Preview and execute an attended direct-USB Slice | [Direct USB delivery and qualification limits](docs/usable-slice-direct.md) |
-| Project into a new ext4 or FAT32 folder (acceptance in progress) | [Folder workflow, safety limits and remaining gates](docs/usable-slice-folders.md) |
-| Upgrade a 0.2.0 or other pre-v7 catalog | [Upgrading ModelArk](docs/upgrading.md) |
+| Project into a new qualified ext4 or FAT32 folder | [Folder workflow, safety limits and evidence](docs/usable-slice-folders.md) |
+| Upgrade an existing installation, including pre-v7 catalogs | [Upgrading ModelArk](docs/upgrading.md) |
 | Install or update the supervised user service | [Deploying ModelArk](docs/deployment.md) |
 | Perform the stopped side-by-side provenance migration | [Live cutover procedure](docs/provenance-live-cutover.md) |
 
@@ -80,15 +80,24 @@ the detailed contracts.
 - **No automatic deletion of extras.** Reconciliation reports unclaimed content but does not adopt
   or remove it.
 
-## What changed in v0.3.3
+## What changed in v0.4.0
 
-Version 0.3.3 makes placement review recoverable. If a browser reload or disconnect interrupts an
-exact proposal review, the Fill page restores that same immutable draft and keeps Start disabled
-until it is approved or explicitly discarded. It retains the bounded replacement-drive workflow and
-schema v7; no catalog migration is required.
+The first Beta brings **Usable Slice**: preview a complete selected model set, approve its exact
+plan, then reconstruct and hash-check original files in a new output folder. Slice does not need
+to own the whole destination drive. Native ext4 supports authenticated resume; the narrowly admitted
+FAT32 USB profile is one-attempt and requires a new folder after an interrupted attempt.
 
-Read the [v0.3.3 release notes](docs/releases/v0.3.3.md) or the
-[changelog](CHANGELOG.md) for the complete patch record.
+- Shared guarded codec workers support both StreamZNN containers and whole-file ZipNN, with the
+  same resource-policy machinery used by compression/canary and original-byte readers.
+- Source reads use attachment-bound identity evidence; explicit backup-first serial repair handles
+  proven legacy mismatches without silently changing drive registration.
+- Slice avoids repeated mount-text parsing and unnecessary per-chunk destination work. A small
+  physical compressed-source transfer improved from roughly 18 minutes to 80 seconds; this is a
+  measured fixture result, not a general throughput guarantee. It predates the final EOF safety
+  recheck; the [release notes](docs/releases/v0.4.0.md#qualification-and-performance) give the limits.
+
+Read the [v0.4.0 release notes](docs/releases/v0.4.0.md), [upgrade and rollback guidance](docs/upgrading.md),
+and [changelog](CHANGELOG.md). Updating the application does not itself repair a catalog or start Fill.
 
 ## What changed in v0.3.0
 
@@ -124,9 +133,10 @@ That same boundary supports local delivery today and future peer transport:
 - **Peer-to-peer transport:** exchange sealed artifact sets while preserving evidence instead of
   treating successful transport as proof of usability.
 
-Attended physical FAT32 delivery passed using uncompressed archive sources; this does not qualify
-every compressed source, filesystem, desktop mount setup or model for functional loading.
-Compressed-source physical acceptance and guided destination onboarding remain incomplete.
+Attended physical FAT32 delivery passed for a raw-source set and a small compressed-source set,
+including original hashes and receipts. This does not qualify every compressed source, filesystem,
+desktop mount setup, power-loss scenario or model for functional loading. Guided destination
+onboarding remains incomplete; qualified FAT32 mount settings still need operator preparation.
 Scratch transfer and P2P transport remain future work—not shipped features.
 
 ## Project and support

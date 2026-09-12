@@ -6,7 +6,22 @@ Canonical build order and parked work. **Design rationale** lives in the append-
 
 > Task numbers (`#NN`) are stable cross-reference labels; a live task board may assign its own IDs.
 
-## Public alpha — live; runtime acceptance active
+## 0.4 Beta
+
+DEC-152 establishes the 0.4 Beta line after merged PR #82. Slice folder
+delivery, guarded codecs and explicit serial-evidence repair are implemented.
+A small compressed-source physical USB workflow passed; this is bounded evidence,
+not universal device/model qualification. See the [0.4.0 notes](releases/v0.4.0.md)
+and [release checklist](plans/release-0.4-beta.md).
+
+The 0.4.0 package/runtime identity and release documentation are synchronized.
+Tagging and GitHub pre-release publication are post-merge maintainer steps in the
+release checklist, not evidence of a deployed runtime or authority for live data
+changes. Guided destination onboarding (DEF-044), stored-representation delivery,
+scratch transfer and P2P remain product follow-ons. The older milestones below are
+historical context, not instructions to repeat completed live operations.
+
+## Historical public-alpha launch gates
 
 The external audit's numbered code blockers are fixed, the canonical repository is public, and its
 public-project settings are hardened. Repository publication and archive activation remain separate

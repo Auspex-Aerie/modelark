@@ -1,7 +1,7 @@
 # Contributing to ModelArk
 
 ModelArk is built in public and pre-1.0 — bug reports, fixes, docs, and curation ideas are all
-welcome. Expect rough edges, and read the [0.3.3 status](../README.md#what-changed-in-v033) first.
+welcome. Expect rough edges, and read the [0.4.0 Beta status](../README.md#what-changed-in-v040) first.
 
 By taking part you agree to the canonical [Code of Conduct](../CODE_OF_CONDUCT.md).
 
@@ -77,7 +77,7 @@ project's narrative; skim it to understand *why* things are the way they are.
 
 ## Pull requests
 
-At this alpha stage the project moves quickly, so the smoothest way to contribute is a **fork PR** —
+At this beta stage the project moves quickly, so the smoothest way to contribute is a **fork PR** —
 carrying local changes tends to get hard to merge as things shift under you:
 
 1. **Fork** the repo and branch on your fork.
