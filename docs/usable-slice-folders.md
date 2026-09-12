@@ -6,7 +6,10 @@ public-flow and alias qualification passed. Reviewed merge `16e8b3f` was deploye
 the attended real-source FAT32 USB smoke test passed under the qualified mount profile described
 below. This is evidence for that tested configuration, not arbitrary USB or filesystem support.
 See the [acceptance record](acceptance/source-identity-usb-2026-09-10.md) for live repair,
-raw-source completion and the still-incomplete compressed-source follow-up.
+raw-source completion and the historical compressed-source preflight. The later
+[compressed-source qualification](plans/slice-observation-performance.md) passed
+the twelve-file Snowflake set and records the accepted 80-second fixture result.
+The [0.4.0 Beta notes](releases/v0.4.0.md) summarize current support and limits.
 
 ## Operator workflow
 
@@ -140,8 +143,9 @@ Native partial resume authenticates completed output without requiring its sourc
 
 No private schema migration is added by these v2 envelopes. An older binary rejects them, including
 while checking overlapping ownership; stores with v2 records require the upgraded reader. The
-[C2 tracker](plans/slice-c2-progress.md) separates synthetic implementation qualification from
-the still-required public CLI, live deployment and physical compressed-source acceptance gates.
+[C2 tracker](plans/slice-c2-progress.md) preserves its stage-local qualification history.
+Later public CLI and physical compressed-source qualification are summarized in the
+[0.4.0 notes](releases/v0.4.0.md); release publication still does not deploy a live service.
 
 ## FAT32 session workflow
 
@@ -187,6 +191,14 @@ says export verified, not host transaction committed; committed host status supp
 
 No reformat, permission rewriting, live deployment, archive reconciliation or deliberate media
 removal was performed as part of the native implementation.
+
+## Later compressed-source qualification
+
+The later compressed-source test delivered 12 files / 91,306,390 original bytes
+from a read-only NAS archive to a fresh FAT32 child, with independent hashes and
+exact receipts. See the [performance record](plans/slice-observation-performance.md)
+for timing, reviewed EOF follow-up and the limits of this one tested configuration.
+This does not change FAT32's no-resume rule or qualify physical power loss.
 
 ## Deferred destination onboarding
 
