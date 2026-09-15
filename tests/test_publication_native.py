@@ -3,6 +3,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import time
 
@@ -182,3 +184,24 @@ def test_bounded_process_deadline_kills_owned_descendants(tmp_path):
         except ProcessLookupError:
             pass
         raise AssertionError(f"descendant {pid} survived timeout cleanup")
+
+
+def test_owned_session_members_exclude_a_recycled_leader_starttime():
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        starttime = native._proc_starttime(proc.pid)
+        assert proc.pid in native._owned_session_members(proc.pid, starttime)
+        assert proc.pid not in native._owned_session_members(proc.pid, starttime - 1)
+        assert proc.pid not in native._owned_session_members(proc.pid, starttime + 1)
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+
+
+def test_deadline_reap_does_not_killpg_the_raw_child_pid(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("killpg must not run on the timeout path")
+    monkeypatch.setattr(os, "killpg", boom)
+    with pytest.raises(PublicationRefused, match="COMMAND_DEADLINE"):
+        native._bounded_process([sys.executable, "-c", "import time; time.sleep(30)"],
+                                cwd=tmp_path, pass_fds=(), environment={}, limit=1024, deadline=1)

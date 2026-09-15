@@ -55,20 +55,68 @@ _REF = re.compile(r"refs/[A-Za-z0-9_./-]+\Z")
 _COMMAND_DEADLINE_SECONDS = 6 * 60 * 60
 
 
-def _reap_group(child):
-    """SIGKILL the owned session even if the direct child has already exited.
+def _proc_starttime(pid):
+    """Field 22 of /proc/<pid>/stat; None if the process is already gone."""
+    try:
+        text = Path("/proc", str(pid), "stat").read_text()
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+        return None
+    close = text.rfind(")")
+    if close < 0:
+        raise PublicationRefused("PUBLICATION_COMMAND_STAT_UNPROVEN", pid=pid)
+    fields = text[close + 2:].split()
+    if len(fields) < 20:
+        raise PublicationRefused("PUBLICATION_COMMAND_STAT_UNPROVEN", pid=pid)
+    return int(fields[19])
 
-    A descendant can keep an inherited output pipe open after the leader exits.
-    Skipping killpg in that case leaves the group alive and the fences held.
+
+def _owned_session_members(pgid, starttime):
+    """Living processes in this session, excluding a recycled leader PID.
+
+    A reused PID that became a new session leader has pid==pgid but a later
+    starttime; it is not ours. Members must have been born at/after the leader.
+    """
+    owned = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            text = (entry / "stat").read_text()
+        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+            continue
+        close = text.rfind(")")
+        if close < 0:
+            continue
+        fields = text[close + 2:].split()
+        if len(fields) < 20:
+            continue
+        pgrp, born = int(fields[2]), int(fields[19])
+        if pgrp != pgid or born < starttime:
+            continue
+        if pid == pgid and born != starttime:
+            continue
+        owned.append(pid)
+    return owned
+
+
+def _reap_group(child, *, pidfd, pgid, starttime):
+    """Tear down the owned session using pidfd identity, never a recycled PID.
+
+    killpg(child.pid) is not used after spawn: that number can name a different
+    process group once the original session is empty. Signal the leader through
+    the pidfd opened at spawn, then only /proc members whose starttime proves
+    they were born in this session.
     """
     try:
-        os.killpg(child.pid, signal.SIGKILL)
+        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
     except ProcessLookupError:
-        if child.poll() is None:
-            try:
-                child.kill()
-            except ProcessLookupError:
-                pass
+        pass
+    for pid in _owned_session_members(pgid, starttime):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
     try:
         child.wait()
     except ChildProcessError:
@@ -104,7 +152,30 @@ def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None
                           stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           start_new_session=True) as child:
+        pidfd = None
+        starttime = None
         try:
+            try:
+                pidfd = os.pidfd_open(child.pid)
+            except OSError as exc:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    child.kill()
+                child.wait()
+                raise PublicationRefused("PUBLICATION_COMMAND_PIDFD_REQUIRED") from exc
+            starttime = _proc_starttime(child.pid)
+            if type(starttime) is not int:
+                try:
+                    signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    child.kill()
+                child.wait()
+                raise PublicationRefused("PUBLICATION_COMMAND_STAT_UNPROVEN", pid=child.pid)
             with selectors.DefaultSelector() as selector:
                 for pipe, name in ((child.stdout, "out"), (child.stderr, "err")):
                     os.set_blocking(pipe.fileno(), False)
@@ -146,11 +217,18 @@ def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None
             if remaining <= 0:
                 raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE")
             code = child.wait(timeout=remaining)
-        except subprocess.TimeoutExpired as exc:
-            raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE") from exc
-        except BaseException:
-            _reap_group(child)
+        except BaseException as exc:
+            if isinstance(exc, PublicationRefused) and exc.code in {
+                    "PUBLICATION_COMMAND_PIDFD_REQUIRED", "PUBLICATION_COMMAND_STAT_UNPROVEN"}:
+                raise
+            if pidfd is not None and type(starttime) is int:
+                _reap_group(child, pidfd=pidfd, pgid=child.pid, starttime=starttime)
+            if isinstance(exc, subprocess.TimeoutExpired):
+                raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE") from exc
             raise
+        finally:
+            if pidfd is not None:
+                os.close(pidfd)
     if code:
         raise PublicationRefused("PUBLICATION_NATIVE_COMMAND_FAILED", returncode=code,
                                  command=argv[0], stderr=bytes(buffers["err"]).decode(errors="replace")[:1024])
