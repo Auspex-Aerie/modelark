@@ -198,6 +198,49 @@ def test_owned_session_members_exclude_a_recycled_leader_starttime():
         proc.wait()
 
 
+def test_owned_tree_members_include_a_setsid_child_session_scan_misses():
+    proc = subprocess.Popen(
+        [sys.executable, "-c",
+         "import os, time\n"
+         "child = os.fork()\n"
+         "if child == 0:\n"
+         "    os.setsid()\n"
+         "    time.sleep(30)\n"
+         "    os._exit(0)\n"
+         "time.sleep(30)\n"],
+        start_new_session=True)
+    try:
+        until = time.monotonic() + 2
+        starttime = extras = None
+        while time.monotonic() < until:
+            starttime = native._proc_starttime(proc.pid)
+            if type(starttime) is not int:
+                time.sleep(0.05)
+                continue
+            tree = native._owned_tree_members(proc.pid, starttime)
+            session = native._owned_session_members(proc.pid, starttime)
+            extras = set(tree) - set(session)
+            if extras:
+                break
+            time.sleep(0.05)
+        assert extras, "setsid child must remain in the ppid tree and leave the session"
+        assert proc.pid in native._owned_tree_members(proc.pid, starttime)
+        assert proc.pid not in extras
+    finally:
+        starttime = native._proc_starttime(proc.pid)
+        if type(starttime) is int:
+            for pid in native._owned_tree_members(proc.pid, starttime):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
+
 def _without_cgroup(monkeypatch):
     def boom():
         raise PublicationRefused("PUBLICATION_COMMAND_CGROUP_REQUIRED")
@@ -221,6 +264,14 @@ def test_missing_cgroup_delegation_still_reaps_forking_descendants(tmp_path, mon
     test_bounded_process_deadline_kills_owned_descendants(tmp_path)
 
 
+def test_missing_cgroup_without_subreaper_refuses(tmp_path, monkeypatch):
+    _without_cgroup(monkeypatch)
+    monkeypatch.setattr(native, "_set_subreaper", lambda enabled: False)
+    with pytest.raises(PublicationRefused, match="SUBREAPER_REQUIRED"):
+        native._bounded_process([sys.executable, "-c", "import time; time.sleep(30)"],
+                                cwd=tmp_path, pass_fds=(), environment={}, limit=1024, deadline=1)
+
+
 def test_deadline_reap_does_not_killpg_the_raw_child_pid(tmp_path, monkeypatch):
     def boom(*args, **kwargs):
         raise AssertionError("killpg must not run on the timeout path")
@@ -233,20 +284,22 @@ def test_deadline_reap_does_not_killpg_the_raw_child_pid(tmp_path, monkeypatch):
 def _wait_dead(pid, seconds=2):
     until = time.monotonic() + seconds
     while time.monotonic() < until:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not native._proc_alive(pid):
             return
         time.sleep(0.05)
     try:
         os.kill(pid, 9)
     except ProcessLookupError:
         return
-    raise AssertionError(f"pid {pid} survived timeout cleanup")
+    if native._proc_alive(pid):
+        raise AssertionError(f"pid {pid} survived timeout cleanup")
 
 
-def test_deadline_reaps_setsid_and_forking_descendants(tmp_path):
-    if not _private_cgroup_available():
+@pytest.mark.parametrize("force_no_cgroup", [False, True])
+def test_deadline_reaps_setsid_and_forking_descendants(tmp_path, monkeypatch, force_no_cgroup):
+    if force_no_cgroup:
+        _without_cgroup(monkeypatch)
+    elif not _private_cgroup_available():
         pytest.skip("private cgroup v2 is not delegated in this process")
     script = tmp_path / "escape.py"
     marker = tmp_path / "pids"

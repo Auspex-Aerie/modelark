@@ -56,7 +56,9 @@ The second command:
 - creates `.venv` when absent and runs a non-editable `pip install` from the checkout;
 - creates the explicit data and state directories with mode `0700`;
 - writes `~/.config/systemd/user/modelark.service` with mode `0600`
-  (`Delegate=yes` so native Git/annex children can be cgroup-contained);
+  (`Delegate=yes` so native Git/annex children can be cgroup-contained;
+  without that subtree, timeout cleanup uses the process tree plus a
+  temporary child subreaper instead of the session);
 - runs `systemctl --user daemon-reload`;
 - does **not** enable or start the service.
 

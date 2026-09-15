@@ -7,6 +7,7 @@ private coordinator operations and require a separately durable command intent.
 from __future__ import annotations
 
 from contextlib import ExitStack, contextmanager
+import ctypes
 from dataclasses import dataclass
 import hashlib
 import json
@@ -17,6 +18,7 @@ import selectors
 import signal
 import stat
 import subprocess
+import threading
 import time
 from types import MappingProxyType
 
@@ -54,6 +56,8 @@ _REF = re.compile(r"refs/[A-Za-z0-9_./-]+\Z")
 # estimator. Tests pass a one-second deadline.
 _COMMAND_DEADLINE_SECONDS = 6 * 60 * 60
 _REAP_PASSES = 64
+_PR_SET_CHILD_SUBREAPER = 36
+_SPAWN_REAP = threading.Lock()
 
 
 def _command_cgroup_parent():
@@ -71,7 +75,8 @@ def _command_cgroup():
     """Private cgroup v2 for one native command. setsid does not escape it.
 
     Yields None when the process cannot create a delegated subtree (documented
-    systemd user units enable Delegate=yes). Cleanup then loops the session.
+    systemd user units enable Delegate=yes). Cleanup then uses the process tree
+    plus a temporary subreaper; session scan is a third pass.
     """
     path = None
     try:
@@ -115,18 +120,39 @@ def _cgroup_pids(path):
 
 
 def _proc_alive(pid):
-    try:
-        text = Path("/proc", str(pid), "stat").read_text()
-    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-        return False
-    close = text.rfind(")")
-    if close < 0 or close + 2 >= len(text):
-        return False
-    return text[close + 2] != "Z"
+    row = _proc_table().get(pid)
+    return row is not None and row[0] != "Z"
 
 
 def _cgroup_live_pids(path):
     return [pid for pid in _cgroup_pids(path) if _proc_alive(pid)]
+
+
+def _set_subreaper(enabled):
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.prctl.restype = ctypes.c_int
+    return libc.prctl(_PR_SET_CHILD_SUBREAPER, 1 if enabled else 0, 0, 0, 0) == 0
+
+
+def _proc_table():
+    """pid -> (state, ppid, pgrp, starttime)."""
+    table = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            text = (entry / "stat").read_text()
+        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+            continue
+        close = text.rfind(")")
+        if close < 0:
+            continue
+        fields = text[close + 2:].split()
+        if len(fields) < 20:
+            continue
+        table[pid] = (fields[0], int(fields[1]), int(fields[2]), int(fields[19]))
+    return table
 
 
 def _kill_cgroup(path):
@@ -167,28 +193,16 @@ def _proc_starttime(pid):
     return int(fields[19])
 
 
-def _owned_session_members(pgid, starttime):
+def _owned_session_members(pgid, starttime, table=None):
     """Living processes in this session, excluding a recycled leader PID.
 
     A reused PID that became a new session leader has pid==pgid but a later
     starttime; it is not ours. Members must have been born at/after the leader.
     """
+    if table is None:
+        table = _proc_table()
     owned = []
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit():
-            continue
-        pid = int(entry.name)
-        try:
-            text = (entry / "stat").read_text()
-        except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
-            continue
-        close = text.rfind(")")
-        if close < 0:
-            continue
-        fields = text[close + 2:].split()
-        if len(fields) < 20:
-            continue
-        state, pgrp, born = fields[0], int(fields[2]), int(fields[19])
+    for pid, (state, _ppid, pgrp, born) in table.items():
         if state == "Z" or pgrp != pgid or born < starttime:
             continue
         if pid == pgid and born != starttime:
@@ -197,41 +211,136 @@ def _owned_session_members(pgid, starttime):
     return owned
 
 
-def _reap_group(child, *, pidfd, pgid, starttime, cgroup):
-    """Tear down the cgroup, then any leftover session members.
+def _owned_tree_members(root, starttime, table=None):
+    """Living processes in the ppid tree rooted at root. setsid does not escape."""
+    if table is None:
+        table = _proc_table()
+    row = table.get(root)
+    if row is not None and row[3] != starttime:
+        return []
+    by_parent = {}
+    for pid, (_state, parent, _pgrp, born) in table.items():
+        if born < starttime:
+            continue
+        by_parent.setdefault(parent, []).append(pid)
+    owned = []
+    seen = set()
+    stack = [root]
+    while stack:
+        pid = stack.pop()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        current = table.get(pid)
+        if current is not None and current[0] != "Z" and current[3] >= starttime:
+            owned.append(pid)
+        stack.extend(by_parent.get(pid, ()))
+    return owned
 
-    cgroup.kill is the container: forks during a /proc snapshot and setsid
-    children stay in the cgroup. Session scan is a second pass, still looped
-    until empty. pidfd identifies the original leader; killpg is not used here.
+
+def _reparented_orphans(preexisting, starttime, table=None, *, zombies=False):
+    """Children of this process that appeared after the reap snapshot."""
+    if table is None:
+        table = _proc_table()
+    me = os.getpid()
+    found = []
+    for pid, (state, parent, _pgrp, born) in table.items():
+        if parent != me or pid in preexisting or born < starttime:
+            continue
+        if zombies:
+            if state == "Z":
+                found.append(pid)
+            continue
+        if state == "Z":
+            continue
+        found.append(pid)
+    return found
+
+
+def _wait_collected(pids):
+    for pid in pids:
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except ChildProcessError:
+            pass
+
+
+def _reap_leftovers(child, *, pgid, starttime, preexisting):
+    table = _proc_table()
+    leftover = _owned_tree_members(child.pid, starttime, table)
+    leftover.extend(_reparented_orphans(preexisting, starttime, table))
+    leftover.extend(_owned_session_members(pgid, starttime, table))
+    return list(dict.fromkeys(leftover))
+
+
+def _reap_group(child, *, pidfd, pgid, starttime, cgroup):
+    """Tear down the cgroup, then the process tree, then any leftover session.
+
+    cgroup.kill is the kernel container. Without it, PR_SET_CHILD_SUBREAPER plus
+    the ppid tree is the container: setsid leaves the session, not the tree, and
+    orphans reparent here instead of init. Session scan is a third pass. pidfd
+    identifies the original leader; killpg is not used here.
     """
     if cgroup is not None:
         _kill_cgroup(cgroup)
-    try:
-        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    for _ in range(_REAP_PASSES):
+    table = _proc_table()
+    preexisting = {pid for pid, (_state, parent, _pgrp, _born) in table.items()
+                   if parent == os.getpid()}
+    preexisting.add(child.pid)
+    subreaper = _set_subreaper(True)
+    if not subreaper and cgroup is None:
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         try:
             child.wait(timeout=0)
         except (subprocess.TimeoutExpired, ChildProcessError):
             pass
-        leftover = _owned_session_members(pgid, starttime)
-        if not leftover:
-            break
-        for pid in leftover:
+        raise PublicationRefused("PUBLICATION_COMMAND_SUBREAPER_REQUIRED")
+    try:
+        leftover = []
+        for _ in range(_REAP_PASSES):
             try:
-                os.kill(pid, signal.SIGKILL)
+                signal.pidfd_send_signal(pidfd, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-        time.sleep(0.01)
-    else:
-        leftover = _owned_session_members(pgid, starttime)
-        if leftover:
-            raise PublicationRefused("PUBLICATION_COMMAND_REAP_INCOMPLETE", pids=tuple(leftover))
-    try:
-        child.wait()
-    except ChildProcessError:
-        pass
+            leftover = _reap_leftovers(child, pgid=pgid, starttime=starttime,
+                                       preexisting=preexisting)
+            for pid in leftover:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            table = _proc_table()
+            _wait_collected(leftover + _reparented_orphans(
+                preexisting, starttime, table, zombies=True) + [child.pid])
+            try:
+                child.wait(timeout=0)
+            except (subprocess.TimeoutExpired, ChildProcessError):
+                pass
+            leftover = _reap_leftovers(child, pgid=pgid, starttime=starttime,
+                                       preexisting=preexisting)
+            if not leftover and child.poll() is not None:
+                leftover = _reap_leftovers(child, pgid=pgid, starttime=starttime,
+                                           preexisting=preexisting)
+                if not leftover:
+                    break
+            time.sleep(0.01)
+        else:
+            leftover = _reap_leftovers(child, pgid=pgid, starttime=starttime,
+                                       preexisting=preexisting)
+            if leftover:
+                raise PublicationRefused("PUBLICATION_COMMAND_REAP_INCOMPLETE", pids=tuple(leftover))
+        try:
+            child.wait()
+        except ChildProcessError:
+            pass
+        _wait_collected(_reparented_orphans(
+            preexisting, starttime, zombies=True) + [child.pid])
+    finally:
+        if subreaper:
+            _set_subreaper(False)
 
 
 def _ref_or_oid(value):
@@ -246,7 +355,7 @@ def _identity(value):
 def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None, deadline=None):
     """Drain both pipes with hard byte budgets and a hang deadline.
 
-    The child is its own session so timeout/error can SIGKILL the owned group.
+    The child is its own session so timeout/error can SIGKILL the owned tree.
     No caller-selected executable is used. Stdin is bounded intent data.
     """
     if type(limit) is not int or not 0 < limit <= 64 * 1024 * 1024:
@@ -265,9 +374,16 @@ def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None
     with _command_cgroup() as cgroup:
         if cgroup is not None:
             spawn["preexec_fn"] = _cgroup_join(cgroup / "cgroup.procs")
-        with subprocess.Popen(argv, **spawn) as child:
-            pidfd = None
-            starttime = None
+        pidfd = None
+        starttime = None
+        _SPAWN_REAP.acquire()
+        spawn_locked = True
+        try:
+            child = subprocess.Popen(argv, **spawn)
+        except BaseException:
+            _SPAWN_REAP.release()
+            raise
+        with child:
             try:
                 try:
                     pidfd = os.pidfd_open(child.pid)
@@ -290,6 +406,11 @@ def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None
                         child.kill()
                     child.wait()
                     raise PublicationRefused("PUBLICATION_COMMAND_STAT_UNPROVEN", pid=child.pid)
+            finally:
+                if spawn_locked:
+                    _SPAWN_REAP.release()
+                    spawn_locked = False
+            try:
                 with selectors.DefaultSelector() as selector:
                     for pipe, name in ((child.stdout, "out"), (child.stderr, "err")):
                         os.set_blocking(pipe.fileno(), False)
@@ -336,7 +457,8 @@ def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None
                         "PUBLICATION_COMMAND_PIDFD_REQUIRED", "PUBLICATION_COMMAND_STAT_UNPROVEN"}:
                     raise
                 if pidfd is not None and type(starttime) is int:
-                    _reap_group(child, pidfd=pidfd, pgid=child.pid, starttime=starttime, cgroup=cgroup)
+                    with _SPAWN_REAP:
+                        _reap_group(child, pidfd=pidfd, pgid=child.pid, starttime=starttime, cgroup=cgroup)
                 if isinstance(exc, subprocess.TimeoutExpired):
                     raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE") from exc
                 raise

@@ -3281,10 +3281,22 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEC-158: Contain native publication commands; reap until the container is empty
 - `id`: DEC-158
 - `date`: 2026-09-15
-- `status`: accepted
+- `status`: accepted; fallback containment superseded by DEC-159
 - `triggered_by`: Independent Greptile P1 and DeepSeek P2 on PR 85 commit `125aa40` (same hole); Greptile P1 on `d8aa941` (hard cgroup require disabled qualify)
 - `decision`: Treat a one-shot `/proc` PID list as not a container. Each native Git/annex command joins a private cgroup v2; timeout cleanup uses `cgroup.kill` and loops until no live members remain. pidfd plus starttime still identify the original leader; `killpg` is only for the instant `pidfd_open` fails while the PID is still ours. Documented systemd user units set `Delegate=yes` so the unprivileged process can mkdir that subtree. If the subtree cannot be created, native commands still run and cleanup loops the session until empty. `setsid`/`setpgid` leave session/pgid but not a cgroup; the setsid escape is closed only on the cgroup path.
 - `rationale`: Fork-during-scan and session-escape are one containment problem. Rescanning the session until empty is necessary and is the degraded path; it is not sufficient because a descendant can `setsid` and keep fence fds. Hard-failing `PUBLICATION_COMMAND_CGROUP_REQUIRED` turned missing user-unit delegation into a total native-command outage, including qualify.
 - `impact`: `modelark/publication_native.py` timeout/reap; `scripts/modelark.service`; deploy docs. No live Fill or conversion.
 - `docs_updated`: docs/decision_log.md, docs/deployment.md, modelark/publication_native.py, scripts/modelark.service, tests/test_publication_native.py, tests/test_deploy.py
 - `related`: DEC-157
+
+### DEC-159: Fallback native containment is the process tree plus a temporary subreaper
+- `id`: DEC-159
+- `date`: 2026-09-15
+- `status`: accepted
+- `supersedes`: DEC-158 session-loop fallback (cgroup success path unchanged)
+- `triggered_by`: Operator approved the small architectural fix after Greptile extra-3x round 3/3 P1 on `34585a1` (fallback session scan misses `setsid`) oscillating with the `d8aa941` P1 (hard cgroup require disables qualify)
+- `decision`: When a private cgroup cannot be created, timeout cleanup sets `PR_SET_CHILD_SUBREAPER`, SIGKILLs the ppid tree of the pidfd-identified leader until no live members remain, and SIGKILLs processes that newly reparent to the ModelArk process with starttime at or after the leader. A mutex covers spawn-start (`Popen` through pidfd and starttime) and reap so a concurrent native command is not mistaken for an orphan. Session scan remains a third pass. If subreaper cannot be installed and no cgroup is attached, refuse `PUBLICATION_COMMAND_SUBREAPER_REQUIRED`. `killpg` remains only for the instant `pidfd_open` fails while the PID is still ours.
+- `rationale`: `setsid`/`setpgid` leave session/pgid, not `ppid`. A looped tree walk plus subreaper is the same containment idea as cgroup membership without a second runner, PID namespace, seccomp policy, or wrapper process. Session membership stays insufficient as the fallback definition.
+- `impact`: `modelark/publication_native.py` timeout/reap only. No live Fill or conversion.
+- `docs_updated`: docs/decision_log.md, docs/deployment.md, modelark/publication_native.py, tests/test_publication_native.py
+- `related`: DEC-158
