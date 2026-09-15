@@ -628,12 +628,23 @@ def test_envelope_wired_only_into_reviewed_transport():
     root = Path(__file__).resolve().parent.parent / "modelark"
     envelope = {"drive_fence", "drive_mutation"}
     mutation_allowed = {"fetch.py", "drive_bootstrap.py"}
+    # DEC-157 Stage 1: exact helpers only, not permission to import the mutation
+    # module and call arbitrary writers. Stage review remains a separate gate.
+    limited_mutation_imports = {
+        "publication_locks.py": {"_fence_identity", "_require_live_session_token"},
+        "publication_store.py": {"_publish_anchor_locked"},
+        "publication_attachment.py": {"DriveMutationRefused"},
+        "publication_inventory.py": {"Observation"},
+        "archive_publisher.py": {"_advance_one", "_drive_facts"},
+        "restore.py": {"_fence_identity", "_generation_is_clean", "_drive_facts", "DriveMutationRefused"},
+    }
     # #35-C admission preview + PR-08 proposal approval (A6) hold drive fences.
     # PR-09 execution session/recovery holds real controller+drive fences (B8/B9).
     # 2026-09-07 / DEC-109: Slice 2's read-only gate shares the neutral fence, not mutation authority.
     fence_allowed = mutation_allowed | {
         "admission.py", "proposal.py", "execution_service.py", "execution_recovery.py",
         "slice/sources.py", "drive_lifecycle.py",
+        "publication_locks.py", "registration_publication.py", "restore.py",
     }
     importers, offenders = set(), []
     for path in root.rglob("*.py"):
@@ -650,6 +661,12 @@ def test_envelope_wired_only_into_reviewed_transport():
                 hits = (set(module) & envelope) | {a.name for a in node.names if a.name in envelope}
             for mod in hits:
                 importers.add(relative)
+                if mod == "drive_mutation" and relative in limited_mutation_imports:
+                    if (not isinstance(node, ast.ImportFrom) or node.module != "modelark.drive_mutation"
+                            or any(a.asname is not None for a in node.names)
+                            or not {a.name for a in node.names} <= limited_mutation_imports[relative]):
+                        offenders.append(f"{relative}:{node.lineno} (unscoped mutation import)")
+                    continue
                 allowed = fence_allowed if mod == "drive_fence" else mutation_allowed
                 if relative not in allowed:
                     offenders.append(f"{path.relative_to(root)}:{node.lineno} ({mod})")
@@ -659,6 +676,17 @@ def test_envelope_wired_only_into_reviewed_transport():
     assert "drive_bootstrap.py" in importers, (
         "PR-03c1 must reuse the fenced primitives in modelark/drive_bootstrap.py "
         "(the reviewed registration/recovery/operator path)")
+
+
+def test_publication_store_clean_publisher_only_belongs_to_enclosing_closure():
+    root = Path(__file__).resolve().parent.parent / "modelark"
+    tree = ast.parse((root / "publication_store.py").read_text())
+    uses = []
+    for function in (node for node in tree.body if isinstance(node, ast.FunctionDef)):
+        for node in ast.walk(function):
+            if isinstance(node, ast.Name) and node.id == "_publish_anchor_locked":
+                uses.append(function.name)
+    assert uses == ["close_operation"]
 
 
 def main():

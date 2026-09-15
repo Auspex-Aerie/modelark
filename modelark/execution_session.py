@@ -11,7 +11,8 @@ from typing import Any, Callable, Mapping
 from modelark import execution_config as ecfg
 from modelark import execution_authority as authority
 from modelark import execution_projection as eproj
-from modelark.proposal import Refusal, bump_revision, current_draft_ids, load_proposal
+from modelark import catalog_write_context
+from modelark.proposal import Refusal, bump_revision, current_draft_ids, load_proposal, require_publication_clear
 
 # Re-export config helpers for session_api discovery in Gate-1 fixtures.
 strip_execution_config_binding_for_test = ecfg.strip_execution_config_binding_for_test
@@ -169,6 +170,8 @@ def start_session(con, proposal_id, predecessor_id, services):
         return proposal
     proposal_id = proposal["proposal_id"]
 
+    require_publication_clear(con, _proposal_drive_ids(proposal))
+
     pending = current_draft_ids(con)
     if pending:
         return Refusal(
@@ -189,6 +192,7 @@ def start_session(con, proposal_id, predecessor_id, services):
         proposal_id = proposal["proposal_id"]
         relevant = _proposal_drive_ids(proposal)
         fence_binding = held.enter_context(fences.hold_all_sorted(relevant))
+        require_publication_clear(con, relevant)
         current_config = dict(services.config.read_graph_affecting_config() or {})
         frozen = ecfg.ExecutionConfig.from_values(current_config)
 
@@ -671,6 +675,7 @@ def session_write(con, session_id, fencing_token, operation: Callable):
         raise Refusal("SESSION_STATE_INVALID", {"state": row[0]}, ())
     auth_token = _set_session_write_auth(con, session_id, fencing_token)
     _SESSION_WRITE_DEPTH = 1
+    write_token = None
     try:
         con.execute("BEGIN IMMEDIATE")
         try:
@@ -686,12 +691,18 @@ def session_write(con, session_id, fencing_token, operation: Callable):
                     authority.Attempt(session_id, int(row2[0])), row2[1], LIVE_STATES)
             except authority.AuthorityLost as exc:
                 raise Refusal("SESSION_TOKEN_MISMATCH", {"session_id": session_id}, ()) from exc
+            write_token = catalog_write_context._enter(
+                con, catalog_write_context.WriteIdentity("session", str(session_id), int(fencing_token)))
             result = operation(con)
-            new_rev = bump_revision(con)
-            con.execute(
-                "UPDATE execution_sessions SET bound_planner_revision=? "
-                "WHERE session_id=? AND fencing_token=?",
-                [new_rev, session_id, int(fencing_token)])
+            from modelark.proposal import GraphResult
+            proven_noop = isinstance(result, GraphResult) and result.proven_noop
+            new_rev = None if proven_noop else bump_revision(con)
+            if new_rev is not None:
+                con.execute(
+                    "UPDATE execution_sessions SET bound_planner_revision=? "
+                    "WHERE session_id=? AND fencing_token=?",
+                    [new_rev, session_id, int(fencing_token)])
+            catalog_write_context._finish(con, new_rev)
             con.execute("COMMIT")
             return result
         except BaseException:
@@ -701,6 +712,8 @@ def session_write(con, session_id, fencing_token, operation: Callable):
                 pass
             raise
     finally:
+        if write_token is not None:
+            catalog_write_context._exit(write_token)
         _SESSION_WRITE_AUTH.reset(auth_token)
         _SESSION_WRITE_DEPTH = 0
 

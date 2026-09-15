@@ -196,6 +196,19 @@ def _capture_held_fence_fds(store):
     """Wrap drive_fence.hold_drives_sorted to record the ACTUAL held drive-lock FDs, so a test can
     assert those exact FDs reach the writer / children rather than arbitrary values."""
     real = drive_fence.hold_drives_sorted
+    real_map, real_controller = drive_fence.hold_map, drive_fence.hold_controller
+
+    @contextmanager
+    def traced_map(*args, **kwargs):
+        with real_map(*args, **kwargs) as handle:
+            store["map_fd"] = handle.fileno()
+            yield handle
+
+    @contextmanager
+    def traced_controller(*args, **kwargs):
+        with real_controller(*args, **kwargs) as handle:
+            store["controller_fd"] = handle.fileno()
+            yield handle
 
     @contextmanager
     def traced(keyed_drives, *a, **k):
@@ -203,8 +216,36 @@ def _capture_held_fence_fds(store):
             store["fds"] = tuple(h.fileno() for h in handles)
             yield handles
 
-    with mock.patch.object(drive_fence, "hold_drives_sorted", traced):
+    with mock.patch.object(drive_fence, "hold_drives_sorted", traced), \
+         mock.patch.object(drive_fence, "hold_map", traced_map), \
+         mock.patch.object(drive_fence, "hold_controller", traced_controller):
         yield store
+
+
+@contextmanager
+def _synthetic_map_identity():
+    """These transport seam fixtures mock Git entirely, including map identity."""
+    from modelark import registration_publication
+    def identity(path):
+        value = path.stat()
+        return "bf7f9d09-7bfb-4a63-95cb-d7e9ba937154", (value.st_dev, value.st_ino)
+    with mock.patch.object(registration_publication, "_identity", side_effect=identity):
+        yield
+
+
+@contextmanager
+def _bound_map_remotes(urls):
+    """Satisfy the exact map-remote routing check used before a legacy annex sync."""
+    from modelark import fetch_publication
+    resolved = {label: str(Path(path).resolve(strict=True)) for label, path in urls.items()}
+    def git(_root, *args, **kwargs):
+        if args[:3] == ("config", "--local", "--get-all") and args[3].startswith("remote.") and args[3].endswith(".url"):
+            label = args[3][len("remote."):-len(".url")]
+            if label in resolved:
+                return resolved[label]
+        raise AssertionError(f"unexpected git config probe {args}")
+    with mock.patch.object(fetch_publication.register, "_git", side_effect=git):
+        yield
 
 
 def _replica_setup(con, tmp_path):
@@ -482,7 +523,8 @@ def test_replica_fences_source_and_target_and_passes_both_fds(tmp_path):
         def cap_reconcile(_con, label, dest, annex, paths, keys):
             reconciled.append((label, tuple(paths), tuple(keys)))
 
-        with _capture_held_fence_fds(held), \
+        with _capture_held_fence_fds(held), _synthetic_map_identity(), \
+             _bound_map_remotes({"drive-00": tmp_path / "src", "drive-04": tmp_path / "tgt"}), \
              mock.patch.object(fetch, "_observe_drive", side_effect=_observe_from_rows(con), create=True), \
              mock.patch.object(fetch, "_reconcile_touched", side_effect=cap_reconcile, create=True), \
              mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
@@ -497,7 +539,7 @@ def test_replica_fences_source_and_target_and_passes_both_fds(tmp_path):
                     if "remote" in cmd or ("annex" in cmd and ("copy" in cmd or "sync" in cmd))]
         assert mutating, f"expected mutating git children (remote/copy/sync); captured {[c for c, _ in captured]}"
         for cmd, fds in mutating:
-            assert tuple(fds or ()) == held["fds"], \
+            assert tuple(fds or ()) == (held["controller_fd"], held["map_fd"], *held["fds"]), \
                 f"replica child {cmd[:5]} must inherit ALL actual held fence FDs; got {fds}"
         syncs = [cmd for cmd, _fds in captured if "annex" in cmd and "sync" in cmd]
         assert syncs and all("drive-00" in cmd and "drive-04" in cmd for cmd in syncs), \
@@ -818,7 +860,8 @@ def test_run_threads_writer_fence_fds_into_fetch_model_and_tail_sync(tmp_path):
             runs.append((tuple(cmd), k.get("pass_fds")))
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
-        with _capture_held_fence_fds(held), \
+        with _capture_held_fence_fds(held), _synthetic_map_identity(), \
+             _bound_map_remotes({"drive-00": tmp_path}), \
              mock.patch.object(fetch, "_observe_drive", side_effect=_observe_from_rows(con), create=True), \
              mock.patch.object(fetch, "fetch_model", side_effect=fake_model), \
              mock.patch.object(fetch, "_is_annex", return_value=True), \
@@ -829,10 +872,11 @@ def test_run_threads_writer_fence_fds_into_fetch_model_and_tail_sync(tmp_path):
         writer = seen_model.get("writer")
         assert writer is not None and hasattr(writer, "child_fence_fds"), \
             "run() must pass the mutation writer (with child_fence_fds) into fetch_model"
-        assert tuple(writer.child_fence_fds) == held.get("fds"), \
+        all_fds = (held["controller_fd"], held["map_fd"], *held["fds"])
+        assert tuple(writer.child_fence_fds) == all_fds, \
             "fetch_model must receive the ACTUAL held drive-fence FDs"
         syncs = [(cmd, fds) for cmd, fds in runs if "annex" in cmd and "sync" in cmd]
-        assert syncs and all(tuple(f or ()) == held.get("fds") for _c, f in syncs), \
+        assert syncs and all(tuple(f or ()) == all_fds for _c, f in syncs), \
             f"the run()-tail annex sync must inherit the held fence FDs; got {syncs}"
         map_sync = [cmd for cmd, _f in syncs if str(tmp_path / "lib") in cmd]
         assert map_sync and "drive-00" in map_sync[0], \
@@ -1017,7 +1061,8 @@ def test_replica_writability_probe_runs_after_both_generations_committed(tmp_pat
             return True
 
         try:
-            with mock.patch.object(fetch, "_observe_drive", side_effect=_observe_from_rows(con), create=True), \
+            with _synthetic_map_identity(), \
+                 mock.patch.object(fetch, "_observe_drive", side_effect=_observe_from_rows(con), create=True), \
                  mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
                  mock.patch.object(fetch.register, "library_root", return_value=library), \
                  mock.patch.object(fetch, "_dest_writable", side_effect=dest_writable), \

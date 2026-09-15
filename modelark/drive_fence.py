@@ -15,6 +15,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import tempfile
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -56,6 +57,24 @@ def drive_lock_path(identity, epoch) -> Path:
     return _LOCK_DIR / f"drive-{drive_lock_key(identity, epoch)}.lock"
 
 
+def map_lock_path(map_uuid: str) -> Path:
+    """Same map identity contends across catalog copies and state directories."""
+    if not isinstance(map_uuid, str) or str(uuid.UUID(map_uuid)) != map_uuid:
+        raise ValueError("a canonical proven map annex UUID is required")
+    return _LOCK_DIR / f"map-{_sha('map:' + map_uuid)}.lock"
+
+
+@contextmanager
+def hold_map(map_uuid: str, *, blocking=True):
+    handle = _acquire(map_lock_path(map_uuid), blocking)
+    try:
+        yield handle
+    finally:
+        # All publication children inherit this descriptor. An exited parent
+        # must not unlock the shared open-file description while a child writes.
+        handle.close()
+
+
 def _acquire(path: Path, blocking: bool, *, shared=False):
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = open(path, "w")                          # noqa: SIM115 — held open for the lock's lifetime
@@ -75,7 +94,8 @@ def hold_controller(catalog_path, *, blocking=True):
     try:
         yield handle
     finally:
-        fcntl.flock(handle, fcntl.LOCK_UN)
+        # Closing retains exclusion in children that explicitly inherited this
+        # open-file description; an explicit LOCK_UN would release their hold.
         handle.close()
 
 

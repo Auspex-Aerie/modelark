@@ -1,0 +1,1359 @@
+{
+  "status": "passed",
+  "root": "/tmp/modelark-sha256e-qualification-57zmmb6m",
+  "checks": [
+    {
+      "name": "sha256e-config.json-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.safetensors-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.safetensors.znn-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.safetensors.zstd-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.gguf-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-pytorch_model.bin-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.pt-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.pth-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.ckpt-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.pkl-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.pickle-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.onnx-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.npz-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.npy-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-vocab.model-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-vocab.vocab-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-vocab.tiktoken-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-template.jinja-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-README.md-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-notes.txt-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-model.py-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-preview.png-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-preview.jpg-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-vocab.tokenizer-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-evaluation.yaml-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-evaluation.yml-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-mapped.blob-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-tokenizer-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-.gitignore-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-.gitattributes-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-nested/.eval/tasks.yaml-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-case.JSON-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-multi.part.extension-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-unusual.a_b-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-unicode.\ud83d\udc3a-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.q4.gguf-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-config.json.znn-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-notes.txt.znn-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-weights.gguf.znn-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-bundle.tar.gz-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-config.json.gz-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-archive.zip-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-archive.bz2-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-model.zst-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-punctuation-._+ \ud83d\udc3a.yaml-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-line\nbreak.json-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-tab\tname.py-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-unicode.\u00e9-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-extension.a-b-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-extension.a+b-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-extension.a b-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    },
+    {
+      "name": "sha256e-empty.json-exact-bytes-and-committed-lock-unlock-relock",
+      "status": "passed"
+    }
+  ],
+  "live_archive_or_catalog_access": false,
+  "stage_1_complete": false,
+  "details": {
+    "observations": [
+      {
+        "filename": "config.json",
+        "stored_path": "case-0/config.json",
+        "key": "SHA256E-s45--3dd5bb85144875f9fa3c66275e39694f62c4a5b8d49978da8ecd571b624764cb.json",
+        "suffix": ".json",
+        "size": 45,
+        "sha256": "3dd5bb85144875f9fa3c66275e39694f62c4a5b8d49978da8ecd571b624764cb",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f6a302f7a472f534841323536452d7334352d2d336464356262383531343438373566396661336336363237356533393639346636326334613562386434393937386461386563643537316236323437363463622e6a736f6e2f534841323536452d7334352d2d336464356262383531343438373566396661336336363237356533393639346636326334613562386434393937386461386563643537316236323437363463622e6a736f6e",
+          "object_path": ".git/annex/objects/j0/zG/SHA256E-s45--3dd5bb85144875f9fa3c66275e39694f62c4a5b8d49978da8ecd571b624764cb.json/SHA256E-s45--3dd5bb85144875f9fa3c66275e39694f62c4a5b8d49978da8ecd571b624764cb.json",
+          "object_sha256": "3dd5bb85144875f9fa3c66275e39694f62c4a5b8d49978da8ecd571b624764cb"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334352d2d336464356262383531343438373566396661336336363237356533393639346636326334613562386434393937386461386563643537316236323437363463622e6a736f6e0a",
+          "object_path": ".git/annex/objects/j0/zG/SHA256E-s45--3dd5bb85144875f9fa3c66275e39694f62c4a5b8d49978da8ecd571b624764cb.json/SHA256E-s45--3dd5bb85144875f9fa3c66275e39694f62c4a5b8d49978da8ecd571b624764cb.json",
+          "object_sha256": "3dd5bb85144875f9fa3c66275e39694f62c4a5b8d49978da8ecd571b624764cb"
+        }
+      },
+      {
+        "filename": "weights.safetensors",
+        "stored_path": "case-1/weights.safetensors",
+        "key": "SHA256E-s45--42576cc0bc9770fbe59337edf90d5a95a4aeeb41f521c966548837287ee92d86",
+        "suffix": "",
+        "size": 45,
+        "sha256": "42576cc0bc9770fbe59337edf90d5a95a4aeeb41f521c966548837287ee92d86",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f377a2f46312f534841323536452d7334352d2d343235373663633062633937373066626535393333376564663930643561393561346165656234316635323163393636353438383337323837656539326438362f534841323536452d7334352d2d34323537366363306263393737306662653539333337656466393064356139356134616565623431663532316339363635343838333732383765653932643836",
+          "object_path": ".git/annex/objects/7z/F1/SHA256E-s45--42576cc0bc9770fbe59337edf90d5a95a4aeeb41f521c966548837287ee92d86/SHA256E-s45--42576cc0bc9770fbe59337edf90d5a95a4aeeb41f521c966548837287ee92d86",
+          "object_sha256": "42576cc0bc9770fbe59337edf90d5a95a4aeeb41f521c966548837287ee92d86"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334352d2d343235373663633062633937373066626535393333376564663930643561393561346165656234316635323163393636353438383337323837656539326438360a",
+          "object_path": ".git/annex/objects/7z/F1/SHA256E-s45--42576cc0bc9770fbe59337edf90d5a95a4aeeb41f521c966548837287ee92d86/SHA256E-s45--42576cc0bc9770fbe59337edf90d5a95a4aeeb41f521c966548837287ee92d86",
+          "object_sha256": "42576cc0bc9770fbe59337edf90d5a95a4aeeb41f521c966548837287ee92d86"
+        }
+      },
+      {
+        "filename": "weights.safetensors.znn",
+        "stored_path": "case-2/weights.safetensors.znn",
+        "key": "SHA256E-s45--f3b598301834f335b518246bf5ebeacef2869edb3f71ee8172ab7e39861d1bf3.znn",
+        "suffix": ".znn",
+        "size": 45,
+        "sha256": "f3b598301834f335b518246bf5ebeacef2869edb3f71ee8172ab7e39861d1bf3",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f34762f674a2f534841323536452d7334352d2d663362353938333031383334663333356235313832343662663565626561636566323836396564623366373165653831373261623765333938363164316266332e7a6e6e2f534841323536452d7334352d2d663362353938333031383334663333356235313832343662663565626561636566323836396564623366373165653831373261623765333938363164316266332e7a6e6e",
+          "object_path": ".git/annex/objects/4v/gJ/SHA256E-s45--f3b598301834f335b518246bf5ebeacef2869edb3f71ee8172ab7e39861d1bf3.znn/SHA256E-s45--f3b598301834f335b518246bf5ebeacef2869edb3f71ee8172ab7e39861d1bf3.znn",
+          "object_sha256": "f3b598301834f335b518246bf5ebeacef2869edb3f71ee8172ab7e39861d1bf3"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334352d2d663362353938333031383334663333356235313832343662663565626561636566323836396564623366373165653831373261623765333938363164316266332e7a6e6e0a",
+          "object_path": ".git/annex/objects/4v/gJ/SHA256E-s45--f3b598301834f335b518246bf5ebeacef2869edb3f71ee8172ab7e39861d1bf3.znn/SHA256E-s45--f3b598301834f335b518246bf5ebeacef2869edb3f71ee8172ab7e39861d1bf3.znn",
+          "object_sha256": "f3b598301834f335b518246bf5ebeacef2869edb3f71ee8172ab7e39861d1bf3"
+        }
+      },
+      {
+        "filename": "weights.safetensors.zstd",
+        "stored_path": "case-3/weights.safetensors.zstd",
+        "key": "SHA256E-s45--58cc726d7eafc9acf5c51068c3ff35fbe0e8c5171190d6963d78a7699a047fef.zstd",
+        "suffix": ".zstd",
+        "size": 45,
+        "sha256": "58cc726d7eafc9acf5c51068c3ff35fbe0e8c5171190d6963d78a7699a047fef",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f77672f51762f534841323536452d7334352d2d353863633732366437656166633961636635633531303638633366663335666265306538633531373131393064363936336437386137363939613034376665662e7a7374642f534841323536452d7334352d2d353863633732366437656166633961636635633531303638633366663335666265306538633531373131393064363936336437386137363939613034376665662e7a737464",
+          "object_path": ".git/annex/objects/wg/Qv/SHA256E-s45--58cc726d7eafc9acf5c51068c3ff35fbe0e8c5171190d6963d78a7699a047fef.zstd/SHA256E-s45--58cc726d7eafc9acf5c51068c3ff35fbe0e8c5171190d6963d78a7699a047fef.zstd",
+          "object_sha256": "58cc726d7eafc9acf5c51068c3ff35fbe0e8c5171190d6963d78a7699a047fef"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334352d2d353863633732366437656166633961636635633531303638633366663335666265306538633531373131393064363936336437386137363939613034376665662e7a7374640a",
+          "object_path": ".git/annex/objects/wg/Qv/SHA256E-s45--58cc726d7eafc9acf5c51068c3ff35fbe0e8c5171190d6963d78a7699a047fef.zstd/SHA256E-s45--58cc726d7eafc9acf5c51068c3ff35fbe0e8c5171190d6963d78a7699a047fef.zstd",
+          "object_sha256": "58cc726d7eafc9acf5c51068c3ff35fbe0e8c5171190d6963d78a7699a047fef"
+        }
+      },
+      {
+        "filename": "weights.gguf",
+        "stored_path": "case-4/weights.gguf",
+        "key": "SHA256E-s45--14c43fbe589f46bf62d7646d4ad0e6858588ae416e75cf18d7f0ab19c21f7d95.gguf",
+        "suffix": ".gguf",
+        "size": 45,
+        "sha256": "14c43fbe589f46bf62d7646d4ad0e6858588ae416e75cf18d7f0ab19c21f7d95",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f394b2f46762f534841323536452d7334352d2d313463343366626535383966343662663632643736343664346164306536383538353838616534313665373563663138643766306162313963323166376439352e676775662f534841323536452d7334352d2d313463343366626535383966343662663632643736343664346164306536383538353838616534313665373563663138643766306162313963323166376439352e67677566",
+          "object_path": ".git/annex/objects/9K/Fv/SHA256E-s45--14c43fbe589f46bf62d7646d4ad0e6858588ae416e75cf18d7f0ab19c21f7d95.gguf/SHA256E-s45--14c43fbe589f46bf62d7646d4ad0e6858588ae416e75cf18d7f0ab19c21f7d95.gguf",
+          "object_sha256": "14c43fbe589f46bf62d7646d4ad0e6858588ae416e75cf18d7f0ab19c21f7d95"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334352d2d313463343366626535383966343662663632643736343664346164306536383538353838616534313665373563663138643766306162313963323166376439352e676775660a",
+          "object_path": ".git/annex/objects/9K/Fv/SHA256E-s45--14c43fbe589f46bf62d7646d4ad0e6858588ae416e75cf18d7f0ab19c21f7d95.gguf/SHA256E-s45--14c43fbe589f46bf62d7646d4ad0e6858588ae416e75cf18d7f0ab19c21f7d95.gguf",
+          "object_sha256": "14c43fbe589f46bf62d7646d4ad0e6858588ae416e75cf18d7f0ab19c21f7d95"
+        }
+      },
+      {
+        "filename": "pytorch_model.bin",
+        "stored_path": "case-5/pytorch_model.bin",
+        "key": "SHA256E-s45--7810d659b69aa8a90148efac90bc0899331cf370ce44ea34f541fd573ccf8a9d.bin",
+        "suffix": ".bin",
+        "size": 45,
+        "sha256": "7810d659b69aa8a90148efac90bc0899331cf370ce44ea34f541fd573ccf8a9d",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f30322f394b2f534841323536452d7334352d2d373831306436353962363961613861393031343865666163393062633038393933333163663337306365343465613334663534316664353733636366386139642e62696e2f534841323536452d7334352d2d373831306436353962363961613861393031343865666163393062633038393933333163663337306365343465613334663534316664353733636366386139642e62696e",
+          "object_path": ".git/annex/objects/02/9K/SHA256E-s45--7810d659b69aa8a90148efac90bc0899331cf370ce44ea34f541fd573ccf8a9d.bin/SHA256E-s45--7810d659b69aa8a90148efac90bc0899331cf370ce44ea34f541fd573ccf8a9d.bin",
+          "object_sha256": "7810d659b69aa8a90148efac90bc0899331cf370ce44ea34f541fd573ccf8a9d"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334352d2d373831306436353962363961613861393031343865666163393062633038393933333163663337306365343465613334663534316664353733636366386139642e62696e0a",
+          "object_path": ".git/annex/objects/02/9K/SHA256E-s45--7810d659b69aa8a90148efac90bc0899331cf370ce44ea34f541fd573ccf8a9d.bin/SHA256E-s45--7810d659b69aa8a90148efac90bc0899331cf370ce44ea34f541fd573ccf8a9d.bin",
+          "object_sha256": "7810d659b69aa8a90148efac90bc0899331cf370ce44ea34f541fd573ccf8a9d"
+        }
+      },
+      {
+        "filename": "weights.pt",
+        "stored_path": "case-6/weights.pt",
+        "key": "SHA256E-s45--3879a924f9a67031724966ee6cebb448b2ea1d87491365fdf240e78b6a3b1fa6.pt",
+        "suffix": ".pt",
+        "size": 45,
+        "sha256": "3879a924f9a67031724966ee6cebb448b2ea1d87491365fdf240e78b6a3b1fa6",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f6d322f58392f534841323536452d7334352d2d333837396139323466396136373033313732343936366565366365626234343862326561316438373439313336356664663234306537386236613362316661362e70742f534841323536452d7334352d2d333837396139323466396136373033313732343936366565366365626234343862326561316438373439313336356664663234306537386236613362316661362e7074",
+          "object_path": ".git/annex/objects/m2/X9/SHA256E-s45--3879a924f9a67031724966ee6cebb448b2ea1d87491365fdf240e78b6a3b1fa6.pt/SHA256E-s45--3879a924f9a67031724966ee6cebb448b2ea1d87491365fdf240e78b6a3b1fa6.pt",
+          "object_sha256": "3879a924f9a67031724966ee6cebb448b2ea1d87491365fdf240e78b6a3b1fa6"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334352d2d333837396139323466396136373033313732343936366565366365626234343862326561316438373439313336356664663234306537386236613362316661362e70740a",
+          "object_path": ".git/annex/objects/m2/X9/SHA256E-s45--3879a924f9a67031724966ee6cebb448b2ea1d87491365fdf240e78b6a3b1fa6.pt/SHA256E-s45--3879a924f9a67031724966ee6cebb448b2ea1d87491365fdf240e78b6a3b1fa6.pt",
+          "object_sha256": "3879a924f9a67031724966ee6cebb448b2ea1d87491365fdf240e78b6a3b1fa6"
+        }
+      },
+      {
+        "filename": "weights.pth",
+        "stored_path": "case-7/weights.pth",
+        "key": "SHA256E-s45--d383585b40572786b4feaa19ffcd34fc887dd880a3980c9b2f15cb61e2e8e1bb.pth",
+        "suffix": ".pth",
+        "size": 45,
+        "sha256": "d383585b40572786b4feaa19ffcd34fc887dd880a3980c9b2f15cb61e2e8e1bb",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f36382f35582f534841323536452d7334352d2d643338333538356234303537323738366234666561613139666663643334666338383764643838306133393830633962326631356362363165326538653162622e7074682f534841323536452d7334352d2d643338333538356234303537323738366234666561613139666663643334666338383764643838306133393830633962326631356362363165326538653162622e707468",
+          "object_path": ".git/annex/objects/68/5X/SHA256E-s45--d383585b40572786b4feaa19ffcd34fc887dd880a3980c9b2f15cb61e2e8e1bb.pth/SHA256E-s45--d383585b40572786b4feaa19ffcd34fc887dd880a3980c9b2f15cb61e2e8e1bb.pth",
+          "object_sha256": "d383585b40572786b4feaa19ffcd34fc887dd880a3980c9b2f15cb61e2e8e1bb"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334352d2d643338333538356234303537323738366234666561613139666663643334666338383764643838306133393830633962326631356362363165326538653162622e7074680a",
+          "object_path": ".git/annex/objects/68/5X/SHA256E-s45--d383585b40572786b4feaa19ffcd34fc887dd880a3980c9b2f15cb61e2e8e1bb.pth/SHA256E-s45--d383585b40572786b4feaa19ffcd34fc887dd880a3980c9b2f15cb61e2e8e1bb.pth",
+          "object_sha256": "d383585b40572786b4feaa19ffcd34fc887dd880a3980c9b2f15cb61e2e8e1bb"
+        }
+      },
+      {
+        "filename": "weights.ckpt",
+        "stored_path": "case-8/weights.ckpt",
+        "key": "SHA256E-s45--bebc17e533573ef9622c2de9c82d14d82209a289403d21154e77b8cdbafdb34a.ckpt",
+        "suffix": ".ckpt",
+        "size": 45,
+        "sha256": "bebc17e533573ef9622c2de9c82d14d82209a289403d21154e77b8cdbafdb34a",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f4d462f58372f534841323536452d7334352d2d626562633137653533333537336566393632326332646539633832643134643832323039613238393430336432313135346537376238636462616664623334612e636b70742f534841323536452d7334352d2d626562633137653533333537336566393632326332646539633832643134643832323039613238393430336432313135346537376238636462616664623334612e636b7074",
+          "object_path": ".git/annex/objects/MF/X7/SHA256E-s45--bebc17e533573ef9622c2de9c82d14d82209a289403d21154e77b8cdbafdb34a.ckpt/SHA256E-s45--bebc17e533573ef9622c2de9c82d14d82209a289403d21154e77b8cdbafdb34a.ckpt",
+          "object_sha256": "bebc17e533573ef9622c2de9c82d14d82209a289403d21154e77b8cdbafdb34a"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334352d2d626562633137653533333537336566393632326332646539633832643134643832323039613238393430336432313135346537376238636462616664623334612e636b70740a",
+          "object_path": ".git/annex/objects/MF/X7/SHA256E-s45--bebc17e533573ef9622c2de9c82d14d82209a289403d21154e77b8cdbafdb34a.ckpt/SHA256E-s45--bebc17e533573ef9622c2de9c82d14d82209a289403d21154e77b8cdbafdb34a.ckpt",
+          "object_sha256": "bebc17e533573ef9622c2de9c82d14d82209a289403d21154e77b8cdbafdb34a"
+        }
+      },
+      {
+        "filename": "weights.pkl",
+        "stored_path": "case-9/weights.pkl",
+        "key": "SHA256E-s45--1dbe51c0b9de85686de19123f0f3f8836c70bec7179c14aa86a36daf4d5bc415.pkl",
+        "suffix": ".pkl",
+        "size": 45,
+        "sha256": "1dbe51c0b9de85686de19123f0f3f8836c70bec7179c14aa86a36daf4d5bc415",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f4a312f32332f534841323536452d7334352d2d316462653531633062396465383536383664653139313233663066336638383336633730626563373137396331346161383661333664616634643562633431352e706b6c2f534841323536452d7334352d2d316462653531633062396465383536383664653139313233663066336638383336633730626563373137396331346161383661333664616634643562633431352e706b6c",
+          "object_path": ".git/annex/objects/J1/23/SHA256E-s45--1dbe51c0b9de85686de19123f0f3f8836c70bec7179c14aa86a36daf4d5bc415.pkl/SHA256E-s45--1dbe51c0b9de85686de19123f0f3f8836c70bec7179c14aa86a36daf4d5bc415.pkl",
+          "object_sha256": "1dbe51c0b9de85686de19123f0f3f8836c70bec7179c14aa86a36daf4d5bc415"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334352d2d316462653531633062396465383536383664653139313233663066336638383336633730626563373137396331346161383661333664616634643562633431352e706b6c0a",
+          "object_path": ".git/annex/objects/J1/23/SHA256E-s45--1dbe51c0b9de85686de19123f0f3f8836c70bec7179c14aa86a36daf4d5bc415.pkl/SHA256E-s45--1dbe51c0b9de85686de19123f0f3f8836c70bec7179c14aa86a36daf4d5bc415.pkl",
+          "object_sha256": "1dbe51c0b9de85686de19123f0f3f8836c70bec7179c14aa86a36daf4d5bc415"
+        }
+      },
+      {
+        "filename": "weights.pickle",
+        "stored_path": "case-10/weights.pickle",
+        "key": "SHA256E-s46--2b72f3ff5ba0afd340ee29a1ddceb6d81defbb375abad612023aa65270153961",
+        "suffix": "",
+        "size": 46,
+        "sha256": "2b72f3ff5ba0afd340ee29a1ddceb6d81defbb375abad612023aa65270153961",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f38362f31322f534841323536452d7334362d2d326237326633666635626130616664333430656532396131646463656236643831646566626233373561626164363132303233616136353237303135333936312f534841323536452d7334362d2d32623732663366663562613061666433343065653239613164646365623664383164656662623337356162616436313230323361613635323730313533393631",
+          "object_path": ".git/annex/objects/86/12/SHA256E-s46--2b72f3ff5ba0afd340ee29a1ddceb6d81defbb375abad612023aa65270153961/SHA256E-s46--2b72f3ff5ba0afd340ee29a1ddceb6d81defbb375abad612023aa65270153961",
+          "object_sha256": "2b72f3ff5ba0afd340ee29a1ddceb6d81defbb375abad612023aa65270153961"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d326237326633666635626130616664333430656532396131646463656236643831646566626233373561626164363132303233616136353237303135333936310a",
+          "object_path": ".git/annex/objects/86/12/SHA256E-s46--2b72f3ff5ba0afd340ee29a1ddceb6d81defbb375abad612023aa65270153961/SHA256E-s46--2b72f3ff5ba0afd340ee29a1ddceb6d81defbb375abad612023aa65270153961",
+          "object_sha256": "2b72f3ff5ba0afd340ee29a1ddceb6d81defbb375abad612023aa65270153961"
+        }
+      },
+      {
+        "filename": "weights.onnx",
+        "stored_path": "case-11/weights.onnx",
+        "key": "SHA256E-s46--429494d89a4be123f5198d2e78e8e1da366173480afb9ac761b05c0972dbd79b.onnx",
+        "suffix": ".onnx",
+        "size": 46,
+        "sha256": "429494d89a4be123f5198d2e78e8e1da366173480afb9ac761b05c0972dbd79b",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f33712f567a2f534841323536452d7334362d2d343239343934643839613462653132336635313938643265373865386531646133363631373334383061666239616337363162303563303937326462643739622e6f6e6e782f534841323536452d7334362d2d343239343934643839613462653132336635313938643265373865386531646133363631373334383061666239616337363162303563303937326462643739622e6f6e6e78",
+          "object_path": ".git/annex/objects/3q/Vz/SHA256E-s46--429494d89a4be123f5198d2e78e8e1da366173480afb9ac761b05c0972dbd79b.onnx/SHA256E-s46--429494d89a4be123f5198d2e78e8e1da366173480afb9ac761b05c0972dbd79b.onnx",
+          "object_sha256": "429494d89a4be123f5198d2e78e8e1da366173480afb9ac761b05c0972dbd79b"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d343239343934643839613462653132336635313938643265373865386531646133363631373334383061666239616337363162303563303937326462643739622e6f6e6e780a",
+          "object_path": ".git/annex/objects/3q/Vz/SHA256E-s46--429494d89a4be123f5198d2e78e8e1da366173480afb9ac761b05c0972dbd79b.onnx/SHA256E-s46--429494d89a4be123f5198d2e78e8e1da366173480afb9ac761b05c0972dbd79b.onnx",
+          "object_sha256": "429494d89a4be123f5198d2e78e8e1da366173480afb9ac761b05c0972dbd79b"
+        }
+      },
+      {
+        "filename": "weights.npz",
+        "stored_path": "case-12/weights.npz",
+        "key": "SHA256E-s46--972a970fd57950875a9da9488e215cb5b1a396be43678e410116b77bb1a05e4b.npz",
+        "suffix": ".npz",
+        "size": 46,
+        "sha256": "972a970fd57950875a9da9488e215cb5b1a396be43678e410116b77bb1a05e4b",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f71352f4b772f534841323536452d7334362d2d393732613937306664353739353038373561396461393438386532313563623562316133393662653433363738653431303131366237376262316130356534622e6e707a2f534841323536452d7334362d2d393732613937306664353739353038373561396461393438386532313563623562316133393662653433363738653431303131366237376262316130356534622e6e707a",
+          "object_path": ".git/annex/objects/q5/Kw/SHA256E-s46--972a970fd57950875a9da9488e215cb5b1a396be43678e410116b77bb1a05e4b.npz/SHA256E-s46--972a970fd57950875a9da9488e215cb5b1a396be43678e410116b77bb1a05e4b.npz",
+          "object_sha256": "972a970fd57950875a9da9488e215cb5b1a396be43678e410116b77bb1a05e4b"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d393732613937306664353739353038373561396461393438386532313563623562316133393662653433363738653431303131366237376262316130356534622e6e707a0a",
+          "object_path": ".git/annex/objects/q5/Kw/SHA256E-s46--972a970fd57950875a9da9488e215cb5b1a396be43678e410116b77bb1a05e4b.npz/SHA256E-s46--972a970fd57950875a9da9488e215cb5b1a396be43678e410116b77bb1a05e4b.npz",
+          "object_sha256": "972a970fd57950875a9da9488e215cb5b1a396be43678e410116b77bb1a05e4b"
+        }
+      },
+      {
+        "filename": "weights.npy",
+        "stored_path": "case-13/weights.npy",
+        "key": "SHA256E-s46--e68215c9d2e893e697689e348176d1c64a579fe8fd6011b6eccd65551c813999.npy",
+        "suffix": ".npy",
+        "size": 46,
+        "sha256": "e68215c9d2e893e697689e348176d1c64a579fe8fd6011b6eccd65551c813999",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f306d2f58302f534841323536452d7334362d2d653638323135633964326538393365363937363839653334383137366431633634613537396665386664363031316236656363643635353531633831333939392e6e70792f534841323536452d7334362d2d653638323135633964326538393365363937363839653334383137366431633634613537396665386664363031316236656363643635353531633831333939392e6e7079",
+          "object_path": ".git/annex/objects/0m/X0/SHA256E-s46--e68215c9d2e893e697689e348176d1c64a579fe8fd6011b6eccd65551c813999.npy/SHA256E-s46--e68215c9d2e893e697689e348176d1c64a579fe8fd6011b6eccd65551c813999.npy",
+          "object_sha256": "e68215c9d2e893e697689e348176d1c64a579fe8fd6011b6eccd65551c813999"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d653638323135633964326538393365363937363839653334383137366431633634613537396665386664363031316236656363643635353531633831333939392e6e70790a",
+          "object_path": ".git/annex/objects/0m/X0/SHA256E-s46--e68215c9d2e893e697689e348176d1c64a579fe8fd6011b6eccd65551c813999.npy/SHA256E-s46--e68215c9d2e893e697689e348176d1c64a579fe8fd6011b6eccd65551c813999.npy",
+          "object_sha256": "e68215c9d2e893e697689e348176d1c64a579fe8fd6011b6eccd65551c813999"
+        }
+      },
+      {
+        "filename": "vocab.model",
+        "stored_path": "case-14/vocab.model",
+        "key": "SHA256E-s46--261805b62d1e8678f3b9042450b35d853370b6e58a2c809bcb72b3197210718b",
+        "suffix": "",
+        "size": 46,
+        "sha256": "261805b62d1e8678f3b9042450b35d853370b6e58a2c809bcb72b3197210718b",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f31772f71572f534841323536452d7334362d2d323631383035623632643165383637386633623930343234353062333564383533333730623665353861326338303962636237326233313937323130373138622f534841323536452d7334362d2d32363138303562363264316538363738663362393034323435306233356438353333373062366535386132633830396263623732623331393732313037313862",
+          "object_path": ".git/annex/objects/1w/qW/SHA256E-s46--261805b62d1e8678f3b9042450b35d853370b6e58a2c809bcb72b3197210718b/SHA256E-s46--261805b62d1e8678f3b9042450b35d853370b6e58a2c809bcb72b3197210718b",
+          "object_sha256": "261805b62d1e8678f3b9042450b35d853370b6e58a2c809bcb72b3197210718b"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d323631383035623632643165383637386633623930343234353062333564383533333730623665353861326338303962636237326233313937323130373138620a",
+          "object_path": ".git/annex/objects/1w/qW/SHA256E-s46--261805b62d1e8678f3b9042450b35d853370b6e58a2c809bcb72b3197210718b/SHA256E-s46--261805b62d1e8678f3b9042450b35d853370b6e58a2c809bcb72b3197210718b",
+          "object_sha256": "261805b62d1e8678f3b9042450b35d853370b6e58a2c809bcb72b3197210718b"
+        }
+      },
+      {
+        "filename": "vocab.vocab",
+        "stored_path": "case-15/vocab.vocab",
+        "key": "SHA256E-s46--66199d9ae7ab68499696b76bfacf3e9707b4d3e3518dfe8d160f4dcf226b5942",
+        "suffix": "",
+        "size": 46,
+        "sha256": "66199d9ae7ab68499696b76bfacf3e9707b4d3e3518dfe8d160f4dcf226b5942",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f36352f6d5a2f534841323536452d7334362d2d363631393964396165376162363834393936393662373662666163663365393730376234643365333531386466653864313630663464636632323662353934322f534841323536452d7334362d2d36363139396439616537616236383439393639366237366266616366336539373037623464336533353138646665386431363066346463663232366235393432",
+          "object_path": ".git/annex/objects/65/mZ/SHA256E-s46--66199d9ae7ab68499696b76bfacf3e9707b4d3e3518dfe8d160f4dcf226b5942/SHA256E-s46--66199d9ae7ab68499696b76bfacf3e9707b4d3e3518dfe8d160f4dcf226b5942",
+          "object_sha256": "66199d9ae7ab68499696b76bfacf3e9707b4d3e3518dfe8d160f4dcf226b5942"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d363631393964396165376162363834393936393662373662666163663365393730376234643365333531386466653864313630663464636632323662353934320a",
+          "object_path": ".git/annex/objects/65/mZ/SHA256E-s46--66199d9ae7ab68499696b76bfacf3e9707b4d3e3518dfe8d160f4dcf226b5942/SHA256E-s46--66199d9ae7ab68499696b76bfacf3e9707b4d3e3518dfe8d160f4dcf226b5942",
+          "object_sha256": "66199d9ae7ab68499696b76bfacf3e9707b4d3e3518dfe8d160f4dcf226b5942"
+        }
+      },
+      {
+        "filename": "vocab.tiktoken",
+        "stored_path": "case-16/vocab.tiktoken",
+        "key": "SHA256E-s46--ebcf14362e8edd48a8a110f576d26739271a40e9cbec4bb779de453cc0b47208",
+        "suffix": "",
+        "size": 46,
+        "sha256": "ebcf14362e8edd48a8a110f576d26739271a40e9cbec4bb779de453cc0b47208",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f70582f4a512f534841323536452d7334362d2d656263663134333632653865646434386138613131306635373664323637333932373161343065396362656334626237373964653435336363306234373230382f534841323536452d7334362d2d65626366313433363265386564643438613861313130663537366432363733393237316134306539636265633462623737396465343533636330623437323038",
+          "object_path": ".git/annex/objects/pX/JQ/SHA256E-s46--ebcf14362e8edd48a8a110f576d26739271a40e9cbec4bb779de453cc0b47208/SHA256E-s46--ebcf14362e8edd48a8a110f576d26739271a40e9cbec4bb779de453cc0b47208",
+          "object_sha256": "ebcf14362e8edd48a8a110f576d26739271a40e9cbec4bb779de453cc0b47208"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d656263663134333632653865646434386138613131306635373664323637333932373161343065396362656334626237373964653435336363306234373230380a",
+          "object_path": ".git/annex/objects/pX/JQ/SHA256E-s46--ebcf14362e8edd48a8a110f576d26739271a40e9cbec4bb779de453cc0b47208/SHA256E-s46--ebcf14362e8edd48a8a110f576d26739271a40e9cbec4bb779de453cc0b47208",
+          "object_sha256": "ebcf14362e8edd48a8a110f576d26739271a40e9cbec4bb779de453cc0b47208"
+        }
+      },
+      {
+        "filename": "template.jinja",
+        "stored_path": "case-17/template.jinja",
+        "key": "SHA256E-s46--463d1cd46692f39d903844d900f2f194eb0c1fb42b4afce47fd60607cd4c24f9",
+        "suffix": "",
+        "size": 46,
+        "sha256": "463d1cd46692f39d903844d900f2f194eb0c1fb42b4afce47fd60607cd4c24f9",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f33672f33322f534841323536452d7334362d2d343633643163643436363932663339643930333834346439303066326631393465623063316662343262346166636534376664363036303763643463323466392f534841323536452d7334362d2d34363364316364343636393266333964393033383434643930306632663139346562306331666234326234616663653437666436303630376364346332346639",
+          "object_path": ".git/annex/objects/3g/32/SHA256E-s46--463d1cd46692f39d903844d900f2f194eb0c1fb42b4afce47fd60607cd4c24f9/SHA256E-s46--463d1cd46692f39d903844d900f2f194eb0c1fb42b4afce47fd60607cd4c24f9",
+          "object_sha256": "463d1cd46692f39d903844d900f2f194eb0c1fb42b4afce47fd60607cd4c24f9"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d343633643163643436363932663339643930333834346439303066326631393465623063316662343262346166636534376664363036303763643463323466390a",
+          "object_path": ".git/annex/objects/3g/32/SHA256E-s46--463d1cd46692f39d903844d900f2f194eb0c1fb42b4afce47fd60607cd4c24f9/SHA256E-s46--463d1cd46692f39d903844d900f2f194eb0c1fb42b4afce47fd60607cd4c24f9",
+          "object_sha256": "463d1cd46692f39d903844d900f2f194eb0c1fb42b4afce47fd60607cd4c24f9"
+        }
+      },
+      {
+        "filename": "README.md",
+        "stored_path": "case-18/README.md",
+        "key": "SHA256E-s46--7df5c1afa2e91ee7d2154e35b9bb32890366ca068c2d232db307fdd1d02c431b.md",
+        "suffix": ".md",
+        "size": 46,
+        "sha256": "7df5c1afa2e91ee7d2154e35b9bb32890366ca068c2d232db307fdd1d02c431b",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f35572f39702f534841323536452d7334362d2d376466356331616661326539316565376432313534653335623962623332383930333636636130363863326432333264623330376664643164303263343331622e6d642f534841323536452d7334362d2d376466356331616661326539316565376432313534653335623962623332383930333636636130363863326432333264623330376664643164303263343331622e6d64",
+          "object_path": ".git/annex/objects/5W/9p/SHA256E-s46--7df5c1afa2e91ee7d2154e35b9bb32890366ca068c2d232db307fdd1d02c431b.md/SHA256E-s46--7df5c1afa2e91ee7d2154e35b9bb32890366ca068c2d232db307fdd1d02c431b.md",
+          "object_sha256": "7df5c1afa2e91ee7d2154e35b9bb32890366ca068c2d232db307fdd1d02c431b"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d376466356331616661326539316565376432313534653335623962623332383930333636636130363863326432333264623330376664643164303263343331622e6d640a",
+          "object_path": ".git/annex/objects/5W/9p/SHA256E-s46--7df5c1afa2e91ee7d2154e35b9bb32890366ca068c2d232db307fdd1d02c431b.md/SHA256E-s46--7df5c1afa2e91ee7d2154e35b9bb32890366ca068c2d232db307fdd1d02c431b.md",
+          "object_sha256": "7df5c1afa2e91ee7d2154e35b9bb32890366ca068c2d232db307fdd1d02c431b"
+        }
+      },
+      {
+        "filename": "notes.txt",
+        "stored_path": "case-19/notes.txt",
+        "key": "SHA256E-s46--8825b1a2d038398df25467b414bc7dec5ddabe0a35f5ee799736391901af3724.txt",
+        "suffix": ".txt",
+        "size": 46,
+        "sha256": "8825b1a2d038398df25467b414bc7dec5ddabe0a35f5ee799736391901af3724",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f356a2f51312f534841323536452d7334362d2d383832356231613264303338333938646632353436376234313462633764656335646461626530613335663565653739393733363339313930316166333732342e7478742f534841323536452d7334362d2d383832356231613264303338333938646632353436376234313462633764656335646461626530613335663565653739393733363339313930316166333732342e747874",
+          "object_path": ".git/annex/objects/5j/Q1/SHA256E-s46--8825b1a2d038398df25467b414bc7dec5ddabe0a35f5ee799736391901af3724.txt/SHA256E-s46--8825b1a2d038398df25467b414bc7dec5ddabe0a35f5ee799736391901af3724.txt",
+          "object_sha256": "8825b1a2d038398df25467b414bc7dec5ddabe0a35f5ee799736391901af3724"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d383832356231613264303338333938646632353436376234313462633764656335646461626530613335663565653739393733363339313930316166333732342e7478740a",
+          "object_path": ".git/annex/objects/5j/Q1/SHA256E-s46--8825b1a2d038398df25467b414bc7dec5ddabe0a35f5ee799736391901af3724.txt/SHA256E-s46--8825b1a2d038398df25467b414bc7dec5ddabe0a35f5ee799736391901af3724.txt",
+          "object_sha256": "8825b1a2d038398df25467b414bc7dec5ddabe0a35f5ee799736391901af3724"
+        }
+      },
+      {
+        "filename": "model.py",
+        "stored_path": "case-20/model.py",
+        "key": "SHA256E-s46--244e86bfd7122ba385e5d0b8a63e804b3ce48ec9b6dfdf1d5921ef2101a33605.py",
+        "suffix": ".py",
+        "size": 46,
+        "sha256": "244e86bfd7122ba385e5d0b8a63e804b3ce48ec9b6dfdf1d5921ef2101a33605",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f76772f464b2f534841323536452d7334362d2d323434653836626664373132326261333835653564306238613633653830346233636534386563396236646664663164353932316566323130316133333630352e70792f534841323536452d7334362d2d323434653836626664373132326261333835653564306238613633653830346233636534386563396236646664663164353932316566323130316133333630352e7079",
+          "object_path": ".git/annex/objects/vw/FK/SHA256E-s46--244e86bfd7122ba385e5d0b8a63e804b3ce48ec9b6dfdf1d5921ef2101a33605.py/SHA256E-s46--244e86bfd7122ba385e5d0b8a63e804b3ce48ec9b6dfdf1d5921ef2101a33605.py",
+          "object_sha256": "244e86bfd7122ba385e5d0b8a63e804b3ce48ec9b6dfdf1d5921ef2101a33605"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d323434653836626664373132326261333835653564306238613633653830346233636534386563396236646664663164353932316566323130316133333630352e70790a",
+          "object_path": ".git/annex/objects/vw/FK/SHA256E-s46--244e86bfd7122ba385e5d0b8a63e804b3ce48ec9b6dfdf1d5921ef2101a33605.py/SHA256E-s46--244e86bfd7122ba385e5d0b8a63e804b3ce48ec9b6dfdf1d5921ef2101a33605.py",
+          "object_sha256": "244e86bfd7122ba385e5d0b8a63e804b3ce48ec9b6dfdf1d5921ef2101a33605"
+        }
+      },
+      {
+        "filename": "preview.png",
+        "stored_path": "case-21/preview.png",
+        "key": "SHA256E-s46--bda952ec9d7b3454f69bbf42ba2356ae6831c43ffaa341b9f434bfa495e4481d.png",
+        "suffix": ".png",
+        "size": 46,
+        "sha256": "bda952ec9d7b3454f69bbf42ba2356ae6831c43ffaa341b9f434bfa495e4481d",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f47332f31362f534841323536452d7334362d2d626461393532656339643762333435346636396262663432626132333536616536383331633433666661613334316239663433346266613439356534343831642e706e672f534841323536452d7334362d2d626461393532656339643762333435346636396262663432626132333536616536383331633433666661613334316239663433346266613439356534343831642e706e67",
+          "object_path": ".git/annex/objects/G3/16/SHA256E-s46--bda952ec9d7b3454f69bbf42ba2356ae6831c43ffaa341b9f434bfa495e4481d.png/SHA256E-s46--bda952ec9d7b3454f69bbf42ba2356ae6831c43ffaa341b9f434bfa495e4481d.png",
+          "object_sha256": "bda952ec9d7b3454f69bbf42ba2356ae6831c43ffaa341b9f434bfa495e4481d"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d626461393532656339643762333435346636396262663432626132333536616536383331633433666661613334316239663433346266613439356534343831642e706e670a",
+          "object_path": ".git/annex/objects/G3/16/SHA256E-s46--bda952ec9d7b3454f69bbf42ba2356ae6831c43ffaa341b9f434bfa495e4481d.png/SHA256E-s46--bda952ec9d7b3454f69bbf42ba2356ae6831c43ffaa341b9f434bfa495e4481d.png",
+          "object_sha256": "bda952ec9d7b3454f69bbf42ba2356ae6831c43ffaa341b9f434bfa495e4481d"
+        }
+      },
+      {
+        "filename": "preview.jpg",
+        "stored_path": "case-22/preview.jpg",
+        "key": "SHA256E-s46--4c70fe03c0980493df8badf23eb11bd0d5cde8bd29ce244bc7730c1d90c3f5ef.jpg",
+        "suffix": ".jpg",
+        "size": 46,
+        "sha256": "4c70fe03c0980493df8badf23eb11bd0d5cde8bd29ce244bc7730c1d90c3f5ef",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f6d342f78322f534841323536452d7334362d2d346337306665303363303938303439336466386261646632336562313162643064356364653862643239636532343462633737333063316439306333663565662e6a70672f534841323536452d7334362d2d346337306665303363303938303439336466386261646632336562313162643064356364653862643239636532343462633737333063316439306333663565662e6a7067",
+          "object_path": ".git/annex/objects/m4/x2/SHA256E-s46--4c70fe03c0980493df8badf23eb11bd0d5cde8bd29ce244bc7730c1d90c3f5ef.jpg/SHA256E-s46--4c70fe03c0980493df8badf23eb11bd0d5cde8bd29ce244bc7730c1d90c3f5ef.jpg",
+          "object_sha256": "4c70fe03c0980493df8badf23eb11bd0d5cde8bd29ce244bc7730c1d90c3f5ef"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d346337306665303363303938303439336466386261646632336562313162643064356364653862643239636532343462633737333063316439306333663565662e6a70670a",
+          "object_path": ".git/annex/objects/m4/x2/SHA256E-s46--4c70fe03c0980493df8badf23eb11bd0d5cde8bd29ce244bc7730c1d90c3f5ef.jpg/SHA256E-s46--4c70fe03c0980493df8badf23eb11bd0d5cde8bd29ce244bc7730c1d90c3f5ef.jpg",
+          "object_sha256": "4c70fe03c0980493df8badf23eb11bd0d5cde8bd29ce244bc7730c1d90c3f5ef"
+        }
+      },
+      {
+        "filename": "vocab.tokenizer",
+        "stored_path": "case-23/vocab.tokenizer",
+        "key": "SHA256E-s46--c34c72bec0b894184ccb93a69cd0ab3a705cdafb4ab2bb4b987d60f460257a2a",
+        "suffix": "",
+        "size": 46,
+        "sha256": "c34c72bec0b894184ccb93a69cd0ab3a705cdafb4ab2bb4b987d60f460257a2a",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f34302f6d6a2f534841323536452d7334362d2d633334633732626563306238393431383463636239336136396364306162336137303563646166623461623262623462393837643630663436303235376132612f534841323536452d7334362d2d63333463373262656330623839343138346363623933613639636430616233613730356364616662346162326262346239383764363066343630323537613261",
+          "object_path": ".git/annex/objects/40/mj/SHA256E-s46--c34c72bec0b894184ccb93a69cd0ab3a705cdafb4ab2bb4b987d60f460257a2a/SHA256E-s46--c34c72bec0b894184ccb93a69cd0ab3a705cdafb4ab2bb4b987d60f460257a2a",
+          "object_sha256": "c34c72bec0b894184ccb93a69cd0ab3a705cdafb4ab2bb4b987d60f460257a2a"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d633334633732626563306238393431383463636239336136396364306162336137303563646166623461623262623462393837643630663436303235376132610a",
+          "object_path": ".git/annex/objects/40/mj/SHA256E-s46--c34c72bec0b894184ccb93a69cd0ab3a705cdafb4ab2bb4b987d60f460257a2a/SHA256E-s46--c34c72bec0b894184ccb93a69cd0ab3a705cdafb4ab2bb4b987d60f460257a2a",
+          "object_sha256": "c34c72bec0b894184ccb93a69cd0ab3a705cdafb4ab2bb4b987d60f460257a2a"
+        }
+      },
+      {
+        "filename": "evaluation.yaml",
+        "stored_path": "case-24/evaluation.yaml",
+        "key": "SHA256E-s46--aed65f3ab7b60f88e5201fc9eea9ac60dbcb1fabf91b3e0ca94db71026e10e10.yaml",
+        "suffix": ".yaml",
+        "size": 46,
+        "sha256": "aed65f3ab7b60f88e5201fc9eea9ac60dbcb1fabf91b3e0ca94db71026e10e10",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f7a6d2f38392f534841323536452d7334362d2d616564363566336162376236306638386535323031666339656561396163363064626362316661626639316233653063613934646237313032366531306531302e79616d6c2f534841323536452d7334362d2d616564363566336162376236306638386535323031666339656561396163363064626362316661626639316233653063613934646237313032366531306531302e79616d6c",
+          "object_path": ".git/annex/objects/zm/89/SHA256E-s46--aed65f3ab7b60f88e5201fc9eea9ac60dbcb1fabf91b3e0ca94db71026e10e10.yaml/SHA256E-s46--aed65f3ab7b60f88e5201fc9eea9ac60dbcb1fabf91b3e0ca94db71026e10e10.yaml",
+          "object_sha256": "aed65f3ab7b60f88e5201fc9eea9ac60dbcb1fabf91b3e0ca94db71026e10e10"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d616564363566336162376236306638386535323031666339656561396163363064626362316661626639316233653063613934646237313032366531306531302e79616d6c0a",
+          "object_path": ".git/annex/objects/zm/89/SHA256E-s46--aed65f3ab7b60f88e5201fc9eea9ac60dbcb1fabf91b3e0ca94db71026e10e10.yaml/SHA256E-s46--aed65f3ab7b60f88e5201fc9eea9ac60dbcb1fabf91b3e0ca94db71026e10e10.yaml",
+          "object_sha256": "aed65f3ab7b60f88e5201fc9eea9ac60dbcb1fabf91b3e0ca94db71026e10e10"
+        }
+      },
+      {
+        "filename": "evaluation.yml",
+        "stored_path": "case-25/evaluation.yml",
+        "key": "SHA256E-s46--906d68dd09d3f1ad490c9ae26005bae8634cfb6f39f0f8086c41addbfaea2d58.yml",
+        "suffix": ".yml",
+        "size": 46,
+        "sha256": "906d68dd09d3f1ad490c9ae26005bae8634cfb6f39f0f8086c41addbfaea2d58",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f314b2f476d2f534841323536452d7334362d2d393036643638646430396433663161643439306339616532363030356261653836333463666236663339663066383038366334316164646266616561326435382e796d6c2f534841323536452d7334362d2d393036643638646430396433663161643439306339616532363030356261653836333463666236663339663066383038366334316164646266616561326435382e796d6c",
+          "object_path": ".git/annex/objects/1K/Gm/SHA256E-s46--906d68dd09d3f1ad490c9ae26005bae8634cfb6f39f0f8086c41addbfaea2d58.yml/SHA256E-s46--906d68dd09d3f1ad490c9ae26005bae8634cfb6f39f0f8086c41addbfaea2d58.yml",
+          "object_sha256": "906d68dd09d3f1ad490c9ae26005bae8634cfb6f39f0f8086c41addbfaea2d58"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d393036643638646430396433663161643439306339616532363030356261653836333463666236663339663066383038366334316164646266616561326435382e796d6c0a",
+          "object_path": ".git/annex/objects/1K/Gm/SHA256E-s46--906d68dd09d3f1ad490c9ae26005bae8634cfb6f39f0f8086c41addbfaea2d58.yml/SHA256E-s46--906d68dd09d3f1ad490c9ae26005bae8634cfb6f39f0f8086c41addbfaea2d58.yml",
+          "object_sha256": "906d68dd09d3f1ad490c9ae26005bae8634cfb6f39f0f8086c41addbfaea2d58"
+        }
+      },
+      {
+        "filename": "mapped.blob",
+        "stored_path": "case-26/mapped.blob",
+        "key": "SHA256E-s46--a127edc086067efc88b7ddad6b935c3322f53cebe01b49f37672f5c00895748b.blob",
+        "suffix": ".blob",
+        "size": 46,
+        "sha256": "a127edc086067efc88b7ddad6b935c3322f53cebe01b49f37672f5c00895748b",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f4b572f33382f534841323536452d7334362d2d613132376564633038363036376566633838623764646164366239333563333332326635336365626530316234396633373637326635633030383935373438622e626c6f622f534841323536452d7334362d2d613132376564633038363036376566633838623764646164366239333563333332326635336365626530316234396633373637326635633030383935373438622e626c6f62",
+          "object_path": ".git/annex/objects/KW/38/SHA256E-s46--a127edc086067efc88b7ddad6b935c3322f53cebe01b49f37672f5c00895748b.blob/SHA256E-s46--a127edc086067efc88b7ddad6b935c3322f53cebe01b49f37672f5c00895748b.blob",
+          "object_sha256": "a127edc086067efc88b7ddad6b935c3322f53cebe01b49f37672f5c00895748b"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d613132376564633038363036376566633838623764646164366239333563333332326635336365626530316234396633373637326635633030383935373438622e626c6f620a",
+          "object_path": ".git/annex/objects/KW/38/SHA256E-s46--a127edc086067efc88b7ddad6b935c3322f53cebe01b49f37672f5c00895748b.blob/SHA256E-s46--a127edc086067efc88b7ddad6b935c3322f53cebe01b49f37672f5c00895748b.blob",
+          "object_sha256": "a127edc086067efc88b7ddad6b935c3322f53cebe01b49f37672f5c00895748b"
+        }
+      },
+      {
+        "filename": "tokenizer",
+        "stored_path": "case-27/tokenizer",
+        "key": "SHA256E-s46--f3b6f42cb50ed722e32d0f23d3ac8b8ecad5bca767a9ed0abfe6dbd596e54ced",
+        "suffix": "",
+        "size": 46,
+        "sha256": "f3b6f42cb50ed722e32d0f23d3ac8b8ecad5bca767a9ed0abfe6dbd596e54ced",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f6a4b2f33502f534841323536452d7334362d2d663362366634326362353065643732326533326430663233643361633862386563616435626361373637613965643061626665366462643539366535346365642f534841323536452d7334362d2d66336236663432636235306564373232653332643066323364336163386238656361643562636137363761396564306162666536646264353936653534636564",
+          "object_path": ".git/annex/objects/jK/3P/SHA256E-s46--f3b6f42cb50ed722e32d0f23d3ac8b8ecad5bca767a9ed0abfe6dbd596e54ced/SHA256E-s46--f3b6f42cb50ed722e32d0f23d3ac8b8ecad5bca767a9ed0abfe6dbd596e54ced",
+          "object_sha256": "f3b6f42cb50ed722e32d0f23d3ac8b8ecad5bca767a9ed0abfe6dbd596e54ced"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d663362366634326362353065643732326533326430663233643361633862386563616435626361373637613965643061626665366462643539366535346365640a",
+          "object_path": ".git/annex/objects/jK/3P/SHA256E-s46--f3b6f42cb50ed722e32d0f23d3ac8b8ecad5bca767a9ed0abfe6dbd596e54ced/SHA256E-s46--f3b6f42cb50ed722e32d0f23d3ac8b8ecad5bca767a9ed0abfe6dbd596e54ced",
+          "object_sha256": "f3b6f42cb50ed722e32d0f23d3ac8b8ecad5bca767a9ed0abfe6dbd596e54ced"
+        }
+      },
+      {
+        "filename": ".gitignore",
+        "stored_path": "case-28/.gitignore",
+        "key": "SHA256E-s46--82ac5b1c91bcc3cdeecad7f7c3b4d9d29b2839cb509647a4db3b3982053fe36f",
+        "suffix": "",
+        "size": 46,
+        "sha256": "82ac5b1c91bcc3cdeecad7f7c3b4d9d29b2839cb509647a4db3b3982053fe36f",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f36392f37372f534841323536452d7334362d2d383261633562316339316263633363646565636164376637633362346439643239623238333963623530393634376134646233623339383230353366653336662f534841323536452d7334362d2d38326163356231633931626363336364656563616437663763336234643964323962323833396362353039363437613464623362333938323035336665333666",
+          "object_path": ".git/annex/objects/69/77/SHA256E-s46--82ac5b1c91bcc3cdeecad7f7c3b4d9d29b2839cb509647a4db3b3982053fe36f/SHA256E-s46--82ac5b1c91bcc3cdeecad7f7c3b4d9d29b2839cb509647a4db3b3982053fe36f",
+          "object_sha256": "82ac5b1c91bcc3cdeecad7f7c3b4d9d29b2839cb509647a4db3b3982053fe36f"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d383261633562316339316263633363646565636164376637633362346439643239623238333963623530393634376134646233623339383230353366653336660a",
+          "object_path": ".git/annex/objects/69/77/SHA256E-s46--82ac5b1c91bcc3cdeecad7f7c3b4d9d29b2839cb509647a4db3b3982053fe36f/SHA256E-s46--82ac5b1c91bcc3cdeecad7f7c3b4d9d29b2839cb509647a4db3b3982053fe36f",
+          "object_sha256": "82ac5b1c91bcc3cdeecad7f7c3b4d9d29b2839cb509647a4db3b3982053fe36f"
+        }
+      },
+      {
+        "filename": ".gitattributes",
+        "stored_path": "case-29/.gitattributes",
+        "key": "SHA256E-s46--c319f5dcfe7f3f3e3d712292194864d79f14b6a478794910c45635639f7f01de",
+        "suffix": "",
+        "size": 46,
+        "sha256": "c319f5dcfe7f3f3e3d712292194864d79f14b6a478794910c45635639f7f01de",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f67362f504d2f534841323536452d7334362d2d633331396635646366653766336633653364373132323932313934383634643739663134623661343738373934393130633435363335363339663766303164652f534841323536452d7334362d2d63333139663564636665376633663365336437313232393231393438363464373966313462366134373837393439313063343536333536333966376630316465",
+          "object_path": ".git/annex/objects/g6/PM/SHA256E-s46--c319f5dcfe7f3f3e3d712292194864d79f14b6a478794910c45635639f7f01de/SHA256E-s46--c319f5dcfe7f3f3e3d712292194864d79f14b6a478794910c45635639f7f01de",
+          "object_sha256": "c319f5dcfe7f3f3e3d712292194864d79f14b6a478794910c45635639f7f01de"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d633331396635646366653766336633653364373132323932313934383634643739663134623661343738373934393130633435363335363339663766303164650a",
+          "object_path": ".git/annex/objects/g6/PM/SHA256E-s46--c319f5dcfe7f3f3e3d712292194864d79f14b6a478794910c45635639f7f01de/SHA256E-s46--c319f5dcfe7f3f3e3d712292194864d79f14b6a478794910c45635639f7f01de",
+          "object_sha256": "c319f5dcfe7f3f3e3d712292194864d79f14b6a478794910c45635639f7f01de"
+        }
+      },
+      {
+        "filename": "nested/.eval/tasks.yaml",
+        "stored_path": "case-30/nested/.eval/tasks.yaml",
+        "key": "SHA256E-s46--de9842137c28da41334fd5e2c5cb2e17f49157e0d990110e8ba996dc91521bae.yaml",
+        "suffix": ".yaml",
+        "size": 46,
+        "sha256": "de9842137c28da41334fd5e2c5cb2e17f49157e0d990110e8ba996dc91521bae",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e2e2f2e2e2f2e6769742f616e6e65782f6f626a656374732f4b512f367a2f534841323536452d7334362d2d646539383432313337633238646134313333346664356532633563623265313766343931353765306439393031313065386261393936646339313532316261652e79616d6c2f534841323536452d7334362d2d646539383432313337633238646134313333346664356532633563623265313766343931353765306439393031313065386261393936646339313532316261652e79616d6c",
+          "object_path": ".git/annex/objects/KQ/6z/SHA256E-s46--de9842137c28da41334fd5e2c5cb2e17f49157e0d990110e8ba996dc91521bae.yaml/SHA256E-s46--de9842137c28da41334fd5e2c5cb2e17f49157e0d990110e8ba996dc91521bae.yaml",
+          "object_sha256": "de9842137c28da41334fd5e2c5cb2e17f49157e0d990110e8ba996dc91521bae"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d646539383432313337633238646134313333346664356532633563623265313766343931353765306439393031313065386261393936646339313532316261652e79616d6c0a",
+          "object_path": ".git/annex/objects/KQ/6z/SHA256E-s46--de9842137c28da41334fd5e2c5cb2e17f49157e0d990110e8ba996dc91521bae.yaml/SHA256E-s46--de9842137c28da41334fd5e2c5cb2e17f49157e0d990110e8ba996dc91521bae.yaml",
+          "object_sha256": "de9842137c28da41334fd5e2c5cb2e17f49157e0d990110e8ba996dc91521bae"
+        }
+      },
+      {
+        "filename": "case.JSON",
+        "stored_path": "case-31/case.JSON",
+        "key": "SHA256E-s46--883d06d4881ebd35eaa7951336a954662c56f02415a0abab3994e1746aa521b6.JSON",
+        "suffix": ".JSON",
+        "size": 46,
+        "sha256": "883d06d4881ebd35eaa7951336a954662c56f02415a0abab3994e1746aa521b6",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f77372f66302f534841323536452d7334362d2d383833643036643438383165626433356561613739353133333661393534363632633536663032343135613061626162333939346531373436616135323162362e4a534f4e2f534841323536452d7334362d2d383833643036643438383165626433356561613739353133333661393534363632633536663032343135613061626162333939346531373436616135323162362e4a534f4e",
+          "object_path": ".git/annex/objects/w7/f0/SHA256E-s46--883d06d4881ebd35eaa7951336a954662c56f02415a0abab3994e1746aa521b6.JSON/SHA256E-s46--883d06d4881ebd35eaa7951336a954662c56f02415a0abab3994e1746aa521b6.JSON",
+          "object_sha256": "883d06d4881ebd35eaa7951336a954662c56f02415a0abab3994e1746aa521b6"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d383833643036643438383165626433356561613739353133333661393534363632633536663032343135613061626162333939346531373436616135323162362e4a534f4e0a",
+          "object_path": ".git/annex/objects/w7/f0/SHA256E-s46--883d06d4881ebd35eaa7951336a954662c56f02415a0abab3994e1746aa521b6.JSON/SHA256E-s46--883d06d4881ebd35eaa7951336a954662c56f02415a0abab3994e1746aa521b6.JSON",
+          "object_sha256": "883d06d4881ebd35eaa7951336a954662c56f02415a0abab3994e1746aa521b6"
+        }
+      },
+      {
+        "filename": "multi.part.extension",
+        "stored_path": "case-32/multi.part.extension",
+        "key": "SHA256E-s46--c8c13e4ec2b38706acaa19e467808e0a757b3f3ea611ab82a60586ff0044a67e",
+        "suffix": "",
+        "size": 46,
+        "sha256": "c8c13e4ec2b38706acaa19e467808e0a757b3f3ea611ab82a60586ff0044a67e",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f56372f30562f534841323536452d7334362d2d633863313365346563326233383730366163616131396534363738303865306137353762336633656136313161623832613630353836666630303434613637652f534841323536452d7334362d2d63386331336534656332623338373036616361613139653436373830386530613735376233663365613631316162383261363035383666663030343461363765",
+          "object_path": ".git/annex/objects/V7/0V/SHA256E-s46--c8c13e4ec2b38706acaa19e467808e0a757b3f3ea611ab82a60586ff0044a67e/SHA256E-s46--c8c13e4ec2b38706acaa19e467808e0a757b3f3ea611ab82a60586ff0044a67e",
+          "object_sha256": "c8c13e4ec2b38706acaa19e467808e0a757b3f3ea611ab82a60586ff0044a67e"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d633863313365346563326233383730366163616131396534363738303865306137353762336633656136313161623832613630353836666630303434613637650a",
+          "object_path": ".git/annex/objects/V7/0V/SHA256E-s46--c8c13e4ec2b38706acaa19e467808e0a757b3f3ea611ab82a60586ff0044a67e/SHA256E-s46--c8c13e4ec2b38706acaa19e467808e0a757b3f3ea611ab82a60586ff0044a67e",
+          "object_sha256": "c8c13e4ec2b38706acaa19e467808e0a757b3f3ea611ab82a60586ff0044a67e"
+        }
+      },
+      {
+        "filename": "unusual.a_b",
+        "stored_path": "case-33/unusual.a_b",
+        "key": "SHA256E-s46--11f6b2899a40ccdfce60f3320f6bcf40625631bde8fc5d454154187c873c0608",
+        "suffix": "",
+        "size": 46,
+        "sha256": "11f6b2899a40ccdfce60f3320f6bcf40625631bde8fc5d454154187c873c0608",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f586b2f704b2f534841323536452d7334362d2d313166366232383939613430636364666365363066333332306636626366343036323536333162646538666335643435343135343138376338373363303630382f534841323536452d7334362d2d31316636623238393961343063636466636536306633333230663662636634303632353633316264653866633564343534313534313837633837336330363038",
+          "object_path": ".git/annex/objects/Xk/pK/SHA256E-s46--11f6b2899a40ccdfce60f3320f6bcf40625631bde8fc5d454154187c873c0608/SHA256E-s46--11f6b2899a40ccdfce60f3320f6bcf40625631bde8fc5d454154187c873c0608",
+          "object_sha256": "11f6b2899a40ccdfce60f3320f6bcf40625631bde8fc5d454154187c873c0608"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d313166366232383939613430636364666365363066333332306636626366343036323536333162646538666335643435343135343138376338373363303630380a",
+          "object_path": ".git/annex/objects/Xk/pK/SHA256E-s46--11f6b2899a40ccdfce60f3320f6bcf40625631bde8fc5d454154187c873c0608/SHA256E-s46--11f6b2899a40ccdfce60f3320f6bcf40625631bde8fc5d454154187c873c0608",
+          "object_sha256": "11f6b2899a40ccdfce60f3320f6bcf40625631bde8fc5d454154187c873c0608"
+        }
+      },
+      {
+        "filename": "unicode.\ud83d\udc3a",
+        "stored_path": "case-34/unicode.\ud83d\udc3a",
+        "key": "SHA256E-s46--5d24bea1f389d25266f27177f7a2499504870fad84324aaefc0f9532f3c4317d.\ud83d\udc3a",
+        "suffix": ".\ud83d\udc3a",
+        "size": 46,
+        "sha256": "5d24bea1f389d25266f27177f7a2499504870fad84324aaefc0f9532f3c4317d",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f5a372f46362f534841323536452d7334362d2d356432346265613166333839643235323636663237313737663761323439393530343837306661643834333234616165666330663935333266336334333137642ef09f90ba2f534841323536452d7334362d2d356432346265613166333839643235323636663237313737663761323439393530343837306661643834333234616165666330663935333266336334333137642ef09f90ba",
+          "object_path": ".git/annex/objects/Z7/F6/SHA256E-s46--5d24bea1f389d25266f27177f7a2499504870fad84324aaefc0f9532f3c4317d.\ud83d\udc3a/SHA256E-s46--5d24bea1f389d25266f27177f7a2499504870fad84324aaefc0f9532f3c4317d.\ud83d\udc3a",
+          "object_sha256": "5d24bea1f389d25266f27177f7a2499504870fad84324aaefc0f9532f3c4317d"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d356432346265613166333839643235323636663237313737663761323439393530343837306661643834333234616165666330663935333266336334333137642ef09f90ba0a",
+          "object_path": ".git/annex/objects/Z7/F6/SHA256E-s46--5d24bea1f389d25266f27177f7a2499504870fad84324aaefc0f9532f3c4317d.\ud83d\udc3a/SHA256E-s46--5d24bea1f389d25266f27177f7a2499504870fad84324aaefc0f9532f3c4317d.\ud83d\udc3a",
+          "object_sha256": "5d24bea1f389d25266f27177f7a2499504870fad84324aaefc0f9532f3c4317d"
+        }
+      },
+      {
+        "filename": "weights.q4.gguf",
+        "stored_path": "case-35/weights.q4.gguf",
+        "key": "SHA256E-s46--bb1e85fb920dbd0b41f2c9c0008f579a7ca9dbcdac66739bae42e32ca3370e5e.q4.gguf",
+        "suffix": ".q4.gguf",
+        "size": 46,
+        "sha256": "bb1e85fb920dbd0b41f2c9c0008f579a7ca9dbcdac66739bae42e32ca3370e5e",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f56342f70582f534841323536452d7334362d2d626231653835666239323064626430623431663263396330303038663537396137636139646263646163363637333962616534326533326361333337306535652e71342e676775662f534841323536452d7334362d2d626231653835666239323064626430623431663263396330303038663537396137636139646263646163363637333962616534326533326361333337306535652e71342e67677566",
+          "object_path": ".git/annex/objects/V4/pX/SHA256E-s46--bb1e85fb920dbd0b41f2c9c0008f579a7ca9dbcdac66739bae42e32ca3370e5e.q4.gguf/SHA256E-s46--bb1e85fb920dbd0b41f2c9c0008f579a7ca9dbcdac66739bae42e32ca3370e5e.q4.gguf",
+          "object_sha256": "bb1e85fb920dbd0b41f2c9c0008f579a7ca9dbcdac66739bae42e32ca3370e5e"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d626231653835666239323064626430623431663263396330303038663537396137636139646263646163363637333962616534326533326361333337306535652e71342e676775660a",
+          "object_path": ".git/annex/objects/V4/pX/SHA256E-s46--bb1e85fb920dbd0b41f2c9c0008f579a7ca9dbcdac66739bae42e32ca3370e5e.q4.gguf/SHA256E-s46--bb1e85fb920dbd0b41f2c9c0008f579a7ca9dbcdac66739bae42e32ca3370e5e.q4.gguf",
+          "object_sha256": "bb1e85fb920dbd0b41f2c9c0008f579a7ca9dbcdac66739bae42e32ca3370e5e"
+        }
+      },
+      {
+        "filename": "config.json.znn",
+        "stored_path": "case-36/config.json.znn",
+        "key": "SHA256E-s46--6f8d8b8457e441038f8eb747ecdddb4d8990b3fa2f021e66ed570ed1a3303085.json.znn",
+        "suffix": ".json.znn",
+        "size": 46,
+        "sha256": "6f8d8b8457e441038f8eb747ecdddb4d8990b3fa2f021e66ed570ed1a3303085",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f57472f7a512f534841323536452d7334362d2d366638643862383435376534343130333866386562373437656364646462346438393930623366613266303231653636656435373065643161333330333038352e6a736f6e2e7a6e6e2f534841323536452d7334362d2d366638643862383435376534343130333866386562373437656364646462346438393930623366613266303231653636656435373065643161333330333038352e6a736f6e2e7a6e6e",
+          "object_path": ".git/annex/objects/WG/zQ/SHA256E-s46--6f8d8b8457e441038f8eb747ecdddb4d8990b3fa2f021e66ed570ed1a3303085.json.znn/SHA256E-s46--6f8d8b8457e441038f8eb747ecdddb4d8990b3fa2f021e66ed570ed1a3303085.json.znn",
+          "object_sha256": "6f8d8b8457e441038f8eb747ecdddb4d8990b3fa2f021e66ed570ed1a3303085"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d366638643862383435376534343130333866386562373437656364646462346438393930623366613266303231653636656435373065643161333330333038352e6a736f6e2e7a6e6e0a",
+          "object_path": ".git/annex/objects/WG/zQ/SHA256E-s46--6f8d8b8457e441038f8eb747ecdddb4d8990b3fa2f021e66ed570ed1a3303085.json.znn/SHA256E-s46--6f8d8b8457e441038f8eb747ecdddb4d8990b3fa2f021e66ed570ed1a3303085.json.znn",
+          "object_sha256": "6f8d8b8457e441038f8eb747ecdddb4d8990b3fa2f021e66ed570ed1a3303085"
+        }
+      },
+      {
+        "filename": "notes.txt.znn",
+        "stored_path": "case-37/notes.txt.znn",
+        "key": "SHA256E-s46--bf410b2c0becf6e5fcc84f7bdc21b16bc8a03476716c4018670f9a82b1d09a0e.txt.znn",
+        "suffix": ".txt.znn",
+        "size": 46,
+        "sha256": "bf410b2c0becf6e5fcc84f7bdc21b16bc8a03476716c4018670f9a82b1d09a0e",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f675a2f7a502f534841323536452d7334362d2d626634313062326330626563663665356663633834663762646332316231366263386130333437363731366334303138363730663961383262316430396130652e7478742e7a6e6e2f534841323536452d7334362d2d626634313062326330626563663665356663633834663762646332316231366263386130333437363731366334303138363730663961383262316430396130652e7478742e7a6e6e",
+          "object_path": ".git/annex/objects/gZ/zP/SHA256E-s46--bf410b2c0becf6e5fcc84f7bdc21b16bc8a03476716c4018670f9a82b1d09a0e.txt.znn/SHA256E-s46--bf410b2c0becf6e5fcc84f7bdc21b16bc8a03476716c4018670f9a82b1d09a0e.txt.znn",
+          "object_sha256": "bf410b2c0becf6e5fcc84f7bdc21b16bc8a03476716c4018670f9a82b1d09a0e"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d626634313062326330626563663665356663633834663762646332316231366263386130333437363731366334303138363730663961383262316430396130652e7478742e7a6e6e0a",
+          "object_path": ".git/annex/objects/gZ/zP/SHA256E-s46--bf410b2c0becf6e5fcc84f7bdc21b16bc8a03476716c4018670f9a82b1d09a0e.txt.znn/SHA256E-s46--bf410b2c0becf6e5fcc84f7bdc21b16bc8a03476716c4018670f9a82b1d09a0e.txt.znn",
+          "object_sha256": "bf410b2c0becf6e5fcc84f7bdc21b16bc8a03476716c4018670f9a82b1d09a0e"
+        }
+      },
+      {
+        "filename": "weights.gguf.znn",
+        "stored_path": "case-38/weights.gguf.znn",
+        "key": "SHA256E-s46--199809ad29ab0676736aea9afdf29715180ddc77344d00c0071bb35016a97ae6.gguf.znn",
+        "suffix": ".gguf.znn",
+        "size": 46,
+        "sha256": "199809ad29ab0676736aea9afdf29715180ddc77344d00c0071bb35016a97ae6",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f70372f784d2f534841323536452d7334362d2d313939383039616432396162303637363733366165613961666466323937313531383064646337373334346430306330303731626233353031366139376165362e676775662e7a6e6e2f534841323536452d7334362d2d313939383039616432396162303637363733366165613961666466323937313531383064646337373334346430306330303731626233353031366139376165362e676775662e7a6e6e",
+          "object_path": ".git/annex/objects/p7/xM/SHA256E-s46--199809ad29ab0676736aea9afdf29715180ddc77344d00c0071bb35016a97ae6.gguf.znn/SHA256E-s46--199809ad29ab0676736aea9afdf29715180ddc77344d00c0071bb35016a97ae6.gguf.znn",
+          "object_sha256": "199809ad29ab0676736aea9afdf29715180ddc77344d00c0071bb35016a97ae6"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d313939383039616432396162303637363733366165613961666466323937313531383064646337373334346430306330303731626233353031366139376165362e676775662e7a6e6e0a",
+          "object_path": ".git/annex/objects/p7/xM/SHA256E-s46--199809ad29ab0676736aea9afdf29715180ddc77344d00c0071bb35016a97ae6.gguf.znn/SHA256E-s46--199809ad29ab0676736aea9afdf29715180ddc77344d00c0071bb35016a97ae6.gguf.znn",
+          "object_sha256": "199809ad29ab0676736aea9afdf29715180ddc77344d00c0071bb35016a97ae6"
+        }
+      },
+      {
+        "filename": "bundle.tar.gz",
+        "stored_path": "case-39/bundle.tar.gz",
+        "key": "SHA256E-s46--cc2389ce41e5a51639f00b46a70ef9bb85811c98009616c4a5177f8e3993d7b7.tar.gz",
+        "suffix": ".tar.gz",
+        "size": 46,
+        "sha256": "cc2389ce41e5a51639f00b46a70ef9bb85811c98009616c4a5177f8e3993d7b7",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f324a2f38322f534841323536452d7334362d2d636332333839636534316535613531363339663030623436613730656639626238353831316339383030393631366334613531373766386533393933643762372e7461722e677a2f534841323536452d7334362d2d636332333839636534316535613531363339663030623436613730656639626238353831316339383030393631366334613531373766386533393933643762372e7461722e677a",
+          "object_path": ".git/annex/objects/2J/82/SHA256E-s46--cc2389ce41e5a51639f00b46a70ef9bb85811c98009616c4a5177f8e3993d7b7.tar.gz/SHA256E-s46--cc2389ce41e5a51639f00b46a70ef9bb85811c98009616c4a5177f8e3993d7b7.tar.gz",
+          "object_sha256": "cc2389ce41e5a51639f00b46a70ef9bb85811c98009616c4a5177f8e3993d7b7"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d636332333839636534316535613531363339663030623436613730656639626238353831316339383030393631366334613531373766386533393933643762372e7461722e677a0a",
+          "object_path": ".git/annex/objects/2J/82/SHA256E-s46--cc2389ce41e5a51639f00b46a70ef9bb85811c98009616c4a5177f8e3993d7b7.tar.gz/SHA256E-s46--cc2389ce41e5a51639f00b46a70ef9bb85811c98009616c4a5177f8e3993d7b7.tar.gz",
+          "object_sha256": "cc2389ce41e5a51639f00b46a70ef9bb85811c98009616c4a5177f8e3993d7b7"
+        }
+      },
+      {
+        "filename": "config.json.gz",
+        "stored_path": "case-40/config.json.gz",
+        "key": "SHA256E-s46--c7f8d1bda14cf0befa3be17cf1e1aee51b869418464d590b69e713cd6d2e469a.json.gz",
+        "suffix": ".json.gz",
+        "size": 46,
+        "sha256": "c7f8d1bda14cf0befa3be17cf1e1aee51b869418464d590b69e713cd6d2e469a",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f78352f57352f534841323536452d7334362d2d633766386431626461313463663062656661336265313763663165316165653531623836393431383436346435393062363965373133636436643265343639612e6a736f6e2e677a2f534841323536452d7334362d2d633766386431626461313463663062656661336265313763663165316165653531623836393431383436346435393062363965373133636436643265343639612e6a736f6e2e677a",
+          "object_path": ".git/annex/objects/x5/W5/SHA256E-s46--c7f8d1bda14cf0befa3be17cf1e1aee51b869418464d590b69e713cd6d2e469a.json.gz/SHA256E-s46--c7f8d1bda14cf0befa3be17cf1e1aee51b869418464d590b69e713cd6d2e469a.json.gz",
+          "object_sha256": "c7f8d1bda14cf0befa3be17cf1e1aee51b869418464d590b69e713cd6d2e469a"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d633766386431626461313463663062656661336265313763663165316165653531623836393431383436346435393062363965373133636436643265343639612e6a736f6e2e677a0a",
+          "object_path": ".git/annex/objects/x5/W5/SHA256E-s46--c7f8d1bda14cf0befa3be17cf1e1aee51b869418464d590b69e713cd6d2e469a.json.gz/SHA256E-s46--c7f8d1bda14cf0befa3be17cf1e1aee51b869418464d590b69e713cd6d2e469a.json.gz",
+          "object_sha256": "c7f8d1bda14cf0befa3be17cf1e1aee51b869418464d590b69e713cd6d2e469a"
+        }
+      },
+      {
+        "filename": "archive.zip",
+        "stored_path": "case-41/archive.zip",
+        "key": "SHA256E-s46--62ef40db3d6d7f6de1ac54c219361b9aa99d0758f887f7eb225e302c121b8857.zip",
+        "suffix": ".zip",
+        "size": 46,
+        "sha256": "62ef40db3d6d7f6de1ac54c219361b9aa99d0758f887f7eb225e302c121b8857",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f36782f474d2f534841323536452d7334362d2d363265663430646233643664376636646531616335346332313933363162396161393964303735386638383766376562323235653330326331323162383835372e7a69702f534841323536452d7334362d2d363265663430646233643664376636646531616335346332313933363162396161393964303735386638383766376562323235653330326331323162383835372e7a6970",
+          "object_path": ".git/annex/objects/6x/GM/SHA256E-s46--62ef40db3d6d7f6de1ac54c219361b9aa99d0758f887f7eb225e302c121b8857.zip/SHA256E-s46--62ef40db3d6d7f6de1ac54c219361b9aa99d0758f887f7eb225e302c121b8857.zip",
+          "object_sha256": "62ef40db3d6d7f6de1ac54c219361b9aa99d0758f887f7eb225e302c121b8857"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d363265663430646233643664376636646531616335346332313933363162396161393964303735386638383766376562323235653330326331323162383835372e7a69700a",
+          "object_path": ".git/annex/objects/6x/GM/SHA256E-s46--62ef40db3d6d7f6de1ac54c219361b9aa99d0758f887f7eb225e302c121b8857.zip/SHA256E-s46--62ef40db3d6d7f6de1ac54c219361b9aa99d0758f887f7eb225e302c121b8857.zip",
+          "object_sha256": "62ef40db3d6d7f6de1ac54c219361b9aa99d0758f887f7eb225e302c121b8857"
+        }
+      },
+      {
+        "filename": "archive.bz2",
+        "stored_path": "case-42/archive.bz2",
+        "key": "SHA256E-s46--e6418e3a176c10717be7115aaa23975164a32822fe9889b1bad03da5eab4ece2.bz2",
+        "suffix": ".bz2",
+        "size": 46,
+        "sha256": "e6418e3a176c10717be7115aaa23975164a32822fe9889b1bad03da5eab4ece2",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f31332f67582f534841323536452d7334362d2d653634313865336131373663313037313762653731313561616132333937353136346133323832326665393838396231626164303364613565616234656365322e627a322f534841323536452d7334362d2d653634313865336131373663313037313762653731313561616132333937353136346133323832326665393838396231626164303364613565616234656365322e627a32",
+          "object_path": ".git/annex/objects/13/gX/SHA256E-s46--e6418e3a176c10717be7115aaa23975164a32822fe9889b1bad03da5eab4ece2.bz2/SHA256E-s46--e6418e3a176c10717be7115aaa23975164a32822fe9889b1bad03da5eab4ece2.bz2",
+          "object_sha256": "e6418e3a176c10717be7115aaa23975164a32822fe9889b1bad03da5eab4ece2"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d653634313865336131373663313037313762653731313561616132333937353136346133323832326665393838396231626164303364613565616234656365322e627a320a",
+          "object_path": ".git/annex/objects/13/gX/SHA256E-s46--e6418e3a176c10717be7115aaa23975164a32822fe9889b1bad03da5eab4ece2.bz2/SHA256E-s46--e6418e3a176c10717be7115aaa23975164a32822fe9889b1bad03da5eab4ece2.bz2",
+          "object_sha256": "e6418e3a176c10717be7115aaa23975164a32822fe9889b1bad03da5eab4ece2"
+        }
+      },
+      {
+        "filename": "model.zst",
+        "stored_path": "case-43/model.zst",
+        "key": "SHA256E-s46--66dba52360cd45151950afb21100aa3b0275b279f55309355d7fad2bee226869.zst",
+        "suffix": ".zst",
+        "size": 46,
+        "sha256": "66dba52360cd45151950afb21100aa3b0275b279f55309355d7fad2bee226869",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f32672f30372f534841323536452d7334362d2d363664626135323336306364343531353139353061666232313130306161336230323735623237396635353330393335356437666164326265653232363836392e7a73742f534841323536452d7334362d2d363664626135323336306364343531353139353061666232313130306161336230323735623237396635353330393335356437666164326265653232363836392e7a7374",
+          "object_path": ".git/annex/objects/2g/07/SHA256E-s46--66dba52360cd45151950afb21100aa3b0275b279f55309355d7fad2bee226869.zst/SHA256E-s46--66dba52360cd45151950afb21100aa3b0275b279f55309355d7fad2bee226869.zst",
+          "object_sha256": "66dba52360cd45151950afb21100aa3b0275b279f55309355d7fad2bee226869"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d363664626135323336306364343531353139353061666232313130306161336230323735623237396635353330393335356437666164326265653232363836392e7a73740a",
+          "object_path": ".git/annex/objects/2g/07/SHA256E-s46--66dba52360cd45151950afb21100aa3b0275b279f55309355d7fad2bee226869.zst/SHA256E-s46--66dba52360cd45151950afb21100aa3b0275b279f55309355d7fad2bee226869.zst",
+          "object_sha256": "66dba52360cd45151950afb21100aa3b0275b279f55309355d7fad2bee226869"
+        }
+      },
+      {
+        "filename": "punctuation-._+ \ud83d\udc3a.yaml",
+        "stored_path": "case-44/punctuation-._+ \ud83d\udc3a.yaml",
+        "key": "SHA256E-s46--e0ea92ae84d08e054f6d66dc2bea073be727ce1960f5f00ea4e41d28318f75e3.yaml",
+        "suffix": ".yaml",
+        "size": 46,
+        "sha256": "e0ea92ae84d08e054f6d66dc2bea073be727ce1960f5f00ea4e41d28318f75e3",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f31312f57762f534841323536452d7334362d2d653065613932616538346430386530353466366436366463326265613037336265373237636531393630663566303065613465343164323833313866373565332e79616d6c2f534841323536452d7334362d2d653065613932616538346430386530353466366436366463326265613037336265373237636531393630663566303065613465343164323833313866373565332e79616d6c",
+          "object_path": ".git/annex/objects/11/Wv/SHA256E-s46--e0ea92ae84d08e054f6d66dc2bea073be727ce1960f5f00ea4e41d28318f75e3.yaml/SHA256E-s46--e0ea92ae84d08e054f6d66dc2bea073be727ce1960f5f00ea4e41d28318f75e3.yaml",
+          "object_sha256": "e0ea92ae84d08e054f6d66dc2bea073be727ce1960f5f00ea4e41d28318f75e3"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d653065613932616538346430386530353466366436366463326265613037336265373237636531393630663566303065613465343164323833313866373565332e79616d6c0a",
+          "object_path": ".git/annex/objects/11/Wv/SHA256E-s46--e0ea92ae84d08e054f6d66dc2bea073be727ce1960f5f00ea4e41d28318f75e3.yaml/SHA256E-s46--e0ea92ae84d08e054f6d66dc2bea073be727ce1960f5f00ea4e41d28318f75e3.yaml",
+          "object_sha256": "e0ea92ae84d08e054f6d66dc2bea073be727ce1960f5f00ea4e41d28318f75e3"
+        }
+      },
+      {
+        "filename": "line\nbreak.json",
+        "stored_path": "case-45/line\nbreak.json",
+        "key": "SHA256E-s46--f75dd79009cc974a56d7b773b5aa4325feb4e39e23b09fc7c76082286c502cd5.json",
+        "suffix": ".json",
+        "size": 46,
+        "sha256": "f75dd79009cc974a56d7b773b5aa4325feb4e39e23b09fc7c76082286c502cd5",
+        "argument_lookupkey_supported": false,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f46672f566b2f534841323536452d7334362d2d663735646437393030396363393734613536643762373733623561613433323566656234653339653233623039666337633736303832323836633530326364352e6a736f6e2f534841323536452d7334362d2d663735646437393030396363393734613536643762373733623561613433323566656234653339653233623039666337633736303832323836633530326364352e6a736f6e",
+          "object_path": ".git/annex/objects/Fg/Vk/SHA256E-s46--f75dd79009cc974a56d7b773b5aa4325feb4e39e23b09fc7c76082286c502cd5.json/SHA256E-s46--f75dd79009cc974a56d7b773b5aa4325feb4e39e23b09fc7c76082286c502cd5.json",
+          "object_sha256": "f75dd79009cc974a56d7b773b5aa4325feb4e39e23b09fc7c76082286c502cd5"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d663735646437393030396363393734613536643762373733623561613433323566656234653339653233623039666337633736303832323836633530326364352e6a736f6e0a",
+          "object_path": ".git/annex/objects/Fg/Vk/SHA256E-s46--f75dd79009cc974a56d7b773b5aa4325feb4e39e23b09fc7c76082286c502cd5.json/SHA256E-s46--f75dd79009cc974a56d7b773b5aa4325feb4e39e23b09fc7c76082286c502cd5.json",
+          "object_sha256": "f75dd79009cc974a56d7b773b5aa4325feb4e39e23b09fc7c76082286c502cd5"
+        }
+      },
+      {
+        "filename": "tab\tname.py",
+        "stored_path": "case-46/tab\tname.py",
+        "key": "SHA256E-s46--b2f1fc40fa9e7e4988dc7f69c243a801ffaa354e9677b19065e154f8a21e902c.py",
+        "suffix": ".py",
+        "size": 46,
+        "sha256": "b2f1fc40fa9e7e4988dc7f69c243a801ffaa354e9677b19065e154f8a21e902c",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f4b6d2f514b2f534841323536452d7334362d2d623266316663343066613965376534393838646337663639633234336138303166666161333534653936373762313930363565313534663861323165393032632e70792f534841323536452d7334362d2d623266316663343066613965376534393838646337663639633234336138303166666161333534653936373762313930363565313534663861323165393032632e7079",
+          "object_path": ".git/annex/objects/Km/QK/SHA256E-s46--b2f1fc40fa9e7e4988dc7f69c243a801ffaa354e9677b19065e154f8a21e902c.py/SHA256E-s46--b2f1fc40fa9e7e4988dc7f69c243a801ffaa354e9677b19065e154f8a21e902c.py",
+          "object_sha256": "b2f1fc40fa9e7e4988dc7f69c243a801ffaa354e9677b19065e154f8a21e902c"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d623266316663343066613965376534393838646337663639633234336138303166666161333534653936373762313930363565313534663861323165393032632e70790a",
+          "object_path": ".git/annex/objects/Km/QK/SHA256E-s46--b2f1fc40fa9e7e4988dc7f69c243a801ffaa354e9677b19065e154f8a21e902c.py/SHA256E-s46--b2f1fc40fa9e7e4988dc7f69c243a801ffaa354e9677b19065e154f8a21e902c.py",
+          "object_sha256": "b2f1fc40fa9e7e4988dc7f69c243a801ffaa354e9677b19065e154f8a21e902c"
+        }
+      },
+      {
+        "filename": "unicode.\u00e9",
+        "stored_path": "case-47/unicode.\u00e9",
+        "key": "SHA256E-s46--f78bc1269c82ab43f8cd583693538af4464a932fcd59473be549851ed51d7a1c.\u00e9",
+        "suffix": ".\u00e9",
+        "size": 46,
+        "sha256": "f78bc1269c82ab43f8cd583693538af4464a932fcd59473be549851ed51d7a1c",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f78512f46672f534841323536452d7334362d2d663738626331323639633832616234336638636435383336393335333861663434363461393332666364353934373362653534393835316564353164376131632ec3a92f534841323536452d7334362d2d663738626331323639633832616234336638636435383336393335333861663434363461393332666364353934373362653534393835316564353164376131632ec3a9",
+          "object_path": ".git/annex/objects/xQ/Fg/SHA256E-s46--f78bc1269c82ab43f8cd583693538af4464a932fcd59473be549851ed51d7a1c.\u00e9/SHA256E-s46--f78bc1269c82ab43f8cd583693538af4464a932fcd59473be549851ed51d7a1c.\u00e9",
+          "object_sha256": "f78bc1269c82ab43f8cd583693538af4464a932fcd59473be549851ed51d7a1c"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d663738626331323639633832616234336638636435383336393335333861663434363461393332666364353934373362653534393835316564353164376131632ec3a90a",
+          "object_path": ".git/annex/objects/xQ/Fg/SHA256E-s46--f78bc1269c82ab43f8cd583693538af4464a932fcd59473be549851ed51d7a1c.\u00e9/SHA256E-s46--f78bc1269c82ab43f8cd583693538af4464a932fcd59473be549851ed51d7a1c.\u00e9",
+          "object_sha256": "f78bc1269c82ab43f8cd583693538af4464a932fcd59473be549851ed51d7a1c"
+        }
+      },
+      {
+        "filename": "extension.a-b",
+        "stored_path": "case-48/extension.a-b",
+        "key": "SHA256E-s46--4fb002e00fa73cee2f81a4049b1ec743982fc6c0a81b4bc71b742e835d008de0",
+        "suffix": "",
+        "size": 46,
+        "sha256": "4fb002e00fa73cee2f81a4049b1ec743982fc6c0a81b4bc71b742e835d008de0",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f5a4d2f397a2f534841323536452d7334362d2d346662303032653030666137336365653266383161343034396231656337343339383266633663306138316234626337316237343265383335643030386465302f534841323536452d7334362d2d34666230303265303066613733636565326638316134303439623165633734333938326663366330613831623462633731623734326538333564303038646530",
+          "object_path": ".git/annex/objects/ZM/9z/SHA256E-s46--4fb002e00fa73cee2f81a4049b1ec743982fc6c0a81b4bc71b742e835d008de0/SHA256E-s46--4fb002e00fa73cee2f81a4049b1ec743982fc6c0a81b4bc71b742e835d008de0",
+          "object_sha256": "4fb002e00fa73cee2f81a4049b1ec743982fc6c0a81b4bc71b742e835d008de0"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d346662303032653030666137336365653266383161343034396231656337343339383266633663306138316234626337316237343265383335643030386465300a",
+          "object_path": ".git/annex/objects/ZM/9z/SHA256E-s46--4fb002e00fa73cee2f81a4049b1ec743982fc6c0a81b4bc71b742e835d008de0/SHA256E-s46--4fb002e00fa73cee2f81a4049b1ec743982fc6c0a81b4bc71b742e835d008de0",
+          "object_sha256": "4fb002e00fa73cee2f81a4049b1ec743982fc6c0a81b4bc71b742e835d008de0"
+        }
+      },
+      {
+        "filename": "extension.a+b",
+        "stored_path": "case-49/extension.a+b",
+        "key": "SHA256E-s46--98d79c8d6dfcb429d699caddd41626f010fc3e1b6688ddd14e5ce37aa9433dc3",
+        "suffix": "",
+        "size": 46,
+        "sha256": "98d79c8d6dfcb429d699caddd41626f010fc3e1b6688ddd14e5ce37aa9433dc3",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f6d712f6a472f534841323536452d7334362d2d393864373963386436646663623432396436393963616464643431363236663031306663336531623636383864646431346535636533376161393433336463332f534841323536452d7334362d2d39386437396338643664666362343239643639396361646464343136323666303130666333653162363638386464643134653563653337616139343333646333",
+          "object_path": ".git/annex/objects/mq/jG/SHA256E-s46--98d79c8d6dfcb429d699caddd41626f010fc3e1b6688ddd14e5ce37aa9433dc3/SHA256E-s46--98d79c8d6dfcb429d699caddd41626f010fc3e1b6688ddd14e5ce37aa9433dc3",
+          "object_sha256": "98d79c8d6dfcb429d699caddd41626f010fc3e1b6688ddd14e5ce37aa9433dc3"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d393864373963386436646663623432396436393963616464643431363236663031306663336531623636383864646431346535636533376161393433336463330a",
+          "object_path": ".git/annex/objects/mq/jG/SHA256E-s46--98d79c8d6dfcb429d699caddd41626f010fc3e1b6688ddd14e5ce37aa9433dc3/SHA256E-s46--98d79c8d6dfcb429d699caddd41626f010fc3e1b6688ddd14e5ce37aa9433dc3",
+          "object_sha256": "98d79c8d6dfcb429d699caddd41626f010fc3e1b6688ddd14e5ce37aa9433dc3"
+        }
+      },
+      {
+        "filename": "extension.a b",
+        "stored_path": "case-50/extension.a b",
+        "key": "SHA256E-s46--6764a18e1bce5c7da55b381eb6086b8e8ece9ee55283caa64b215cffdc5beb44",
+        "suffix": "",
+        "size": 46,
+        "sha256": "6764a18e1bce5c7da55b381eb6086b8e8ece9ee55283caa64b215cffdc5beb44",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f6b562f32392f534841323536452d7334362d2d363736346131386531626365356337646135356233383165623630383662386538656365396565353532383363616136346232313563666664633562656234342f534841323536452d7334362d2d36373634613138653162636535633764613535623338316562363038366238653865636539656535353238336361613634623231356366666463356265623434",
+          "object_path": ".git/annex/objects/kV/29/SHA256E-s46--6764a18e1bce5c7da55b381eb6086b8e8ece9ee55283caa64b215cffdc5beb44/SHA256E-s46--6764a18e1bce5c7da55b381eb6086b8e8ece9ee55283caa64b215cffdc5beb44",
+          "object_sha256": "6764a18e1bce5c7da55b381eb6086b8e8ece9ee55283caa64b215cffdc5beb44"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d7334362d2d363736346131386531626365356337646135356233383165623630383662386538656365396565353532383363616136346232313563666664633562656234340a",
+          "object_path": ".git/annex/objects/kV/29/SHA256E-s46--6764a18e1bce5c7da55b381eb6086b8e8ece9ee55283caa64b215cffdc5beb44/SHA256E-s46--6764a18e1bce5c7da55b381eb6086b8e8ece9ee55283caa64b215cffdc5beb44",
+          "object_sha256": "6764a18e1bce5c7da55b381eb6086b8e8ece9ee55283caa64b215cffdc5beb44"
+        }
+      },
+      {
+        "filename": "empty.json",
+        "stored_path": "case-51/empty.json",
+        "key": "SHA256E-s0--e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.json",
+        "suffix": ".json",
+        "size": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "argument_lookupkey_supported": true,
+        "locked": {
+          "mode": "120000",
+          "blob_hex": "2e2e2f2e6769742f616e6e65782f6f626a656374732f51512f7a702f534841323536452d73302d2d653362306334343239386663316331343961666266346338393936666239323432376165343165343634396239333463613439353939316237383532623835352e6a736f6e2f534841323536452d73302d2d653362306334343239386663316331343961666266346338393936666239323432376165343165343634396239333463613439353939316237383532623835352e6a736f6e",
+          "object_path": ".git/annex/objects/QQ/zp/SHA256E-s0--e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.json/SHA256E-s0--e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.json",
+          "object_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "unlocked": {
+          "mode": "100644",
+          "blob_hex": "2f616e6e65782f6f626a656374732f534841323536452d73302d2d653362306334343239386663316331343961666266346338393936666239323432376165343165343634396239333463613439353939316237383532623835352e6a736f6e0a",
+          "object_path": ".git/annex/objects/QQ/zp/SHA256E-s0--e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.json/SHA256E-s0--e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855.json",
+          "object_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        }
+      }
+    ],
+    "tools": {
+      "/usr/bin/git": "5a39a7909c023f92a84b77b49e6b008f3f152b833135b96d73ac7c403314a88a",
+      "/usr/bin/git-annex": "5de67e4fd40d011af9f99f563df80238b1d74c001c00cc1ed64227eb2e79ccc7",
+      "/usr/bin/dash": "4f291296e89b784cd35479fca606f228126e3641f5bcaee68dee36583d7c9483"
+    },
+    "final_repository_format": 8,
+    "production_profile_qualified": false,
+    "fixture_annex_dotfiles": true,
+    "candidate_exact_ascii_suffixes": [
+      "",
+      ".JSON",
+      ".bin",
+      ".blob",
+      ".bz2",
+      ".ckpt",
+      ".gguf",
+      ".gguf.znn",
+      ".jpg",
+      ".json",
+      ".json.gz",
+      ".json.znn",
+      ".md",
+      ".npy",
+      ".npz",
+      ".onnx",
+      ".pkl",
+      ".png",
+      ".pt",
+      ".pth",
+      ".py",
+      ".q4.gguf",
+      ".tar.gz",
+      ".txt",
+      ".txt.znn",
+      ".yaml",
+      ".yml",
+      ".zip",
+      ".znn",
+      ".zst",
+      ".zstd"
+    ],
+    "unknown_suffixes_implicitly_admitted": false
+  },
+  "source_sha256": {
+    "qualify_annex_sha256e.py": "9724a059d50899485d1b40e18df46c3f374a9107075e864640eafc1b82c63cb2",
+    "qualify_annex_publication.py": "94461ff4713a0e706879e4f526f16c45b838fdf720dbfe947d872c0aa5a81587",
+    "qualify_annex_payload.py": "ee31267fe7d679cf6607edff3943b9a9a39d3aad05d42c75ce11ea06df594a59"
+  }
+}

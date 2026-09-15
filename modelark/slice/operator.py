@@ -11,7 +11,8 @@ from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 
-from modelark.catalog_versions import SUPPORTED_CATALOG_VERSIONS
+from modelark.catalog_versions import SUPPORTED_CATALOG_VERSIONS, validate_publication_schema
+from modelark.publication_policy import PublicationRefused
 
 from . import domain as d
 from . import state as private_state
@@ -52,9 +53,12 @@ def _archives(catalog_path):
         con.execute("PRAGMA query_only=ON")
         con.execute("BEGIN")
         if con.execute("PRAGMA user_version").fetchone()[0] not in SUPPORTED_CATALOG_VERSIONS:
-            raise d.SliceRefusal("CATALOG_VERSION_UNSUPPORTED", "direct delivery requires catalog v7 or v8")
+            raise d.SliceRefusal("CATALOG_VERSION_UNSUPPORTED", "direct delivery requires catalog v7, v8 or v9")
+        validate_publication_schema(con)
         return tuple(SimpleNamespace(fs_uuid=uuid, serial=serial)
                      for uuid, serial in con.execute("SELECT fs_uuid,serial FROM drives ORDER BY drive_label"))
+    except PublicationRefused as exc:
+        raise d.SliceRefusal(exc.code, str(exc.evidence)) from exc
     except sqlite3.Error as exc:
         raise d.SliceRefusal("CATALOG_UNAVAILABLE", str(exc)) from exc
     finally:

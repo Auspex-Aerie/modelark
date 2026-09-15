@@ -72,6 +72,20 @@ class FencedSources:
                 captured = identity(candidate.drive)
                 keys = captured.lock_keys()
                 stack.enter_context(drive_fence.hold_drives_sorted(keys, blocking=False))
+                # A fresh read transaction under the existing source fence. Never
+                # acquire controller/map locks in reverse or reuse a stale preview.
+                from modelark.publication_policy import PublicationRefused
+                from modelark.publication_store import require_clear
+                try:
+                    with closing(sqlite3.connect(
+                            Path(self.catalog_path).resolve().as_uri() + '?mode=ro', uri=True)) as con:
+                        con.execute('PRAGMA query_only=ON')
+                        con.execute('BEGIN')
+                        require_clear(con, [candidate.drive.drive_label])
+                except PublicationRefused as exc:
+                    raise TransferRefusal(exc.code, str(exc.evidence)) from exc
+                except sqlite3.Error as exc:
+                    raise TransferRefusal('SOURCE_EVIDENCE_UNAVAILABLE', str(exc)) from exc
                 spec = SliceSpec((candidate.copy.repo_id,), "source-evidence", "unused")
                 snapshot = read_catalog(self.catalog_path, spec)
                 fresh = next((drive for drive in snapshot.drives

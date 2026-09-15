@@ -33,6 +33,94 @@ def stamp(path, version):
         con.execute(f"PRAGMA user_version={version}")
 
 
+def install_publication(path):
+    from modelark import publication_store as store
+    from modelark.proposal import graph_write
+    with sqlite3.connect(path, isolation_level=None) as con:
+        graph_write(con, lambda c: store._install_schema(
+            c, library_id="11111111-1111-4111-8111-111111111111",
+            map_uuid="22222222-2222-4222-8222-222222222222"))
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+@pytest.mark.parametrize("read_only", [True, False])
+def test_qualified_v9_open_preserves_schema_history_and_pending_diagnostics(catalog, read_only):
+    from test_publication_store import pending
+    install_publication(catalog)
+    with sqlite3.connect(catalog, isolation_level=None) as con:
+        pending(con, label="saved")
+        before = tuple(con.iterdump())
+    before_bytes = catalog.read_bytes()
+    con = db.connect(read_only=read_only)
+    try:
+        # Normal writable bootstrap recreates views; SQL dump ordering is not
+        # part of schema/history identity.
+        assert sorted(con.iterdump()) == sorted(before)
+        assert con.execute("PRAGMA user_version").fetchone() == (9,)
+        assert con.execute("SELECT state FROM publication_operations").fetchone() == ("PREPARED",)
+    finally:
+        con.close()
+    if read_only:
+        assert catalog.read_bytes() == before_bytes
+
+
+@pytest.mark.parametrize("corruption", ["bare", "partial", "definition", "downgraded", "identity"])
+@pytest.mark.parametrize("entry", [
+    "read_only", "writable", "migration", "clone_validator", "provenance", "schema_migrations",
+])
+def test_invalid_publication_contract_refuses_before_schema_or_journal_writes(catalog, corruption, entry):
+    if corruption != "bare":
+        install_publication(catalog)
+    with sqlite3.connect(catalog, isolation_level=None) as con:
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        con.execute("PRAGMA journal_mode=DELETE")
+        con.execute({
+            "bare": "PRAGMA user_version=9",
+            "partial": "DROP TABLE publication_files",
+            "definition": "ALTER TABLE publication_operations ADD COLUMN unqualified TEXT",
+            "downgraded": "PRAGMA user_version=8",
+            "identity": "DELETE FROM publication_library",
+        }[corruption])
+    before = catalog.read_bytes()
+    with pytest.raises(RuntimeError, match="Catalog publication contract refused"):
+        if entry in {"read_only", "writable"}:
+            db.connect(read_only=entry == "read_only")
+        elif entry == "migration":
+            db.migrate_existing_catalog(backup_existing=False)
+        else:
+            with sqlite3.connect(catalog, isolation_level=None) as con:
+                if entry == "clone_validator":
+                    db._validate_migrated_clone(con)
+                elif entry == "schema_migrations":
+                    db.apply_schema_migrations(con, backup_existing=False)
+                else:
+                    db._migrate_provenance_v7(con, backup_existing=False)
+    assert catalog.read_bytes() == before
+    assert not catalog.with_name(catalog.name + "-wal").exists()
+
+
+def test_qualified_v9_explicit_schema_ladder_preserves_floor(catalog):
+    install_publication(catalog)
+    before = snapshot(catalog)
+    con = db.migrate_existing_catalog(backup_existing=False)
+    try:
+        db._validate_migrated_clone(con)
+    finally:
+        con.close()
+    assert snapshot(catalog) == before
+
+
+def test_historical_v8_numeric_gate_remains_a_distinct_contract(catalog, monkeypatch):
+    # Reproduce the old gate, not an assertion that the current binary still has
+    # the v8 ceiling. Accepted native qualification artifacts remain historical.
+    install_publication(catalog)
+    monkeypatch.setattr(db, "MAX_SUPPORTED_CATALOG_VERSION", 8)
+    before = catalog.read_bytes()
+    with pytest.raises(RuntimeError, match="newer than this ModelArk build"):
+        db.connect(read_only=True)
+    assert catalog.read_bytes() == before
+
+
 @pytest.mark.parametrize("version", [7, 8])
 @pytest.mark.parametrize("read_only", [True, False])
 def test_normal_open_preserves_physical_version_schema_and_identity(catalog, version, read_only):
@@ -53,11 +141,11 @@ def test_normal_open_preserves_physical_version_schema_and_identity(catalog, ver
 def test_bootstrap_and_provenance_layout_stay_separate_from_reader_ceiling(catalog):
     assert db._SCHEMA_VERSION == 7
     assert snapshot(catalog)[0] == 7
-    assert SUPPORTED_CATALOG_VERSIONS == {7, 8}
-    assert MAX_SUPPORTED_CATALOG_VERSION == 8
+    assert SUPPORTED_CATALOG_VERSIONS == {7, 8, 9}
+    assert MAX_SUPPORTED_CATALOG_VERSION == 9
 
 
-@pytest.mark.parametrize("version", [0, 5, 6, 9, 99])
+@pytest.mark.parametrize("version", [0, 5, 6, 10, 99])
 @pytest.mark.parametrize("read_only", [True, False])
 def test_unsupported_normal_open_is_byte_preserving(catalog, version, read_only):
     stamp(catalog, version)
@@ -81,7 +169,7 @@ def test_explicit_ladder_rejects_future_before_journal_mode_mutation(catalog):
     with sqlite3.connect(catalog) as con:
         con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         con.execute("PRAGMA journal_mode=DELETE")
-        con.execute("PRAGMA user_version=9")
+        con.execute("PRAGMA user_version=10")
     before = catalog.read_bytes()
     with pytest.raises(RuntimeError, match="newer"):
         db.migrate_existing_catalog(backup_existing=False)
@@ -96,14 +184,14 @@ def test_clone_validator_accepts_closed_compatible_versions(catalog, version):
 
 
 def test_clone_validator_refuses_future_layout_lookalike(catalog):
-    stamp(catalog, 9)
+    stamp(catalog, 10)
     with sqlite3.connect(catalog) as con:
-        with pytest.raises(RuntimeError, match="expected 7 or 8"):
+        with pytest.raises(RuntimeError, match="newer"):
             db._validate_migrated_clone(con)
 
 
 def test_remigration_refuses_future_snapshot_without_touching_source(catalog, tmp_path):
-    stamp(catalog, 9)
+    stamp(catalog, 10)
     before = catalog.read_bytes()
     with pytest.raises(RuntimeError, match="newer"):
         db._remigrate_snapshot_to_expected(catalog, tmp_path / "remigrate")

@@ -660,7 +660,11 @@ def register_new_identity(
     confirmation: str,
     prepare_archive: Callable[..., Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Prepare and register one exact new identity under the central graph-write boundary."""
+    """Prepare outside SQLite, then register through one exact graph-write CAS.
+
+    The controller spans both steps. A failed or stale final CAS preserves the
+    physical preparation receipt for explicit retry, never adopts another tree.
+    """
     if not isinstance(expected_binding, Mapping):
         raise proposal.Refusal(
             "DRIVE_REGISTRATION_BINDING_INVALID",
@@ -720,8 +724,7 @@ def register_new_identity(
     volume = current_preview["volume"]
     approval_invalidated = False
 
-    def op(c):
-        nonlocal approval_invalidated
+    def check_catalog(c):
         current_revision = planner_revision(c)
         active = plan.active(c)
         current_catalog_binding = {
@@ -754,33 +757,11 @@ def register_new_identity(
                     {column: value, "registered_labels": [str(row[0]) for row in collision]},
                     ("review_registered_identity",),
                 )
-        try:
-            prepared = dict(prepare_archive(
-                volume_dev=expected["volume_dev"],
-                mount=expected["mount"],
-                archive_path=expected["archive_path"],
-                label=expected["label"],
-                fs_uuid=expected["fs_uuid"],
-                fstype=volume["fstype"],
-                serial=expected["serial"],
-                model=observed_device.get("model"),
-                role=expected["role"],
-            ))
-        except proposal.Refusal:
-            raise
-        except Exception as exc:
-            raise proposal.Refusal(
-                "DRIVE_REGISTRATION_PREPARATION_INCOMPLETE",
-                {"archive_path": expected["archive_path"], "error": str(exc)},
-                ("refresh_onboarding_preview", "review_prepared_namespace"),
-            ) from exc
-        annex_uuid = str(prepared.get("annex_uuid") or "")
-        if not annex_uuid or prepared.get("archive_path") != expected["archive_path"]:
-            raise proposal.Refusal(
-                "DRIVE_REGISTRATION_PREPARATION_INCOMPLETE",
-                {"prepared": prepared},
-                ("refresh_onboarding_preview", "review_prepared_namespace"),
-            )
+
+    def op(c):
+        nonlocal approval_invalidated
+        registration_publication.require_legacy_registration(c)
+        check_catalog(c)
         annex_collision = c.execute(
             "SELECT drive_label FROM drives WHERE annex_uuid=? ORDER BY drive_label",
             [annex_uuid],
@@ -841,7 +822,39 @@ def register_new_identity(
             },
         )
 
-    written = proposal.graph_write(con, op)
+    from modelark import registration_publication
+
+    with registration_publication.controller(con):
+        registration_publication.require_legacy_registration(con)
+        check_catalog(con)
+        try:
+            prepared = dict(prepare_archive(
+                volume_dev=expected["volume_dev"],
+                mount=expected["mount"],
+                archive_path=expected["archive_path"],
+                label=expected["label"],
+                fs_uuid=expected["fs_uuid"],
+                fstype=volume["fstype"],
+                serial=expected["serial"],
+                model=observed_device.get("model"),
+                role=expected["role"],
+            ))
+        except proposal.Refusal:
+            raise
+        except Exception as exc:
+            raise proposal.Refusal(
+                "DRIVE_REGISTRATION_PREPARATION_INCOMPLETE",
+                {"archive_path": expected["archive_path"], "error": str(exc)},
+                ("refresh_onboarding_preview", "review_prepared_namespace"),
+            ) from exc
+        annex_uuid = str(prepared.get("annex_uuid") or "")
+        if not annex_uuid or prepared.get("archive_path") != expected["archive_path"]:
+            raise proposal.Refusal(
+                "DRIVE_REGISTRATION_PREPARATION_INCOMPLETE",
+                {"prepared": prepared},
+                ("refresh_onboarding_preview", "review_prepared_namespace"),
+            )
+        written = proposal.graph_write(con, op)
     return {
         "changed": True,
         "already_registered": False,
@@ -924,6 +937,7 @@ def declare_lost(
 
     def op(c):
         current_revision = planner_revision(c)
+        proposal.require_publication_clear(c, [drive_label])
         drive = _drive(c, drive_label)
         current_binding = {
             "planner_revision": current_revision,

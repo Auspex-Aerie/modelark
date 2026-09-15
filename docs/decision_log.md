@@ -2002,7 +2002,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEF-CATALOG-005: Revisit the fast-moving Spark-resident weight set
 - `id`: DEF-CATALOG-005
 - `date`: 2026-08-30
-- `status`: revisit triggered 2026-09-05; snapshot discovery and curation pending
+- `status`: resolved by DEC-155; archive-first wave accepted, implementation tracked in docs/plans/dgxspark-archive-first.md
 - `triggered_by`: Operator chose the tested revision-9 migration/release path before Spark catalog expansion and noted that the Spark weights are already downloaded while weights and recipes change daily.
 - `observation`: DGXSpark's current `config/inference/weight_catalog.yml` names 24 kept or queued repository IDs. A live ModelArk catalog comparison found only `LiquidAI/LFM2.5-8B-A1B`, already selected; the other 23 are absent. Their current local residency reduces immediate recovery pressure, while their rapid recipe/weight churn makes today's list a poor stable preservation boundary.
 - `deferral`: Do not ingest or select the 23 missing Spark repositories before approving and releasing the feasible revision-9 plan. Preserve the DGXSpark catalog as the current discovery source and treat the Spark set as a later catalog/Usable Slice wave rather than expanding the first Fill.
@@ -3175,7 +3175,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### INC-065: Historical bridge-encoded identity blocks exact placement approval
 - `id`: INC-065
 - `date`: 2026-09-12
-- `status`: open
+- `status`: remediated via DEC-153/DEC-154; physical Drive 01 repair and shared-consumer read verified (docs/acceptance/bridge-serial-drive01-2026-09-12.md)
 - `triggered_by`: Operator reported DRIVE_IDENTITY_UNPROVEN while approving draft 4c0d2ec8-14e7-4900-8f7a-e016f14e27c9 after the local 0.4.0 upgrade; read-only fence-fact inspection isolated drive-01.
 - `symptom`: Drive 01's baseline-only requirements still participate in approval fencing. Its saved fingerprint does not bind the registered literal serial, and the suggested ordinary reconciliation path also rejects those persisted facts.
 - `root_cause`: The August 29 clean anchor contains raw bridge serial 5652314B56344C4B, the ASCII-hex representation of registered VR1KV4LK. That exact raw serial reproduces the saved fingerprint; registered-literal and NULL forms do not. Strict FenceIdentity supports current/NULL forms, not this historical representation. INC-048/DEC-079 addressed passive drive correlation but did not repair the stored identity evidence or establish a shared active-consumer rule.
@@ -3188,7 +3188,7 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### OUT-003: Drive 01 identity evidence prevents approving the current Fill proposal
 - `id`: OUT-003
 - `date`: 2026-09-12
-- `status`: open
+- `status`: open — physical repair verified and patched portal healthy; awaiting operator fresh preview/approval (docs/acceptance/bridge-serial-drive01-2026-09-12.md)
 - `severity`: Medium
 - `triggered_by`: INC-065
 - `summary`: Operator cannot approve the current exact placement proposal. Duration remains open; the portal is available and Fill is idle. No archive loss was observed, and post-upgrade verification found all 18 catalog tables unchanged before the operator created this new draft.
@@ -3218,3 +3218,62 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Shared evidence resolver, bootstrap diagnostic preservation and regressions for ordinary reads plus unchanged stale-plan refusal. No new Slice fields, schema, alias registry or live-data changes. Authorize exactly one additional local Grok correction review, not a reset of the default three-round policy; the already-approved cloud Codex cycle remains capped at three rounds, with no Greptile.
 - `docs_updated`: docs/decision_log.md, docs/bridge-serial-repair-plan.md, docs/archive-serial-repair.md
 - `related`: DEC-153, INC-065
+
+### DEC-155: Archive the Spark recipe set in ModelArk before replacing caches with Slice projections
+- `id`: DEC-155
+- `date`: 2026-09-13
+- `status`: accepted
+- `triggered_by`: Operator approved the exact Spark-to-ModelArk comparison and documentation, directing that the models enter ModelArk before being called downloaded and that Spark-local copies later be replaced by usable Slice projections; DEF-CATALOG-005 and DIS-005 supply the prior preservation boundary.
+- `decision`: Use the 27 exact repositories in the September 12 inventory (21 main-model/format repositories plus six drafts) as the starting archive wave. Treat current HF copies as Spark-resident/staged, not completed ModelArk acquisition. Preserve the selected recipe's exact artifact closure, including revision/content identity and supporting files, through ModelArk archive evidence before materializing verified usable Slice output. Retain each old cache until the replacement recipe works and archive/copy requirements are met; resolve exact targets and shared dependencies before cleanup. Keep wishlist-only, unproduced and retired Spark candidates outside this wave.
+- `rationale`: Local residency is neither durable archive coverage nor proof of an equivalent usable recipe. The read-only comparison found 26 exact IDs absent and one Liquid repository with archive records but Slice evidence gaps and a different Spark chat template. Model names or matching weights alone cannot justify deleting a working cache.
+- `impact`: docs/plans/dgxspark-archive-first.md tracks acquisition, exact-revision/required-file compatibility checks, normal placement approval and Fill, projection qualification, consumer cutover and bounded cleanup. The current unpinned download request and required-file selection need an explicit compatibility scope before promising exact snapshot reproduction; this decision does not approve a particular schema/refactor or bypass those checks. Compressed archive representation, usable original-file projection and later P2P transport remain distinct.
+- `resolves`: DEF-CATALOG-005 (deferral ends; acquisition is not complete)
+- `docs_updated`: docs/decision_log.md, docs/plans/dgxspark-archive-first.md, docs/acceptance/dgxspark-archive-comparison-2026-09-13.md, docs/acceptance/dgxspark-archive-comparison-2026-09-13.json, docs/acceptance/dgxspark-model-inventory-2026-09-12.md
+- `related`: DEC-081, DEC-084, DEC-101, DEC-130, DIS-005, DEF-CATALOG-005
+- `scope_boundary`: This turn performed comparison and documentation only. No catalog/selection/proposal mutation, Fill, physical archive repair, service change, projection write, cache deletion, DGXSpark ledger edit, commit, push or PR action. Future acquisition and cache replacement proceed through the documented gates, not direct database edits or an in-place overwrite of an existing cache.
+
+### DEC-156: Preserve upstream repository dotfiles as annex-managed payload
+- `id`: DEC-156
+- `date`: 2026-09-13
+- `status`: accepted direction; implementation and legacy conversion not yet scoped
+- `triggered_by`: Operator clarified that imported repository files, including .gitignore, should be annexed and retained for later sharing after Drive 01 Fill paused on an ordinary Git-tracked upstream .gitattributes file.
+- `decision`: Preserve upstream .gitignore and .gitattributes files as model-repository payload through the annex-managed archive and usable projection path; do not omit them merely because they are dotfiles. Keep ModelArk's own Git-control files separate. Choose and qualify the storage representation before implementation, so imported control-file contents cannot silently govern ModelArk's archive operations.
+- `rationale`: Uniform payload identity, copy accounting and projection make complete selected repository delivery easier to reason about. Ordinary Git-tracked files are shareable through Git; lack of an annex key does not make them unshareable. The direction is about ModelArk's payload contract, not that incorrect transport limitation.
+- `impact`: Scope follow-up across manifest classification (.gitignore currently falls through to other), annex ingestion and missing-key handling, reconciliation, legacy Git-backed copies, original-path projection and tests. Do not treat a global annex.dotfiles toggle or weaker reconciliation as an already-approved complete solution.
+- `docs_updated`: docs/decision_log.md
+- `related`: DEC-155, INC-017
+- `scope_boundary`: Policy record only. No code/config changes, archive conversion, catalog mutation, Fill resume or cache deletion. Existing ordinary Git files remain valid historical evidence and must be preserved during any later migration.
+
+### HYP-003: Can isolated annex payload paths preserve control-file bytes across supported clients?
+- `id`: HYP-003
+- `date`: 2026-09-13
+- `status`: open
+- `triggered_by`: DEC-156; operator authorized Stage 0 after Codex plan pass 1 and Grok CLI plan pass 2.
+- `question`: Can scoped repository-local policy isolate neutral payload paths while old upstream attributes remain active, preserve exact bytes through annex and mapped readers, and support a recoverable map/clone transition without weakening drive evidence?
+- `observation`: The candidate must work on installed git-annex 8.20210223 and a newer client, without changing live installations or silently upgrading annex repository format. A passing primitive is not a production migration or recovery guarantee.
+- `interventions`: A: neutral name alone (negative control); B: exact namespace override in .git/info/attributes plus forced scoped annex add, SHA256 object checks and explicit mapped-path publication; C: expected-old ref transactions plus separately verified index/worktree publication.
+- `test_matrix`: Fresh synthetic repositories/catalogs for each run; installed 8.20210223 and standalone 10.20260717, both using annex repository format 8; locked/unlocked raw payloads, inherited filter/encoding/EOL and ignores, second-clone object copy, portable manifest transport, failed ref CAS, confined Slice opening/restore materialization, and current readers refusing catalog v9.
+- `docs_updated`: scripts/qualify_annex_payload.py, docs/acceptance/annex-payload-stage0-2026-09-13.md, docs/plans/annex-payload-migration.md
+- `related`: docs/reviews/annex-payload-plan-codex-1.md, docs/reviews/annex-payload-plan-grok-2.md
+
+#### Results
+
+- Initial bounded runs passed on both binaries. Negative control confirmed that neutral names alone do not isolate inherited attributes; scoped .git/info/attributes preserved the original bytes. Key-only copy established object presence but not a mapped worktree path. Current core read/write and Slice readers refused synthetic catalog v9 without changing the catalog. Detailed reproducible run evidence and unqualified boundaries are in the acceptance report; Stage 0 remains open until its remaining protocol gates are closed.
+- Expanded commit/map probes corrected the initial interpretation: disabling all filters (-filter) preserved bytes but let the newer client commit raw Git payload after lock/unlock. Explicit filter=annex plus committed-pointer verification passed 13 grouped probes per binary. The newer client also auto-upgraded its disposable repositories from requested format 8 to observed format 9; the installed client remained at 8. This is not mixed-client compatibility evidence. Retain both failures and final runs in the acceptance report; no live client/archive was upgraded.
+- 2026-09-14 clarification: the original test_matrix describes requested format 8, not final observed format for both clients. Results were format 8 with 8.20210223 and format 9 with 10.20260717. DEC-157 pins the initial migration profile to the former; comparative newer-client evidence is retained without claiming compatibility or closing this hypothesis.
+- 2026-09-14 continuation: 42 bounded checks passed on the pinned installed binary in fresh synthetic fixtures. New evidence covers rejected filter/origin/helper/format drift before suspicious execution, registry-bound ownership negatives, the same returning clone through preservation/conversion/retirement and mapped readers, native staged location metadata validation, atomic ref refusal and modeled partial-index/receipt replay. Retained run: /tmp/modelark-annex-payload-stage0-u4pxp6d6. An earlier harness failure showed write-tree can itself need index.lock; the corrected check compares index bytes while the injected lock is held. Full evidence/limits: docs/acceptance/annex-publication-stage0-2026-09-14.md; script: scripts/qualify_annex_publication.py. Stage 0 remains open; no production guard, live migration, catalog mutation, Fill action or newer-client invocation is implied.
+- 2026-09-14 round-2 experiment: native absent-to-present merge legitimately retained two timestamped records for one UUID; the initial one-record parser refused it despite native whereis reporting the correct copies (/tmp/modelark-annex-payload-stage0-diy6a6g4). After quarantine-before-reader admission, history-aware validation, independent-map setup, stricter replay state/bindings and pointer negatives, 69 check results passed in /tmp/modelark-annex-payload-stage0-756s6vow. Native present-to-present setpresentkey was observed as an exact no-op, not a new clock. The earlier 13-check representation suite also passed fresh with all final formats 8 (/tmp/modelark-annex-payload-stage0-gp96bntg). Evidence and retained failures: docs/acceptance/annex-publication-stage0-2026-09-14.md, round2 JSON; review findings: docs/reviews/annex-publication-stage0-grok-1.md. Stage 0 closure remains under current-round review; no production or live state was changed.
+- 2026-09-14 qualification closure: local Grok qualification round 2 accepted the pinned Stage 0 publication-protocol batch, closed all six prior findings and reported no remaining P1/P2 blockers (docs/reviews/annex-publication-stage0-grok-2.md). Stop on acceptance after 2/3 rounds; third unused. Local verification confirmed byte-identical copied JSON, all 34 final fixture formats at 8, both scripts passing Ruff and clean diff whitespace. The accepted mechanism is Git-only quarantine before native merge, history-aware independently checked metadata and fully rechecked replay evidence. Original pre-review result flags/hashes remain unchanged. This closes the initial qualification gate, not production authority/locking/schema/crash or live-deployment gates; Stage 1 is the next separately authorized implementation scope in docs/plans/annex-payload-migration.md.
+
+- 2026-09-14 Stage 1 integration result: tracing existing Fill found advisory per-key `.log.met` records beyond the Stage 0 location-log matrix. Fresh pinned-client fixtures passed eight grouped annotation checks: native initial/replacement/repeated/encoded writes, omitted parameter preservation, staged effective union with another repository's same-key map tag, changed-source refusal before native merge, unplanned-field refusal and an unchanged contentless map. Native tag logs compact timestamped field/value cells, so location-log history inclusion is not their merge rule. Evidence: docs/acceptance/annex-annotations-stage1-2026-09-14.md and matching JSON; run /tmp/modelark-annex-payload-stage0-1b1yx9ne. These results extend the open hypothesis's integration evidence, not Stage 0's closed review count or Stage 1 acceptance. No live state was changed.
+
+### DEC-157: Centralize archive publication as an evidence-driven state machine
+- `id`: DEC-157
+- `date`: 2026-09-14
+- `status`: accepted architecture direction; qualification incomplete, implementation not authorized by this entry
+- `triggered_by`: HYP-003 and Grok planning/qualification pass 3; operator explicitly requested the architectural change in the plan and another local Grok review after the three-pass stop.
+- `decision`: Plan one ArchivePublisher across acquisition, replica and legacy/returning-clone conversion, with phase-specific byte/object, committed-tree, map/location and catalog proofs bound to one operation/authority record. Require a qualified execution profile, staged metadata validation and durable replay, rather than optional post-add checks. Pin this migration's initial rollout profile to installed git-annex 8.20210223/repository format 8; newer clients require separate qualification/deployment approval. Retain existing Fill session authority and dedicated migration recovery ownership as explicit adapters.
+- `rationale`: Working bytes, Git representation, annex location claims and format compatibility are independent facts. The filter and auto-upgrade probes show that success in one cannot authorize another. A journal without shared admission/closure enforcement or a filter name without validated commands is insufficient.
+- `impact`: Architecture plan, remaining Stage 0 qualification and later shared writer/recovery/sync integration. No codec redesign, live client upgrade, automatic Fill resume or catalog change. Authorize one additional local Grok design review as pass 4; do not reset the three-pass policy or treat design acceptance as qualification completion.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-payload-migration.md, docs/acceptance/annex-payload-stage0-2026-09-13.md
+- `related`: DEC-156, HYP-003, docs/reviews/annex-payload-plan-grok-3.md
