@@ -56,16 +56,23 @@ _COMMAND_DEADLINE_SECONDS = 6 * 60 * 60
 
 
 def _reap_group(child):
-    """Kill the owned session and wait; never leave a fence-holding descendant."""
-    if child.poll() is None:
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
+    """SIGKILL the owned session even if the direct child has already exited.
+
+    A descendant can keep an inherited output pipe open after the leader exits.
+    Skipping killpg in that case leaves the group alive and the fences held.
+    """
+    try:
+        os.killpg(child.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        if child.poll() is None:
             try:
                 child.kill()
             except ProcessLookupError:
                 pass
-    child.wait()
+    try:
+        child.wait()
+    except ChildProcessError:
+        pass
 
 
 def _ref_or_oid(value):

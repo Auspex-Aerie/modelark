@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 import pytest
 
@@ -158,14 +159,26 @@ def test_bounded_process_deadline_kills_owned_descendants(tmp_path):
     script = tmp_path / "stall.py"
     marker = tmp_path / "child.pid"
     script.write_text(
-        "import subprocess, sys, time\n"
-        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "import subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+        "                         stdout=sys.stdout, stderr=sys.stderr)\n"
         f"open({str(marker)!r}, 'w').write(str(child.pid))\n"
-        "time.sleep(30)\n"
+        "raise SystemExit(0)\n"
     )
     with pytest.raises(PublicationRefused, match="COMMAND_DEADLINE"):
         native._bounded_process([sys.executable, str(script)], cwd=tmp_path, pass_fds=(),
                                 environment={}, limit=1024, deadline=1)
     pid = int(marker.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
+    until = time.monotonic() + 2
+    while time.monotonic() < until:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+        raise AssertionError(f"descendant {pid} survived timeout cleanup")
