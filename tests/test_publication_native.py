@@ -205,3 +205,53 @@ def test_deadline_reap_does_not_killpg_the_raw_child_pid(tmp_path, monkeypatch):
     with pytest.raises(PublicationRefused, match="COMMAND_DEADLINE"):
         native._bounded_process([sys.executable, "-c", "import time; time.sleep(30)"],
                                 cwd=tmp_path, pass_fds=(), environment={}, limit=1024, deadline=1)
+
+
+def _wait_dead(pid, seconds=2):
+    until = time.monotonic() + seconds
+    while time.monotonic() < until:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    try:
+        os.kill(pid, 9)
+    except ProcessLookupError:
+        return
+    raise AssertionError(f"pid {pid} survived timeout cleanup")
+
+
+def test_deadline_reaps_setsid_and_forking_descendants(tmp_path):
+    script = tmp_path / "escape.py"
+    marker = tmp_path / "pids"
+    script.write_text(
+        "import os, sys, time\n"
+        f"marker = {str(marker)!r}\n"
+        "def note(tag):\n"
+        "    with open(marker, 'a') as fh:\n"
+        "        fh.write(f'{tag} {os.getpid()}\\n')\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        "    os.setsid()\n"
+        "    note('setsid')\n"
+        "    time.sleep(30)\n"
+        "    os._exit(0)\n"
+        "note('leader')\n"
+        "while True:\n"
+        "    pid = os.fork()\n"
+        "    if pid == 0:\n"
+        "        note('fork')\n"
+        "        time.sleep(30)\n"
+        "        os._exit(0)\n"
+        "    time.sleep(0.02)\n"
+    )
+    with pytest.raises(PublicationRefused, match="COMMAND_DEADLINE"):
+        native._bounded_process([sys.executable, str(script)], cwd=tmp_path, pass_fds=(),
+                                environment={}, limit=1024, deadline=1)
+    pids = []
+    if marker.exists():
+        pids = [int(line.split()[1]) for line in marker.read_text().splitlines() if line.strip()]
+    assert pids, "escape script must record descendant pids"
+    for pid in pids:
+        _wait_dead(pid)

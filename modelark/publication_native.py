@@ -6,7 +6,7 @@ private coordinator operations and require a separately durable command intent.
 """
 from __future__ import annotations
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import hashlib
 import json
@@ -53,6 +53,99 @@ _REF = re.compile(r"refs/[A-Za-z0-9_./-]+\Z")
 # Hang bound only. Large annex-add may be quiet on pipes; this is not a progress
 # estimator. Tests pass a one-second deadline.
 _COMMAND_DEADLINE_SECONDS = 6 * 60 * 60
+_REAP_PASSES = 64
+
+
+def _command_cgroup_parent():
+    lines = Path("/proc/self/cgroup").read_text().splitlines()
+    if not lines or not lines[-1].startswith("0::"):
+        raise PublicationRefused("PUBLICATION_COMMAND_CGROUP_REQUIRED")
+    parent = Path("/sys/fs/cgroup") / lines[-1][3:].lstrip("/")
+    if not parent.is_dir():
+        raise PublicationRefused("PUBLICATION_COMMAND_CGROUP_REQUIRED")
+    return parent
+
+
+@contextmanager
+def _command_cgroup():
+    """Private cgroup v2 for one native command. setsid does not escape it."""
+    path = _command_cgroup_parent() / f"modelark-pub-{os.getpid()}-{time.monotonic_ns()}"
+    try:
+        path.mkdir()
+    except OSError as exc:
+        raise PublicationRefused("PUBLICATION_COMMAND_CGROUP_REQUIRED") from exc
+    if not (path / "cgroup.kill").is_file():
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+        raise PublicationRefused("PUBLICATION_COMMAND_CGROUP_REQUIRED")
+    try:
+        yield path
+    finally:
+        try:
+            _kill_cgroup(path)
+        finally:
+            try:
+                path.rmdir()
+            except OSError:
+                pass
+
+
+def _cgroup_join(procs):
+    raw = os.fspath(procs).encode()
+    def join():
+        fd = os.open(raw, os.O_WRONLY | os.O_CLOEXEC)
+        try:
+            os.write(fd, b"%d" % os.getpid())
+        finally:
+            os.close(fd)
+    return join
+
+
+def _cgroup_pids(path):
+    try:
+        return [int(pid) for pid in (path / "cgroup.procs").read_text().split() if pid]
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError, ValueError):
+        return []
+
+
+def _proc_alive(pid):
+    try:
+        text = Path("/proc", str(pid), "stat").read_text()
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+        return False
+    close = text.rfind(")")
+    if close < 0 or close + 2 >= len(text):
+        return False
+    return text[close + 2] != "Z"
+
+
+def _cgroup_live_pids(path):
+    return [pid for pid in _cgroup_pids(path) if _proc_alive(pid)]
+
+
+def _kill_cgroup(path):
+    """Kill the subtree until no live members remain. Zombies are not leftovers."""
+    kill = path / "cgroup.kill"
+    leftover = []
+    for _ in range(_REAP_PASSES):
+        try:
+            kill.write_text("1")
+        except OSError:
+            pass
+        leftover = _cgroup_live_pids(path)
+        if not leftover:
+            return
+        for pid in leftover:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        time.sleep(0.01)
+    leftover = _cgroup_live_pids(path)
+    if leftover:
+        raise PublicationRefused("PUBLICATION_COMMAND_REAP_INCOMPLETE", pids=tuple(leftover))
 
 
 def _proc_starttime(pid):
@@ -91,8 +184,8 @@ def _owned_session_members(pgid, starttime):
         fields = text[close + 2:].split()
         if len(fields) < 20:
             continue
-        pgrp, born = int(fields[2]), int(fields[19])
-        if pgrp != pgid or born < starttime:
+        state, pgrp, born = fields[0], int(fields[2]), int(fields[19])
+        if state == "Z" or pgrp != pgid or born < starttime:
             continue
         if pid == pgid and born != starttime:
             continue
@@ -100,23 +193,36 @@ def _owned_session_members(pgid, starttime):
     return owned
 
 
-def _reap_group(child, *, pidfd, pgid, starttime):
-    """Tear down the owned session using pidfd identity, never a recycled PID.
+def _reap_group(child, *, pidfd, pgid, starttime, cgroup):
+    """Tear down the cgroup, then any leftover session members.
 
-    killpg(child.pid) is not used after spawn: that number can name a different
-    process group once the original session is empty. Signal the leader through
-    the pidfd opened at spawn, then only /proc members whose starttime proves
-    they were born in this session.
+    cgroup.kill is the container: forks during a /proc snapshot and setsid
+    children stay in the cgroup. Session scan is a second pass, still looped
+    until empty. pidfd identifies the original leader; killpg is not used here.
     """
+    _kill_cgroup(cgroup)
     try:
         signal.pidfd_send_signal(pidfd, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    for pid in _owned_session_members(pgid, starttime):
+    for _ in range(_REAP_PASSES):
         try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
+            child.wait(timeout=0)
+        except (subprocess.TimeoutExpired, ChildProcessError):
             pass
+        leftover = _owned_session_members(pgid, starttime)
+        if not leftover:
+            break
+        for pid in leftover:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        time.sleep(0.01)
+    else:
+        leftover = _owned_session_members(pgid, starttime)
+        if leftover:
+            raise PublicationRefused("PUBLICATION_COMMAND_REAP_INCOMPLETE", pids=tuple(leftover))
     try:
         child.wait()
     except ChildProcessError:
@@ -148,10 +254,11 @@ def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None
         raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE_INVALID")
     buffers = {"out": bytearray(), "err": bytearray()}
     deadline_at = time.monotonic() + deadline
-    with subprocess.Popen(argv, cwd=cwd, env=dict(environment), pass_fds=tuple(pass_fds),
-                          stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          start_new_session=True) as child:
+    with _command_cgroup() as cgroup, subprocess.Popen(
+            argv, cwd=cwd, env=dict(environment), pass_fds=tuple(pass_fds),
+            stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True, preexec_fn=_cgroup_join(cgroup / "cgroup.procs")) as child:
         pidfd = None
         starttime = None
         try:
@@ -222,7 +329,7 @@ def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None
                     "PUBLICATION_COMMAND_PIDFD_REQUIRED", "PUBLICATION_COMMAND_STAT_UNPROVEN"}:
                 raise
             if pidfd is not None and type(starttime) is int:
-                _reap_group(child, pidfd=pidfd, pgid=child.pid, starttime=starttime)
+                _reap_group(child, pidfd=pidfd, pgid=child.pid, starttime=starttime, cgroup=cgroup)
             if isinstance(exc, subprocess.TimeoutExpired):
                 raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE") from exc
             raise
