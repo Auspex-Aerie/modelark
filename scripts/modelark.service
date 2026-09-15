@@ -13,6 +13,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
+Delegate=yes
 WorkingDirectory=@WORKING_DIRECTORY@
 ExecStart=@EXEC_START@
 Restart=always

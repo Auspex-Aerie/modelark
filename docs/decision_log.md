@@ -3277,3 +3277,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Architecture plan, remaining Stage 0 qualification and later shared writer/recovery/sync integration. No codec redesign, live client upgrade, automatic Fill resume or catalog change. Authorize one additional local Grok design review as pass 4; do not reset the three-pass policy or treat design acceptance as qualification completion.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-payload-migration.md, docs/acceptance/annex-payload-stage0-2026-09-13.md
 - `related`: DEC-156, HYP-003, docs/reviews/annex-payload-plan-grok-3.md
+
+### DEC-158: Contain native publication commands; reap until the container is empty
+- `id`: DEC-158
+- `date`: 2026-09-15
+- `status`: accepted
+- `triggered_by`: Independent Greptile P1 and DeepSeek P2 on PR 85 commit `125aa40` (same hole); Greptile P1 on `d8aa941` (hard cgroup require disabled qualify)
+- `decision`: Treat a one-shot `/proc` PID list as not a container. Each native Git/annex command joins a private cgroup v2; timeout cleanup uses `cgroup.kill` and loops until no live members remain. pidfd plus starttime still identify the original leader; `killpg` is only for the instant `pidfd_open` fails while the PID is still ours. Documented systemd user units set `Delegate=yes` so the unprivileged process can mkdir that subtree. If the subtree cannot be created, native commands still run and cleanup loops the session until empty. `setsid`/`setpgid` leave session/pgid but not a cgroup; the setsid escape is closed only on the cgroup path.
+- `rationale`: Fork-during-scan and session-escape are one containment problem. Rescanning the session until empty is necessary and is the degraded path; it is not sufficient because a descendant can `setsid` and keep fence fds. Hard-failing `PUBLICATION_COMMAND_CGROUP_REQUIRED` turned missing user-unit delegation into a total native-command outage, including qualify.
+- `impact`: `modelark/publication_native.py` timeout/reap; `scripts/modelark.service`; deploy docs. No live Fill or conversion.
+- `docs_updated`: docs/decision_log.md, docs/deployment.md, modelark/publication_native.py, scripts/modelark.service, tests/test_publication_native.py, tests/test_deploy.py
+- `related`: DEC-157

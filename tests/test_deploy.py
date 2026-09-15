@@ -97,6 +97,7 @@ def test_unit_is_unprivileged_explicit_and_resume_is_opt_in(tmp_path):
     state = tmp_path / "state"
     unit = deploy.render_unit(source, executable, data, state, None, 8077, False)
     assert "User=" not in unit and "Group=" not in unit
+    assert "Delegate=yes" in unit
     assert "WantedBy=default.target" in unit
     assert "WorkingDirectory=" in unit and "source\\x20with\\x20space" in unit
     assert f'"{data}"' in unit and f'"{state}"' in unit

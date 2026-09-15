@@ -198,6 +198,29 @@ def test_owned_session_members_exclude_a_recycled_leader_starttime():
         proc.wait()
 
 
+def _without_cgroup(monkeypatch):
+    def boom():
+        raise PublicationRefused("PUBLICATION_COMMAND_CGROUP_REQUIRED")
+    monkeypatch.setattr(native, "_command_cgroup_parent", boom)
+
+
+def _private_cgroup_available():
+    with native._command_cgroup() as path:
+        return path is not None
+
+
+def test_missing_cgroup_delegation_still_runs_and_reaps(tmp_path, monkeypatch):
+    _without_cgroup(monkeypatch)
+    with pytest.raises(PublicationRefused, match="COMMAND_DEADLINE"):
+        native._bounded_process([sys.executable, "-c", "import time; time.sleep(30)"],
+                                cwd=tmp_path, pass_fds=(), environment={}, limit=1024, deadline=1)
+
+
+def test_missing_cgroup_delegation_still_reaps_forking_descendants(tmp_path, monkeypatch):
+    _without_cgroup(monkeypatch)
+    test_bounded_process_deadline_kills_owned_descendants(tmp_path)
+
+
 def test_deadline_reap_does_not_killpg_the_raw_child_pid(tmp_path, monkeypatch):
     def boom(*args, **kwargs):
         raise AssertionError("killpg must not run on the timeout path")
@@ -223,6 +246,8 @@ def _wait_dead(pid, seconds=2):
 
 
 def test_deadline_reaps_setsid_and_forking_descendants(tmp_path):
+    if not _private_cgroup_available():
+        pytest.skip("private cgroup v2 is not delegated in this process")
     script = tmp_path / "escape.py"
     marker = tmp_path / "pids"
     script.write_text(

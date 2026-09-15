@@ -68,28 +68,32 @@ def _command_cgroup_parent():
 
 @contextmanager
 def _command_cgroup():
-    """Private cgroup v2 for one native command. setsid does not escape it."""
-    path = _command_cgroup_parent() / f"modelark-pub-{os.getpid()}-{time.monotonic_ns()}"
+    """Private cgroup v2 for one native command. setsid does not escape it.
+
+    Yields None when the process cannot create a delegated subtree (documented
+    systemd user units enable Delegate=yes). Cleanup then loops the session.
+    """
+    path = None
     try:
+        parent = _command_cgroup_parent()
+        path = parent / f"modelark-pub-{os.getpid()}-{time.monotonic_ns()}"
         path.mkdir()
-    except OSError as exc:
-        raise PublicationRefused("PUBLICATION_COMMAND_CGROUP_REQUIRED") from exc
-    if not (path / "cgroup.kill").is_file():
-        try:
+        if not (path / "cgroup.kill").is_file():
             path.rmdir()
-        except OSError:
-            pass
-        raise PublicationRefused("PUBLICATION_COMMAND_CGROUP_REQUIRED")
+            path = None
+    except (PublicationRefused, OSError):
+        path = None
     try:
         yield path
     finally:
-        try:
-            _kill_cgroup(path)
-        finally:
+        if path is not None:
             try:
-                path.rmdir()
-            except OSError:
-                pass
+                _kill_cgroup(path)
+            finally:
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
 
 
 def _cgroup_join(procs):
@@ -200,7 +204,8 @@ def _reap_group(child, *, pidfd, pgid, starttime, cgroup):
     children stay in the cgroup. Session scan is a second pass, still looped
     until empty. pidfd identifies the original leader; killpg is not used here.
     """
-    _kill_cgroup(cgroup)
+    if cgroup is not None:
+        _kill_cgroup(cgroup)
     try:
         signal.pidfd_send_signal(pidfd, signal.SIGKILL)
     except ProcessLookupError:
@@ -254,88 +259,90 @@ def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None
         raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE_INVALID")
     buffers = {"out": bytearray(), "err": bytearray()}
     deadline_at = time.monotonic() + deadline
-    with _command_cgroup() as cgroup, subprocess.Popen(
-            argv, cwd=cwd, env=dict(environment), pass_fds=tuple(pass_fds),
-            stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True, preexec_fn=_cgroup_join(cgroup / "cgroup.procs")) as child:
-        pidfd = None
-        starttime = None
-        try:
+    spawn = dict(cwd=cwd, env=dict(environment), pass_fds=tuple(pass_fds),
+                 stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+    with _command_cgroup() as cgroup:
+        if cgroup is not None:
+            spawn["preexec_fn"] = _cgroup_join(cgroup / "cgroup.procs")
+        with subprocess.Popen(argv, **spawn) as child:
+            pidfd = None
+            starttime = None
             try:
-                pidfd = os.pidfd_open(child.pid)
-            except OSError as exc:
                 try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    child.kill()
-                child.wait()
-                raise PublicationRefused("PUBLICATION_COMMAND_PIDFD_REQUIRED") from exc
-            starttime = _proc_starttime(child.pid)
-            if type(starttime) is not int:
-                try:
-                    signal.pidfd_send_signal(pidfd, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                try:
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    child.kill()
-                child.wait()
-                raise PublicationRefused("PUBLICATION_COMMAND_STAT_UNPROVEN", pid=child.pid)
-            with selectors.DefaultSelector() as selector:
-                for pipe, name in ((child.stdout, "out"), (child.stderr, "err")):
-                    os.set_blocking(pipe.fileno(), False)
-                    selector.register(pipe, selectors.EVENT_READ, name)
-                pending = memoryview(input_data or b"")
-                if child.stdin is not None:
-                    if pending:
-                        os.set_blocking(child.stdin.fileno(), False)
-                        selector.register(child.stdin, selectors.EVENT_WRITE, "in")
-                    else:
-                        child.stdin.close()
-                while selector.get_map():
-                    remaining = deadline_at - time.monotonic()
-                    if remaining <= 0:
-                        raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE")
-                    ready = selector.select(min(1.0, remaining))
-                    if not ready:
-                        continue
-                    for event, _ in ready:
-                        pipe, name = event.fileobj, event.data
-                        if name == "in":
-                            try:
-                                pending = pending[os.write(pipe.fileno(), pending[:65536]):]
-                            except BrokenPipeError:
-                                pending = pending[:0]
-                            if not pending:
+                    pidfd = os.pidfd_open(child.pid)
+                except OSError as exc:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        child.kill()
+                    child.wait()
+                    raise PublicationRefused("PUBLICATION_COMMAND_PIDFD_REQUIRED") from exc
+                starttime = _proc_starttime(child.pid)
+                if type(starttime) is not int:
+                    try:
+                        signal.pidfd_send_signal(pidfd, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        child.kill()
+                    child.wait()
+                    raise PublicationRefused("PUBLICATION_COMMAND_STAT_UNPROVEN", pid=child.pid)
+                with selectors.DefaultSelector() as selector:
+                    for pipe, name in ((child.stdout, "out"), (child.stderr, "err")):
+                        os.set_blocking(pipe.fileno(), False)
+                        selector.register(pipe, selectors.EVENT_READ, name)
+                    pending = memoryview(input_data or b"")
+                    if child.stdin is not None:
+                        if pending:
+                            os.set_blocking(child.stdin.fileno(), False)
+                            selector.register(child.stdin, selectors.EVENT_WRITE, "in")
+                        else:
+                            child.stdin.close()
+                    while selector.get_map():
+                        remaining = deadline_at - time.monotonic()
+                        if remaining <= 0:
+                            raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE")
+                        ready = selector.select(min(1.0, remaining))
+                        if not ready:
+                            continue
+                        for event, _ in ready:
+                            pipe, name = event.fileobj, event.data
+                            if name == "in":
+                                try:
+                                    pending = pending[os.write(pipe.fileno(), pending[:65536]):]
+                                except BrokenPipeError:
+                                    pending = pending[:0]
+                                if not pending:
+                                    selector.unregister(pipe)
+                                    pipe.close()
+                                continue
+                            chunk = os.read(pipe.fileno(), 65536)
+                            if not chunk:
                                 selector.unregister(pipe)
-                                pipe.close()
-                            continue
-                        chunk = os.read(pipe.fileno(), 65536)
-                        if not chunk:
-                            selector.unregister(pipe)
-                            continue
-                        budget = limit if name == "out" else 65536
-                        if len(buffers[name]) + len(chunk) > budget:
-                            raise PublicationRefused("PUBLICATION_COMMAND_OUTPUT_LIMIT", stream=name)
-                        buffers[name].extend(chunk)
-            remaining = deadline_at - time.monotonic()
-            if remaining <= 0:
-                raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE")
-            code = child.wait(timeout=remaining)
-        except BaseException as exc:
-            if isinstance(exc, PublicationRefused) and exc.code in {
-                    "PUBLICATION_COMMAND_PIDFD_REQUIRED", "PUBLICATION_COMMAND_STAT_UNPROVEN"}:
+                                continue
+                            budget = limit if name == "out" else 65536
+                            if len(buffers[name]) + len(chunk) > budget:
+                                raise PublicationRefused("PUBLICATION_COMMAND_OUTPUT_LIMIT", stream=name)
+                            buffers[name].extend(chunk)
+                remaining = deadline_at - time.monotonic()
+                if remaining <= 0:
+                    raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE")
+                code = child.wait(timeout=remaining)
+            except BaseException as exc:
+                if isinstance(exc, PublicationRefused) and exc.code in {
+                        "PUBLICATION_COMMAND_PIDFD_REQUIRED", "PUBLICATION_COMMAND_STAT_UNPROVEN"}:
+                    raise
+                if pidfd is not None and type(starttime) is int:
+                    _reap_group(child, pidfd=pidfd, pgid=child.pid, starttime=starttime, cgroup=cgroup)
+                if isinstance(exc, subprocess.TimeoutExpired):
+                    raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE") from exc
                 raise
-            if pidfd is not None and type(starttime) is int:
-                _reap_group(child, pidfd=pidfd, pgid=child.pid, starttime=starttime, cgroup=cgroup)
-            if isinstance(exc, subprocess.TimeoutExpired):
-                raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE") from exc
-            raise
-        finally:
-            if pidfd is not None:
-                os.close(pidfd)
+            finally:
+                if pidfd is not None:
+                    os.close(pidfd)
     if code:
         raise PublicationRefused("PUBLICATION_NATIVE_COMMAND_FAILED", returncode=code,
                                  command=argv[0], stderr=bytes(buffers["err"]).decode(errors="replace")[:1024])
