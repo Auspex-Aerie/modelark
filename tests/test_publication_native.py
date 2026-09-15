@@ -1,6 +1,7 @@
 """Pinned native reader tests on disposable repos and synthetic attachment rows."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -145,3 +146,26 @@ def test_bounded_process_failure_is_not_success(tmp_path):
     with pytest.raises(PublicationRefused, match="NATIVE_COMMAND_FAILED"):
         native._bounded_process([sys.executable, "-c", "raise SystemExit(3)"], cwd=tmp_path,
                                 pass_fds=(), environment={}, limit=1024)
+
+
+def test_bounded_process_deadline_kills_a_silent_child(tmp_path):
+    with pytest.raises(PublicationRefused, match="COMMAND_DEADLINE"):
+        native._bounded_process([sys.executable, "-c", "import time; time.sleep(30)"],
+                                cwd=tmp_path, pass_fds=(), environment={}, limit=1024, deadline=1)
+
+
+def test_bounded_process_deadline_kills_owned_descendants(tmp_path):
+    script = tmp_path / "stall.py"
+    marker = tmp_path / "child.pid"
+    script.write_text(
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        f"open({str(marker)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(30)\n"
+    )
+    with pytest.raises(PublicationRefused, match="COMMAND_DEADLINE"):
+        native._bounded_process([sys.executable, str(script)], cwd=tmp_path, pass_fds=(),
+                                environment={}, limit=1024, deadline=1)
+    pid = int(marker.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)

@@ -14,8 +14,10 @@ import os
 from pathlib import Path
 import re
 import selectors
+import signal
 import stat
 import subprocess
+import time
 from types import MappingProxyType
 
 from modelark import publication_locks, publication_store as store
@@ -48,6 +50,22 @@ _SAFE_ANNEX = {"annex.version": {"8"}, "annex.backend": {"SHA256", "SHA256E"},
                "annex.thin": {"false"}, "annex.securehashesonly": {"true"}}
 _OID = re.compile(r"[0-9a-f]{40}\Z")
 _REF = re.compile(r"refs/[A-Za-z0-9_./-]+\Z")
+# Hang bound only. Large annex-add may be quiet on pipes; this is not a progress
+# estimator. Tests pass a one-second deadline.
+_COMMAND_DEADLINE_SECONDS = 6 * 60 * 60
+
+
+def _reap_group(child):
+    """Kill the owned session and wait; never leave a fence-holding descendant."""
+    if child.poll() is None:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            try:
+                child.kill()
+            except ProcessLookupError:
+                pass
+    child.wait()
 
 
 def _ref_or_oid(value):
@@ -59,20 +77,26 @@ def _identity(value):
     return (value.st_dev, value.st_ino, value.st_mode, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
 
-def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None):
-    """Drain both pipes with hard byte budgets; no unbounded communicate capture.
+def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None, deadline=None):
+    """Drain both pipes with hard byte budgets and a hang deadline.
 
-    On overflow/error terminate and reap only this owned subprocess. No command
-    timeout or caller-selected executable is used. Stdin is bounded intent data.
+    The child is its own session so timeout/error can SIGKILL the owned group.
+    No caller-selected executable is used. Stdin is bounded intent data.
     """
     if type(limit) is not int or not 0 < limit <= 64 * 1024 * 1024:
         raise PublicationRefused("PUBLICATION_COMMAND_LIMIT_INVALID")
     if input_data is not None and (type(input_data) is not bytes or len(input_data) > 1024 * 1024):
         raise PublicationRefused("PUBLICATION_COMMAND_INPUT_INVALID")
+    if deadline is None:
+        deadline = _COMMAND_DEADLINE_SECONDS
+    if type(deadline) is not int or deadline <= 0:
+        raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE_INVALID")
     buffers = {"out": bytearray(), "err": bytearray()}
+    deadline_at = time.monotonic() + deadline
     with subprocess.Popen(argv, cwd=cwd, env=dict(environment), pass_fds=tuple(pass_fds),
                           stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          start_new_session=True) as child:
         try:
             with selectors.DefaultSelector() as selector:
                 for pipe, name in ((child.stdout, "out"), (child.stderr, "err")):
@@ -86,7 +110,13 @@ def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None
                     else:
                         child.stdin.close()
                 while selector.get_map():
-                    for event, _ in selector.select():
+                    remaining = deadline_at - time.monotonic()
+                    if remaining <= 0:
+                        raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE")
+                    ready = selector.select(min(1.0, remaining))
+                    if not ready:
+                        continue
+                    for event, _ in ready:
                         pipe, name = event.fileobj, event.data
                         if name == "in":
                             try:
@@ -105,11 +135,14 @@ def _bounded_process(argv, *, cwd, pass_fds, environment, limit, input_data=None
                         if len(buffers[name]) + len(chunk) > budget:
                             raise PublicationRefused("PUBLICATION_COMMAND_OUTPUT_LIMIT", stream=name)
                         buffers[name].extend(chunk)
-            code = child.wait()
+            remaining = deadline_at - time.monotonic()
+            if remaining <= 0:
+                raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE")
+            code = child.wait(timeout=remaining)
+        except subprocess.TimeoutExpired as exc:
+            raise PublicationRefused("PUBLICATION_COMMAND_DEADLINE") from exc
         except BaseException:
-            if child.poll() is None:
-                child.kill()
-            child.wait()
+            _reap_group(child)
             raise
     if code:
         raise PublicationRefused("PUBLICATION_NATIVE_COMMAND_FAILED", returncode=code,
