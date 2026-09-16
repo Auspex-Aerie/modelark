@@ -42,13 +42,21 @@ def leftover(con, intent, *, cataloged=False):
     match = _matching_prepared(con, intent)
     if match is None or not cataloged:
         return match
-    operation_id, _batch_id, file_id = match
+    operation_id, _batch_id, file_id, _saved = match
     row = con.execute(
         "SELECT phase FROM publication_files WHERE operation_id=? AND file_id=?",
         [operation_id, file_id]).fetchone()
     if row is None or row[0] != "CATALOG_PUBLISHED":
         return None
     return match
+
+
+def _intents_match(saved, intent):
+    if saved.get("kind") != intent.get("kind"):
+        return False
+    if saved.get("kind") in {"register_drive", "register_nas", "register_new_identity"}:
+        return saved.get("label") == intent.get("label")
+    return saved == intent
 
 
 def _matching_prepared(con, intent):
@@ -58,7 +66,8 @@ def _matching_prepared(con, intent):
     if len(rows) != 1:
         return None
     binding = store._unseal(rows[0][1], rows[0][2])
-    if binding.get("before_state", {}).get("intent") != intent:
+    saved = binding.get("before_state", {}).get("intent") or {}
+    if not _intents_match(saved, intent):
         return None
     files = binding.get("batch_files") or {}
     if len(files) != 1:
@@ -66,7 +75,19 @@ def _matching_prepared(con, intent):
     batch_id, children = next(iter(files.items()))
     if len(children) != 1:
         return None
-    return rows[0][0], batch_id, children[0]
+    return rows[0][0], batch_id, children[0], saved
+
+
+def _stored_physical(setup):
+    row = setup.connection.execute(
+        "SELECT intent_json, intent_digest FROM publication_files WHERE operation_id=? AND file_id=?",
+        [setup.operation_id, setup.file_id]).fetchone()
+    if row is None:
+        return {}
+    frozen = store._unseal(row[0], row[1])
+    intent = frozen.get("intent") if isinstance(frozen.get("intent"), dict) else frozen
+    physical = (intent.get("catalog_pair") or {}).get("physical")
+    return physical if isinstance(physical, dict) else {}
 
 
 def _map_receipt(map_uuid, root=None):
@@ -213,7 +234,7 @@ def hold(con, intent):
         store.require_clear(con, tree_change=True)
     setup = RegistrationSetup(con, intent)
     if leftover is not None:
-        setup.operation_id, setup.batch_id, setup.file_id = leftover
+        setup.operation_id, setup.batch_id, setup.file_id, setup.intent = leftover
     with locks.hold(con, (), map_uuid=identity[1], map_only=True,
                     operation_id=setup.operation_id if leftover else None) as scope:
         setup.scope = scope

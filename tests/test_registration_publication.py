@@ -268,6 +268,35 @@ def test_v9_publish_map_receipt_uses_post_mutation_head(v9, tmp_path):
     assert tree["proof"]["map"]["refs"]["HEAD"] == after != before
 
 
+def test_v9_register_drive_leftover_matches_label_not_library_path(v9, tmp_path, monkeypatch):
+    from modelark import registration_setup
+    from modelark.proposal import GraphResult
+    root = tmp_path / "map"
+    real_close = registration_setup.store.close_operation
+
+    def boom(*_a, **_k):
+        raise RuntimeError("injected close failure")
+
+    monkeypatch.setattr(registration_setup.store, "close_operation", boom)
+    with pytest.raises(RuntimeError, match="injected close"):
+        with registration_setup.hold(v9, {"kind": "register_drive", "label": "drive-08",
+                                         "path": str(root)}) as setup:
+            setup.publish(physical={"archive_path": "/media/test/seagate/modelark",
+                                    "annex_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
+                          catalog=lambda _c: GraphResult(proven_noop=True, value="ark"))
+    monkeypatch.setattr(registration_setup.store, "close_operation", real_close)
+    assert registration_setup.leftover(
+        v9, {"kind": "register_drive", "label": "drive-08", "path": "/not/the/same"},
+        cataloged=True)
+    with registration_setup.hold(v9, {"kind": "register_drive", "label": "drive-08"}) as setup:
+        assert setup.intent["path"] == str(root)
+        physical = registration_setup._stored_physical(setup)
+        assert physical["archive_path"] == "/media/test/seagate/modelark"
+        setup.publish(physical=physical, catalog=lambda _c: (_ for _ in ()).throw(
+            AssertionError("catalog CAS must not rerun")))
+    assert v9.execute("SELECT state FROM publication_operations").fetchone()[0] == "CLOSED"
+
+
 def test_v9_register_new_identity_closes_leftover_after_catalog(v9, tmp_path, monkeypatch):
     from modelark import registration_setup
     preview = _preview(v9)
