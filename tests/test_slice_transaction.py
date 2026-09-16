@@ -5,6 +5,7 @@ import hashlib
 import importlib
 import io
 import multiprocessing
+import sqlite3
 import threading
 import os
 from pathlib import PurePosixPath
@@ -799,7 +800,9 @@ def test_lazy_source_read_failure_blocks_or_uses_sealed_fallback(setup, tmp_path
             finally:
                 stream.close()
                 closed.append(candidate.drive.drive_label)
-    source = gate.FencedSources(tmp_path / "unused-catalog", Reader())
+    catalog = tmp_path / "catalog.sqlite"
+    sqlite3.connect(catalog).close()
+    source = gate.FencedSources(catalog, Reader())
     with t.start(store, tx, dest, source) as session:
         result = session.run()
     if fallback:

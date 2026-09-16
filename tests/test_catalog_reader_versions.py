@@ -36,11 +36,21 @@ def stamp(path, version):
 def install_publication(path):
     from modelark import publication_store as store
     from modelark.proposal import graph_write
-    with sqlite3.connect(path, isolation_level=None) as con:
+    with sqlite3.connect(path, isolation_level=None, timeout=30) as con:
+        con.execute("PRAGMA busy_timeout=30000")
         graph_write(con, lambda c: store._install_schema(
             c, library_id="11111111-1111-4111-8111-111111111111",
             map_uuid="22222222-2222-4222-8222-222222222222"))
         con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    with sqlite3.connect(path, isolation_level=None, timeout=30) as con:
+        con.execute("PRAGMA busy_timeout=30000")
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        mode = con.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+        if str(mode).lower() != "delete":
+            raise RuntimeError(f"publication fixture journal_mode={mode!r}")
+    for suffix in ("-wal", "-shm"):
+        leftover = path.with_name(path.name + suffix)
+        leftover.unlink(missing_ok=True)
 
 
 @pytest.mark.parametrize("read_only", [True, False])
@@ -71,7 +81,8 @@ def test_qualified_v9_open_preserves_schema_history_and_pending_diagnostics(cata
 def test_invalid_publication_contract_refuses_before_schema_or_journal_writes(catalog, corruption, entry):
     if corruption != "bare":
         install_publication(catalog)
-    with sqlite3.connect(catalog, isolation_level=None) as con:
+    with sqlite3.connect(catalog, isolation_level=None, timeout=30) as con:
+        con.execute("PRAGMA busy_timeout=30000")
         con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         con.execute("PRAGMA journal_mode=DELETE")
         con.execute({
