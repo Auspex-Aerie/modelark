@@ -527,8 +527,7 @@ def require_clear(con, drive_labels: Iterable[str] | None = None, *, tree_change
             if label is None:
                 if kind != "registration" or state != "PREPARED":
                     raise PublicationRefused("PUBLICATION_RECORD_UNPROVEN", operation_id=operation_id)
-                if labels is None or tree_change:
-                    blocked.add(operation_id)
+                blocked.add(operation_id)
                 continue
             closing = _CLOSING.get()
             explicitly_closing = closing is not None and closing[0] is con and closing[1] == operation_id

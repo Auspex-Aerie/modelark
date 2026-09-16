@@ -144,6 +144,22 @@ def test_selected_obligation_blocks_source_and_ordinary_closure(con):
     assert con.execute("SELECT state FROM publication_operations").fetchone()[0] == "PREPARED"
 
 
+def test_map_only_registration_blocks_clean_anchor_and_ordinary_recovery(con):
+    install(con)
+    con.execute("INSERT INTO publication_operations VALUES(?,?,?,?,?,'PREPARED',1,NULL,NULL,1)",
+                ["reg-op", LIBRARY, "registration", "{}", store.digest({})])
+    for labels in (None, ["d0"], ["d1"]):
+        with pytest.raises(PublicationRefused, match="MAINTENANCE_REQUIRED") as error:
+            store.require_clear(con, labels)
+        assert error.value.evidence["operation_ids"] == ["reg-op"]
+    with pytest.raises(drive_mutation.DriveMutationRefused, match="MAINTENANCE_REQUIRED"):
+        drive_mutation._publish_anchor_locked(con, "d0", 1, 1, None, "now")
+    with pytest.raises(drive_mutation.DriveMutationRefused, match="MAINTENANCE_REQUIRED"):
+        drive_bootstrap.reconcile_drive(con, "d0", now="now", dedicated=True)
+    with pytest.raises(Refusal, match="MAINTENANCE_REQUIRED"):
+        preview_pure(con)
+
+
 def test_missing_participant_is_a_corrupt_record_not_zero_work(con):
     install(con)
     pending(con)

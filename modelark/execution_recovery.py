@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from modelark import execution_authority as authority
-from modelark.proposal import Refusal
+from modelark.proposal import Refusal, require_publication_clear
 
 # session_id -> list of open file handles holding drive/controller fences (OS-visible flock).
 _CHILD_FENCE_HANDLES: dict[str, list] = {}
@@ -266,6 +266,7 @@ def recover_expired_session(con, *, session_id, services):
                 validate_fences(con)
             if _recovery_labels() != (labels, owned_before):
                 raise Refusal("SESSION_AUTHORITY_CHANGED", {"session_id": session_id}, ())
+            require_publication_clear(con, labels)
             # Re-read under locks; CAS on token + live state + still-expired lease.
             row2 = con.execute(
                 "SELECT state, fencing_token, expires_at, approved_proposal_id "

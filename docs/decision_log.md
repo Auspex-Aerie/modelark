@@ -3311,3 +3311,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `publication_store` operation kind CHECK; `publication_locks.map_only`; `registration_setup`; `register`/`drive_lifecycle` v9 entry. No live Fill, conversion, or catalog migration apply.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/plans/annex-publication-writer-map.md, modelark/publication_store.py, modelark/publication_locks.py, modelark/registration_publication.py, modelark/registration_setup.py, modelark/register.py, modelark/drive_lifecycle.py, tests/test_registration_publication.py
 - `related`: DEC-157, DEC-159
+
+### DEC-161: Shared publication guard on clean-anchor, recovery, and map-only registration
+- `id`: DEC-161
+- `date`: 2026-09-16
+- `status`: accepted
+- `triggered_by`: Operator authorized the admission/clean-anchor/recovery route audit after DEC-160
+- `decision`: A PREPARED map-only `registration` operation blocks every `require_clear` caller, including clean-anchor with a concrete drive set and `tree_change=False`. Ordinary reconcile and expired-session recovery recheck the same guard and cannot publish a clean anchor or terminalize a session over unfinished publication. The only clean-anchor exemption remains `_CLOSING` inside `close_operation`. Competing callers stay refused. Owner continuation of remaining file/batch steps is the owning coordinator, not a generic clean-anchor. Conversion stays off.
+- `rationale`: DEC-160 treated map-only registration as a tree-change block only. A generic `_publish_anchor_locked` could then claim a drive clean while map publication was still PREPARED. Session recovery had no publication guard, so an expired Fill could be terminalized without inspecting the obligation. Plan D: ordinary recovery returns MAINTENANCE_REQUIRED; a generic clean-anchor cannot erase unfinished map work.
+- `impact`: `publication_store.require_clear`; `execution_recovery.recover_expired_session`. No live Fill or conversion.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/plans/annex-publication-writer-map.md, modelark/publication_store.py, modelark/execution_recovery.py, tests/test_publication_store.py, tests/test_execution_authority.py
+- `related`: DEC-157, DEC-160

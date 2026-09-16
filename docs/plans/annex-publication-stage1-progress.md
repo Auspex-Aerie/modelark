@@ -258,12 +258,11 @@ Completed after the last Codex 5.6 SOL interruption (still uncommitted, conversi
 
 Next remaining Stage 1 work:
 
-1. Audit remaining admission/clean-anchor/recovery routes; owner may finish only its
-   sealed remaining steps.
-2. Failed/skipped/gated Fill files versus the frozen complete batch-child set: keep
+1. Failed/skipped/gated Fill files versus the frozen complete batch-child set: keep
    the operation pending; never drop a declared child to close.
-3. Full scoped fault-injection remains required before stage acceptance.
-4. Resume of a leftover PREPARED registration operation after a failed catalog CAS.
+2. Full scoped fault-injection remains required before stage acceptance.
+3. Resume of a leftover PREPARED registration operation after `CATALOG_PUBLISHED`
+   (unpublished attempts already abort on `hold()` exit).
 
 Current code is local and uncommitted on `codex/annex-publication-stage1` in
 `claudedocs/operator-scratch/worktrees/codec-stage-d`. Unrelated dirty ledger, bridge
