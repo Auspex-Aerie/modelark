@@ -261,11 +261,14 @@ dropped to close; injected stop at each durable phase resumes without clearing
 the obligation; leftover PREPARED registration after `CATALOG_PUBLISHED` resumes
 and closes. Conversion remains disabled. Live Fill/catalog migration remain off.
 
-Next remaining work after this Stage 1 coordinator slice:
+Stage 2 inspect is landed read-only (`archive annex-migrate inspect`). Apply/resume
+still raise `PUBLICATION_CONVERSION_DISABLED` and must not cut over the live catalog.
 
-1. Stage 2 inspect/apply/resume with atomic catalog cutover and returning-clone
-   migration (conversion still separately gated).
-2. Live Fill restart / catalog migration apply, only when explicitly authorized.
+Next remaining work:
+
+1. Disposable-catalog apply/resume for conversion (still not live cutover).
+2. Returning-clone interception and guarded map publication.
+3. Live Fill restart / catalog migration apply, only when explicitly authorized.
 
 Current code is local and uncommitted on `codex/annex-publication-stage1` in
 `claudedocs/operator-scratch/worktrees/codec-stage-d`. Unrelated dirty ledger, bridge
