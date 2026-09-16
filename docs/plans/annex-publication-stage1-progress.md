@@ -258,13 +258,12 @@ Completed after the last Codex 5.6 SOL interruption (still uncommitted, conversi
 
 Next remaining Stage 1 work:
 
-1. Registration still refuses `REGISTRATION_PUBLICATION_ADAPTER_REQUIRED` until the
-   durable setup-intent / qualified-IO / map-receipt adapter exists.
-2. Audit remaining admission/clean-anchor/recovery routes; owner may finish only its
+1. Audit remaining admission/clean-anchor/recovery routes; owner may finish only its
    sealed remaining steps.
-3. Failed/skipped/gated Fill files versus the frozen complete batch-child set: keep
+2. Failed/skipped/gated Fill files versus the frozen complete batch-child set: keep
    the operation pending; never drop a declared child to close.
-4. Full scoped fault-injection remains required before stage acceptance.
+3. Full scoped fault-injection remains required before stage acceptance.
+4. Resume of a leftover PREPARED registration operation after a failed catalog CAS.
 
 Current code is local and uncommitted on `codex/annex-publication-stage1` in
 `claudedocs/operator-scratch/worktrees/codec-stage-d`. Unrelated dirty ledger, bridge

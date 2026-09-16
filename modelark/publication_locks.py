@@ -162,13 +162,16 @@ def _require_owner(con, writer):
 
 
 @contextmanager
-def hold(con, drive_labels, *, map_uuid, session_id=None, fencing_token=None, operation_id=None, blocking=False):
+def hold(con, drive_labels, *, map_uuid, session_id=None, fencing_token=None, operation_id=None,
+         blocking=False, map_only=False):
     """Acquire a fresh complete publication scope; never reenter existing fences.
 
     `map_uuid` must come from the independently qualified map profile; comparing
     it with the durable library binding here does not qualify a caller's profile.
     Conversion remains unavailable; maintenance ownership is checked separately
     against each captured terminal/sessionless dirty-generation binding.
+    `map_only` is the v9 registration setup scope: controller and map UUID, no
+    already-registered drive participant. Fill/replica still require drives.
     """
     if con.in_transaction:
         raise PublicationRefused("PUBLICATION_LOCK_ORDER_TRANSACTION_ACTIVE")
@@ -179,7 +182,7 @@ def hold(con, drive_labels, *, map_uuid, session_id=None, fencing_token=None, op
     if operation_id is not None:
         publication_store.canonical_uuid(operation_id)
     labels = tuple(sorted(set(drive_labels)))
-    if not labels:
+    if (not labels) != bool(map_only):
         raise PublicationRefused("PUBLICATION_PARTICIPANTS_REQUIRED")
     identity = publication_store.library(con)
     if identity is None or identity[1] != map_uuid:
@@ -195,9 +198,12 @@ def hold(con, drive_labels, *, map_uuid, session_id=None, fencing_token=None, op
         if publication_store.library(con) != identity:
             raise PublicationRefused("PUBLICATION_LIBRARY_CHANGED")
         map_handle = stack.enter_context(drive_fence.hold_map(map_uuid, blocking=blocking))
-        identities = {label: _fence_identity(con, label) for label in labels}
-        handles = stack.enter_context(drive_fence.hold_drives_sorted(
-            compatible_keys(identities.values()), blocking=blocking))
+        if labels:
+            identities = {label: _fence_identity(con, label) for label in labels}
+            handles = stack.enter_context(drive_fence.hold_drives_sorted(
+                compatible_keys(identities.values()), blocking=blocking))
+        else:
+            identities, handles = {}, ()
         _require_owner(con, writer)
         authority = _FenceAuthority(con, identity, MappingProxyType(dict(identities)), writer,
                                     (controller, map_handle, *handles), get_ident())

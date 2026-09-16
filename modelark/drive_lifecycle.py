@@ -738,11 +738,19 @@ def register_new_identity(
             "plan_id": expected["plan_id"],
         }
         if current_catalog_binding != expected_catalog_binding:
-            raise proposal.Refusal(
-                "DRIVE_REGISTRATION_PREVIEW_STALE",
-                {"expected": expected_catalog_binding, "current": current_catalog_binding},
-                ("refresh_onboarding_preview",),
-            )
+            from modelark import registration_publication
+            setup = registration_publication._SETUP.get()
+            if setup is not None:
+                expected_catalog_binding = {
+                    **expected_catalog_binding,
+                    "planner_revision": setup.base_revision,
+                }
+            if current_catalog_binding != expected_catalog_binding:
+                raise proposal.Refusal(
+                    "DRIVE_REGISTRATION_PREVIEW_STALE",
+                    {"expected": expected_catalog_binding, "current": current_catalog_binding},
+                    ("refresh_onboarding_preview",),
+                )
         for column, value in (
             ("drive_label", expected["label"]),
             ("serial", expected["serial"]),
@@ -822,9 +830,10 @@ def register_new_identity(
             },
         )
 
-    from modelark import registration_publication
+    from modelark import registration_publication, publication_store
+    from modelark.publication_policy import PublicationRefused
 
-    with registration_publication.controller(con):
+    def prepare_and_commit():
         registration_publication.require_legacy_registration(con)
         check_catalog(con)
         try:
@@ -854,7 +863,30 @@ def register_new_identity(
                 {"prepared": prepared},
                 ("refresh_onboarding_preview", "review_prepared_namespace"),
             )
-        written = proposal.graph_write(con, op)
+        return prepared, annex_uuid
+
+    try:
+        identity = publication_store.library(con)
+    except PublicationRefused as exc:
+        raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
+
+    if identity is None:
+        with registration_publication.controller(con):
+            prepared, annex_uuid = prepare_and_commit()
+            written = proposal.graph_write(con, op)
+    else:
+        from modelark import registration_setup
+        try:
+            with registration_setup.hold(con, {
+                "kind": "register_new_identity",
+                "label": expected["label"],
+                "archive_path": expected["archive_path"],
+                "plan_id": expected["plan_id"],
+            }) as setup:
+                prepared, annex_uuid = prepare_and_commit()
+                written = setup.publish(physical=prepared, catalog=op)
+        except PublicationRefused as exc:
+            raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
     return {
         "changed": True,
         "already_registered": False,

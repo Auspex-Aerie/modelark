@@ -103,6 +103,26 @@ def _save_library_root(path: Path) -> None:
     (db.CATALOG_DIR / "library.json").write_text(json.dumps({"library_root": str(path)}, indent=2) + "\n")
 
 
+def _publication_library(con=None):
+    from modelark import publication_store
+    from modelark.publication_policy import PublicationRefused
+    from modelark import proposal
+    own = con is None
+    if own:
+        if not Path(db.DB_PATH).expanduser().exists():
+            return None
+        connection = db.connect()
+    else:
+        connection = con
+    try:
+        return publication_store.library(connection)
+    except PublicationRefused as exc:
+        raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
+    finally:
+        if own:
+            connection.close()
+
+
 def ensure_library(path: Path | None = None) -> Path:
     """Explicitly initialize an absent/empty map; never adopt an occupied namespace.
 
@@ -110,12 +130,16 @@ def ensure_library(path: Path | None = None) -> Path:
     Once native initialization supplies its UUID, that exclusion overlaps the
     map lock until setup completes. Existing maps are inspected with Git only;
     missing UUID/HEAD is an incomplete or unrelated namespace, not permission to
-    initialize, repair or overwrite it.
+    initialize, repair or overwrite it. Version-nine catalogs already have a map
+    UUID; they inspect that map through the registration setup adapter and never
+    annex-init a second identity.
     """
     requested = (path or library_root()).expanduser().absolute()
     if requested.is_symlink():
         raise RuntimeError(f"refusing unsafe map namespace {requested}")
     path = requested.resolve()
+    if _publication_library() is not None:
+        return _ensure_library_v9(path)
     with registration_publication.controller(), registration_publication.bootstrap(path):
         registration_publication.require_library_setup()
         if path.exists() and not path.is_dir():
@@ -152,6 +176,38 @@ def ensure_library(path: Path | None = None) -> Path:
             _git(path, "commit", "-qm", "init modelark library map")
             _save_library_root(path)
         return path
+
+
+def _ensure_library_v9(path: Path) -> Path:
+    from modelark import proposal, registration_setup
+    from modelark.proposal import GraphResult
+    from modelark.publication_policy import PublicationRefused
+
+    connection = db.connect()
+    try:
+        with registration_setup.hold(connection, {"kind": "ensure_library", "path": str(path)}) as setup:
+            registration_publication.require_legacy_registration(connection)
+            if not path.exists() or not path.is_dir():
+                raise proposal.Refusal(
+                    "PUBLICATION_MAP_ROOT_MISSING", {"root": str(path)},
+                    ("inspect_archive_publication",),
+                )
+            version = _git(path, "config", "--local", "--get", "annex.version")
+            if not re.fullmatch(r"[1-9][0-9]*", version):
+                raise RuntimeError("map has no initialized annex repository format")
+            head = _git(path, "rev-parse", "--verify", "HEAD^{commit}")
+            if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
+                raise RuntimeError("map has no exact committed HEAD")
+            _save_library_root(path)
+            setup.publish(
+                physical={"archive_path": str(path), "annex_uuid": setup.map_receipt["map_uuid"]},
+                catalog=lambda _c: GraphResult(proven_noop=True),
+            )
+            return path
+    except PublicationRefused as exc:
+        raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
+    finally:
+        connection.close()
 
 
 # ---- SMART qualification ----------------------------------------------------
@@ -449,6 +505,8 @@ def _require_exact_registration_receipt(
 
 def prepare_new_identity_archive(**kwargs) -> dict:
     """Run exact physical preparation under controller-before-map exclusion."""
+    if registration_publication._CONTROLLER.get() is not None or registration_publication.setup_active():
+        return _prepare_new_identity_archive(**kwargs)
     with registration_publication.controller():
         return _prepare_new_identity_archive(**kwargs)
 
@@ -657,7 +715,10 @@ def _register_drive(dev, label=None, mount: str | None = None,
     # physical SMART/format/mount work.
     con = db.connect()
     try:
-        registration_publication.require_legacy_registration(con)
+        if _publication_library(con) is None:
+            registration_publication.require_legacy_registration(con)
+        else:
+            require_no_live_session(con)
         _guard_existing_label(con, label)      # before SMART, dry-run, or any physical/remote/catalog mutation
     finally:
         con.close()
@@ -780,7 +841,20 @@ def _register_drive_archive(*, dev, label, archive, lib, mp, base, role, raid_ba
                       pk=["plan_id", "drive_label"])
             return GraphResult(proven_noop=False, value=ap["plan_id"])
 
-        plan_id = graph_write(con, op).value
+        if _publication_library(con) is not None:
+            from modelark import registration_setup
+            from modelark.publication_policy import PublicationRefused
+            from modelark import proposal
+            try:
+                with registration_setup.hold(con, {"kind": "register_drive", "label": label}) as setup:
+                    plan_id = setup.publish(
+                        physical={"archive_path": str(archive), "annex_uuid": annex_uuid},
+                        catalog=op,
+                    ).value
+            except PublicationRefused as exc:
+                raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
+        else:
+            plan_id = graph_write(con, op).value
     finally:
         con.close()
 
@@ -884,14 +958,24 @@ def register_nas(remote: str = "nas", label: str = "drive-99", role: str = "repl
     con = db.connect()
     try:
         _guard_existing_label(con, label)      # before library/remote inspection or the catalog upsert
-        with registration_publication.controller(con):
-            registration_publication.require_legacy_registration(con)
-            return _register_nas_locked(con, remote, label, role)
+        if _publication_library(con) is None:
+            with registration_publication.controller(con):
+                registration_publication.require_legacy_registration(con)
+                return _register_nas_locked(con, remote, label, role)
+        from modelark import registration_setup
+        from modelark.publication_policy import PublicationRefused
+        from modelark import proposal
+        try:
+            with registration_setup.hold(con, {"kind": "register_nas", "label": label, "remote": remote}) as setup:
+                registration_publication.require_legacy_registration(con)
+                return _register_nas_locked(con, remote, label, role, setup=setup)
+        except PublicationRefused as exc:
+            raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
     finally:
         con.close()
 
 
-def _register_nas_locked(con, remote, label, role):
+def _register_nas_locked(con, remote, label, role, setup=None):
     """Read-only remote inspection followed by one guarded catalog transaction."""
     from modelark.proposal import GraphResult, Refusal, graph_write
     from modelark import plan
@@ -934,6 +1018,12 @@ def _register_nas_locked(con, remote, label, role):
             active = plan.get(c, plan.DEFAULT_PLAN)
         db.upsert(c, "plan_drives", {"plan_id": active["plan_id"], "drive_label": label}, pk=["plan_id", "drive_label"])
         return GraphResult(value=active["plan_id"])
-    plan_id = graph_write(con, commit).value
+    if setup is not None:
+        plan_id = setup.publish(
+            physical={"archive_path": directory, "annex_uuid": uuid},
+            catalog=commit,
+        ).value
+    else:
+        plan_id = graph_write(con, commit).value
     return {"label": label, "uuid": uuid, "mount": mount, "directory": directory,
             "role": role, "free": du.free, "total": du.total, "remote": remote, "plan": plan_id}

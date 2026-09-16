@@ -125,18 +125,67 @@ def test_nested_controller_cannot_switch_catalog(con, tmp_path):
         other.close()
 
 
-def test_v9_registration_refuses_before_io_until_durable_setup_adapter_exists(con):
+LIBRARY = "11111111-1111-4111-8111-111111111111"
+MAP = "22222222-2222-4222-8222-222222222222"
+
+
+def _v9_map(tmp_path):
+    path = tmp_path / "map"
+    path.mkdir()
+    register._run("git", "-C", str(path), "init", "-q")
+    register._run("git", "-C", str(path), "config", "user.name", "ModelArk")
+    register._run("git", "-C", str(path), "config", "user.email", "publication@modelark.invalid")
+    register._run("git", "-C", str(path), "config", "annex.uuid", MAP)
+    register._run("git", "-C", str(path), "config", "annex.version", "8")
+    (path / "README.md").write_text("map\n")
+    register._run("git", "-C", str(path), "add", "README.md")
+    register._run("git", "-C", str(path), "commit", "-qm", "init")
+    register._save_library_root(path)
+    return path
+
+
+@pytest.fixture
+def v9(tmp_path, monkeypatch):
+    from modelark import publication_store
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "catalog.sqlite")
+    monkeypatch.setattr(db, "CATALOG_DIR", tmp_path / "catalog-state")
+    monkeypatch.setattr(drive_fence, "_LOCK_DIR", tmp_path / "locks")
+    source = _catalog()
+    target = sqlite3.connect(tmp_path / "catalog.sqlite", isolation_level=None)
+    source.backup(target)
+    source.close()
+    target.execute("PRAGMA user_version=8")
+    proposal.graph_write(target, lambda c: publication_store._install_schema(
+        c, library_id=LIBRARY, map_uuid=MAP))
+    _v9_map(tmp_path)
+    yield target
+    target.close()
+
+
+def test_v9_registration_uses_setup_adapter_and_closes(v9, tmp_path):
+    result = _apply(v9, lambda **kw: _prepared(kw))
+    assert result["annex_uuid"] == "NEW-ANNEX-UUID"
+    assert v9.execute("SELECT count(*) FROM drives").fetchone()[0] == 8
+    assert v9.execute("SELECT kind,state FROM publication_operations").fetchone() == ("registration", "CLOSED")
+    assert not (tmp_path / "must-not-create").exists()
+
+
+def test_v9_ensure_library_qualifies_matching_map(v9, tmp_path):
+    root = tmp_path / "map"
+    assert register.ensure_library(root) == root
+    assert v9.execute("SELECT kind,state FROM publication_operations").fetchone() == ("registration", "CLOSED")
+
+
+def test_v9_registration_without_adapter_still_refuses(con):
     from modelark import publication_store
 
     con.execute("PRAGMA user_version=8")
     proposal.graph_write(con, lambda c: publication_store._install_schema(
-        c, library_id="11111111-1111-4111-8111-111111111111",
-        map_uuid="22222222-2222-4222-8222-222222222222",
-    ))
+        c, library_id=LIBRARY, map_uuid=MAP))
     with pytest.raises(proposal.Refusal) as refused:
-        _apply(con, lambda **kw: pytest.fail("unactivated setup must not touch the map"))
+        registration_publication.require_legacy_registration(con)
     assert refused.value.code == "REGISTRATION_PUBLICATION_ADAPTER_REQUIRED"
-    assert con.execute("SELECT count(*) FROM drives").fetchone()[0] == 7
 
 
 def test_final_cas_checks_annex_collision_discovered_during_preparation(con):
@@ -250,6 +299,6 @@ def test_standalone_ensure_library_refuses_v9_before_map_or_config_mutation(
     target = tmp_path / "must-not-create"
     with pytest.raises(proposal.Refusal) as refused:
         register.ensure_library(target)
-    assert refused.value.code == "REGISTRATION_PUBLICATION_ADAPTER_REQUIRED"
+    assert refused.value.code == "PUBLICATION_MAP_ROOT_MISSING"
     assert not target.exists()
     assert not (db.CATALOG_DIR / "library.json").exists()

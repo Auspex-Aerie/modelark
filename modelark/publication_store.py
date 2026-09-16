@@ -32,7 +32,7 @@ DDL = (
         protocol_version INTEGER NOT NULL CHECK(protocol_version=1))""",
     """CREATE TABLE publication_operations (
         operation_id TEXT PRIMARY KEY, library_id TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK(kind IN ('fill','replica','maintenance','returning_clone')),
+        kind TEXT NOT NULL CHECK(kind IN ('fill','replica','registration','maintenance','returning_clone')),
         binding_json TEXT NOT NULL, binding_digest TEXT NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('PREPARED','CLOSED')),
         created_revision INTEGER, closed_revision INTEGER, closure_json TEXT,
@@ -175,7 +175,7 @@ def prepare_operation(scope, *, operation_id, kind, profile_digest, batch_files,
     scope.require_transaction(scope.connection)
     canonical_uuid(operation_id)
     _require_digest(profile_digest)
-    if kind not in {"fill", "replica"}:
+    if kind not in {"fill", "replica", "registration"}:
         raise PublicationRefused("PUBLICATION_CONVERSION_DISABLED")
     if not isinstance(batch_files, dict) or not batch_files:
         raise PublicationRefused("PUBLICATION_BATCHES_REQUIRED")
@@ -517,13 +517,19 @@ def require_clear(con, drive_labels: Iterable[str] | None = None, *, tree_change
     labels = None if drive_labels is None else frozenset(drive_labels)
     try:
         operations = con.execute(
-            "SELECT o.operation_id,o.state,o.library_id,p.drive_label "
+            "SELECT o.operation_id,o.state,o.library_id,o.kind,p.drive_label "
             "FROM publication_operations o LEFT JOIN publication_participants p "
             "ON p.operation_id=o.operation_id WHERE o.state!='CLOSED'").fetchall()
         blocked = set()
-        for operation_id, state, library_id, label in operations:
-            if library_id != identity[0] or state not in {"PREPARED", "CLOSED"} or label is None:
+        for operation_id, state, library_id, kind, label in operations:
+            if library_id != identity[0] or state not in {"PREPARED", "CLOSED"}:
                 raise PublicationRefused("PUBLICATION_RECORD_UNPROVEN", operation_id=operation_id)
+            if label is None:
+                if kind != "registration" or state != "PREPARED":
+                    raise PublicationRefused("PUBLICATION_RECORD_UNPROVEN", operation_id=operation_id)
+                if labels is None or tree_change:
+                    blocked.add(operation_id)
+                continue
             closing = _CLOSING.get()
             explicitly_closing = closing is not None and closing[0] is con and closing[1] == operation_id
             if state != "CLOSED" and not explicitly_closing and (labels is None or label in labels):

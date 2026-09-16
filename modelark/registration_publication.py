@@ -1,9 +1,8 @@
-"""Registration exclusion, not publication evidence or catalog admission.
+"""Registration exclusion; v9 catalog admission uses registration_setup.
 
-Legacy registration must contend with the central publisher even before the
-version-nine setup-intent adapter is enabled. Physical preparation never owns a
-SQLite write transaction. The real map UUID, not its path or a catalog copy,
-keys the shared exclusion. These locks do not turn legacy sync into a receipt.
+Physical preparation never owns a SQLite write transaction. The real map UUID,
+not its path or a catalog copy, keys the shared exclusion. These locks do not
+turn legacy sync into a receipt.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -18,6 +17,7 @@ from modelark.core import db
 _CONTROLLER = ContextVar("registration_controller", default=None)
 _BOOTSTRAP = ContextVar("registration_bootstrap", default=None)
 _MAP = ContextVar("registration_map", default=None)
+_SETUP = ContextVar("registration_setup", default=None)
 
 
 def child_fds() -> tuple[int, ...]:
@@ -140,20 +140,28 @@ def map_write(path):
             _MAP.reset(token)
 
 
+def setup_active():
+    return _SETUP.get() is not None
+
+
 def require_legacy_registration(con):
-    """Do not activate v9 registration before its durable setup adapter exists."""
+    """v7/v8 proceeds; v9 requires the durable registration setup adapter."""
     from modelark import proposal, publication_store
     from modelark.execution_session import require_no_live_session
+    from modelark.publication_policy import PublicationRefused
 
     require_no_live_session(con)
     try:
-        publication_store.require_clear(con, tree_change=True)
-        if publication_store.library(con) is not None:
+        if publication_store.library(con) is None:
+            publication_store.require_clear(con, tree_change=True)
+            return
+        if _SETUP.get() is None:
+            publication_store.require_clear(con, tree_change=True)
             raise proposal.Refusal(
                 "REGISTRATION_PUBLICATION_ADAPTER_REQUIRED", {},
                 ("complete_registration_publication_setup",),
             )
-    except publication_store.PublicationRefused as exc:
+    except PublicationRefused as exc:
         raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
 
 

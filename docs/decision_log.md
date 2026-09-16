@@ -3300,3 +3300,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `modelark/publication_native.py` timeout/reap only. No live Fill or conversion.
 - `docs_updated`: docs/decision_log.md, docs/deployment.md, modelark/publication_native.py, tests/test_publication_native.py
 - `related`: DEC-158
+
+### DEC-160: Enable v9 registration through a map-only setup adapter
+- `id`: DEC-160
+- `date`: 2026-09-15
+- `status`: accepted
+- `triggered_by`: Operator authorized the next Stage 1 section after native-reap close: durable v9 registration setup adapter
+- `decision`: Catalog-facing registration on a version-nine library uses a map-only publication scope (`locks.hold(..., map_only=True)`), a `registration` operation kind, qualified map UUID/root identity, and catalog CAS through the file/batch/closure pipeline. Physical preparation stays outside SQLite. `fill`/`replica` are unchanged. `maintenance` and `returning_clone` remain `PUBLICATION_CONVERSION_DISABLED`. A v9 catalog does not annex-init a second map identity; missing map root refuses without creating directories. v7/v8 registration keeps the legacy controller/bootstrap path. Conversion stays off.
+- `rationale`: `REGISTRATION_PUBLICATION_ADAPTER_REQUIRED` was the fail-closed gate until durable setup intent, qualified map IO and map receipts existed. Registration is not conversion and is not a FileRequest fill. Empty drive participants are valid for a new identity; require_clear treats an open registration operation as a library-wide tree-change block.
+- `impact`: `publication_store` operation kind CHECK; `publication_locks.map_only`; `registration_setup`; `register`/`drive_lifecycle` v9 entry. No live Fill, conversion, or catalog migration apply.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/plans/annex-publication-writer-map.md, modelark/publication_store.py, modelark/publication_locks.py, modelark/registration_publication.py, modelark/registration_setup.py, modelark/register.py, modelark/drive_lifecycle.py, tests/test_registration_publication.py
+- `related`: DEC-157, DEC-159
