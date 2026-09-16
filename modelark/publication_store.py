@@ -508,8 +508,10 @@ def require_clear(con, drive_labels: Iterable[str] | None = None, *, tree_change
 
     None checks the whole library (approval/control-plane admission). A concrete
     selected-drive set excludes unrelated offline clone obligations from that set.
-    No caller boolean or session token bypasses this guard. Explicit publication
-    replay/closure requires the separate owning coordinator, not ordinary recovery.
+    A PREPARED map-only registration still blocks every caller, including
+    drive-scoped clean-anchor with tree_change=False. No caller boolean or
+    session token bypasses this guard. Explicit publication replay/closure
+    requires the separate owning coordinator, not ordinary recovery.
     """
     identity = library(con)
     if identity is None:
