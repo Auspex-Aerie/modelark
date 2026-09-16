@@ -37,9 +37,18 @@ def _catalog_result(setup):
     return GraphResult(proven_noop=True)
 
 
-def leftover(con, intent):
+def leftover(con, intent, *, cataloged=False):
     """Matching PREPARED registration the owner may resume, or None."""
-    return _matching_prepared(con, intent)
+    match = _matching_prepared(con, intent)
+    if match is None or not cataloged:
+        return match
+    operation_id, _batch_id, file_id = match
+    row = con.execute(
+        "SELECT phase FROM publication_files WHERE operation_id=? AND file_id=?",
+        [operation_id, file_id]).fetchone()
+    if row is None or row[0] != "CATALOG_PUBLISHED":
+        return None
+    return match
 
 
 def _matching_prepared(con, intent):

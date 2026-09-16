@@ -704,7 +704,8 @@ def register_new_identity(
     from modelark import publication_store, registration_setup
     from modelark.publication_policy import PublicationRefused
     try:
-        if publication_store.library(con) is not None and registration_setup.leftover(con, leftover_intent):
+        if publication_store.library(con) is not None and registration_setup.leftover(
+                con, leftover_intent, cataloged=True):
             with registration_setup.hold(con, leftover_intent) as setup:
                 written = setup.publish(
                     physical={"archive_path": expected["archive_path"], "annex_uuid": ""},

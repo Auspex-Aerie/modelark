@@ -743,7 +743,7 @@ def _register_drive(dev, label=None, mount: str | None = None,
                 leftover_intent = {"kind": "register_drive", "label": label, "path": str(library_root())}
             except (OSError, RuntimeError, TypeError, ValueError):
                 leftover_intent = None
-            if leftover_intent and registration_setup.leftover(con, leftover_intent):
+            if leftover_intent and registration_setup.leftover(con, leftover_intent, cataloged=True):
                 from modelark.publication_policy import PublicationRefused
                 from modelark import proposal
                 try:
@@ -1015,7 +1015,7 @@ def register_nas(remote: str = "nas", label: str = "drive-99", role: str = "repl
         leftover_intent = {"kind": "register_nas", "label": label, "remote": remote}
         if _publication_library(con) is not None:
             from modelark import registration_setup
-            if registration_setup.leftover(con, leftover_intent):
+            if registration_setup.leftover(con, leftover_intent, cataloged=True):
                 from modelark.publication_policy import PublicationRefused
                 from modelark import proposal
                 try:
