@@ -1,5 +1,6 @@
 """Registration IO, final catalog CAS and legacy/new map exclusion boundaries."""
 import json
+from pathlib import Path
 import sqlite3
 import sys
 
@@ -200,6 +201,36 @@ def test_v9_prepare_new_identity_archive_reuses_setup_controller(v9, tmp_path, m
     result = _apply(v9, register.prepare_new_identity_archive)
     assert result["annex_uuid"] == "NEW-ANNEX-UUID"
     assert seen and len(seen[0]) >= 2
+
+
+def test_v9_register_drive_catalog_reuses_outer_setup(v9, tmp_path, monkeypatch):
+    from modelark import registration_setup
+    import types
+    lib = tmp_path / "map"
+    monkeypatch.setattr(register, "_is_annex", lambda p: True)
+    def git(repo, *args, **kwargs):
+        text = " ".join(args)
+        if "annex.uuid" in text:
+            return MAP if Path(repo).resolve() == lib.resolve() else "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        return ""
+    monkeypatch.setattr(register, "_git", git)
+    monkeypatch.setattr(register, "_fs_uuid", lambda d: None)
+    monkeypatch.setattr(register, "_disk_bytes", lambda d: 1)
+    monkeypatch.setattr(register.shutil, "disk_usage",
+                        lambda p: types.SimpleNamespace(total=1, free=1))
+    monkeypatch.setattr(register.db, "connect", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("v9 register_drive must not open a second catalog connection")))
+    with registration_setup.hold(v9, {"kind": "register_drive", "label": "drive-08", "path": str(lib)}) as setup:
+        result = register._register_drive_archive(
+            dev="/dev/null", label="drive-08", archive=tmp_path / "archive", lib=lib,
+            mp=tmp_path, base={"verdict": "ok", "model": "m", "serial": "s", "reallocated": 0,
+                               "pending": 0, "offline_uncorrectable": 0, "power_on_hours": 0,
+                               "smart_passed": True, "note": None},
+            role="primary", raid_backed=False, location=None, setup=setup)
+    assert result["plan"] == "ark"
+    assert v9.execute("SELECT annex_uuid FROM drives WHERE drive_label='drive-08'").fetchone()[0] == (
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    assert v9.execute("SELECT state FROM publication_operations").fetchone()[0] == "CLOSED"
 
 
 def test_v9_ensure_library_qualifies_matching_map(v9, tmp_path):
