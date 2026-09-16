@@ -92,23 +92,24 @@ def _cataloged_drive_facts(con, label):
 def _durable_match(cataloged, observed):
     """Same disk iff annex UUID matches, or both filesystem UUID and serial match.
 
-    One shared fact is not identity: a cloned filesystem UUID with no serial
-    must not close leftover. Conflicting nonempty facts always refuse.
+    Annex UUID is the archive. USB-bridge serial spelling must not veto it
+    (DEC-133). A cloned filesystem UUID with no serial still must not match.
     """
     if not cataloged or not observed:
         return False
-    for key in ("annex_uuid", "fs_uuid", "serial"):
-        current, live = cataloged.get(key) or None, observed.get(key) or None
-        if current and live and current != live:
-            return False
     annex = cataloged.get("annex_uuid") or None
-    if annex and annex == (observed.get("annex_uuid") or None):
-        return True
+    live_annex = observed.get("annex_uuid") or None
+    if annex and live_annex:
+        return annex == live_annex
     fs_uuid = cataloged.get("fs_uuid") or None
     serial = cataloged.get("serial") or None
-    return bool(fs_uuid and serial
-                and fs_uuid == (observed.get("fs_uuid") or None)
-                and serial == (observed.get("serial") or None))
+    live_fs = observed.get("fs_uuid") or None
+    live_serial = observed.get("serial") or None
+    if fs_uuid and live_fs and fs_uuid != live_fs:
+        return False
+    if serial and live_serial and serial != live_serial:
+        return False
+    return bool(fs_uuid and serial and fs_uuid == live_fs and serial == live_serial)
 
 
 def _intents_match(saved, intent):

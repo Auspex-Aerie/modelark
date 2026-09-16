@@ -292,12 +292,16 @@ def test_v9_register_drive_leftover_matches_durable_facts_not_kernel_path(
     same = {"serial": "NEW-SEAGATE", "fs_uuid": "NEW-FS-UUID"}
     other = {"serial": "OTHER-DISK", "fs_uuid": "OTHER-FS"}
     cloned = {"fs_uuid": "NEW-FS-UUID"}
+    annex_bridge = {"annex_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                    "serial": "BRIDGE-ENCODED"}
     assert registration_setup.leftover(
         v9, {"kind": "register_drive", "label": "drive-08"}, cataloged=True, observed=same)
     assert not registration_setup.leftover(
         v9, {"kind": "register_drive", "label": "drive-08"}, cataloged=True, observed=other)
     assert not registration_setup.leftover(
         v9, {"kind": "register_drive", "label": "drive-08"}, cataloged=True, observed=cloned)
+    assert registration_setup.leftover(
+        v9, {"kind": "register_drive", "label": "drive-08"}, cataloged=True, observed=annex_bridge)
     with registration_setup.hold(v9, {"kind": "register_drive", "label": "drive-08"}) as setup:
         physical = registration_setup._stored_physical(setup)
         assert physical["archive_path"] == "/media/test/seagate/modelark"

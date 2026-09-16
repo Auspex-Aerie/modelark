@@ -3355,3 +3355,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `registration_setup._durable_match` / `observe_locator`. No live Fill or conversion.
 - `docs_updated`: docs/decision_log.md, modelark/registration_setup.py, tests/test_registration_publication.py
 - `related`: DEC-133, DEC-163
+
+### DEC-165: Annex UUID is authoritative leftover identity; serial does not veto it
+- `id`: DEC-165
+- `date`: 2026-09-16
+- `status`: accepted
+- `triggered_by`: Greptile P1 on `760b7f1`: matching annex UUID still refused when lsblk serial differed from catalog SMART serial
+- `decision`: If live annex UUID equals the cataloged annex UUID, leftover match succeeds even when serial or filesystem UUID spelling differs. USB-bridge serial encodings are locators (DEC-133). Without a live annex UUID, leftover still requires both filesystem UUID and serial. A cloned filesystem UUID with no serial still does not match. Conversion stays off.
+- `rationale`: The annex UUID is the archive. Serial is optional in FenceIdentity and is known to be bridge-encoded. Treating serial disagreement as a veto after annex agreement blocked the same disk from closing leftover.
+- `impact`: `registration_setup._durable_match`. No live Fill or conversion.
+- `docs_updated`: docs/decision_log.md, modelark/registration_setup.py, tests/test_registration_publication.py
+- `related`: DEC-133, DEC-164
