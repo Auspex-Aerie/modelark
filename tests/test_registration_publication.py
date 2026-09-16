@@ -268,6 +268,34 @@ def test_v9_publish_map_receipt_uses_post_mutation_head(v9, tmp_path):
     assert tree["proof"]["map"]["refs"]["HEAD"] == after != before
 
 
+def test_v9_register_new_identity_closes_leftover_after_catalog(v9, tmp_path, monkeypatch):
+    from modelark import registration_setup
+    preview = _preview(v9)
+
+    def apply():
+        return drive_lifecycle.register_new_identity(
+            v9, _device(), _mounted_topology(),
+            expected_binding=preview["registration_binding"],
+            confirmation=preview["confirmation"],
+            prepare_archive=lambda **kw: _prepared(kw),
+        )
+
+    def boom(*_a, **_k):
+        raise RuntimeError("injected close failure")
+
+    real_close = registration_setup.store.close_operation
+    monkeypatch.setattr(registration_setup.store, "close_operation", boom)
+    with pytest.raises(RuntimeError, match="injected close"):
+        apply()
+    assert v9.execute("SELECT count(*) FROM drives").fetchone()[0] == 8
+    assert v9.execute("SELECT state FROM publication_operations").fetchone()[0] == "PREPARED"
+    monkeypatch.setattr(registration_setup.store, "close_operation", real_close)
+    result = apply()
+    assert result["changed"] is True
+    assert result["already_registered"] is False
+    assert v9.execute("SELECT state FROM publication_operations").fetchone()[0] == "CLOSED"
+
+
 def test_v9_resume_after_catalog_published_closes_without_rerunning_cas(v9, tmp_path, monkeypatch):
     from modelark import registration_setup
     from modelark.proposal import GraphResult

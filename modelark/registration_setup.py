@@ -20,6 +20,28 @@ def _id(parent, name):
     return str(uuid.uuid5(uuid.UUID(parent), name))
 
 
+def _catalog_result(setup):
+    from modelark.proposal import GraphResult
+    kind, label = setup.intent.get("kind"), setup.intent.get("label")
+    if kind == "register_new_identity":
+        row = setup.connection.execute(
+            "SELECT annex_uuid FROM drives WHERE drive_label=?", [label]).fetchone()
+        return GraphResult(proven_noop=True, value={
+            "archive_path": setup.intent.get("archive_path"),
+            "annex_uuid": None if row is None else row[0],
+        })
+    if kind in {"register_drive", "register_nas"}:
+        row = setup.connection.execute(
+            "SELECT plan_id FROM plan_drives WHERE drive_label=?", [label]).fetchone()
+        return GraphResult(proven_noop=True, value=None if row is None else row[0])
+    return GraphResult(proven_noop=True)
+
+
+def leftover(con, intent):
+    """Matching PREPARED registration the owner may resume, or None."""
+    return _matching_prepared(con, intent)
+
+
 def _matching_prepared(con, intent):
     rows = con.execute(
         "SELECT operation_id, binding_json, binding_digest FROM publication_operations "
@@ -115,7 +137,6 @@ class RegistrationSetup:
     def publish(self, *, physical, catalog):
         if self.scope is None:
             raise PublicationRefused("PUBLICATION_COORDINATOR_INACTIVE")
-        from modelark.proposal import GraphResult
         pair = {"kind": self.intent["kind"], "physical": {
             "archive_path": physical.get("archive_path"),
             "annex_uuid": physical.get("annex_uuid"),
@@ -151,7 +172,7 @@ class RegistrationSetup:
                 proof={"catalog": pair}, catalog_cas=cas))
             phase = "CATALOG_PUBLISHED"
         elif phase == "CATALOG_PUBLISHED":
-            outcome["result"] = GraphResult(proven_noop=True)
+            outcome["result"] = _catalog_result(self)
         if self._batch_phase() == "PREPARED":
             self.scope.write(lambda _: store.propagate_batch(
                 self.scope, operation_id=operation_id, batch_id=batch_id, map_proof=receipt))

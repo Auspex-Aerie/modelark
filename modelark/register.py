@@ -738,6 +738,30 @@ def _register_drive(dev, label=None, mount: str | None = None,
             registration_publication.require_legacy_registration(con)
         else:
             require_no_live_session(con)
+            from modelark import registration_setup
+            try:
+                leftover_intent = {"kind": "register_drive", "label": label, "path": str(library_root())}
+            except (OSError, RuntimeError, TypeError, ValueError):
+                leftover_intent = None
+            if leftover_intent and registration_setup.leftover(con, leftover_intent):
+                from modelark.publication_policy import PublicationRefused
+                from modelark import proposal
+                try:
+                    with registration_setup.hold(con, leftover_intent) as setup:
+                        plan_id = setup.publish(
+                            physical={"archive_path": leftover_intent["path"], "annex_uuid": ""},
+                            catalog=lambda _c: proposal.GraphResult(proven_noop=True)).value
+                    row = con.execute(
+                        "SELECT annex_uuid,hw_model,serial,health FROM drives WHERE drive_label=?",
+                        [label]).fetchone()
+                    return {"label": label, "archive": leftover_intent["path"],
+                            "annex_uuid": None if row is None else row[0],
+                            "health": None if row is None else row[3],
+                            "model": None if row is None else row[1],
+                            "serial": None if row is None else row[2],
+                            "library": leftover_intent["path"], "plan": plan_id}
+                except PublicationRefused as exc:
+                    raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
         _guard_existing_label(con, label)      # before SMART, dry-run, or any physical/remote/catalog mutation
     finally:
         con.close()
@@ -988,6 +1012,17 @@ def register_nas(remote: str = "nas", label: str = "drive-99", role: str = "repl
     the free/total from the mount the directory lives on (DEC-006, DEC-014)."""
     con = db.connect()
     try:
+        leftover_intent = {"kind": "register_nas", "label": label, "remote": remote}
+        if _publication_library(con) is not None:
+            from modelark import registration_setup
+            if registration_setup.leftover(con, leftover_intent):
+                from modelark.publication_policy import PublicationRefused
+                from modelark import proposal
+                try:
+                    with registration_setup.hold(con, leftover_intent) as setup:
+                        return _register_nas_locked(con, remote, label, role, setup=setup)
+                except PublicationRefused as exc:
+                    raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
         _guard_existing_label(con, label)      # before library/remote inspection or the catalog upsert
         if _publication_library(con) is None:
             with registration_publication.controller(con):

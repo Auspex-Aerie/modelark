@@ -695,6 +695,35 @@ def register_new_identity(
             ("type_exact_confirmation",),
         )
 
+    leftover_intent = {
+        "kind": "register_new_identity",
+        "label": expected["label"],
+        "archive_path": expected["archive_path"],
+        "plan_id": expected["plan_id"],
+    }
+    from modelark import publication_store, registration_setup
+    from modelark.publication_policy import PublicationRefused
+    try:
+        if publication_store.library(con) is not None and registration_setup.leftover(con, leftover_intent):
+            with registration_setup.hold(con, leftover_intent) as setup:
+                written = setup.publish(
+                    physical={"archive_path": expected["archive_path"], "annex_uuid": ""},
+                    catalog=lambda _c: proposal.GraphResult(proven_noop=True))
+            return {
+                "changed": True,
+                "already_registered": False,
+                "drive_label": expected["label"],
+                "planner_revision": planner_revision(con),
+                "plan_id": expected["plan_id"],
+                "archive_path": written.value["archive_path"],
+                "annex_uuid": written.value["annex_uuid"],
+                "approval_invalidated": False,
+                "capacity_evidence": "unknown_until_reconcile",
+                "reconciliation_required": True,
+                "inherited_from_lost_identity": [],
+            }
+    except PublicationRefused as exc:
+        raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
     already = _exact_existing_registration(
         con,
         expected=expected,
