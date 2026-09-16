@@ -27,7 +27,43 @@ def _map_receipt(map_uuid, root=None):
     observed, identity = registration_publication._identity(root)
     if observed != map_uuid:
         raise PublicationRefused("PUBLICATION_MAP_UUID_MISMATCH", expected=map_uuid, observed=observed)
-    return {"map_uuid": map_uuid, "root": str(root.resolve()), "identity": list(identity)}
+    head = register._git(root, "rev-parse", "--verify", "HEAD^{commit}", check=False)
+    annex = register._git(root, "rev-parse", "--verify", "refs/heads/git-annex", check=False)
+    remotes = [line for line in register._git(root, "remote", check=False).splitlines() if line]
+    refs = {}
+    if head:
+        refs["HEAD"] = head
+    if annex:
+        refs["git-annex"] = annex
+    return {"map_uuid": map_uuid, "root": str(root.resolve()), "identity": list(identity),
+            "refs": refs, "remotes": remotes}
+
+
+def _abort_unfinished(scope, operation_id):
+    """Drop a PREPARED registration that never published catalog rows.
+
+    CATALOG_PUBLISHED leftovers stay durable for later resume. This only unblocks
+    retry after a failed attempt that did not insert membership. Uses graph_write
+    directly so a CLOSED operation does not go through load_owned_operation.
+    """
+    from modelark.proposal import GraphResult, graph_write
+
+    def write(con):
+        row = con.execute("SELECT state FROM publication_operations WHERE operation_id=?",
+                          [operation_id]).fetchone()
+        if row is None or row[0] != "PREPARED":
+            return GraphResult(proven_noop=True)
+        if con.execute("SELECT 1 FROM publication_files WHERE operation_id=? AND phase='CATALOG_PUBLISHED'",
+                       [operation_id]).fetchone():
+            return GraphResult(proven_noop=True)
+        con.execute("DELETE FROM publication_actions WHERE operation_id=?", [operation_id])
+        con.execute("DELETE FROM publication_files WHERE operation_id=?", [operation_id])
+        con.execute("DELETE FROM publication_batches WHERE operation_id=?", [operation_id])
+        con.execute("DELETE FROM publication_participants WHERE operation_id=?", [operation_id])
+        con.execute("DELETE FROM publication_operations WHERE operation_id=?", [operation_id])
+        return GraphResult(proven_noop=False)
+
+    graph_write(scope.connection, write)
 
 
 class RegistrationSetup:
@@ -53,7 +89,8 @@ class RegistrationSetup:
             "archive_path": physical.get("archive_path"),
             "annex_uuid": physical.get("annex_uuid"),
         }}
-        receipt = self.map_receipt
+        receipt = _map_receipt(store.library(self.connection)[1], self.intent.get("path"))
+        self.map_receipt = receipt
         operation_id, batch_id, file_id = self.operation_id, self.batch_id, self.file_id
         outcome = {}
         self.scope.write(lambda _: store.prepare_file(
@@ -121,7 +158,10 @@ def hold(con, intent):
 
             setup.scope.write(prepare)
             setup.base_revision = store._revision(con)
-            yield setup
+            try:
+                yield setup
+            finally:
+                _abort_unfinished(scope, setup.operation_id)
         finally:
             if token is not None:
                 registration_publication._SETUP.reset(token)

@@ -233,6 +233,41 @@ def test_v9_register_drive_catalog_reuses_outer_setup(v9, tmp_path, monkeypatch)
     assert v9.execute("SELECT state FROM publication_operations").fetchone()[0] == "CLOSED"
 
 
+def test_v9_failed_setup_does_not_block_retry(v9, tmp_path):
+    from modelark import registration_setup
+    root = tmp_path / "map"
+    with pytest.raises(RuntimeError, match="boom"):
+        with registration_setup.hold(v9, {"kind": "ensure_library", "path": str(root)}):
+            raise RuntimeError("boom")
+    assert v9.execute("SELECT count(*) FROM publication_operations").fetchone()[0] == 0
+    with registration_setup.hold(v9, {"kind": "ensure_library", "path": str(root)}) as setup:
+        from modelark.proposal import GraphResult
+        setup.publish(
+            physical={"archive_path": str(root), "annex_uuid": MAP},
+            catalog=lambda _c: GraphResult(proven_noop=True),
+        )
+    assert v9.execute("SELECT state FROM publication_operations").fetchone()[0] == "CLOSED"
+
+
+def test_v9_publish_map_receipt_uses_post_mutation_head(v9, tmp_path):
+    from modelark import registration_setup
+    from modelark.proposal import GraphResult
+    root = tmp_path / "map"
+    with registration_setup.hold(v9, {"kind": "ensure_library", "path": str(root)}) as setup:
+        before = setup.map_receipt["refs"]["HEAD"]
+        (root / "extra.txt").write_text("after sync\n")
+        register._run("git", "-C", str(root), "add", "extra.txt")
+        register._run("git", "-C", str(root), "commit", "-qm", "post-sync")
+        setup.publish(
+            physical={"archive_path": str(root), "annex_uuid": MAP},
+            catalog=lambda _c: GraphResult(proven_noop=True),
+        )
+    after = register._git(root, "rev-parse", "HEAD")
+    tree = json.loads(v9.execute(
+        "SELECT tree_proof_json FROM publication_files").fetchone()[0])
+    assert tree["proof"]["map"]["refs"]["HEAD"] == after != before
+
+
 def test_v9_ensure_library_qualifies_matching_map(v9, tmp_path):
     root = tmp_path / "map"
     assert register.ensure_library(root) == root
