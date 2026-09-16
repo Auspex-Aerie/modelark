@@ -51,12 +51,21 @@ def leftover(con, intent, *, cataloged=False):
     return match
 
 
+def _canonical_intent(intent):
+    intent = dict(intent)
+    for key in ("path", "archive_path", "dev"):
+        value = intent.get(key)
+        if not value:
+            continue
+        try:
+            intent[key] = str(Path(value).expanduser().resolve())
+        except (OSError, RuntimeError, TypeError, ValueError):
+            intent[key] = str(Path(str(value)).expanduser())
+    return intent
+
+
 def _intents_match(saved, intent):
-    if saved.get("kind") != intent.get("kind"):
-        return False
-    if saved.get("kind") in {"register_drive", "register_nas", "register_new_identity"}:
-        return saved.get("label") == intent.get("label")
-    return saved == intent
+    return _canonical_intent(saved) == _canonical_intent(intent)
 
 
 def _matching_prepared(con, intent):
@@ -144,7 +153,7 @@ class RegistrationSetup:
                 "register_new_identity", "register_drive", "register_nas", "ensure_library"}:
             raise PublicationRefused("PUBLICATION_REGISTRATION_INTENT_INVALID")
         self.connection = con
-        self.intent = dict(intent)
+        self.intent = _canonical_intent(intent)
         self.scope = None
         self.operation_id = str(uuid.uuid4())
         self.batch_id = _id(self.operation_id, "batch:map")
