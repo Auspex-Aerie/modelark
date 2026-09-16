@@ -20,6 +20,24 @@ def _id(parent, name):
     return str(uuid.uuid5(uuid.UUID(parent), name))
 
 
+def _matching_prepared(con, intent):
+    rows = con.execute(
+        "SELECT operation_id, binding_json, binding_digest FROM publication_operations "
+        "WHERE kind='registration' AND state='PREPARED'").fetchall()
+    if len(rows) != 1:
+        return None
+    binding = store._unseal(rows[0][1], rows[0][2])
+    if binding.get("before_state", {}).get("intent") != intent:
+        return None
+    files = binding.get("batch_files") or {}
+    if len(files) != 1:
+        return None
+    batch_id, children = next(iter(files.items()))
+    if len(children) != 1:
+        return None
+    return rows[0][0], batch_id, children[0]
+
+
 def _map_receipt(map_uuid, root=None):
     root = Path(root) if root is not None else register.library_root()
     if not root.exists():
@@ -82,9 +100,22 @@ class RegistrationSetup:
         self.map_receipt = None
         self.base_revision = None
 
+    def _file_phase(self):
+        row = self.connection.execute(
+            "SELECT phase FROM publication_files WHERE operation_id=? AND file_id=?",
+            [self.operation_id, self.file_id]).fetchone()
+        return None if row is None else row[0]
+
+    def _batch_phase(self):
+        row = self.connection.execute(
+            "SELECT phase FROM publication_batches WHERE operation_id=? AND batch_id=?",
+            [self.operation_id, self.batch_id]).fetchone()
+        return None if row is None else row[0]
+
     def publish(self, *, physical, catalog):
         if self.scope is None:
             raise PublicationRefused("PUBLICATION_COORDINATOR_INACTIVE")
+        from modelark.proposal import GraphResult
         pair = {"kind": self.intent["kind"], "physical": {
             "archive_path": physical.get("archive_path"),
             "annex_uuid": physical.get("annex_uuid"),
@@ -93,30 +124,44 @@ class RegistrationSetup:
         self.map_receipt = receipt
         operation_id, batch_id, file_id = self.operation_id, self.batch_id, self.file_id
         outcome = {}
-        self.scope.write(lambda _: store.prepare_file(
-            self.scope, operation_id=operation_id, batch_id=batch_id, file_id=file_id,
-            intent={"catalog_pair": pair, "setup": self.intent}))
-        self.scope.write(lambda _: store.advance_file(
-            self.scope, operation_id=operation_id, file_id=file_id, phase="LOCAL_VERIFIED",
-            proof={"physical": physical}))
-        self.scope.write(lambda _: store.advance_file(
-            self.scope, operation_id=operation_id, file_id=file_id, phase="TREE_VERIFIED",
-            proof={"map": receipt}))
+        phase = self._file_phase()
+        if phase is None:
+            self.scope.write(lambda _: store.prepare_file(
+                self.scope, operation_id=operation_id, batch_id=batch_id, file_id=file_id,
+                intent={"catalog_pair": pair, "setup": self.intent}))
+            phase = "PREPARED"
+        if phase == "PREPARED":
+            self.scope.write(lambda _: store.advance_file(
+                self.scope, operation_id=operation_id, file_id=file_id, phase="LOCAL_VERIFIED",
+                proof={"physical": physical}))
+            phase = "LOCAL_VERIFIED"
+        if phase == "LOCAL_VERIFIED":
+            self.scope.write(lambda _: store.advance_file(
+                self.scope, operation_id=operation_id, file_id=file_id, phase="TREE_VERIFIED",
+                proof={"map": receipt}))
+            phase = "TREE_VERIFIED"
         self.base_revision = store._revision(self.connection)
+        if phase == "TREE_VERIFIED":
+            def cas(con, frozen):
+                store.require_catalog_transition(self.scope, frozen["catalog_pair"])
+                outcome["result"] = catalog(con)
 
-        def cas(con, frozen):
-            store.require_catalog_transition(self.scope, frozen["catalog_pair"])
-            outcome["result"] = catalog(con)
-
-        self.scope.write(lambda _: store.advance_file(
-            self.scope, operation_id=operation_id, file_id=file_id, phase="CATALOG_PUBLISHED",
-            proof={"catalog": pair}, catalog_cas=cas))
-        self.scope.write(lambda _: store.propagate_batch(
-            self.scope, operation_id=operation_id, batch_id=batch_id, map_proof=receipt))
-        self.scope.write(lambda _: store.close_operation(
-            self.scope, operation_id=operation_id, observations={}, inventory_proofs={},
-            now=datetime.now(timezone.utc).isoformat()))
-        return outcome["result"]
+            self.scope.write(lambda _: store.advance_file(
+                self.scope, operation_id=operation_id, file_id=file_id, phase="CATALOG_PUBLISHED",
+                proof={"catalog": pair}, catalog_cas=cas))
+            phase = "CATALOG_PUBLISHED"
+        elif phase == "CATALOG_PUBLISHED":
+            outcome["result"] = GraphResult(proven_noop=True)
+        if self._batch_phase() == "PREPARED":
+            self.scope.write(lambda _: store.propagate_batch(
+                self.scope, operation_id=operation_id, batch_id=batch_id, map_proof=receipt))
+        if self.connection.execute(
+                "SELECT state FROM publication_operations WHERE operation_id=?",
+                [operation_id]).fetchone()[0] != "CLOSED":
+            self.scope.write(lambda _: store.close_operation(
+                self.scope, operation_id=operation_id, observations={}, inventory_proofs={},
+                now=datetime.now(timezone.utc).isoformat()))
+        return outcome.get("result")
 
 
 @contextmanager
@@ -133,9 +178,14 @@ def hold(con, intent):
     identity = store.library(con)
     if identity is None:
         raise PublicationRefused("PUBLICATION_MIGRATION_REQUIRED")
-    store.require_clear(con, tree_change=True)
+    leftover = _matching_prepared(con, intent)
+    if leftover is None:
+        store.require_clear(con, tree_change=True)
     setup = RegistrationSetup(con, intent)
-    with locks.hold(con, (), map_uuid=identity[1], map_only=True) as scope:
+    if leftover is not None:
+        setup.operation_id, setup.batch_id, setup.file_id = leftover
+    with locks.hold(con, (), map_uuid=identity[1], map_only=True,
+                    operation_id=setup.operation_id if leftover else None) as scope:
         setup.scope = scope
         paths = [row[2] for row in con.execute("PRAGMA database_list") if row[1] == "main"]
         controller_handle, map_handle = scope._authority.handles[0], scope._authority.handles[1]
@@ -156,7 +206,8 @@ def hold(con, intent):
                     batch_files={setup.batch_id: [setup.file_id]},
                     before_state={"intent": setup.intent, "map": setup.map_receipt})
 
-            setup.scope.write(prepare)
+            if leftover is None:
+                setup.scope.write(prepare)
             setup.base_revision = store._revision(con)
             try:
                 yield setup

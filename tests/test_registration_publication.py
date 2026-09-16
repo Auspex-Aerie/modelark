@@ -268,6 +268,29 @@ def test_v9_publish_map_receipt_uses_post_mutation_head(v9, tmp_path):
     assert tree["proof"]["map"]["refs"]["HEAD"] == after != before
 
 
+def test_v9_resume_after_catalog_published_closes_without_rerunning_cas(v9, tmp_path, monkeypatch):
+    from modelark import registration_setup
+    from modelark.proposal import GraphResult
+    root = tmp_path / "map"
+
+    def boom(*_a, **_k):
+        raise RuntimeError("injected close failure")
+
+    real_close = registration_setup.store.close_operation
+    monkeypatch.setattr(registration_setup.store, "close_operation", boom)
+    with pytest.raises(RuntimeError, match="injected close"):
+        with registration_setup.hold(v9, {"kind": "ensure_library", "path": str(root)}) as setup:
+            setup.publish(physical={"archive_path": str(root), "annex_uuid": MAP},
+                          catalog=lambda _c: GraphResult(proven_noop=True))
+    assert v9.execute("SELECT phase FROM publication_files").fetchone()[0] == "CATALOG_PUBLISHED"
+    assert v9.execute("SELECT state FROM publication_operations").fetchone()[0] == "PREPARED"
+    monkeypatch.setattr(registration_setup.store, "close_operation", real_close)
+    with registration_setup.hold(v9, {"kind": "ensure_library", "path": str(root)}) as setup:
+        setup.publish(physical={"archive_path": str(root), "annex_uuid": MAP},
+                      catalog=lambda _c: (_ for _ in ()).throw(AssertionError("catalog CAS must not rerun")))
+    assert v9.execute("SELECT state FROM publication_operations").fetchone()[0] == "CLOSED"
+
+
 def test_v9_ensure_library_qualifies_matching_map(v9, tmp_path):
     root = tmp_path / "map"
     assert register.ensure_library(root) == root

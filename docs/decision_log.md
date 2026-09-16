@@ -3322,3 +3322,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `publication_store.require_clear`; `execution_recovery.recover_expired_session`. No live Fill or conversion.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/plans/annex-publication-writer-map.md, modelark/publication_store.py, modelark/execution_recovery.py, tests/test_publication_store.py, tests/test_execution_authority.py
 - `related`: DEC-157, DEC-160
+
+### DEC-162: Frozen batch children, Stage 1 crash resume, and leftover registration close
+- `id`: DEC-162
+- `date`: 2026-09-16
+- `status`: accepted
+- `triggered_by`: Operator authorized landing the remaining Stage 1 items after DEC-161
+- `decision`: A declared batch child is never omitted to close. `finish()` / `propagate_batch` / `close_operation` refuse unless every frozen child is `CATALOG_PUBLISHED`. Failed, skipped, or gated Fill files leave the operation `PREPARED`. Crash/resume at each durable file/batch phase continues from the last recorded phase; competitors stay `MAINTENANCE_REQUIRED`. A leftover PREPARED registration whose intent matches is resumed by `registration_setup.hold` and `publish()` skips completed phases, including after `CATALOG_PUBLISHED`. Unpublished leftovers still abort on `hold()` exit. Conversion stays off.
+- `rationale`: Per-file success is not generation closure. Gated/requirement failures must not shrink the sealed request set. Process-kill after catalog CAS left registration blocked with no owner continuation. Stage 1 fault-injection is the fill/replica/registration crash/resume matrix, not conversion or live Fill.
+- `impact`: `registration_setup`; tests for incomplete children, injected stop/resume, and registration leftover close. No live Fill or conversion.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/plans/annex-publication-writer-map.md, modelark/registration_setup.py, tests/test_publication_lifecycle.py, tests/test_registration_publication.py
+- `related`: DEC-157, DEC-160, DEC-161

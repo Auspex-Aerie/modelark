@@ -256,13 +256,16 @@ Completed after the last Codex 5.6 SOL interruption (still uncommitted, conversi
   error case when running), plus 123 related publisher/install/registration/catalog
   tests passing. Grok local review counter remains 3/3 used; do not start a fourth.
 
-Next remaining Stage 1 work:
+Stage 1 remaining coordinator items (DEC-162): frozen batch children cannot be
+dropped to close; injected stop at each durable phase resumes without clearing
+the obligation; leftover PREPARED registration after `CATALOG_PUBLISHED` resumes
+and closes. Conversion remains disabled. Live Fill/catalog migration remain off.
 
-1. Failed/skipped/gated Fill files versus the frozen complete batch-child set: keep
-   the operation pending; never drop a declared child to close.
-2. Full scoped fault-injection remains required before stage acceptance.
-3. Resume of a leftover PREPARED registration operation after `CATALOG_PUBLISHED`
-   (unpublished attempts already abort on `hold()` exit).
+Next remaining work after this Stage 1 coordinator slice:
+
+1. Stage 2 inspect/apply/resume with atomic catalog cutover and returning-clone
+   migration (conversion still separately gated).
+2. Live Fill restart / catalog migration apply, only when explicitly authorized.
 
 Current code is local and uncommitted on `codex/annex-publication-stage1` in
 `claudedocs/operator-scratch/worktrees/codec-stage-d`. Unrelated dirty ledger, bridge

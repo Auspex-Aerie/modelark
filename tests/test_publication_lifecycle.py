@@ -109,6 +109,29 @@ def test_full_record_lifecycle_never_closes_from_per_file_or_batch_success(con):
             close(scope)
 
 
+FILE2 = "77777777-7777-4777-8777-777777777777"
+
+
+def test_unpublished_declared_child_blocks_propagate_and_close(con):
+    with publication_locks.hold(con, ["d0"], map_uuid=MAP) as scope:
+        scope.write(lambda _: store.prepare_operation(
+            scope, operation_id=OP, kind="fill", profile_digest="a" * 64,
+            batch_files={BATCH: [FILE, FILE2]}, before_state={"fixture": "two children"}))
+        file_intent(scope)
+        advance(scope, "LOCAL_VERIFIED")
+        advance(scope, "TREE_VERIFIED")
+        advance(scope, "CATALOG_PUBLISHED", lambda c, intent: None)
+        scope.write(lambda _: store.prepare_file(
+            scope, operation_id=OP, batch_id=BATCH, file_id=FILE2, intent={"fixture": "second child"}))
+        with pytest.raises(PublicationRefused, match="CHILDREN_INCOMPLETE"):
+            propagate(scope)
+        with pytest.raises(PublicationRefused):
+            close(scope)
+        assert con.execute("SELECT state FROM publication_operations").fetchone()[0] == "PREPARED"
+        assert [row[0] for row in con.execute(
+            "SELECT file_id FROM publication_files ORDER BY file_id")] == sorted([FILE, FILE2])
+
+
 def test_failed_second_anchor_rolls_back_first_anchor_and_closure(con):
     with publication_locks.hold(con, ["d0", "d1"], map_uuid=MAP) as scope:
         published(scope)
@@ -398,3 +421,38 @@ def test_failed_prepare_restores_memory_binding_and_database(con):
         assert scope.operation_id is None
         assert not con.execute("SELECT 1 FROM publication_operations").fetchone()
         prepare(scope)
+
+
+@pytest.mark.parametrize("stop_after", [
+    "PREPARED", "LOCAL_VERIFIED", "TREE_VERIFIED", "CATALOG_PUBLISHED", "PROPAGATED",
+])
+def test_injected_stop_keeps_pending_and_resume_completes(con, stop_after):
+    with publication_locks.hold(con, ["d0"], map_uuid=MAP) as scope:
+        prepare(scope)
+        file_intent(scope)
+        if stop_after != "PREPARED":
+            advance(scope, "LOCAL_VERIFIED")
+        if stop_after not in {"PREPARED", "LOCAL_VERIFIED"}:
+            advance(scope, "TREE_VERIFIED")
+        if stop_after in {"CATALOG_PUBLISHED", "PROPAGATED"}:
+            advance(scope, "CATALOG_PUBLISHED", lambda c, intent: None)
+        if stop_after == "PROPAGATED":
+            propagate(scope)
+        assert con.execute("SELECT state FROM publication_operations").fetchone()[0] == "PREPARED"
+        with pytest.raises(PublicationRefused, match="MAINTENANCE_REQUIRED"):
+            store.require_clear(con, ["d0"])
+    with publication_locks.hold(con, ["d0"], map_uuid=MAP, operation_id=OP) as scope:
+        if stop_after == "PREPARED":
+            advance(scope, "LOCAL_VERIFIED")
+            stop_after = "LOCAL_VERIFIED"
+        if stop_after == "LOCAL_VERIFIED":
+            advance(scope, "TREE_VERIFIED")
+            stop_after = "TREE_VERIFIED"
+        if stop_after == "TREE_VERIFIED":
+            advance(scope, "CATALOG_PUBLISHED", lambda c, intent: None)
+            stop_after = "CATALOG_PUBLISHED"
+        if stop_after == "CATALOG_PUBLISHED":
+            propagate(scope)
+        close(scope)
+    store.require_clear(con, ["d0"])
+    assert con.execute("SELECT state FROM publication_operations").fetchone()[0] == "CLOSED"
