@@ -3333,3 +3333,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `registration_setup`; tests for incomplete children, injected stop/resume, and registration leftover close. No live Fill or conversion.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/plans/annex-publication-writer-map.md, modelark/registration_setup.py, tests/test_publication_lifecycle.py, tests/test_registration_publication.py
 - `related`: DEC-157, DEC-160, DEC-161
+
+### DEC-163: Leftover registration identity is durable catalog facts, not kernel paths
+- `id`: DEC-163
+- `date`: 2026-09-16
+- `status`: accepted
+- `triggered_by`: Operator authorized the leftover-identity architecture after Greptile extra-3x oscillated path spelling vs kind+label vs resolved `/dev/sdX`
+- `decision`: `/dev` and library-path spelling are locators. Leftover match is `kind`+`label` (`remote` for NAS). A cataloged leftover additionally requires live durable facts (`serial`, `fs_uuid`, `annex_uuid`) to agree with the drives row — the same facts `FenceIdentity` uses. `observe_locator` turns a requested `--dev` into those facts and does not store the kernel node. Same disk at a new `/dev` after reattach closes leftover. A different disk with the same label is not a retry; leftover stays pending and `require_clear` still blocks a second registration. Map leftover identity remains the catalog map UUID at hold time, not `library_root()` spelling.
+- `rationale`: Drive flocks, catalog CAS, serial repair and block inventory already treat PATH/KNAME as aliases. Sealing resolved `dev` in registration intent was the exception and could not survive reattach without also matching the wrong disk.
+- `impact`: `registration_setup.leftover` / `observe_locator`; `register_drive` leftover retry; `register_new_identity` leftover observed binding. No live Fill or conversion.
+- `docs_updated`: docs/decision_log.md, modelark/registration_setup.py, modelark/register.py, modelark/drive_lifecycle.py, tests/test_registration_publication.py
+- `related`: DEC-133, DEC-162

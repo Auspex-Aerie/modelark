@@ -698,14 +698,14 @@ def register_new_identity(
     leftover_intent = {
         "kind": "register_new_identity",
         "label": expected["label"],
-        "archive_path": expected["archive_path"],
         "plan_id": expected["plan_id"],
     }
+    observed = {"serial": expected.get("serial"), "fs_uuid": expected.get("fs_uuid")}
     from modelark import publication_store, registration_setup
     from modelark.publication_policy import PublicationRefused
     try:
         if publication_store.library(con) is not None and registration_setup.leftover(
-                con, leftover_intent, cataloged=True):
+                con, leftover_intent, cataloged=True, observed=observed):
             with registration_setup.hold(con, leftover_intent) as setup:
                 written = setup.publish(
                     physical={"archive_path": expected["archive_path"], "annex_uuid": ""},

@@ -37,35 +37,75 @@ def _catalog_result(setup):
     return GraphResult(proven_noop=True)
 
 
-def leftover(con, intent, *, cataloged=False):
-    """Matching PREPARED registration the owner may resume, or None."""
+def leftover(con, intent, *, cataloged=False, observed=None):
+    """Matching PREPARED registration the owner may resume, or None.
+
+    Kernel device nodes and path spelling are locators, not identity. A
+    cataloged leftover additionally requires live durable facts (serial,
+    filesystem UUID, annex UUID) to agree with the drives row.
+    """
     match = _matching_prepared(con, intent)
     if match is None or not cataloged:
         return match
-    operation_id, _batch_id, file_id, _saved = match
+    operation_id, _batch_id, file_id, saved = match
     row = con.execute(
         "SELECT phase FROM publication_files WHERE operation_id=? AND file_id=?",
         [operation_id, file_id]).fetchone()
     if row is None or row[0] != "CATALOG_PUBLISHED":
         return None
+    if saved.get("kind") in {"register_drive", "register_new_identity"}:
+        facts = _cataloged_drive_facts(con, saved.get("label") or intent.get("label"))
+        if not _durable_match(facts, observed or intent):
+            return None
     return match
 
 
-def _canonical_intent(intent):
-    intent = dict(intent)
-    for key in ("path", "archive_path", "dev"):
-        value = intent.get(key)
-        if not value:
+def observe_locator(dev):
+    """Resolve a kernel locator to durable block facts. `/dev` is not stored."""
+    try:
+        disk = register._parent_disk(dev)
+        serial = register._run("lsblk", "-dno", "SERIAL", disk, check=False).stdout.strip() or None
+        uuids = register._run("lsblk", "-no", "UUID", dev, check=False).stdout.splitlines()
+        fs_uuid = next((line.strip() for line in uuids if line.strip()), None)
+        return {"serial": serial, "fs_uuid": fs_uuid}
+    except (OSError, RuntimeError, TypeError, ValueError, FileNotFoundError):
+        return {"serial": None, "fs_uuid": None}
+
+
+def _cataloged_drive_facts(con, label):
+    if not label:
+        return None
+    row = con.execute(
+        "SELECT serial, fs_uuid, annex_uuid FROM drives WHERE drive_label=?", [label]).fetchone()
+    if row is None:
+        return None
+    return {"serial": row[0], "fs_uuid": row[1], "annex_uuid": row[2]}
+
+
+def _durable_match(cataloged, observed):
+    if not cataloged or not observed:
+        return False
+    agreed = False
+    for key in ("annex_uuid", "fs_uuid", "serial"):
+        current, live = cataloged.get(key) or None, observed.get(key) or None
+        if not current or not live:
             continue
-        try:
-            intent[key] = str(Path(value).expanduser().resolve())
-        except (OSError, RuntimeError, TypeError, ValueError):
-            intent[key] = str(Path(str(value)).expanduser())
-    return intent
+        if current != live:
+            return False
+        agreed = True
+    return agreed
 
 
 def _intents_match(saved, intent):
-    return _canonical_intent(saved) == _canonical_intent(intent)
+    if saved.get("kind") != intent.get("kind"):
+        return False
+    if saved.get("kind") == "register_nas":
+        return saved.get("label") == intent.get("label") and saved.get("remote") == intent.get("remote")
+    if saved.get("kind") in {"register_drive", "register_new_identity"}:
+        return saved.get("label") == intent.get("label")
+    if saved.get("kind") == "ensure_library":
+        return True
+    return saved == intent
 
 
 def _matching_prepared(con, intent):
@@ -153,7 +193,7 @@ class RegistrationSetup:
                 "register_new_identity", "register_drive", "register_nas", "ensure_library"}:
             raise PublicationRefused("PUBLICATION_REGISTRATION_INTENT_INVALID")
         self.connection = con
-        self.intent = _canonical_intent(intent)
+        self.intent = dict(intent)
         self.scope = None
         self.operation_id = str(uuid.uuid4())
         self.batch_id = _id(self.operation_id, "batch:map")

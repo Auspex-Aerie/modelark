@@ -268,7 +268,7 @@ def test_v9_publish_map_receipt_uses_post_mutation_head(v9, tmp_path):
     assert tree["proof"]["map"]["refs"]["HEAD"] == after != before
 
 
-def test_v9_register_drive_leftover_matches_canonical_path_not_a_different_device(
+def test_v9_register_drive_leftover_matches_durable_facts_not_kernel_path(
         v9, tmp_path, monkeypatch):
     from modelark import registration_setup
     from modelark.proposal import GraphResult
@@ -278,8 +278,7 @@ def test_v9_register_drive_leftover_matches_canonical_path_not_a_different_devic
     def boom(*_a, **_k):
         raise RuntimeError("injected close failure")
 
-    stored = {"kind": "register_drive", "label": "drive-08", "path": str(root),
-              "dev": "/dev/mock-seagate"}
+    stored = {"kind": "register_drive", "label": "drive-08", "path": str(root)}
     monkeypatch.setattr(registration_setup.store, "close_operation", boom)
     with pytest.raises(RuntimeError, match="injected close"):
         with registration_setup.hold(v9, stored) as setup:
@@ -287,14 +286,16 @@ def test_v9_register_drive_leftover_matches_canonical_path_not_a_different_devic
                                     "annex_uuid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"},
                           catalog=lambda _c: GraphResult(proven_noop=True, value="ark"))
     monkeypatch.setattr(registration_setup.store, "close_operation", real_close)
+    v9.execute(
+        "INSERT INTO drives(drive_label, fs_uuid, annex_uuid, serial) VALUES(?,?,?,?)",
+        ["drive-08", "NEW-FS-UUID", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "NEW-SEAGATE"])
+    same = {"serial": "NEW-SEAGATE", "fs_uuid": "NEW-FS-UUID"}
+    other = {"serial": "OTHER-DISK", "fs_uuid": "OTHER-FS"}
     assert registration_setup.leftover(
-        v9, {"kind": "register_drive", "label": "drive-08", "path": str(root.resolve()),
-             "dev": "/dev/mock-seagate"}, cataloged=True)
+        v9, {"kind": "register_drive", "label": "drive-08"}, cataloged=True, observed=same)
     assert not registration_setup.leftover(
-        v9, {"kind": "register_drive", "label": "drive-08", "path": str(root),
-             "dev": "/dev/other"}, cataloged=True)
-    with registration_setup.hold(v9, {"kind": "register_drive", "label": "drive-08",
-                                     "path": str(root.resolve()), "dev": "/dev/mock-seagate"}) as setup:
+        v9, {"kind": "register_drive", "label": "drive-08"}, cataloged=True, observed=other)
+    with registration_setup.hold(v9, {"kind": "register_drive", "label": "drive-08"}) as setup:
         physical = registration_setup._stored_physical(setup)
         assert physical["archive_path"] == "/media/test/seagate/modelark"
         setup.publish(physical=physical, catalog=lambda _c: (_ for _ in ()).throw(

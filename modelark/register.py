@@ -739,14 +739,9 @@ def _register_drive(dev, label=None, mount: str | None = None,
         else:
             require_no_live_session(con)
             from modelark import registration_setup
-            try:
-                leftover_intent = {
-                    "kind": "register_drive", "label": label,
-                    "path": str(library_root()), "dev": str(dev),
-                }
-            except (OSError, RuntimeError, TypeError, ValueError):
-                leftover_intent = None
-            if leftover_intent and registration_setup.leftover(con, leftover_intent, cataloged=True):
+            leftover_intent = {"kind": "register_drive", "label": label}
+            observed = registration_setup.observe_locator(dev)
+            if registration_setup.leftover(con, leftover_intent, cataloged=True, observed=observed):
                 from modelark.publication_policy import PublicationRefused
                 from modelark import proposal
                 try:
@@ -823,7 +818,7 @@ def _register_drive(dev, label=None, mount: str | None = None,
         connection = db.connect()
         try:
             with registration_setup.hold(connection, {
-                "kind": "register_drive", "label": label, "path": str(lib), "dev": str(dev),
+                "kind": "register_drive", "label": label, "path": str(lib),
             }) as setup:
                 return _register_drive_archive(
                     dev=dev, label=label, archive=archive, lib=lib, mp=mp, base=base,
