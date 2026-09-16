@@ -67,9 +67,16 @@ def observe_locator(dev):
         serial = register._run("lsblk", "-dno", "SERIAL", disk, check=False).stdout.strip() or None
         uuids = register._run("lsblk", "-no", "UUID", dev, check=False).stdout.splitlines()
         fs_uuid = next((line.strip() for line in uuids if line.strip()), None)
-        return {"serial": serial, "fs_uuid": fs_uuid}
+        annex_uuid = None
+        mount = register._mountpoint(dev)
+        if mount:
+            archive = Path(mount) / register.ARCHIVE_SUBDIR
+            if (archive / ".git").exists():
+                annex_uuid = register._git(
+                    archive, "config", "--local", "--get", "annex.uuid", check=False) or None
+        return {"serial": serial, "fs_uuid": fs_uuid, "annex_uuid": annex_uuid}
     except (OSError, RuntimeError, TypeError, ValueError, FileNotFoundError):
-        return {"serial": None, "fs_uuid": None}
+        return {"serial": None, "fs_uuid": None, "annex_uuid": None}
 
 
 def _cataloged_drive_facts(con, label):
@@ -83,17 +90,25 @@ def _cataloged_drive_facts(con, label):
 
 
 def _durable_match(cataloged, observed):
+    """Same disk iff annex UUID matches, or both filesystem UUID and serial match.
+
+    One shared fact is not identity: a cloned filesystem UUID with no serial
+    must not close leftover. Conflicting nonempty facts always refuse.
+    """
     if not cataloged or not observed:
         return False
-    agreed = False
     for key in ("annex_uuid", "fs_uuid", "serial"):
         current, live = cataloged.get(key) or None, observed.get(key) or None
-        if not current or not live:
-            continue
-        if current != live:
+        if current and live and current != live:
             return False
-        agreed = True
-    return agreed
+    annex = cataloged.get("annex_uuid") or None
+    if annex and annex == (observed.get("annex_uuid") or None):
+        return True
+    fs_uuid = cataloged.get("fs_uuid") or None
+    serial = cataloged.get("serial") or None
+    return bool(fs_uuid and serial
+                and fs_uuid == (observed.get("fs_uuid") or None)
+                and serial == (observed.get("serial") or None))
 
 
 def _intents_match(saved, intent):

@@ -3344,3 +3344,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `registration_setup.leftover` / `observe_locator`; `register_drive` leftover retry; `register_new_identity` leftover observed binding. No live Fill or conversion.
 - `docs_updated`: docs/decision_log.md, modelark/registration_setup.py, modelark/register.py, modelark/drive_lifecycle.py, tests/test_registration_publication.py
 - `related`: DEC-133, DEC-162
+
+### DEC-164: Cataloged leftover match is annex UUID, or filesystem UUID and serial together
+- `id`: DEC-164
+- `date`: 2026-09-16
+- `status`: accepted
+- `triggered_by`: Greptile P1 on `78d3668`: `_durable_match` accepted any one overlapping fact
+- `decision`: A cataloged leftover is the same disk only if live annex UUID equals the drives row, or both filesystem UUID and serial equal the drives row. Conflicting nonempty facts refuse. A cloned filesystem UUID with no serial does not match. `observe_locator` also reads annex UUID from `<mount>/modelark` when present. Conversion stays off.
+- `rationale`: Filesystem UUID can be cloned. Serial can be missing on USB. FenceIdentity already requires a stable filesystem or annex UUID; leftover close must not be weaker.
+- `impact`: `registration_setup._durable_match` / `observe_locator`. No live Fill or conversion.
+- `docs_updated`: docs/decision_log.md, modelark/registration_setup.py, tests/test_registration_publication.py
+- `related`: DEC-133, DEC-163
