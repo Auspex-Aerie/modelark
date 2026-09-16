@@ -8,6 +8,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 import uuid
 
 from modelark import publication_locks as locks, publication_store as store, register
@@ -88,6 +89,8 @@ def hold(con, intent):
     if active is not None:
         if active.connection is not con:
             raise PublicationRefused("PUBLICATION_LOCK_SCOPE_NESTED")
+        if active.intent != intent:
+            raise PublicationRefused("PUBLICATION_REGISTRATION_INTENT_MISMATCH")
         yield active
         return
     identity = store.library(con)
@@ -97,19 +100,31 @@ def hold(con, intent):
     setup = RegistrationSetup(con, intent)
     with locks.hold(con, (), map_uuid=identity[1], map_only=True) as scope:
         setup.scope = scope
-        setup.map_receipt = _map_receipt(identity[1], setup.intent.get("path"))
-        token = registration_publication._SETUP.set(setup)
-
-        def prepare(_con):
-            return store.prepare_operation(
-                scope, operation_id=setup.operation_id, kind="registration",
-                profile_digest=store.digest(setup.map_receipt),
-                batch_files={setup.batch_id: [setup.file_id]},
-                before_state={"intent": setup.intent, "map": setup.map_receipt})
-
+        paths = [row[2] for row in con.execute("PRAGMA database_list") if row[1] == "main"]
+        controller_handle, map_handle = scope._authority.handles[0], scope._authority.handles[1]
+        token_c = registration_publication._CONTROLLER.set(
+            (Path(paths[0]).expanduser().resolve(), threading.get_ident(), controller_handle, con))
+        token_m = token = None
         try:
+            setup.map_receipt = _map_receipt(identity[1], setup.intent.get("path"))
+            map_path = Path(setup.map_receipt["root"]).expanduser().absolute()
+            token_m = registration_publication._MAP.set(
+                (map_path, registration_publication._identity(map_path), map_handle))
+            token = registration_publication._SETUP.set(setup)
+
+            def prepare(_con):
+                return store.prepare_operation(
+                    scope, operation_id=setup.operation_id, kind="registration",
+                    profile_digest=store.digest(setup.map_receipt),
+                    batch_files={setup.batch_id: [setup.file_id]},
+                    before_state={"intent": setup.intent, "map": setup.map_receipt})
+
             setup.scope.write(prepare)
             setup.base_revision = store._revision(con)
             yield setup
         finally:
-            registration_publication._SETUP.reset(token)
+            if token is not None:
+                registration_publication._SETUP.reset(token)
+            if token_m is not None:
+                registration_publication._MAP.reset(token_m)
+            registration_publication._CONTROLLER.reset(token_c)

@@ -198,11 +198,11 @@ def _ensure_library_v9(path: Path) -> Path:
             head = _git(path, "rev-parse", "--verify", "HEAD^{commit}")
             if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", head):
                 raise RuntimeError("map has no exact committed HEAD")
-            _save_library_root(path)
             setup.publish(
                 physical={"archive_path": str(path), "annex_uuid": setup.map_receipt["map_uuid"]},
                 catalog=lambda _c: GraphResult(proven_noop=True),
             )
+            _save_library_root(path)
             return path
     except PublicationRefused as exc:
         raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
@@ -505,7 +505,7 @@ def _require_exact_registration_receipt(
 
 def prepare_new_identity_archive(**kwargs) -> dict:
     """Run exact physical preparation under controller-before-map exclusion."""
-    if registration_publication._CONTROLLER.get() is not None or registration_publication.setup_active():
+    if registration_publication._CONTROLLER.get() is not None:
         return _prepare_new_identity_archive(**kwargs)
     with registration_publication.controller():
         return _prepare_new_identity_archive(**kwargs)
@@ -681,8 +681,27 @@ def _prepare_new_identity_tree(
     }
 
 
+def _file_catalog_is_v9():
+    """Read-only probe of the on-disk catalog; does not use db.connect()."""
+    from modelark import publication_store
+    from modelark.publication_policy import PublicationRefused
+    import sqlite3
+    path = Path(db.DB_PATH).expanduser()
+    if not path.exists():
+        return False
+    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return publication_store.library(connection) is not None
+    except (PublicationRefused, sqlite3.Error):
+        return False
+    finally:
+        connection.close()
+
+
 def register_drive(*args, **kwargs) -> dict:
     """Keep controller exclusion across legacy physical setup and catalog CAS."""
+    if _file_catalog_is_v9():
+        return _register_drive(*args, **kwargs)
     with registration_publication.controller():
         return _register_drive(*args, **kwargs)
 
@@ -768,6 +787,23 @@ def _register_drive(dev, label=None, mount: str | None = None,
     archive = Path(mp) / ARCHIVE_SUBDIR
 
     lib = ensure_library(Path(library).expanduser() if library else None)
+    if _publication_library() is not None:
+        from modelark import registration_setup
+        from modelark.publication_policy import PublicationRefused
+        from modelark import proposal
+        connection = db.connect()
+        try:
+            with registration_setup.hold(connection, {
+                "kind": "register_drive", "label": label, "path": str(lib),
+            }):
+                return _register_drive_archive(
+                    dev=dev, label=label, archive=archive, lib=lib, mp=mp, base=base,
+                    role=role, raid_backed=raid_backed, location=location,
+                )
+        except PublicationRefused as exc:
+            raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
+        finally:
+            connection.close()
     with registration_publication.map_write(lib):
         return _register_drive_archive(
             dev=dev, label=label, archive=archive, lib=lib, mp=mp, base=base,
@@ -846,7 +882,9 @@ def _register_drive_archive(*, dev, label, archive, lib, mp, base, role, raid_ba
             from modelark.publication_policy import PublicationRefused
             from modelark import proposal
             try:
-                with registration_setup.hold(con, {"kind": "register_drive", "label": label}) as setup:
+                with registration_setup.hold(con, {
+                    "kind": "register_drive", "label": label, "path": str(lib),
+                }) as setup:
                     plan_id = setup.publish(
                         physical={"archive_path": str(archive), "annex_uuid": annex_uuid},
                         catalog=op,

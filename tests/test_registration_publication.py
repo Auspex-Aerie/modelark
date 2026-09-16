@@ -171,6 +171,37 @@ def test_v9_registration_uses_setup_adapter_and_closes(v9, tmp_path):
     assert not (tmp_path / "must-not-create").exists()
 
 
+def test_v9_setup_owns_controller_map_and_child_fds(v9, tmp_path):
+    from modelark import registration_setup
+    root = tmp_path / "map"
+    with registration_setup.hold(v9, {"kind": "ensure_library", "path": str(root)}) as setup:
+        assert registration_publication._CONTROLLER.get() is not None
+        assert registration_publication._MAP.get() is not None
+        assert len(registration_publication.child_fds()) >= 2
+        with registration_publication.map_write(root):
+            assert setup.map_receipt["map_uuid"] == MAP
+        from modelark.publication_policy import PublicationRefused
+        with pytest.raises(PublicationRefused, match="INTENT_MISMATCH"):
+            with registration_setup.hold(v9, {"kind": "register_drive", "label": "drive-09"}):
+                pytest.fail("mismatched nested intent")
+
+
+def test_v9_prepare_new_identity_archive_reuses_setup_controller(v9, tmp_path, monkeypatch):
+    seen = []
+
+    def fake_prepare(**kwargs):
+        seen.append(registration_publication.child_fds())
+        assert registration_publication._CONTROLLER.get() is not None
+        with registration_publication.map_write(tmp_path / "map"):
+            pass
+        return _prepared(kwargs)
+
+    monkeypatch.setattr(register, "_prepare_new_identity_archive", fake_prepare)
+    result = _apply(v9, register.prepare_new_identity_archive)
+    assert result["annex_uuid"] == "NEW-ANNEX-UUID"
+    assert seen and len(seen[0]) >= 2
+
+
 def test_v9_ensure_library_qualifies_matching_map(v9, tmp_path):
     root = tmp_path / "map"
     assert register.ensure_library(root) == root
