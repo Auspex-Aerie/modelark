@@ -252,13 +252,24 @@ def cmd_annex_migrate_inspect(args):
         sys.stdout.write(text)
 
 
+def _archive_map(values):
+    archives = {}
+    for item in values or ():
+        if "=" not in item:
+            raise SystemExit("archive mapping must be drive_label=/path")
+        label, path = item.split("=", 1)
+        archives[label] = Path(path)
+    return archives or None
+
+
 def cmd_annex_migrate_apply(args):
     from modelark.publication_migrate import apply_conversion, plan_json
     from modelark.publication_policy import PublicationRefused
-    con = db.connect(read_only=True)
+    archives = _archive_map(args.archive)
+    con = db.connect(read_only=archives is None)
     try:
         frozen = apply_conversion(
-            con, writers_stopped=args.writers_stopped, dest_dir=args.save_dir)
+            con, writers_stopped=args.writers_stopped, dest_dir=args.save_dir, archives=archives)
     except PublicationRefused as exc:
         raise SystemExit(f"{exc.code}: conversion apply is not live catalog cutover")
     finally:
@@ -269,10 +280,12 @@ def cmd_annex_migrate_apply(args):
 def cmd_annex_migrate_resume(args):
     from modelark.publication_migrate import plan_json, resume_conversion
     from modelark.publication_policy import PublicationRefused
-    con = db.connect(read_only=True)
+    archives = _archive_map(args.archive)
+    con = db.connect(read_only=archives is None)
     try:
         frozen = resume_conversion(
-            con, args.plan, writers_stopped=args.writers_stopped, dest_dir=args.save_dir)
+            con, args.plan, writers_stopped=args.writers_stopped, dest_dir=args.save_dir,
+            archives=archives)
     except PublicationRefused as exc:
         raise SystemExit(f"{exc.code}: conversion resume is not live catalog cutover")
     finally:
@@ -936,6 +949,7 @@ def _main(argv, permit):
     insp.set_defaults(func=cmd_annex_migrate_inspect)
     ap = migsub.add_parser("apply", help="freeze inspect plan on a disposable catalog (not live cutover)")
     ap.add_argument("--save-dir", type=Path, required=True, help="private directory for the frozen plan JSON")
+    ap.add_argument("--archive", action="append", help="drive_label=/path to a disposable annex archive")
     ap.add_argument("--writers-stopped", action="store_true")
     ap.set_defaults(func=cmd_annex_migrate_apply)
     st = migsub.add_parser("status", help="show conversion inspect counts")
@@ -944,6 +958,7 @@ def _main(argv, permit):
     mgrs = migsub.add_parser("resume", help="resume a conversion plan (refuses live catalog cutover)")
     mgrs.add_argument("plan", help="frozen plan seal or prefix")
     mgrs.add_argument("--save-dir", type=Path, required=True)
+    mgrs.add_argument("--archive", action="append", help="drive_label=/path to a disposable annex archive")
     mgrs.add_argument("--writers-stopped", action="store_true")
     mgrs.set_defaults(func=cmd_annex_migrate_resume)
 

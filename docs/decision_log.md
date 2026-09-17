@@ -3388,3 +3388,25 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `tests/test_catalog_reader_versions.py`; `publication_migrate.apply_conversion` / `resume_conversion`. No live Fill or live cutover.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/publication_migrate.py, modelark/cli.py, tests/test_publication_migrate.py, tests/test_catalog_reader_versions.py
 - `related`: DEC-166
+
+### DEC-168: Disposable physical conversion annexes payload and CASes annex_key
+- `id`: DEC-168
+- `date`: 2026-09-17
+- `status`: accepted
+- `triggered_by`: Operator authorized physical conversion apply on a disposable git-annex catalog after PR 85 merge; live cutover still forbidden
+- `decision`: `apply_conversion(..., archives={drive_label: archive})` on a non-live catalog freezes the inspect plan, annex-adds each convertible file under `__modelark_payload_v1__/`, and CASes `archived.annex_key`/`stored_relpath` only when the row still has a null key. Bytes must match `orig_sha256`. Resume skips already-keyed rows. Live catalog path still raises `PUBLICATION_LIVE_CUTOVER_FORBIDDEN`. No `maintenance` kind enablement and no production library conversion.
+- `rationale`: Inspect named the INC-017 null-key copies. Disposable physical apply proves git-blob → annex key + catalog CAS without touching the live ModelArk catalog.
+- `impact`: `publication_migrate.py`, CLI `--archive`, tests. No live Fill or live cutover.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/publication_migrate.py, modelark/cli.py, tests/test_publication_migrate.py
+- `related`: DEC-166, DEC-167
+
+### DEC-169: Disposable convert proves frozen source, path-limited commits, and before-state CAS
+- `id`: DEC-169
+- `date`: 2026-09-17
+- `status`: accepted
+- `triggered_by`: Greptile PR 86 P1s on `cae2f61` (unproven rfilename fallback, unrestricted commit, ignored retirement, empty-key-only CAS)
+- `decision`: Physical apply opens only the inspect-frozen `stored_relpath`; a missing path is `PUBLICATION_MIGRATE_SOURCE_UNPROVEN` and never falls back to `rfilename`. Inspect classifies a null-key row without `stored_relpath` as `needs-evidence`. Git commits are limited to the migration-owned path. Catalog CAS matches frozen `orig_sha256`, `orig_bytes`, `stored_relpath`, `compressed`, `stored_bytes`, and `orig_sha256_provenance` plus empty `annex_key`. Source retirement `git rm`/`commit` must succeed; resume of an already-keyed row still retires a leftover frozen source. Live catalog path remains forbidden. No production library conversion.
+- `rationale`: The four P1s were the same leftover-identity class as DEC-163: locator/fallback is not proof. Frozen inspect facts are the before-state; conversion must not open, commit, or CAS anything else, and resume must close leftover source rather than skip it.
+- `impact`: `publication_migrate.py`, tests. No live Fill or live cutover.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/publication_migrate.py, tests/test_publication_migrate.py
+- `related`: DEC-165, DEC-168
