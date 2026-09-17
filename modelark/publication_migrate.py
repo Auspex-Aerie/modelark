@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from modelark.core.db import _xdg_data_home
-from modelark.publication_policy import PublicationRefused
+from modelark.publication_policy import (
+    PublicationRefused, parse_sha256_key, payload_relative_path, relative_path, sha256_key)
 from modelark.publication_store import library
 
 
@@ -40,8 +41,7 @@ def _state(row):
 
 
 def _mapping(rfilename):
-    digest = hashlib.sha256(str(rfilename).encode("utf-8")).hexdigest()
-    return f"{_PAYLOAD_PREFIX}/p-{digest}.blob"
+    return payload_relative_path(rfilename)
 
 
 def inspect_conversion(con, *, drive=None, repos=None):
@@ -136,41 +136,68 @@ def _git(archive, *args, check=True):
     return (result.stdout or "").strip()
 
 
+def _confined(archive, repo_id, stored):
+    joined = f"{relative_path(repo_id).as_posix()}/{relative_path(stored).as_posix()}"
+    confined = relative_path(joined)
+    root = Path(archive).resolve()
+    path = root.joinpath(*confined.parts)
+    resolved = path.resolve()
+    if resolved != root and not str(resolved).startswith(str(root) + os.sep):
+        raise PublicationRefused("PUBLICATION_PATH_INVALID", path=joined)
+    return path, confined.as_posix()
+
+
 def _source_path(archive, candidate):
     stored = candidate.get("stored_relpath") or candidate.get("rfilename")
     if not stored:
         raise PublicationRefused("PUBLICATION_MIGRATE_SOURCE_UNPROVEN")
-    path = archive / stored
-    if not path.is_file() and not path.is_symlink():
-        alt = archive / candidate["rfilename"]
-        if alt.is_file() or alt.is_symlink():
-            return alt
-        raise PublicationRefused("PUBLICATION_MIGRATE_SOURCE_UNPROVEN", path=str(path))
-    return path
+    path, _ = _confined(archive, candidate["repo_id"], stored)
+    if path.is_file() or path.is_symlink():
+        return path
+    fallback, _ = _confined(archive, candidate["repo_id"], candidate["rfilename"])
+    if fallback.is_file() or fallback.is_symlink():
+        return fallback
+    raise PublicationRefused("PUBLICATION_MIGRATE_SOURCE_UNPROVEN", path=str(path))
+
+
+def _write_new(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
 
 
 def _convert_file(archive, candidate):
     archive = Path(archive)
     src = _source_path(archive, candidate)
     data = src.read_bytes()
-    expected = candidate.get("orig_sha256")
     digest = hashlib.sha256(data).hexdigest()
+    expected = candidate.get("orig_sha256")
     if expected and digest != expected:
         raise PublicationRefused("PUBLICATION_MIGRATE_HASH_MISMATCH", expected=expected, observed=digest)
-    dest_rel = candidate["proposed_stored_relpath"]
-    dest = archive / dest_rel
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.resolve() != src.resolve():
-        dest.write_bytes(data)
-    _git(archive, "-c", "annex.largefiles=anything", "annex", "add", "--", dest_rel)
-    key = _git(archive, "annex", "lookupkey", "--", dest_rel)
-    if not key:
-        raise PublicationRefused("PUBLICATION_MIGRATE_KEY_UNPROVEN", path=dest_rel)
-    src_rel = str(src.relative_to(archive))
-    if dest.resolve() != src.resolve():
-        _git(archive, "rm", "-q", "--", src_rel, check=False)
-    _git(archive, "commit", "-qm", f"annex-migrate {candidate['rfilename']}")
-    return key, dest_rel
+    dest_rel = candidate.get("proposed_stored_relpath") or _mapping(candidate["rfilename"])
+    dest, dest_joined = _confined(archive, candidate["repo_id"], dest_rel)
+    repo_prefix = relative_path(candidate["repo_id"]).as_posix() + "/"
+    stored_relpath = dest_joined[len(repo_prefix):] if dest_joined.startswith(repo_prefix) else dest_rel
+    if dest.resolve() != src.resolve() and not dest.exists():
+        _write_new(dest, data)
+    _git(archive, "-c", "annex.backend=SHA256", "-c", "annex.largefiles=anything",
+         "annex", "add", "--", dest_joined)
+    key = _git(archive, "annex", "lookupkey", "--", dest_joined)
+    size, key_digest = parse_sha256_key(key)
+    if key != sha256_key(len(data), digest) or size != len(data) or key_digest != digest:
+        raise PublicationRefused("PUBLICATION_MIGRATE_KEY_UNPROVEN", key=key)
+    object_rel = _git(archive, "annex", "examinekey", "--format=${objectpath}", "--", key)
+    object_path = Path(object_rel)
+    if not object_path.is_absolute():
+        object_path = archive / object_rel
+    object_path = object_path.resolve()
+    if hashlib.sha256(object_path.read_bytes()).hexdigest() != digest:
+        raise PublicationRefused("PUBLICATION_MIGRATE_HASH_MISMATCH", path=object_rel)
+    _git(archive, "commit", "-qm", f"annex-migrate {candidate['repo_id']}/{candidate['rfilename']}")
+    return key, stored_relpath, src, dest
 
 
 def _current_annex_key(con, candidate):
@@ -185,11 +212,11 @@ def _publish_key(con, candidate, key, stored_relpath):
 
     def write(c):
         changed = c.execute(
-            "UPDATE archived SET annex_key=?, stored_relpath=? "
+            "UPDATE archived SET annex_key=?, stored_relpath=?, stored_name=? "
             "WHERE drive_label=? AND repo_id=? AND rfilename=? "
             "AND (annex_key IS NULL OR annex_key='')",
-            [key, stored_relpath, candidate["drive_label"], candidate["repo_id"],
-             candidate["rfilename"]])
+            [key, stored_relpath, Path(stored_relpath).name, candidate["drive_label"],
+             candidate["repo_id"], candidate["rfilename"]])
         if changed.rowcount != 1:
             raise PublicationRefused("PUBLICATION_MIGRATE_CATALOG_UNPROVEN",
                                      drive_label=candidate["drive_label"],
@@ -210,8 +237,11 @@ def _convert_archives(con, frozen, archives):
         archive = archives.get(label)
         if archive is None:
             raise PublicationRefused("PUBLICATION_MIGRATE_ARCHIVE_REQUIRED", drive_label=label)
-        key, stored = _convert_file(archive, candidate)
+        key, stored, src, dest = _convert_file(archive, candidate)
         _publish_key(con, candidate, key, stored)
+        if dest.resolve() != src.resolve():
+            _git(archive, "rm", "-q", "--", str(src.relative_to(Path(archive).resolve())), check=False)
+            _git(archive, "commit", "-qm", f"annex-migrate-retire {candidate['rfilename']}", check=False)
         converted.append({"drive_label": label, "rfilename": candidate["rfilename"],
                           "annex_key": key, "stored_relpath": stored})
     frozen = dict(frozen)

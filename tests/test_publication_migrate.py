@@ -95,33 +95,48 @@ def test_physical_convert_on_disposable_annex_updates_catalog_and_resumes(tmp_pa
     git("init", "-q", "--initial-branch=main")
     git("annex", "init", "--version=8", "--quiet", "migrate-test")
     git("config", "annex.backend", "SHA256")
-    (archive / ".gitattributes").write_bytes(payload)
-    git("add", "--", ".gitattributes")
-    git("commit", "-qm", "git blob")
+    for repo in ("org/m", "org/n"):
+        path = archive / repo
+        path.mkdir(parents=True)
+        (path / ".gitattributes").write_bytes(payload)
+        git("add", "--", f"{repo}/.gitattributes")
+    git("commit", "-qm", "git blobs")
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "catalog.sqlite")
     monkeypatch.setattr(db, "CATALOG_DIR", tmp_path)
     con = db.connect(_bootstrapping=True)
     con.execute("INSERT INTO drives(drive_label) VALUES('drive-00')")
-    con.execute("INSERT INTO models(repo_id) VALUES('org/m')")
-    con.execute("INSERT INTO files(repo_id,rfilename,size_bytes) VALUES('org/m','.gitattributes',?)",
-                [len(payload)])
-    con.execute(
-        "INSERT INTO archived(repo_id,rfilename,drive_label,orig_sha256,orig_bytes,stored_bytes,"
-        "compressed,stored_relpath,annex_key) VALUES('org/m','.gitattributes','drive-00',?,?,?,0,"
-        "'.gitattributes',NULL)",
-        [digest, len(payload), len(payload)])
+    for repo in ("org/m", "org/n"):
+        con.execute("INSERT INTO models(repo_id) VALUES(?)", [repo])
+        con.execute("INSERT INTO files(repo_id,rfilename,size_bytes) VALUES(?,'.gitattributes',?)",
+                    [repo, len(payload)])
+        con.execute(
+            "INSERT INTO archived(repo_id,rfilename,drive_label,orig_sha256,orig_bytes,stored_bytes,"
+            "compressed,stored_relpath,annex_key) VALUES(?,'.gitattributes','drive-00',?,?,?,0,"
+            "'.gitattributes',NULL)",
+            [repo, digest, len(payload), len(payload)])
     census = inspect_conversion(con)
     frozen = apply_conversion(con, census, writers_stopped=True, dest_dir=tmp_path / "plans",
                               archives={"drive-00": archive})
     assert frozen["apply"] == "physical-disposable"
     converted = frozen["converted"]
-    assert len(converted) == 1
-    assert converted[0]["annex_key"].startswith("SHA256-")
-    assert digest in converted[0]["annex_key"]
-    row = con.execute("SELECT annex_key, stored_relpath FROM archived").fetchone()
-    assert row[0] == converted[0]["annex_key"]
-    assert row[1].startswith("__modelark_payload_v1__/")
+    assert len(converted) == 2
+    keys = {row["annex_key"] for row in converted}
+    assert len(keys) == 1
+    assert digest in next(iter(keys))
+    rows = con.execute("SELECT repo_id, annex_key, stored_relpath, stored_name FROM archived "
+                       "ORDER BY repo_id").fetchall()
+    assert {row[0] for row in rows} == {"org/m", "org/n"}
+    for row in rows:
+        assert row[1].startswith("SHA256-")
+        assert row[2].startswith("__modelark_payload_v1__/")
+        assert row[3] == Path(row[2]).name
+        assert (archive / row[0] / row[2]).exists()
     resumed = resume_conversion(con, frozen["seal"], writers_stopped=True,
                                 dest_dir=tmp_path / "plans", archives={"drive-00": archive})
     assert resumed["converted"] == []
+    monkeypatch.setattr("modelark.publication_migrate.live_catalog_path",
+                        lambda: Path(con.execute("PRAGMA database_list").fetchone()[2]).resolve())
+    with pytest.raises(PublicationRefused, match="LIVE_CUTOVER_FORBIDDEN"):
+        apply_conversion(con, census, writers_stopped=True, dest_dir=tmp_path / "other",
+                         archives={"drive-00": archive})
     con.close()
