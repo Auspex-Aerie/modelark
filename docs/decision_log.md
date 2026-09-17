@@ -3370,10 +3370,21 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 ### DEC-166: Stage 2 inspect is read-only; apply/resume do not cut over the live catalog
 - `id`: DEC-166
 - `date`: 2026-09-16
-- `status`: accepted
+- `status`: accepted; apply/resume freeze clarified by DEC-167
 - `triggered_by`: Operator asked to fix PR 85 CI and continue Stage 2, stopping short of live local ModelArk cutover
 - `decision`: `publication_migrate.inspect_conversion` is a read-only census of archived copies without annex keys. CLI `archive annex-migrate inspect` writes an optional private plan file and performs no Git or catalog mutation. `apply` and `resume` raise `PUBLICATION_CONVERSION_DISABLED` until a later explicit live-cutover authorization. Conversion kinds remain refused in `prepare_operation`.
 - `rationale`: Stage 2's inspect/apply/resume exists so conversion can be planned without pretending the live catalog has been converted. The original Fill stop was raw `.gitattributes` without annex keys (INC-017 census); inspect names those candidates.
 - `impact`: `modelark/publication_migrate.py`, `modelark/cli.py`. No live Fill, conversion apply, or catalog migration.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/publication_migrate.py, modelark/cli.py, tests/test_publication_migrate.py
 - `related`: DEC-156, DEC-157
+
+### DEC-167: Disposable apply freezes inspect; live catalog path is never converted
+- `id`: DEC-167
+- `date`: 2026-09-16
+- `status`: accepted
+- `triggered_by`: Operator asked to fix the 3.12 catalog lock then continue Stage 2 short of live cutover
+- `decision`: Python `sqlite3` connection context managers do not close; catalog-reader tests close explicitly so WAL `journal_mode=DELETE` is not locked on 3.12. `apply_conversion` requires `--writers-stopped` and a dest dir, refuses when the catalog file is the default live `~/.local/share/modelark/catalog.sqlite`, and otherwise writes a frozen inspect JSON (`apply: frozen-inspect-only`). `resume_conversion` reloads that freeze. No Git mutation, no `annex_key` writes, no `maintenance` kind enablement.
+- `rationale`: Stage 2 can seal a conversion census on a disposable catalog without pretending bytes were annexed. Physical conversion remains a later increment.
+- `impact`: `tests/test_catalog_reader_versions.py`; `publication_migrate.apply_conversion` / `resume_conversion`. No live Fill or live cutover.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/publication_migrate.py, modelark/cli.py, tests/test_publication_migrate.py, tests/test_catalog_reader_versions.py
+- `related`: DEC-166

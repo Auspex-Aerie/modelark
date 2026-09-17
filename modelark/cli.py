@@ -253,21 +253,31 @@ def cmd_annex_migrate_inspect(args):
 
 
 def cmd_annex_migrate_apply(args):
-    from modelark.publication_migrate import apply_conversion
+    from modelark.publication_migrate import apply_conversion, plan_json
     from modelark.publication_policy import PublicationRefused
+    con = db.connect(read_only=True)
     try:
-        apply_conversion(plan_id=args.plan, seal=args.seal, writers_stopped=args.writers_stopped)
+        frozen = apply_conversion(
+            con, writers_stopped=args.writers_stopped, dest_dir=args.save_dir)
     except PublicationRefused as exc:
         raise SystemExit(f"{exc.code}: conversion apply is not live catalog cutover")
+    finally:
+        con.close()
+    sys.stdout.write(plan_json(frozen))
 
 
 def cmd_annex_migrate_resume(args):
-    from modelark.publication_migrate import resume_conversion
+    from modelark.publication_migrate import plan_json, resume_conversion
     from modelark.publication_policy import PublicationRefused
+    con = db.connect(read_only=True)
     try:
-        resume_conversion(plan_id=args.plan, writers_stopped=args.writers_stopped)
+        frozen = resume_conversion(
+            con, args.plan, writers_stopped=args.writers_stopped, dest_dir=args.save_dir)
     except PublicationRefused as exc:
         raise SystemExit(f"{exc.code}: conversion resume is not live catalog cutover")
+    finally:
+        con.close()
+    sys.stdout.write(plan_json(frozen))
 
 
 def cmd_annex_migrate_status(args):
@@ -924,16 +934,16 @@ def _main(argv, permit):
     insp.add_argument("--repo", action="append", help="limit to a repo id (repeatable)")
     insp.add_argument("--save", type=Path, help="write the inspect plan JSON to this private path")
     insp.set_defaults(func=cmd_annex_migrate_inspect)
-    ap = migsub.add_parser("apply", help="apply a sealed inspect plan (refuses live catalog cutover)")
-    ap.add_argument("--plan", required=True)
-    ap.add_argument("--seal", required=True)
+    ap = migsub.add_parser("apply", help="freeze inspect plan on a disposable catalog (not live cutover)")
+    ap.add_argument("--save-dir", type=Path, required=True, help="private directory for the frozen plan JSON")
     ap.add_argument("--writers-stopped", action="store_true")
     ap.set_defaults(func=cmd_annex_migrate_apply)
     st = migsub.add_parser("status", help="show conversion inspect counts")
     st.add_argument("plan")
     st.set_defaults(func=cmd_annex_migrate_status)
     mgrs = migsub.add_parser("resume", help="resume a conversion plan (refuses live catalog cutover)")
-    mgrs.add_argument("plan")
+    mgrs.add_argument("plan", help="frozen plan seal or prefix")
+    mgrs.add_argument("--save-dir", type=Path, required=True)
     mgrs.add_argument("--writers-stopped", action="store_true")
     mgrs.set_defaults(func=cmd_annex_migrate_resume)
 

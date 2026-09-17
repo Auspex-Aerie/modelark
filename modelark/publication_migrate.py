@@ -1,12 +1,28 @@
-"""Read-only annex-payload conversion inspect. Does not apply or cut over live catalogs."""
+"""Read-only annex-payload conversion inspect. Disposable apply freezes a plan.
+
+Live catalog cutover remains forbidden. Physical Git/annex conversion is later.
+"""
 from __future__ import annotations
 
 import hashlib
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
+from modelark.core.db import _xdg_data_home
 from modelark.publication_policy import PublicationRefused
 from modelark.publication_store import library
+
+
+def live_catalog_path():
+    return (_xdg_data_home() / "modelark" / "catalog.sqlite").expanduser().resolve()
+
+
+def _catalog_file(con):
+    paths = [row[2] for row in con.execute("PRAGMA database_list") if row[1] == "main"]
+    if not paths or not paths[0]:
+        return None
+    return Path(paths[0]).expanduser().resolve()
 
 
 _PAYLOAD_PREFIX = "__modelark_payload_v1__"
@@ -69,12 +85,45 @@ def inspect_conversion(con, *, drive=None, repos=None):
     }
 
 
-def apply_conversion(*_a, **_k):
-    raise PublicationRefused("PUBLICATION_CONVERSION_DISABLED")
+def apply_conversion(con, plan=None, *, writers_stopped=False, dest_dir=None):
+    """Freeze an inspect plan on a disposable catalog. Never converts live bytes."""
+    if not writers_stopped:
+        raise PublicationRefused("PUBLICATION_WRITERS_STILL_RUNNING")
+    catalog = _catalog_file(con)
+    if catalog is not None and catalog == live_catalog_path():
+        raise PublicationRefused("PUBLICATION_LIVE_CUTOVER_FORBIDDEN")
+    if dest_dir is None:
+        raise PublicationRefused("PUBLICATION_MIGRATE_DEST_REQUIRED")
+    dest_dir = Path(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    plan = dict(plan or inspect_conversion(con))
+    body = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
+    seal = hashlib.sha256(body).hexdigest()
+    frozen = {**plan, "frozen": True, "seal": seal, "apply": "frozen-inspect-only"}
+    path = dest_dir / f"annex-migrate-{seal[:12]}.json"
+    path.write_text(plan_json(frozen))
+    frozen["plan_path"] = str(path)
+    return frozen
 
 
-def resume_conversion(*_a, **_k):
-    raise PublicationRefused("PUBLICATION_CONVERSION_DISABLED")
+def resume_conversion(con, plan_id, *, writers_stopped=False, dest_dir=None):
+    """Reload a frozen inspect plan. Does not convert live bytes."""
+    if not writers_stopped:
+        raise PublicationRefused("PUBLICATION_WRITERS_STILL_RUNNING")
+    catalog = _catalog_file(con)
+    if catalog is not None and catalog == live_catalog_path():
+        raise PublicationRefused("PUBLICATION_LIVE_CUTOVER_FORBIDDEN")
+    if dest_dir is None:
+        raise PublicationRefused("PUBLICATION_MIGRATE_DEST_REQUIRED")
+    dest_dir = Path(dest_dir)
+    prefix = str(plan_id)[:12]
+    matches = sorted(dest_dir.glob(f"annex-migrate-{prefix}*.json"))
+    if len(matches) != 1:
+        raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", plan_id=plan_id)
+    frozen = json.loads(matches[0].read_text())
+    if frozen.get("seal", "")[:12] != prefix:
+        raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", plan_id=plan_id)
+    return frozen
 
 
 def plan_json(plan):

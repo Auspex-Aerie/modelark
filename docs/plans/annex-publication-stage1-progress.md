@@ -261,12 +261,13 @@ dropped to close; injected stop at each durable phase resumes without clearing
 the obligation; leftover PREPARED registration after `CATALOG_PUBLISHED` resumes
 and closes. Conversion remains disabled. Live Fill/catalog migration remain off.
 
-Stage 2 inspect is landed read-only (`archive annex-migrate inspect`). Apply/resume
-still raise `PUBLICATION_CONVERSION_DISABLED` and must not cut over the live catalog.
+Stage 2 inspect is read-only. Disposable apply/resume freeze an inspect plan to
+private JSON (`frozen-inspect-only`) and refuse the live catalog path. Physical
+Git/annex conversion is not enabled.
 
 Next remaining work:
 
-1. Disposable-catalog apply/resume for conversion (still not live cutover).
+1. Physical conversion apply on a disposable git-annex catalog (still not live).
 2. Returning-clone interception and guarded map publication.
 3. Live Fill restart / catalog migration apply, only when explicitly authorized.
 
