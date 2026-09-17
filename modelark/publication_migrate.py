@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -85,6 +86,38 @@ def inspect_conversion(con, *, drive=None, repos=None):
     }
 
 
+_ENVELOPE = frozenset({"frozen", "seal", "apply", "plan_path"})
+
+
+def _census(plan):
+    return {key: value for key, value in plan.items() if key not in _ENVELOPE}
+
+
+def _seal(plan):
+    body = json.dumps(_census(plan), sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(body).hexdigest()
+
+
+def _write_private(path, text):
+    path = Path(path)
+    os.makedirs(path.parent, mode=0o700, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        os.write(fd, text.encode())
+    finally:
+        os.close(fd)
+
+
+def _read_private(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        return os.read(fd, 1 << 22).decode()
+    finally:
+        os.close(fd)
+
+
 def apply_conversion(con, plan=None, *, writers_stopped=False, dest_dir=None):
     """Freeze an inspect plan on a disposable catalog. Never converts live bytes."""
     if not writers_stopped:
@@ -95,13 +128,16 @@ def apply_conversion(con, plan=None, *, writers_stopped=False, dest_dir=None):
     if dest_dir is None:
         raise PublicationRefused("PUBLICATION_MIGRATE_DEST_REQUIRED")
     dest_dir = Path(dest_dir)
-    dest_dir.mkdir(parents=True, exist_ok=True)
     plan = dict(plan or inspect_conversion(con))
-    body = json.dumps(plan, sort_keys=True, separators=(",", ":")).encode()
-    seal = hashlib.sha256(body).hexdigest()
-    frozen = {**plan, "frozen": True, "seal": seal, "apply": "frozen-inspect-only"}
+    seal = _seal(plan)
+    frozen = {**_census(plan), "frozen": True, "seal": seal, "apply": "frozen-inspect-only"}
     path = dest_dir / f"annex-migrate-{seal[:12]}.json"
-    path.write_text(plan_json(frozen))
+    try:
+        _write_private(path, plan_json(frozen))
+    except FileExistsError as exc:
+        raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_EXISTS", path=str(path)) from exc
+    except OSError as exc:
+        raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", path=str(path)) from exc
     frozen["plan_path"] = str(path)
     return frozen
 
@@ -120,7 +156,12 @@ def resume_conversion(con, plan_id, *, writers_stopped=False, dest_dir=None):
     matches = sorted(dest_dir.glob(f"annex-migrate-{prefix}*.json"))
     if len(matches) != 1:
         raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", plan_id=plan_id)
-    frozen = json.loads(matches[0].read_text())
+    try:
+        frozen = json.loads(_read_private(matches[0]))
+    except OSError as exc:
+        raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", plan_id=plan_id) from exc
+    if frozen.get("seal") != _seal(frozen):
+        raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", plan_id=plan_id)
     if frozen.get("seal", "")[:12] != prefix:
         raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", plan_id=plan_id)
     return frozen

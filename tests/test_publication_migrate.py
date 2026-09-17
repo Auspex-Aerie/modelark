@@ -1,4 +1,5 @@
 """Read-only conversion inspect; disposable apply freezes a plan, not live cutover."""
+import json
 from pathlib import Path
 
 import pytest
@@ -49,14 +50,23 @@ def test_apply_and_resume_freeze_inspect_on_disposable_catalog_not_live(tmp_path
         "compressed,annex_key) VALUES('org/m','.gitattributes','drive-00','abc',12,12,0,NULL)")
     with pytest.raises(PublicationRefused, match="WRITERS_STILL_RUNNING"):
         apply_conversion(con, writers_stopped=False, dest_dir=tmp_path / "plans")
-    frozen = apply_conversion(con, writers_stopped=True, dest_dir=tmp_path / "plans")
+    census = inspect_conversion(con)
+    frozen = apply_conversion(con, census, writers_stopped=True, dest_dir=tmp_path / "plans")
     assert frozen["frozen"] is True
     assert frozen["apply"] == "frozen-inspect-only"
     assert (tmp_path / "plans" / f"annex-migrate-{frozen['seal'][:12]}.json").is_file()
     resumed = resume_conversion(con, frozen["seal"], writers_stopped=True, dest_dir=tmp_path / "plans")
     assert resumed["seal"] == frozen["seal"]
+    path = Path(frozen["plan_path"])
+    tampered = json.loads(path.read_text())
+    tampered["candidates"] = []
+    path.write_text(json.dumps(tampered, indent=2) + "\n")
+    with pytest.raises(PublicationRefused, match="PLAN_UNPROVEN"):
+        resume_conversion(con, frozen["seal"], writers_stopped=True, dest_dir=tmp_path / "plans")
+    with pytest.raises(PublicationRefused, match="PLAN_EXISTS"):
+        apply_conversion(con, census, writers_stopped=True, dest_dir=tmp_path / "plans")
     monkeypatch.setattr("modelark.publication_migrate.live_catalog_path",
                         lambda: Path(con.execute("PRAGMA database_list").fetchone()[2]).resolve())
     with pytest.raises(PublicationRefused, match="LIVE_CUTOVER_FORBIDDEN"):
-        apply_conversion(con, writers_stopped=True, dest_dir=tmp_path / "plans")
+        apply_conversion(con, writers_stopped=True, dest_dir=tmp_path / "other")
     con.close()
