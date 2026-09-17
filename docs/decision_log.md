@@ -3218,3 +3218,33 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Shared evidence resolver, bootstrap diagnostic preservation and regressions for ordinary reads plus unchanged stale-plan refusal. No new Slice fields, schema, alias registry or live-data changes. Authorize exactly one additional local Grok correction review, not a reset of the default three-round policy; the already-approved cloud Codex cycle remains capped at three rounds, with no Greptile.
 - `docs_updated`: docs/decision_log.md, docs/bridge-serial-repair-plan.md, docs/archive-serial-repair.md
 - `related`: DEC-153, INC-065
+
+### DEC-155: Open RFC-003 for a local verified-export provider
+- `id`: DEC-155
+- `date`: 2026-09-16
+- `status`: accepted
+- `triggered_by`: Operator direction to keep ModelArk, FrostByte, and AEON Orb separate; share a reviewable envelope; capture the design in ModelArk after FrostByte issue #20 and the partner schema draft.
+- `decision`:
+  1. Frame collaboration as a local verified-export: installed FrostByte/Orb may request an identified artifact and receive verified original regular files plus labeled vendor-authority and git-annex custody evidence. ModelArk owns retrieval, drives, and verification. They own BitTorrent/IPFS and Sharing. No repo merge, no annex paths, no default-on sharing.
+  2. Use one materialization job with `purpose: verified-export` now and `purpose: usable-slice` later (DEC-081). Do not wrap `restore_repo`. Pin drives like Fill. Hold prepared files until the caller releases; no ModelArk expiry (`holdUntil` only if the caller sends it). Refuse prepares that exceed staging space or attached-media visit plans.
+  3. Open RFC-003 as the ModelArk contract. The FrostByte review copy is `docs/MODELARK-ARCHIVE-PROVIDER.md` on `modelark/local-archive-provider` (issue #20). Amend both together if review changes fields. Do not implement adapters, a provider socket, portal `/api` reuse, archive mutation, or direct annex reads until a follow-up DEC.
+- `rationale`: DEC-084 already named the storage primitive. Export and Slice share the engine and must not collapse “verified bytes for sharing” into “usable for a consumer.” A stale uncommitted note on another branch labeled this collaboration DEC-085; that ID on `main` is the Greptile-loop bound. This entry is the canonical collaboration decision.
+- `impact`: RFC-003 and this ledger entry only. FrostByte #20 and its schema draft already exist for their review. No ModelArk runtime, catalog, Fill, restore, or drive behavior changes.
+- `docs_updated`: docs/decision_log.md, docs/rfcs/003-local-verified-export.md
+- `related`: DEC-081, DEC-084, DEF-041, RFC-003
+- `scope_boundary`: Documentation and reviewable contract only. No provider implementation, source adapter, Frost-Net client, P2P transport, archive mutation, Fill, proposal approval, or public package publication.
+
+### DEC-155: Open RFC-003 for a local verified-export provider
+- `id`: DEC-155
+- `date`: 2026-09-16
+- `status`: accepted
+- `triggered_by`: Operator direction to keep ModelArk, FrostByte, and AEON Orb separate; share a reviewable envelope; capture the design in ModelArk after FrostByte issue #20 and the partner schema draft.
+- `decision`:
+  1. Frame collaboration as a local verified-export: installed FrostByte/Orb may request an identified artifact and receive verified original regular files plus labeled vendor-authority and git-annex custody evidence. ModelArk owns retrieval, drives, and verification. They own BitTorrent/IPFS and Sharing. No repo merge, no annex paths, no default-on sharing.
+  2. Use one materialization job with `purpose: verified-export` now and `purpose: usable-slice` later (DEC-081). Do not wrap `restore_repo`. Pin drives like Fill. Hold prepared files until the caller releases; no ModelArk expiry (`holdUntil` only if the caller sends it). Refuse prepares that exceed staging space or attached-media visit plans.
+  3. Open RFC-003 as the ModelArk contract. The FrostByte review copy is `docs/MODELARK-ARCHIVE-PROVIDER.md` on `modelark/local-archive-provider` (issue #20). Amend both together if review changes fields. Do not implement adapters, a provider socket, portal `/api` reuse, archive mutation, or direct annex reads until a follow-up DEC.
+- `rationale`: DEC-084 already named the storage primitive. Export and Slice share the engine and must not collapse “verified bytes for sharing” into “usable for a consumer.” A stale uncommitted note on another branch labeled this collaboration DEC-085; that ID on `main` is the Greptile-loop bound. This entry is the canonical collaboration decision.
+- `impact`: RFC-003 and this ledger entry only. FrostByte #20 and its schema draft already exist for their review. No ModelArk runtime, catalog, Fill, restore, or drive behavior changes.
+- `docs_updated`: docs/decision_log.md, docs/rfcs/003-local-verified-export.md
+- `related`: DEC-081, DEC-084, DEF-041, RFC-003
+- `scope_boundary`: Documentation and reviewable contract only. No provider implementation, source adapter, Frost-Net client, P2P transport, archive mutation, Fill, proposal approval, or public package publication.
