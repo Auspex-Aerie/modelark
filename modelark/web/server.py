@@ -371,12 +371,24 @@ def _serve(port=8077, open_browser=True, resume=False, host="127.0.0.1"):
         else:
             log.warning("auto-resume skipped", reason=r.get("error") or r.get("code"))
     signal.signal(signal.SIGTERM, lambda *a: (_ for _ in ()).throw(KeyboardInterrupt))
+    export = None
+    try:
+        from modelark.export_provider import start_background
+        export = start_background()
+        log.info("export provider ready", socket=str(export.socket_path))
+    except Exception:
+        log.exception("export provider failed to start")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         log.info("stopping — closing catalog cleanly")
+        if export is not None:
+            try:
+                export.stop()
+            except Exception:
+                pass
         httpd.shutdown()
         fill_worker.shutdown()   # ask the fill worker to stop at its next file boundary (daemon: dies with us)
         try:

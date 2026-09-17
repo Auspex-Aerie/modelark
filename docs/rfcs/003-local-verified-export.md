@@ -1,6 +1,6 @@
 # RFC-003: Local verified-export provider (FrostByte / AEON)
 
-- **Status:** OPEN — design contract; FrostByte reviewing the shared envelope
+- **Status:** OPEN — hop-1 in implementation (DEC-156); FrostByte still reviewing the envelope
 - **Date:** 2026-09-16
 - **Owners:** Auspex-Aerie + operator
 - **Related:** DEC-081, DEC-084, DEC-155, DEF-041, FrostByte #20

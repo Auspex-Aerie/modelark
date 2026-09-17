@@ -3234,17 +3234,17 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `related`: DEC-081, DEC-084, DEF-041, RFC-003
 - `scope_boundary`: Documentation and reviewable contract only. No provider implementation, source adapter, Frost-Net client, P2P transport, archive mutation, Fill, proposal approval, or public package publication.
 
-### DEC-155: Open RFC-003 for a local verified-export provider
-- `id`: DEC-155
-- `date`: 2026-09-16
+### DEC-156: Implement hop-1 verified-export alongside FrostByte
+- `id`: DEC-156
+- `date`: 2026-09-17
 - `status`: accepted
-- `triggered_by`: Operator direction to keep ModelArk, FrostByte, and AEON Orb separate; share a reviewable envelope; capture the design in ModelArk after FrostByte issue #20 and the partner schema draft.
+- `triggered_by`: Operator direction to stop waiting on FrostByte review and ship a working local integration: run FrostByte here, expose a ModelArk unix-socket provider, and let FrostByte prepare/seed from a hold of regular files.
 - `decision`:
-  1. Frame collaboration as a local verified-export: installed FrostByte/Orb may request an identified artifact and receive verified original regular files plus labeled vendor-authority and git-annex custody evidence. ModelArk owns retrieval, drives, and verification. They own BitTorrent/IPFS and Sharing. No repo merge, no annex paths, no default-on sharing.
-  2. Use one materialization job with `purpose: verified-export` now and `purpose: usable-slice` later (DEC-081). Do not wrap `restore_repo`. Pin drives like Fill. Hold prepared files until the caller releases; no ModelArk expiry (`holdUntil` only if the caller sends it). Refuse prepares that exceed staging space or attached-media visit plans.
-  3. Open RFC-003 as the ModelArk contract. The FrostByte review copy is `docs/MODELARK-ARCHIVE-PROVIDER.md` on `modelark/local-archive-provider` (issue #20). Amend both together if review changes fields. Do not implement adapters, a provider socket, portal `/api` reuse, archive mutation, or direct annex reads until a follow-up DEC.
-- `rationale`: DEC-084 already named the storage primitive. Export and Slice share the engine and must not collapse “verified bytes for sharing” into “usable for a consumer.” A stale uncommitted note on another branch labeled this collaboration DEC-085; that ID on `main` is the Greptile-loop bound. This entry is the canonical collaboration decision.
-- `impact`: RFC-003 and this ledger entry only. FrostByte #20 and its schema draft already exist for their review. No ModelArk runtime, catalog, Fill, restore, or drive behavior changes.
+  1. Authorize hop-1 of RFC-003. ModelArk serves JSON-line `{ok,data|error}` on a local unix socket started with the portal. FrostByte discovers that socket (optional, off by default), prepares an identified artifact, and seeds the hold root with existing `seed()` after operator confirm. No annex paths, no default-on sharing, no FrostByte source copied into ModelArk.
+  2. Hold until the caller releases. No ModelArk expiry. Prepare refuses unattached-media visit plans (needs-media) rather than wrapping `restore_repo` across swaps. Direct annex reads remain later.
+  3. Clerical: remove the accidental duplicate DEC-155 block from the RFC-003 commit; the first DEC-155 text is unchanged.
+- `rationale`: Partner review is slow; the operator is steering the first hop. The instance lock means the provider must live inside `serve`, not as a second ModelArk process.
+- `impact`: New `modelark.export_provider`, portal socket, FrostByte client/settings on `modelark/local-archive-provider`. No Fill, proposal, or archive-byte mutation beyond existing restore materialize-to-regular-file for an explicit export hold.
 - `docs_updated`: docs/decision_log.md, docs/rfcs/003-local-verified-export.md
-- `related`: DEC-081, DEC-084, DEF-041, RFC-003
-- `scope_boundary`: Documentation and reviewable contract only. No provider implementation, source adapter, Frost-Net client, P2P transport, archive mutation, Fill, proposal approval, or public package publication.
+- `related`: DEC-155, RFC-003
+- `scope_boundary`: Hop-1 local socket + FrostByte client. No Frost-Net, no Orb REST, no usable-slice purpose, no range-read, no public package publication.
