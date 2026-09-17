@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sqlite3
 import tempfile
+from contextlib import closing, contextmanager, ExitStack
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from modelark import archive_hash, archive_manifest, compress, register
@@ -155,6 +157,56 @@ def _may_mutate(con, drive: str) -> bool:
     return not (row and row[0] == "dedicated_local")
 
 
+@contextmanager
+def _publication_source(con, repo_id, row):
+    """Fresh per-copy v9 admission under physical source fences, no map-lock inversion.
+
+    v7/v8 retain their existing restore policy. Publication-enabled archives are
+    read-only here: an implicit annex get must not mutate outside the publisher.
+    This admission check does not itself prove attachment or payload bytes.
+    """
+    from modelark import drive_fence, publication_store
+    from modelark.drive_identity import compatible_keys
+    from modelark.drive_mutation import (
+        _fence_identity, _generation_is_clean, _drive_facts, DriveMutationRefused,
+    )
+    from modelark.publication_policy import PublicationRefused
+    label = row["drive_label"]
+    try:
+        if publication_store.library(con) is None:
+            yield _may_mutate(con, label)
+            return
+        captured = _fence_identity(con, label)
+        with ExitStack() as stack:
+            stack.enter_context(drive_fence.hold_drives_sorted(compatible_keys([captured]), blocking=False))
+            path = next((r[2] for r in con.execute("PRAGMA database_list") if r[1] == "main"), "")
+            if path:
+                fresh = stack.enter_context(closing(sqlite3.connect(
+                    Path(path).resolve().as_uri() + "?mode=ro", uri=True, isolation_level=None)))
+                fresh.execute("PRAGMA query_only=ON")
+            else:
+                if con.in_transaction:
+                    raise RestoreError("PUBLICATION_SOURCE_SNAPSHOT_STALE")
+                fresh = con
+                stack.callback(lambda: con.execute("ROLLBACK"))
+            fresh.execute("BEGIN")
+            publication_store.require_clear(fresh, [label])
+            if _fence_identity(fresh, label) != captured:
+                raise RestoreError("PUBLICATION_DRIVE_IDENTITY_CHANGED")
+            if not _generation_is_clean(fresh, label, *_drive_facts(fresh, label)):
+                raise RestoreError("DRIVE_RECONCILIATION_REQUIRED")
+            current = [r for r in _rows(fresh, repo_id).get(row["rfilename"], ()) if r["drive_label"] == label]
+            if current != [row]:
+                raise RestoreError("PUBLICATION_SOURCE_ROW_CHANGED")
+            yield False
+    except PublicationRefused as exc:
+        raise RestoreError(f"{exc.code}: {exc.evidence}") from exc
+    except drive_fence.FenceUnavailable as exc:
+        raise RestoreError(f"SOURCE_BUSY: {label}") from exc
+    except DriveMutationRefused as exc:
+        raise RestoreError(f"{exc.code}: {label}") from exc
+
+
 def restore_repo(con, repo_id: str, output_root: str | Path) -> dict:
     """Restore one repo below ``output_root`` and return an operator-facing summary.
 
@@ -222,18 +274,19 @@ def restore_repo(con, repo_id: str, output_root: str | Path) -> dict:
                     attempts.append(f"{drive}: {exc}")
                     continue
                 stored = Path(archive) / Path(*repo_rel.parts) / Path(*stored_rel.parts)
-                source, retrieved, source_detail = _annex_content(
-                    Path(archive), row, stored, may_mutate=_may_mutate(con, drive))
-                if source is None:
-                    attempts.append(f"{drive}: {source_detail}")
-                    continue
-                retrievals += int(retrieved)
-                expected = _expected_hash(row)
-                if expected is None:
-                    attempts.append(f"{drive}: no original-byte sha256 available")
-                    continue
                 try:
-                    _materialize(source, stage / Path(*output_rel.parts), row, expected)
+                    with _publication_source(con, repo_id, row) as may_mutate:
+                        source, retrieved, source_detail = _annex_content(
+                            Path(archive), row, stored, may_mutate=may_mutate)
+                        if source is None:
+                            attempts.append(f"{drive}: {source_detail}")
+                            continue
+                        retrievals += int(retrieved)
+                        expected = _expected_hash(row)
+                        if expected is None:
+                            attempts.append(f"{drive}: no original-byte sha256 available")
+                            continue
+                        _materialize(source, stage / Path(*output_rel.parts), row, expected)
                 except (OSError, RuntimeError) as exc:
                     attempts.append(f"{drive}: {exc}")
                     continue

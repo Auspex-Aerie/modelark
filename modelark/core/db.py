@@ -26,6 +26,7 @@ from typing import Iterable
 
 from modelark.catalog_versions import (
     CATALOG_LAYOUT_VERSION, MAX_SUPPORTED_CATALOG_VERSION, SUPPORTED_CATALOG_VERSIONS,
+    validate_publication_schema,
 )
 
 PKG_ROOT = Path(__file__).resolve().parent           # modelark/core
@@ -156,8 +157,7 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
         con.execute("PRAGMA foreign_keys=ON")
         con.execute("PRAGMA query_only=ON")
         try:
-            version = con.execute("PRAGMA user_version").fetchone()[0]
-            _validate_catalog_version(version, read_only=True)
+            _validate_catalog_connection(con, read_only=True)
         except Exception:
             con.close()
             raise
@@ -175,6 +175,7 @@ def connect(read_only: bool = False, _bootstrapping: bool = False) -> sqlite3.Co
     try:
         version = int(con.execute("PRAGMA user_version").fetchone()[0])
         _validate_catalog_version(version)
+        _validate_catalog_connection(con)
         # DEC-059: clone-first is mandatory for every existing pre-v7 catalog,
         # including a populated legacy file stamped user_version=0. Only an
         # *absent* catalog file counts as fresh creation. Raise before
@@ -210,6 +211,7 @@ def apply_schema_migrations(con: sqlite3.Connection, *, backup_existing: bool = 
     """
     version = int(con.execute("PRAGMA user_version").fetchone()[0])
     _validate_catalog_version(version)
+    _validate_catalog_connection(con)
     con.execute("PRAGMA foreign_keys=OFF")
     try:
         _apply_schema(con, tables_only=True)
@@ -230,7 +232,7 @@ def migrate_existing_catalog(*, backup_existing: bool = True) -> sqlite3.Connect
     existed = DB_PATH.exists()
     con = sqlite3.connect(str(DB_PATH), isolation_level=None, check_same_thread=False)
     try:
-        _validate_catalog_version(int(con.execute("PRAGMA user_version").fetchone()[0]))
+        _validate_catalog_connection(con)
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA busy_timeout=15000")
         con.execute("PRAGMA synchronous=NORMAL")
@@ -303,6 +305,16 @@ def _validate_catalog_version(version: int, *, read_only: bool = False) -> None:
             f"publish_provenance_migration) before read-only diagnostics; ordinary "
             f"db.connect() will not auto-migrate an existing pre-v{_SCHEMA_VERSION} catalog."
         )
+
+
+def _validate_catalog_connection(con, *, read_only: bool = False) -> None:
+    """Reject an invalid floor/contract before journal, schema, or repair writes."""
+    from modelark.publication_policy import PublicationRefused
+    _validate_catalog_version(int(con.execute("PRAGMA user_version").fetchone()[0]), read_only=read_only)
+    try:
+        validate_publication_schema(con)
+    except PublicationRefused as exc:
+        raise RuntimeError(f"Catalog publication contract refused: {exc.code}") from exc
 
 
 def _drop_columns_from_ddl(ddl: str, exclude: tuple[str, ...]) -> str:
@@ -1102,6 +1114,7 @@ def _apply_provenance_backfill(con: sqlite3.Connection) -> dict[str, int]:
 
 def _validate_migrated_clone(con: sqlite3.Connection) -> None:
     """Post-migration validation: integrity, FK, CHECK vocabulary, schema objects."""
+    _validate_catalog_connection(con, read_only=True)
     if _integrity_ok(con) != "ok":
         raise RuntimeError("migrated clone failed integrity_check")
     viol = _fk_violations(con)
@@ -1121,7 +1134,7 @@ def _validate_migrated_clone(con: sqlite3.Connection) -> None:
         raise RuntimeError("migrated clone missing drive_hash_repair_state")
     version = int(con.execute("PRAGMA user_version").fetchone()[0])
     if version not in SUPPORTED_CATALOG_VERSIONS:
-        raise RuntimeError(f"migrated clone user_version={version}, expected 7 or 8")
+        raise RuntimeError(f"migrated clone user_version={version}, expected one of {sorted(SUPPORTED_CATALOG_VERSIONS)}")
     # Illegal non-null derivation values must already have been rejected by rebuild.
     bad_dm = con.execute(
         "SELECT proposal_id, derivation_mode FROM placement_proposals "
@@ -1142,6 +1155,7 @@ def _migrate_provenance_v7(con: sqlite3.Connection, *, backup_existing: bool) ->
     """
     version = int(con.execute("PRAGMA user_version").fetchone()[0])
     _validate_catalog_version(version)
+    _validate_catalog_connection(con)
     if version > _PROVENANCE_SCHEMA_VERSION:
         # A reader-floor stamp is not permission to rebuild/downgrade a malformed
         # repaired catalog. Validate it without resetting the floor to version 7.
@@ -2099,6 +2113,7 @@ def rehearse_provenance_migration(
         clone_con.execute("PRAGMA foreign_keys=OFF")
         # Ensure clone is at least v6 before provenance (frozen fixtures are v6).
         ver = int(clone_con.execute("PRAGMA user_version").fetchone()[0])
+        _validate_catalog_connection(clone_con)
         if ver > MAX_SUPPORTED_CATALOG_VERSION:
             raise RuntimeError(
                 f"clone user_version {ver} newer than build v{MAX_SUPPORTED_CATALOG_VERSION}")
@@ -2268,6 +2283,7 @@ def _remigrate_snapshot_to_expected(snapshot_path: Path, work: Path) -> Path:
         con.execute("PRAGMA foreign_keys=OFF")
         ver = int(con.execute("PRAGMA user_version").fetchone()[0])
         _validate_catalog_version(ver)
+        _validate_catalog_connection(con)
         if ver < _EXECUTION_CONFIG_HASH_SCHEMA_VERSION:
             _migrate(con, ver, backup_existing=False)
             ver = int(con.execute("PRAGMA user_version").fetchone()[0])

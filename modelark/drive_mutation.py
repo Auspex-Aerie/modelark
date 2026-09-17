@@ -16,8 +16,9 @@ durable sessions/fencing tokens = #39).
 """
 from __future__ import annotations
 
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
+from pathlib import Path
 
 from modelark import drive_fence
 from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity, compatible_keys
@@ -44,6 +45,16 @@ class DriveMutationRefused(Exception):
         super().__init__(code)
         self.code = code
         self.evidence = evidence
+
+
+def require_publication_clear(con, labels, *, tree_change=False):
+    """Preserve one typed archive guard across admission, recovery and clean publication."""
+    from modelark.publication_policy import PublicationRefused
+    from modelark.publication_store import require_clear
+    try:
+        require_clear(con, labels, tree_change=tree_change)
+    except PublicationRefused as exc:
+        raise DriveMutationRefused(exc.code, **exc.evidence) from exc
 
 
 class _Writer:
@@ -125,6 +136,7 @@ def _advance_one(con, label, operation_code, captured=None,
 
     Session-owned Fill mutations populate both owner fields; operator mutations leave both null.
     """
+    require_publication_clear(con, [label], tree_change=True)
     epoch, generation, fingerprint, capacity, authority = _drive_facts(con, label)
     if captured is not None and (epoch, fingerprint) != (captured[0], captured[2]):
         raise DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label)
@@ -189,6 +201,7 @@ def _require_identity(observation, fingerprint, capacity, label):
 def _publish_anchor_locked(con, label, identity_epoch, generation, observation, now):
     """Publish one clean anchor under a captured (identity_epoch, generation) CAS, WITHOUT its own
     transaction (so multiple drives publish atomically in one caller transaction)."""
+    require_publication_clear(con, [label])
     epoch, current_generation, fingerprint, capacity, authority = _drive_facts(con, label)
     if (epoch, current_generation) != (identity_epoch, generation):
         raise DriveMutationRefused("CLEAN_ANCHOR_CAS_FAILED", drive=label,
@@ -247,7 +260,7 @@ def _require_live_session_token(con, session_id, fencing_token):
 @contextmanager
 def drive_mutation(
     con, drive_labels, operation_code, *, observe, reconcile, now, blocking=True,
-    session_id=None, fencing_token=None,
+    session_id=None, fencing_token=None, map_path=None,
 ):
     """Fence, dirty, run ``body``, reconcile the touched set, and publish a fresh clean anchor for
     every drive. ``observe(label) -> Observation`` is the fenced identity/free reader; ``reconcile(
@@ -260,10 +273,21 @@ def drive_mutation(
     """
     session_owned = session_id is not None and fencing_token is not None
     drive_labels = tuple(sorted(set(drive_labels)))
+    require_publication_clear(con, drive_labels, tree_change=True)
+    if map_path is not None:
+        from modelark.publication_store import library
+        if library(con) is not None:
+            raise DriveMutationRefused("ARCHIVE_PUBLICATION_ADAPTER_REQUIRED")
     if (session_id is None) != (fencing_token is None):
         raise DriveMutationRefused(
             "DIRTY_OWNER_PAIR_REQUIRED",
             session_id=session_id, fencing_token=fencing_token)
+    def observe_map(path):
+        from modelark.registration_publication import _identity
+        try:
+            return _identity(path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise DriveMutationRefused("MAP_IDENTITY_UNPROVEN", detail=str(exc)) from exc
     try:
         # The sorted drive fences span the whole mutation (body -> reconcile -> anchor). The controller
         # fence is held ONLY long enough to capture facts under it, acquire the drive fences, prove
@@ -271,7 +295,23 @@ def drive_mutation(
         # graph writes and recovery are not blocked for the transport body, while the drive fences stay
         # held below.
         with ExitStack() as drive_fences:
-            with drive_fence.hold_controller(db.DB_PATH, blocking=blocking):
+            paths = [row[2] for row in con.execute("PRAGMA database_list") if row[1] == "main"]
+            controller_context = drive_fence.hold_controller(paths[0] if paths and paths[0] else db.DB_PATH,
+                                                           blocking=blocking)
+            # Legacy map writers now retain controller -> map -> physical
+            # exclusion through their complete body, just like the publisher.
+            # Non-map mutation retains its established controller lifetime.
+            if map_path is not None:
+                controller_context = nullcontext(drive_fences.enter_context(controller_context))
+            map_handle, map_identity = None, None
+            with controller_context as controller_handle:
+                require_publication_clear(con, drive_labels, tree_change=True)
+                if map_path is not None:
+                    map_path = Path(map_path).absolute()
+                    map_identity = observe_map(map_path)
+                    map_handle = drive_fences.enter_context(drive_fence.hold_map(map_identity[0], blocking=blocking))
+                    if observe_map(map_path) != map_identity:
+                        raise DriveMutationRefused("MAP_IDENTITY_CHANGED")
                 facts = {label: _drive_facts(con, label) for label in drive_labels}
                 identities = {label: _fence_identity(con, label) for label in drive_labels}
                 keyed = compatible_keys(identities.values())
@@ -311,8 +351,11 @@ def drive_mutation(
                 else:
                     captured = _immediate(con, lambda: _dirty_body(con))
             # controller released here; the drive fences remain held for the body below
-            writer = _Writer([handle.fileno() for handle in handles])
+            inherited = ([controller_handle, map_handle] if map_handle is not None else []) + list(handles)
+            writer = _Writer([handle.fileno() for handle in inherited])
             yield writer
+            if map_path is not None and observe_map(map_path) != map_identity:
+                raise DriveMutationRefused("MAP_IDENTITY_CHANGED")
             # collect ALL candidate anchors (reconcile + fresh observation per drive), then publish
             # them in ONE transaction so a later drive's failure leaves no drive marked clean
             candidates = {}

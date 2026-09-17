@@ -1,0 +1,161 @@
+{
+  "source_head": "4c0c67a678e09a8d70926dbb5e7ed8285416ac93",
+  "date": "2026-09-13",
+  "stage_0_complete": false,
+  "runs": [
+    {
+      "status": "passed-bounded-probes",
+      "error": null,
+      "git_annex_version": "git-annex version: 8.20210223\nbuild flags: Assistant Webapp Pairing Inotify DBus DesktopNotify TorrentParser MagicMime Feeds Testsuite S3 WebDAV\ndependency versions: aws-0.22 bloomfilter-2.0.1.0 cryptonite-0.26 DAV-1.3.4 feed-1.3.0.1 ghc-8.8.4 http-client-0.6.4.1 persistent-sqlite-2.10.6.2 torrent-10000.1.1 uuid-1.3.13 yesod-1.6.1.0\nkey/value backends: SHA256E SHA256 SHA512E SHA512 SHA224E SHA224 SHA384E SHA384 SHA3_256E SHA3_256 SHA3_512E SHA3_512 SHA3_224E SHA3_224 SHA3_384E SHA3_384 SKEIN256E SKEIN256 SKEIN512E SKEIN512 BLAKE2B256E BLAKE2B256 BLAKE2B512E BLAKE2B512 BLAKE2B160E BLAKE2B160 BLAKE2B224E BLAKE2B224 BLAKE2B384E BLAKE2B384 BLAKE2BP512E BLAKE2BP512 BLAKE2S256E BLAKE2S256 BLAKE2S160E BLAKE2S160 BLAKE2S224E BLAKE2S224 BLAKE2SP256E BLAKE2SP256 BLAKE2SP224E BLAKE2SP224 SHA1E SHA1 MD5E MD5 WORM URL X*\nremote types: git gcrypt p2p S3 bup directory rsync web bittorrent webdav adb tahoe glacier ddar git-lfs httpalso borg hook external\noperating system: linux x86_64\nsupported repository versions: 8\nupgrade supported from repository versions: 0 1 2 3 4 5 6 7",
+      "checks": [
+        {
+          "name": "negative-control-neutral-name-does-not-isolate-attributes",
+          "status": "passed"
+        },
+        {
+          "name": "info-attributes-isolate-filter-encoding-eol-during-duplicate-interval",
+          "status": "passed"
+        },
+        {
+          "name": "five-original-names-exact-sha256-locked-unlocked-and-ignore-refusal-override",
+          "status": "passed"
+        },
+        {
+          "name": "successful-add-of-tracked-dotfile-does-not-prove-annex-key",
+          "status": "passed",
+          "index_changed": false
+        },
+        {
+          "name": "key-copy-has-object-but-no-mapped-worktree-path",
+          "status": "passed"
+        },
+        {
+          "name": "dedicated-manifest-ref-portable-without-file-tree-checkout",
+          "status": "passed"
+        },
+        {
+          "name": "local-source-preserved-before-tree-sync-and-stale-ref-cas-refused",
+          "status": "passed"
+        },
+        {
+          "name": "failed-second-ref-cas-leaves-entire-ref-transaction-unchanged",
+          "status": "passed"
+        },
+        {
+          "name": "actual-slice-confined-opener-and-restore-materializer-read-mapped-locked-unlocked",
+          "status": "passed"
+        },
+        {
+          "name": "exact-map-tree-delta-and-index-replay-without-annex-payload-transfer",
+          "status": "passed"
+        },
+        {
+          "name": "current-core-ro-refuses-v9-before-catalog-mutation",
+          "status": "passed"
+        },
+        {
+          "name": "current-core-rw-refuses-v9-before-catalog-mutation",
+          "status": "passed"
+        },
+        {
+          "name": "current-slice-refuses-v9-before-catalog-mutation",
+          "status": "passed"
+        }
+      ],
+      "retained_directory": "/tmp/modelark-annex-payload-stage0-77w0oppc",
+      "physical_USB_or_archive_test": false,
+      "stage_0_complete": false,
+      "archive_repository_formats": {
+        "source": "8",
+        "returning": "8",
+        "map": "8",
+        "tracked-negative-control": "8"
+      },
+      "not_proven": [
+        "mixed-binary interoperation",
+        "full ref/annex-metadata crash protocol",
+        "production admission guards",
+        "trusted ownership validation",
+        "public Slice/restore workflow and authority",
+        "v7/v8 to new-schema migration"
+      ]
+    },
+    {
+      "status": "passed-bounded-probes",
+      "error": null,
+      "git_annex_version": "git-annex version: 10.20260717-g0c917920c80ab1e8cc3d8f5886537708949e1659\nbuild flags: Assistant Webapp Inotify DBus DesktopNotify TorrentParser MagicMime Benchmark Feeds Testsuite S3 WebDAV Servant OsPath Botan Blake3 XXH3\ndependency versions: aws-0.24.4 bloomfilter-2.0.1.3 crypton-1.0.4 DAV-1.3.4 feed-1.3.2.1 ghc-9.10.3 http-client-0.7.19 torrent-10000.1.3 uuid-1.3.16 yesod-1.6.2.1\nkey/value backends: SHA256E SHA256 SHA512E SHA512 SHA224E SHA224 SHA384E SHA384 SHA3_256E SHA3_256 SHA3_512E SHA3_512 SHA3_224E SHA3_224 SHA3_384E SHA3_384 SKEIN256E SKEIN256 SKEIN512E SKEIN512 BLAKE2B256E BLAKE2B256 BLAKE2B512E BLAKE2B512 BLAKE2B160E BLAKE2B160 BLAKE2B224E BLAKE2B224 BLAKE2B384E BLAKE2B384 BLAKE2BP512E BLAKE2BP512 BLAKE2S256E BLAKE2S256 BLAKE2S160E BLAKE2S160 BLAKE2S224E BLAKE2S224 BLAKE2SP256E BLAKE2SP256 BLAKE2SP224E BLAKE2SP224 BLAKE3_256E BLAKE3_256 XXH3E XXH3 SHA1E SHA1 MD5E MD5 WORM URL GITBUNDLE GITMANIFEST VURL X*\nremote types: git gcrypt p2p S3 bup directory rsync web bittorrent webdav adb tahoe glacier ddar git-lfs httpalso borg rclone hook external compute mask\noperating system: linux x86_64\nsupported repository versions: 8 9 10\nupgrade supported from repository versions: 0 1 2 3 4 5 6 7 8 9 10",
+      "checks": [
+        {
+          "name": "negative-control-neutral-name-does-not-isolate-attributes",
+          "status": "passed"
+        },
+        {
+          "name": "info-attributes-isolate-filter-encoding-eol-during-duplicate-interval",
+          "status": "passed"
+        },
+        {
+          "name": "five-original-names-exact-sha256-locked-unlocked-and-ignore-refusal-override",
+          "status": "passed"
+        },
+        {
+          "name": "successful-add-of-tracked-dotfile-does-not-prove-annex-key",
+          "status": "passed",
+          "index_changed": false
+        },
+        {
+          "name": "key-copy-has-object-but-no-mapped-worktree-path",
+          "status": "passed"
+        },
+        {
+          "name": "dedicated-manifest-ref-portable-without-file-tree-checkout",
+          "status": "passed"
+        },
+        {
+          "name": "local-source-preserved-before-tree-sync-and-stale-ref-cas-refused",
+          "status": "passed"
+        },
+        {
+          "name": "failed-second-ref-cas-leaves-entire-ref-transaction-unchanged",
+          "status": "passed"
+        },
+        {
+          "name": "actual-slice-confined-opener-and-restore-materializer-read-mapped-locked-unlocked",
+          "status": "passed"
+        },
+        {
+          "name": "exact-map-tree-delta-and-index-replay-without-annex-payload-transfer",
+          "status": "passed"
+        },
+        {
+          "name": "current-core-ro-refuses-v9-before-catalog-mutation",
+          "status": "passed"
+        },
+        {
+          "name": "current-core-rw-refuses-v9-before-catalog-mutation",
+          "status": "passed"
+        },
+        {
+          "name": "current-slice-refuses-v9-before-catalog-mutation",
+          "status": "passed"
+        }
+      ],
+      "retained_directory": "/tmp/modelark-annex-payload-stage0-uggdwiio",
+      "physical_USB_or_archive_test": false,
+      "stage_0_complete": false,
+      "archive_repository_formats": {
+        "source": "9",
+        "returning": "9",
+        "map": "9",
+        "tracked-negative-control": "9"
+      },
+      "not_proven": [
+        "mixed-binary interoperation",
+        "full ref/annex-metadata crash protocol",
+        "production admission guards",
+        "trusted ownership validation",
+        "public Slice/restore workflow and authority",
+        "v7/v8 to new-schema migration"
+      ]
+    }
+  ]
+}

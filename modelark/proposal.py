@@ -14,6 +14,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from modelark import (
     archive_manifest,
+    catalog_write_context,
     capacity,
     drive_fence,
     placement,
@@ -38,6 +39,7 @@ GRAPH_AFFECTING_WRITERS = {
     "discover.discover_one": "discover one repo",
     "discover.discover_repos": "discover many repos",
     "db.replace_files": "manifest file refresh",
+    "archive_manifest.apply_metadata_classification": "explicit legacy metadata classification repair",
     "cli.cmd_protect": "numcopies protect",
     "plan.create": "plan create",
     "plan.add_drive": "plan membership add",
@@ -100,6 +102,15 @@ def _require_fill_idle(con) -> None:
         pass
 
 
+def require_publication_clear(con, labels=None):
+    from modelark.publication_policy import PublicationRefused
+    from modelark.publication_store import require_clear
+    try:
+        require_clear(con, labels)
+    except PublicationRefused as exc:
+        raise Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
+
+
 def bump_revision(con) -> int:
     """Increment planner_revision inside the caller's open transaction.
 
@@ -136,14 +147,16 @@ def graph_write(con, op: Callable[[Any], Any]) -> Any:
     # Live-session exclusion before opening the write transaction (B3 / B13).
     _require_fill_idle(con)
     con.execute("BEGIN IMMEDIATE")
+    write_token = None
     try:
         # Re-check inside TX for races (still allow authorized session_write on this con).
         _require_fill_idle(con)
+        write_token = catalog_write_context._enter(con, catalog_write_context.WriteIdentity("graph"))
         result = op(con)
         if result is None:
             result = GraphResult(proven_noop=False)
-        if not getattr(result, "proven_noop", False):
-            bump_revision(con)
+        new_revision = None if getattr(result, "proven_noop", False) else bump_revision(con)
+        catalog_write_context._finish(con, new_revision)
         con.execute("COMMIT")
         return result
     except BaseException:
@@ -152,6 +165,9 @@ def graph_write(con, op: Callable[[Any], Any]) -> Any:
         except sqlite3.Error:
             pass
         raise
+    finally:
+        if write_token is not None:
+            catalog_write_context._exit(write_token)
 
 
 # ---------------------------------------------------------------------------
@@ -773,6 +789,7 @@ def _header_from_facts(
 # ---------------------------------------------------------------------------
 def preview_pure(con, plan_id: str = "ark", mutation: tuple = ("adopt_current", ())) -> dict:
     """Pure planning outside BEGIN IMMEDIATE: build payload without writing."""
+    require_publication_clear(con)
     if not isinstance(mutation, tuple):
         mutation = tuple(mutation)
     rev = int(con.execute(
@@ -1583,6 +1600,7 @@ def approve(con, proposal_id: str, *, mutation=None, services=None, **_extra):
     require_active_proposal_plan(con, proposal)
     require_unambiguous_current_draft(con)
     labels = proposal_drive_ids(proposal)
+    require_publication_clear(con, labels)
     catalog_path = getattr(db, "DB_PATH", None) or ":memory:"
 
     def _run_approve():
@@ -1598,6 +1616,7 @@ def approve(con, proposal_id: str, *, mutation=None, services=None, **_extra):
             captured = _fence_facts(con, labels)
             keys = compatible_keys(captured)
             with drive_fence.hold_drives_sorted(keys, blocking=True):
+                require_publication_clear(con, labels)
                 _require_fence_facts(con, labels, captured)
                 # Evidence after fences, before BEGIN IMMEDIATE (A6).
                 observe = getattr(services, "observe_exact_capacity", None)
@@ -1629,6 +1648,7 @@ approve_proposal = approve
 def _approve_tx(con, proposal_id: str, *, mutation, evidence_by_drive, fence_binding) -> dict:
     con.execute("BEGIN IMMEDIATE")
     try:
+        require_publication_clear(con, fence_binding[0])
         _require_fence_facts(con, *fence_binding)
         proposal = load_proposal(con, proposal_id)
         if proposal["lifecycle"] != "draft":

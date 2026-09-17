@@ -1,0 +1,67 @@
+{
+  "status": "passed",
+  "root": "/tmp/modelark-annex-payload-stage0-1b1yx9ne",
+  "checks": [
+    {
+      "name": "native-tag-write-0-matches-planned-values-and-native-reader",
+      "status": "passed"
+    },
+    {
+      "name": "native-tag-write-1-matches-planned-values-and-native-reader",
+      "status": "passed"
+    },
+    {
+      "name": "native-tag-write-2-matches-planned-values-and-native-reader",
+      "status": "passed"
+    },
+    {
+      "name": "native-tag-write-3-matches-planned-values-and-native-reader",
+      "status": "passed"
+    },
+    {
+      "name": "native-quarantined-staged-tag-merge-preserves-effective-advisory-fields",
+      "status": "passed"
+    },
+    {
+      "name": "source-tag-change-after-proof-refuses-before-native-merge",
+      "status": "passed",
+      "refusal": "source annotation proof changed"
+    },
+    {
+      "name": "native-unplanned-same-key-field-refuses-source-write-proof",
+      "status": "passed"
+    },
+    {
+      "name": "real-fixture-map-remains-unchanged-and-contentless",
+      "status": "passed"
+    }
+  ],
+  "live_archive_or_catalog_access": false,
+  "stage_1_complete": false,
+  "details": {
+    "native_logs": [
+      "1789413379.781851352s format +safetensors model +org/repo params +7.5 quant +none\n",
+      "1789413379.957665278s format +safetensors model +org/other -org/repo params -7.5 +8 quant +none\n",
+      "1789413379.957665278s format +safetensors model +org/other -org/repo params -7.5 +8 quant +none\n1789413380.120448122s format +safetensors model +org/other params +8 quant +none\n",
+      "1789413379.957665278s format +safetensors model +org/other -org/repo params -7.5 +8 quant +none\n1789413380.120448122s format +safetensors model +org/other params +8 quant +none\n1789413380.279614069s format +gguf -safetensors model -org/other +!b3JnL3NwYWNlIPCfkLo= quant +Q4_K_M -none\n"
+    ],
+    "source_key": "SHA256-s6--c5f1bef76e6da55aae170950ea2aaf7f1576e7843d63d2b6fc0c168e8007da7e",
+    "tag_path": "daf/ed7/SHA256-s6--c5f1bef76e6da55aae170950ea2aaf7f1576e7843d63d2b6fc0c168e8007da7e.log.met",
+    "old_map_ref": "a48145f28c708e4fcc8784fdee551069955dd1fa",
+    "candidate_ref": "1d8dc2e95d241856df627ec97583241e7c829938",
+    "production_publisher_qualified": false
+  },
+  "final_repo_formats": {
+    "annotation-bad-input": "8",
+    "annotation-staging": "8",
+    "annotation-map": "8",
+    "annotation-source": "8"
+  },
+  "source_sha256": {
+    "scripts/qualify_annex_annotations.py": "9f4bef07f33cf3a0035dd1b9119adc217657756c1e74afc16a230c1f91c0b99d",
+    "scripts/qualify_annex_publication.py": "94461ff4713a0e706879e4f526f16c45b838fdf720dbfe947d872c0aa5a81587",
+    "scripts/qualify_annex_payload.py": "ee31267fe7d679cf6607edff3943b9a9a39d3aad05d42c75ce11ea06df594a59",
+    "modelark/publication_annotations.py": "250d9d4a36b5a8522c7645431f13c1d363db9d8dadce85e88e8e46804e5e06c6",
+    "modelark/publication_policy.py": "7e584bc4fd0f7e9465dc29b78030c816c480dda4b2ba03fb125b94581f84e084"
+  }
+}

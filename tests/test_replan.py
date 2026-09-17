@@ -22,7 +22,7 @@ import pytest
 
 import _admission_compat
 from modelark.core import db
-from modelark import capacity, fetch, fill, plan, reconcile
+from modelark import capacity, fetch, fetch_publication, fill, plan, reconcile
 
 
 @pytest.fixture(autouse=True)
@@ -987,6 +987,10 @@ def test_replica_records_only_after_target_uuid_proof(tmp_path):
     source.mkdir()
     target.mkdir()
     library.mkdir()
+    import subprocess as _sp
+    _sp.run(["git", "init", "-q", str(library)], check=True)
+    _sp.run(["git", "-C", str(library), "remote", "add", "drive-00", str(source.resolve())], check=True)
+    _sp.run(["git", "-C", str(library), "remote", "add", "drive-04", str(target.resolve())], check=True)
 
     def archive_path(_con, label):
         return source if label == "drive-00" else target
@@ -997,6 +1001,7 @@ def test_replica_records_only_after_target_uuid_proof(tmp_path):
     with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
          mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
          mock.patch.object(fetch.register, "library_root", return_value=library), \
+         mock.patch.object(fetch_publication, "legacy_map_targets"), \
          mock.patch.object(fetch, "_dest_writable", return_value=True), \
          mock.patch.object(fetch.subprocess, "run", return_value=completed), \
          mock.patch.object(fetch, "_annex_key_on_uuid", return_value=False):
@@ -1009,6 +1014,7 @@ def test_replica_records_only_after_target_uuid_proof(tmp_path):
     with mock.patch.object(fetch.drive_mutation, "drive_mutation", _passthru_mutation), \
          mock.patch.object(fetch.register, "archive_path", side_effect=archive_path), \
          mock.patch.object(fetch.register, "library_root", return_value=library), \
+         mock.patch.object(fetch_publication, "legacy_map_targets"), \
          mock.patch.object(fetch, "_dest_writable", return_value=True), \
          mock.patch.object(fetch.subprocess, "run", return_value=completed), \
          mock.patch.object(fetch, "_annex_key_on_uuid", return_value=True):

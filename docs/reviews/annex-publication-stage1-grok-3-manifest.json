@@ -1,0 +1,31 @@
+{
+  "stage": 1,
+  "round": 3,
+  "review": "operator-requested follow-on implementation increment; full stage incomplete",
+  "session": "a72fe127-0c4e-4fc5-a91a-a318dbe1110f",
+  "head": "eb3bb4f84bbe1afd2257c3da70cf98e5b1fa2611",
+  "started_utc": "2026-09-15 01:15:02 UTC",
+  "files": {
+    "modelark/publication_tree.py": "a2819e15bcff04072ceaf1278a90df11c4141f69d6c0e7644944244e7d6f4362",
+    "modelark/publication_locks.py": "4c24b293dd8f8ef218689249265b56da8265823825f1921681749b5963d1df87",
+    "modelark/publication_store.py": "6e173d33644694ed3c18d5cd66c2d6337a55dc5eb2c8e105b52c5a7cabb403dd",
+    "modelark/publication_payload.py": "c62bc98ec5d2dad23b854502f8c0e278999948f147423045abcbbb90dea4990a",
+    "modelark/publication_policy.py": "7e584bc4fd0f7e9465dc29b78030c816c480dda4b2ba03fb125b94581f84e084",
+    "modelark/publication_catalog.py": "e8729b6ce7aeffd38320cd92e1762859043c11ffdfb474bf12670f2ad041bec2",
+    "modelark/catalog_write_context.py": "b8abc453eeefd5cabfe5356b653df44feae048eb4c84f37981311f1f792643b9",
+    "modelark/drive_fence.py": "66530d15cf5abd43f126a024b3b10bb487e4cea583cb35015327f7cda8b0a95d",
+    "modelark/drive_mutation.py": "ba58732a781b9e800231c7c7ab4c2af6ee472ffbedcbb055fca375fe1fd30e76",
+    "modelark/execution_session.py": "70e1cd0ceac2e2ccadcb15c993de3fb5e07bae5506764aa2b98592d7a22ac254",
+    "modelark/proposal.py": "165ee2bc9eb7115586ec614598b429a458ea27f3f63a3ccb8f6f1163122a0f10",
+    "tests/test_publication_tree.py": "38475445c1805ded02682a7534b5219765fa7848dba2a683efba014f3c3e8647",
+    "tests/test_publication_lifecycle.py": "7222d031396ac1a78ab71ec3dfa83f1129d99fbaec6b8b182ab7d36f34a42db0",
+    "tests/test_publication_evidence_integration.py": "6835136cb85e2c0c817cf752572cfa43c86e72418c8da304346eeb053e295f66",
+    "tests/test_publication_catalog.py": "35ba23cba758c1f27a7463631ce432eda188d434a0004df6303db01a30eab080",
+    "tests/test_publication_payload.py": "b72a45a5a71e873cf9237c485c1432b8333298f7ee30c96cf0f4cfb0fa419c71",
+    "tests/test_publication_payload_native.py": "806b3585462e4ae410113b1ded629ecd268204f33abb06dca0d366ff16ef9a92",
+    "tests/test_publication_store.py": "8f226a6d3c2c65ad83be1de61861b8e9e23258cf288a51ece5afe278d91d22e7",
+    "docs/plans/annex-payload-migration.md": "37e8dde25d60f9085c1961c60b60148327e3a89e2d977373f9727d938d5b56d5",
+    "docs/plans/annex-publication-stage1-progress.md": "769bc0635493f1f8bdd639daed2e377d53306ed22ef6df96f1ede2f6f4d10b26",
+    "docs/reviews/annex-publication-stage1-grok-2.md": "97fffcca1414f22e857c7df7f3e695505946aa66423de1f073bfe0823eab3c3a"
+  }
+}

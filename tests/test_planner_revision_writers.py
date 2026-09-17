@@ -338,6 +338,7 @@ def test_register_drive_with_real_physical_seams_mocked(tmp_path):
     mnt = tmp_path / "mnt"
     mnt.mkdir()
     (tmp_path / "lib").mkdir(exist_ok=True)
+    (tmp_path / "lib" / ".git").mkdir()
     con.execute("UPDATE planner_state SET planner_revision=0 WHERE singleton_id=1")
     con.close()
     baseline = {
@@ -359,7 +360,7 @@ def test_register_drive_with_real_physical_seams_mocked(tmp_path):
                                                                return_value=True):
                                             with mock.patch.object(
                                                     register, "_git",
-                                                    return_value="annex-uuid-new"):
+                                                    return_value="2b2f8d5c-a06f-498e-ad3b-a8b879d36f20"):
                                                 before = _rev(db.connect())
                                                 db.connect().close()
                                                 register.register_drive(

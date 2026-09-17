@@ -237,6 +237,61 @@ def cmd_repair_hashes(args):
         raise SystemExit(1)
 
 
+def cmd_annex_migrate_inspect(args):
+    from modelark.publication_migrate import inspect_conversion, plan_json
+    con = db.connect(read_only=True)
+    try:
+        plan = inspect_conversion(con, drive=args.drive, repos=args.repo)
+    finally:
+        con.close()
+    text = plan_json(plan)
+    if args.save:
+        args.save.write_text(text)
+        print(f"wrote {args.save}")
+    else:
+        sys.stdout.write(text)
+
+
+def cmd_annex_migrate_apply(args):
+    from modelark.publication_migrate import apply_conversion, plan_json
+    from modelark.publication_policy import PublicationRefused
+    con = db.connect(read_only=True)
+    try:
+        frozen = apply_conversion(
+            con, writers_stopped=args.writers_stopped, dest_dir=args.save_dir)
+    except PublicationRefused as exc:
+        raise SystemExit(f"{exc.code}: conversion apply is not live catalog cutover")
+    finally:
+        con.close()
+    sys.stdout.write(plan_json(frozen))
+
+
+def cmd_annex_migrate_resume(args):
+    from modelark.publication_migrate import plan_json, resume_conversion
+    from modelark.publication_policy import PublicationRefused
+    con = db.connect(read_only=True)
+    try:
+        frozen = resume_conversion(
+            con, args.plan, writers_stopped=args.writers_stopped, dest_dir=args.save_dir)
+    except PublicationRefused as exc:
+        raise SystemExit(f"{exc.code}: conversion resume is not live catalog cutover")
+    finally:
+        con.close()
+    sys.stdout.write(plan_json(frozen))
+
+
+def cmd_annex_migrate_status(args):
+    from modelark.publication_migrate import inspect_conversion, plan_json
+    con = db.connect(read_only=True)
+    try:
+        plan = inspect_conversion(con)
+    finally:
+        con.close()
+    sys.stdout.write(plan_json({"kind": "annex-migrate-status", "plan_id": args.plan,
+                                "apply": "disabled-until-explicit-cutover",
+                                "inspect": plan["counts"]}))
+
+
 def cmd_repair_drive(args):
     """Explicit per-drive hash repair (DEC-054) — exact drive/epoch/fingerprint."""
     from modelark import hash_repair, register
@@ -869,6 +924,28 @@ def _main(argv, permit):
     rec.add_argument("--writers-stopped", action="store_true",
                      help="confirm all old ModelArk processes and unsupported archive writers are stopped")
     rec.set_defaults(func=cmd_drive_reconcile)
+
+    ar = sub.add_parser("archive", help="archive maintenance (conversion inspect; apply is not live cutover)")
+    arsub = ar.add_subparsers(dest="archive_cmd", required=True)
+    mig = arsub.add_parser("annex-migrate", help="inspect/apply/resume annex payload conversion")
+    migsub = mig.add_subparsers(dest="migrate_cmd", required=True)
+    insp = migsub.add_parser("inspect", help="read-only census of archived copies without annex keys")
+    insp.add_argument("--drive", help="limit to one drive label")
+    insp.add_argument("--repo", action="append", help="limit to a repo id (repeatable)")
+    insp.add_argument("--save", type=Path, help="write the inspect plan JSON to this private path")
+    insp.set_defaults(func=cmd_annex_migrate_inspect)
+    ap = migsub.add_parser("apply", help="freeze inspect plan on a disposable catalog (not live cutover)")
+    ap.add_argument("--save-dir", type=Path, required=True, help="private directory for the frozen plan JSON")
+    ap.add_argument("--writers-stopped", action="store_true")
+    ap.set_defaults(func=cmd_annex_migrate_apply)
+    st = migsub.add_parser("status", help="show conversion inspect counts")
+    st.add_argument("plan")
+    st.set_defaults(func=cmd_annex_migrate_status)
+    mgrs = migsub.add_parser("resume", help="resume a conversion plan (refuses live catalog cutover)")
+    mgrs.add_argument("plan", help="frozen plan seal or prefix")
+    mgrs.add_argument("--save-dir", type=Path, required=True)
+    mgrs.add_argument("--writers-stopped", action="store_true")
+    mgrs.set_defaults(func=cmd_annex_migrate_resume)
 
     args = p.parse_args(argv)
     args._instance_permit = permit

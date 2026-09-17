@@ -32,6 +32,21 @@ AUX_EXTS = (
     ".json", ".txt", ".md", ".model", ".vocab", ".tiktoken", ".jinja",
     ".py", ".gitattributes", ".png", ".jpg", ".yaml", ".yml", ".tokenizer",
 )
+UPSTREAM_CONTROL_BASENAMES = frozenset({".gitignore", ".gitattributes"})
+
+
+def is_upstream_payload_path(rfilename: str) -> bool:
+    """Whether a logical upstream name can denote payload, not Git administration.
+
+    This is not a filesystem scan or permission to import ModelArk's root policy.
+    Callers supply names relative to one upstream repository, never archive-root
+    files. Hidden supported metadata remains eligible; unknown hidden files do not
+    become selected merely because they are hidden. Storage mapping is separate.
+    """
+    if not isinstance(rfilename, str) or "\\" in rfilename or "\x00" in rfilename:
+        return False
+    parts = rfilename.split("/")
+    return all(part not in {"", ".", ".."} and part.lower() != ".git" for part in parts)
 
 
 def parse_gguf_quant(filename: str) -> tuple[str | None, float | None]:
@@ -46,9 +61,14 @@ def classify_file(
     rfilename: str, repo_dtype: str | None = None, tags: tuple[str, ...] = ()
 ) -> tuple[str, str | None, float | None, str]:
     """Return (format, quant, quant_bits, safety) for one repo file."""
+    if not is_upstream_payload_path(rfilename):
+        return "other", None, None, "unknown"
     p = rfilename.lower()
     stem = rfilename.rsplit("/", 1)[-1]
     tl = " ".join(tags).lower()
+
+    if stem in UPSTREAM_CONTROL_BASENAMES:
+        return "aux", None, None, "safe"
 
     if p.endswith(".safetensors"):
         if "gptq" in tl or "gptq" in p:

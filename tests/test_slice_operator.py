@@ -362,7 +362,7 @@ def test_registry_reader_uses_all_drives_and_never_creates_missing_catalog(opera
     assert path.read_bytes() == before
 
 
-@pytest.mark.parametrize("physical_version", [0, 6, 9, 99])
+@pytest.mark.parametrize("physical_version", [0, 6, 10, 99])
 def test_registry_reader_refuses_unknown_versions_without_mutation(operator, tmp_path, physical_version):
     import sqlite3
     path = tmp_path / "catalog.sqlite"

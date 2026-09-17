@@ -44,6 +44,14 @@ def test_inspection_is_read_only_and_binds_current_or_historical_proof(tmp_path,
         assert bootstrap.inspect_serial_identity(con, 'drive-00') == report
 
 
+def test_inspection_refuses_a_v9_floor_without_the_publication_contract(tmp_path):
+    with _catalog(tmp_path) as con:
+        seed(con)
+        con.execute("PRAGMA user_version=9")
+        with pytest.raises(bootstrap.DriveMutationRefused, match="PUBLICATION_SCHEMA_UNSUPPORTED"):
+            bootstrap.inspect_serial_identity(con, "drive-00")
+
+
 @pytest.mark.parametrize('options,mutation', [
     ({'proof': '{}'}, None),
     ({'anchor': False}, None),
@@ -186,7 +194,7 @@ def test_inspection_captures_one_snapshot_across_concurrent_catalog_change(tmp_p
             if not changed:
                 other.execute('BEGIN IMMEDIATE')
                 other.execute("UPDATE drives SET eligibility='excluded'")
-                other.execute('PRAGMA user_version=9')
+                other.execute('PRAGMA user_version=10')
                 other.execute('COMMIT')
                 changed.append(True)
             return bound(connection, label)

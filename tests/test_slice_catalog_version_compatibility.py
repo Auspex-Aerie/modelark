@@ -15,6 +15,57 @@ from test_slice_catalog import seed
 from test_slice_domain import spec
 
 
+def test_qualified_v9_preserves_logical_facts_but_pending_source_stays_blocked(tmp_path, monkeypatch):
+    from test_catalog_reader_versions import install_publication
+    from test_publication_store import pending
+    from modelark.slice.operator import _archives
+    monkeypatch.setattr(drive_fence, "_LOCK_DIR", tmp_path / "locks")
+    path = tmp_path / "catalog.sqlite"
+    con = seed(path, domain)
+    try:
+        before = catalog.read_catalog(path, spec(domain))
+        proposal = domain.preview(spec(domain), before)
+        fleet = _archives(path)
+        install_publication(path)
+        assert catalog.read_catalog(path, spec(domain)) == before
+        assert domain.preview(spec(domain), catalog.read_catalog(path, spec(domain))) == proposal
+        assert _archives(path) == fleet
+        pending(con, label="drive-a")
+        # Diagnostics are readable, but the actual source gate must not read bytes.
+        assert catalog.read_catalog(path, spec(domain)) == before
+
+        class Reader:
+            def open(self, candidate):
+                pytest.fail("pending publication must refuse before source bytes")
+
+        with pytest.raises(TransferRefusal, match="MAINTENANCE_REQUIRED"):
+            with FencedSources(path, Reader()).open(proposal.closure[0].sources[0]):
+                pytest.fail("pending publication source admitted")
+    finally:
+        con.close()
+
+
+@pytest.mark.parametrize("corruption", ["bare", "partial", "downgraded"])
+@pytest.mark.parametrize("entry", ["snapshot", "fleet"])
+def test_publication_schema_refusal_at_both_raw_slice_readers(tmp_path, corruption, entry):
+    from test_catalog_reader_versions import install_publication
+    from modelark.slice.operator import _archives
+    path = tmp_path / "catalog.sqlite"
+    con = seed(path, domain)
+    if corruption != "bare":
+        install_publication(path)
+    con.execute({"bare": "PRAGMA user_version=9", "partial": "DROP TABLE publication_files",
+                 "downgraded": "PRAGMA user_version=8"}[corruption])
+    con.close()
+    before = path.read_bytes()
+    with pytest.raises(domain.SliceRefusal, match="PUBLICATION_SCHEMA"):
+        if entry == "snapshot":
+            catalog.read_catalog(path, spec(domain))
+        else:
+            _archives(path)
+    assert path.read_bytes() == before
+
+
 def test_reader_floor_only_change_preserves_existing_plan_and_source(tmp_path, monkeypatch):
     monkeypatch.setattr(drive_fence, "_LOCK_DIR", tmp_path / "locks")
     path = tmp_path / "catalog ? #.sqlite"
@@ -80,7 +131,7 @@ def test_physical_v8_is_not_a_new_logical_snapshot_layout(tmp_path):
         con.close()
 
 
-@pytest.mark.parametrize("physical_version", [0, 1, 6, 9, 99])
+@pytest.mark.parametrize("physical_version", [0, 1, 6, 10, 99])
 def test_unsupported_physical_versions_refuse_without_touching_catalog(physical_version, tmp_path):
     path = tmp_path / "catalog.sqlite"
     con = seed(path, domain)

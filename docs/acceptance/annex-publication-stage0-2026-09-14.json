@@ -1,0 +1,262 @@
+{
+  "status": "passed-bounded-protocol-probes",
+  "error": null,
+  "checks": [
+    {
+      "name": "profile-refuses-clean-substitution-before-execution",
+      "status": "passed",
+      "refusal": "unqualified annex filter command"
+    },
+    {
+      "name": "profile-refuses-smudge-substitution-before-execution",
+      "status": "passed",
+      "refusal": "unqualified annex filter command"
+    },
+    {
+      "name": "profile-refuses-process-substitution-before-execution",
+      "status": "passed",
+      "refusal": "unqualified annex filter command"
+    },
+    {
+      "name": "profile-refuses-required-substitution-before-execution",
+      "status": "passed",
+      "refusal": "unqualified annex filter command"
+    },
+    {
+      "name": "profile-refuses-included-filter-even-with-same-command",
+      "status": "passed",
+      "refusal": "filter origin"
+    },
+    {
+      "name": "profile-refuses-command-override-origin",
+      "status": "passed",
+      "refusal": "filter origin"
+    },
+    {
+      "name": "profile-refuses-helper-path-substitution-before-execution",
+      "status": "passed",
+      "refusal": "helper resolution: git-annex"
+    },
+    {
+      "name": "profile-refuses-format-nine-before-annex-invocation",
+      "status": "passed",
+      "refusal": "format drift"
+    },
+    {
+      "name": "profile-refuses-attribute-drift",
+      "status": "passed",
+      "refusal": "attribute policy drift"
+    },
+    {
+      "name": "profile-seal-refuses-other-effective-config-drift",
+      "status": "passed",
+      "refusal": "full config/origin seal drift"
+    },
+    {
+      "name": "negative-profile-cases-preserve-payload-head-index-and-never-execute-marker",
+      "status": "passed"
+    },
+    {
+      "name": "unclaimed-returning-copy-validates-without-inventing-catalog-rows",
+      "status": "passed"
+    },
+    {
+      "name": "ownership-refuses-wrong-library",
+      "status": "passed",
+      "refusal": "manifest library"
+    },
+    {
+      "name": "ownership-refuses-wrong-operation",
+      "status": "passed",
+      "refusal": "manifest operation"
+    },
+    {
+      "name": "ownership-refuses-wrong-profile",
+      "status": "passed",
+      "refusal": "manifest profile"
+    },
+    {
+      "name": "ownership-refuses-wrong-digest",
+      "status": "passed",
+      "refusal": "manifest digest"
+    },
+    {
+      "name": "ownership-refuses-invalid-key-despite-matching-digest",
+      "status": "passed",
+      "refusal": "key binding"
+    },
+    {
+      "name": "ownership-refuses-invalid-stored-despite-matching-digest",
+      "status": "passed",
+      "refusal": "mapping identity/uniqueness"
+    },
+    {
+      "name": "ownership-refuses-invalid-original-despite-matching-digest",
+      "status": "passed",
+      "refusal": "logical grammar"
+    },
+    {
+      "name": "ownership-refuses-duplicate-mapping",
+      "status": "passed",
+      "refusal": "mapping identity/uniqueness"
+    },
+    {
+      "name": "ownership-refuses-pre-existing-unowned-namespace",
+      "status": "passed",
+      "refusal": "pre-existing unowned namespace"
+    },
+    {
+      "name": "ownership-refuses-divergent-returning-bytes",
+      "status": "passed",
+      "refusal": "old byte divergence"
+    },
+    {
+      "name": "committed-pointer-full-grammar-120000",
+      "status": "passed",
+      "pointer": "../../../.git/annex/objects/Jj/03/SHA256-s93--9c1d7f0f0cc7275433101169c76a4f86b8c517cff6dbd798ce72c9481289cb55/SHA256-s93--9c1d7f0f0cc7275433101169c76a4f86b8c517cff6dbd798ce72c9481289cb55"
+    },
+    {
+      "name": "actual-slice-confined-opener-and-restore-materializer-read-mapped-locked-unlocked",
+      "status": "passed"
+    },
+    {
+      "name": "committed-pointer-full-grammar-100644",
+      "status": "passed",
+      "pointer": "/annex/objects/SHA256-s93--9c1d7f0f0cc7275433101169c76a4f86b8c517cff6dbd798ce72c9481289cb55\n"
+    },
+    {
+      "name": "same-returning-clone-preserves-converts-retires-and-reads-original-through-consumers",
+      "status": "passed"
+    },
+    {
+      "name": "native-staged-annex-merge-validates-selected-drive-UUID-and-preserves-real-map",
+      "status": "passed",
+      "changed_keys": [
+        "SHA256-s93--9c1d7f0f0cc7275433101169c76a4f86b8c517cff6dbd798ce72c9481289cb55"
+      ],
+      "effective_UUIDs": [
+        "ab481fb8-0671-445b-a068-98e2200863c5"
+      ]
+    },
+    {
+      "name": "metadata-refuses-native-map-presence",
+      "status": "passed",
+      "refusal": "new MAP UUID presence claim"
+    },
+    {
+      "name": "metadata-refuses-native-unknown-UUID",
+      "status": "passed",
+      "refusal": "unproven/unknown drive UUID"
+    },
+    {
+      "name": "metadata-refuses-native-unselected-key",
+      "status": "passed",
+      "refusal": "unselected metadata key"
+    },
+    {
+      "name": "metadata-refuses-native-drop",
+      "status": "passed",
+      "refusal": "drop claim"
+    },
+    {
+      "name": "metadata-refuses-native-description",
+      "status": "passed",
+      "refusal": "unrelated metadata change: uuid.log"
+    },
+    {
+      "name": "metadata-refuses-native-trust",
+      "status": "passed",
+      "refusal": "unrelated metadata change: trust.log"
+    },
+    {
+      "name": "metadata-refuses-unknown-grammar",
+      "status": "passed",
+      "refusal": "unknown location grammar"
+    },
+    {
+      "name": "metadata-refuses-ambiguous-dominating-clock",
+      "status": "passed",
+      "refusal": "multiple/ambiguous clock records for UUID"
+    },
+    {
+      "name": "native-repeat-merge-is-exact-metadata-noop-with-original-location-clocks",
+      "status": "passed"
+    },
+    {
+      "name": "stale-annex-CAS-refuses-entire-file-and-metadata-ref-group",
+      "status": "passed"
+    },
+    {
+      "name": "index-lock-after-atomic-ref-publication-retains-old-tree-and-pending-intent",
+      "status": "passed"
+    },
+    {
+      "name": "replay-refuses-external-old-path-edit",
+      "status": "passed",
+      "refusal": "replay old-path changed"
+    },
+    {
+      "name": "replay-refuses-unrelated-extra-in-partial-tree",
+      "status": "passed",
+      "refusal": "unrelated path"
+    },
+    {
+      "name": "sealed-partial-index-and-worktree-converges-without-changing-unrelated-paths",
+      "status": "passed"
+    },
+    {
+      "name": "receipt-failure-and-verified-new-state-replay-without-map-payload-copy",
+      "status": "passed"
+    }
+  ],
+  "profile": {
+    "tools": {
+      "/usr/bin/git": "5a39a7909c023f92a84b77b49e6b008f3f152b833135b96d73ac7c403314a88a",
+      "/usr/bin/git-annex": "5de67e4fd40d011af9f99f563df80238b1d74c001c00cc1ed64227eb2e79ccc7",
+      "/usr/bin/dash": "4f291296e89b784cd35479fca606f228126e3641f5bcaee68dee36583d7c9483"
+    },
+    "filters": {
+      "filter.annex.smudge": "git-annex smudge -- %f",
+      "filter.annex.clean": "git-annex smudge --clean -- %f"
+    },
+    "origins": "local:file:.git/config",
+    "attributes_sha256": "52df1d2d158dab2d29b5d58e0fa8c81823c1e9e1c684abfc8433d25cfc712cfa",
+    "effective_attributes": {
+      "filter": "annex",
+      "text": "unset",
+      "ident": "unset",
+      "working-tree-encoding": "unspecified",
+      "eol": "unspecified",
+      "annex.largefiles": "anything",
+      "annex.backend": "SHA256"
+    },
+    "repository_format": 8,
+    "fixture_config_seal": "e769472c70305206dd54a8a40d680c97274d1f5b53466816d7864cac889728a2"
+  },
+  "details": {
+    "metadata": {
+      "old_annex": "cf75a3a0617aec066cc5dd90835391f859a77a2e",
+      "source_annex": "fb54339e1206ee5065db6d4e2f5ebb481a86e8e5",
+      "candidate_annex": "fe42710f565196039bbb2bd5c20243fb92e4049a",
+      "delta": {
+        "SHA256-s93--9c1d7f0f0cc7275433101169c76a4f86b8c517cff6dbd798ce72c9481289cb55": {
+          "ab481fb8-0671-445b-a068-98e2200863c5": "1789368616.912137688"
+        }
+      },
+      "native_location_log": "1789368616.912137688s 1 ab481fb8-0671-445b-a068-98e2200863c5\n",
+      "map_UUID": "189f34f1-f6ce-442a-a634-9a44b6f6b43e",
+      "source_UUID": "ab481fb8-0671-445b-a068-98e2200863c5",
+      "merge_command": "git annex sync --only-annex --no-content --no-pull --no-push --no-commit"
+    }
+  },
+  "retained_directory": "/tmp/modelark-annex-payload-stage0-u4pxp6d6",
+  "stage_0_complete": false,
+  "physical_USB_or_archive_test": false,
+  "not_proven": [
+    "production authority/profile implementation",
+    "production crash recovery",
+    "complete profile/config closure",
+    "partial per-path index crash matrix",
+    "live migration"
+  ]
+}

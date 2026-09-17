@@ -47,7 +47,10 @@ from modelark import drive_mutation as dm
 from modelark import execution_authority as authority
 from modelark.drive_identity import FenceIdentity, UnprovenFenceIdentity, compatible_keys
 from modelark.core import db
-from modelark.catalog_versions import SUPPORTED_CATALOG_VERSIONS, SERIAL_REPAIR_CATALOG_VERSION
+from modelark.catalog_versions import (
+    SERIAL_REPAIR_CATALOG_VERSION, SUPPORTED_CATALOG_VERSIONS, validate_publication_schema,
+)
+from modelark.publication_policy import PublicationRefused
 from modelark.serial_identity import (
     recognize_legacy_anchor, SerialIdentityUnproven, is_legacy_serial_mismatch,
     serialless_anchor_serial, recognize_bridge_anchor,
@@ -344,6 +347,10 @@ def _serial_repair_state_snapshot(con, label):
     version = con.execute("PRAGMA user_version").fetchone()[0]
     if version not in SUPPORTED_CATALOG_VERSIONS:
         raise dm.DriveMutationRefused("CATALOG_VERSION_UNSUPPORTED", drive=label)
+    try:
+        validate_publication_schema(con)
+    except PublicationRefused as exc:
+        raise dm.DriveMutationRefused(exc.code, drive=label, **exc.evidence) from exc
     facts = _persisted(con, label)
     epoch, generation, fingerprint, capacity, write_authority, fs_uuid, annex_uuid, serial = facts
     if write_authority != "dedicated_local" or type(generation) is not int or generation < 1:
@@ -511,6 +518,7 @@ def _serial_live(con, label, state):
 def _serial_guard(con, label, expected):
     from modelark.execution_session import require_no_live_session
     require_no_live_session(con)
+    dm.require_publication_clear(con, [label], tree_change=True)
     if _serial_repair_state(con, label) != expected:
         raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_STALE", drive=label)
 
@@ -552,7 +560,8 @@ def _serial_enrich_locked(con, label, state, final, now):
                 [state["canonical_fingerprint"], label])
     dm._publish_anchor_locked(con, label, facts[0], generation, final.observation(), now)
     affected = supersede_serial_repair_approvals(con, label)
-    con.execute(f"PRAGMA user_version={SERIAL_REPAIR_CATALOG_VERSION}")
+    floor = max(int(con.execute("PRAGMA user_version").fetchone()[0]), SERIAL_REPAIR_CATALOG_VERSION)
+    con.execute(f"PRAGMA user_version={floor}")
     bump_revision(con)
     return generation, affected
 
@@ -620,6 +629,7 @@ def repair_serial_identity(con, label: str, *, expected_binding: str, now,
         raise dm.DriveMutationRefused("DRIVE_SERIAL_REPAIR_BINDING_REQUIRED", drive=label)
     require_no_live_session(con)
     recovered = False
+    dm.require_publication_clear(con, [label], tree_change=True)
     artifacts = {}
     try:
         with drive_fence.hold_controller(db.DB_PATH, blocking=blocking):
@@ -747,7 +757,7 @@ def _recover_owned_generation(con, label, dest, facts, owner, ev, now, progress,
     """Inventory outside SQLite's write transaction, then CAS + anchor in one short commit."""
     from modelark.execution_session import require_no_live_session
     from modelark.proposal import bump_revision
-
+    dm.require_publication_clear(con, [label], tree_change=True)
     inventory = _require_complete_inventory(con, label, dest, progress=progress)
     final = _final_observation(con, label, ev)
     epoch, gen = facts[:2]
@@ -773,12 +783,14 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
     for the full contract; raises a typed ``dm.DriveMutationRefused`` for every fail-closed path."""
     from modelark.execution_session import require_no_live_session
     require_no_live_session(con)
+    dm.require_publication_clear(con, [label], tree_change=True)
     _reconcile_metadata(con, label)
     # Early diagnostic only: capture again after both fences, before the inventory.
     _capture_recovery_owner(con, label, _persisted(con, label))
     try:
         with drive_fence.hold_controller(db.DB_PATH, blocking=blocking):
             require_no_live_session(con)
+            dm.require_publication_clear(con, [label], tree_change=True)
             facts = _persisted(con, label)
             metadata = _reconcile_metadata(con, label)
             if bridge_repair_required(con, label):
@@ -817,6 +829,7 @@ def reconcile_drive(con, label: str, *, now, dedicated: bool = False, accept_dri
                 raise dm.DriveMutationRefused("DRIVE_IDENTITY_UNPROVEN", drive=label, reason=str(exc)) from exc
             with drive_fence.hold_drives_sorted(keyed, blocking=blocking):
                 require_no_live_session(con)
+                dm.require_publication_clear(con, [label], tree_change=True)
                 _reconcile_metadata(con, label, expected=metadata)
                 if _persisted(con, label) != facts:
                     raise dm.DriveMutationRefused("DRIVE_RECOVERY_OWNER_CHANGED", drive=label)
@@ -860,8 +873,11 @@ def _decide_and_commit(
     captured_facts,
     metadata,
 ):
+    dm.require_publication_clear(con, [label], tree_change=True)
+
     def commit(body):
         def checked():
+            dm.require_publication_clear(con, [label], tree_change=True)
             from modelark.execution_session import require_no_live_session
             require_no_live_session(con)
             _reconcile_metadata(con, label, expected=metadata)

@@ -158,7 +158,7 @@ def test_every_physical_lock_adapter_uses_shared_expansion():
     expected = {
         "drive_mutation.py", "drive_bootstrap.py", "admission.py", "proposal.py",
         "execution_service.py", "execution_recovery.py", "slice/sources.py",
-        "drive_lifecycle.py",
+        "drive_lifecycle.py", "publication_locks.py", "restore.py",
     }
     found = set()
     for path in root.rglob("*.py"):

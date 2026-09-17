@@ -41,6 +41,8 @@ from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNot
 from modelark.core import db
 from modelark import archive_hash, archive_manifest, capacity_evidence, compress, drive_mutation
 from modelark import register, wishlist
+from modelark import fetch_publication
+from modelark.publication_policy import PublicationRefused
 from modelark.artifact_policy import qualified_policy
 from modelark.codec_process import isolated_command, validate_runtime
 from modelark.codec_resources import CodecResourceRefusal, available_memory
@@ -191,6 +193,7 @@ class RunCtx:
     fencing_token: int | None = None
     # Frozen ExecutionConfig from SessionStart (finding 35) — transport must not reread globals.
     execution_config: Any = None
+    _publication: Any = field(default=None, repr=False, compare=False)
 
     def q1(self, sql: str, params: list | None = None):
         with self.lock:
@@ -209,6 +212,9 @@ class RunCtx:
                 value = fn(c)
                 return GraphResult(proven_noop=False, value=value)
 
+            if self._publication is not None:
+                result = self._publication.write(op)
+                return getattr(result, "value", result)
             if self.session_id is not None and self.fencing_token is not None:
                 from modelark.execution_session import session_write
                 # session_write validates token, holds BEGIN IMMEDIATE, bumps revision.
@@ -844,7 +850,10 @@ def fetch_model(
     reconciliation.  ``None`` is the pre-envelope/standalone path (no fences, no touched-set recording).
     """
     con = ctx.con
-    inherit_fds = mutation_writer.child_fence_fds if mutation_writer is not None else ()
+    publication = (fetch_publication.require_owner(ctx, dest, drive_label)
+                   if fetch_publication.enabled(con) else None)
+    inherit_fds = (publication.scope.child_fence_fds if publication is not None else
+                   mutation_writer.child_fence_fds if mutation_writer is not None else ())
     with ctx.lock:                                      # brief: read the plan + resume set
         task_manifest = tuple(manifest) if manifest is not None else tuple(
             archive_manifest.manifest_for_repo(con, repo_id)
@@ -889,6 +898,9 @@ def fetch_model(
                 orig_sha256=orig_sha256,
                 compressed=compressed,
                 annex_key=annex_key):
+            if publication is not None and publication._resuming and fetch_publication.FileRequest(
+                    repo_id, item.rfilename, drive_label) in publication._files:
+                todo.append(record)  # Finish any saved staging release before enclosing closure.
             continue
         try:
             resolved = archive_hash.expected_sha256(
@@ -935,9 +947,16 @@ def fetch_model(
         )
     model_dir = dest / repo_id
     stage_dir = _download_stage_dir(dest, repo_id, annex)
+    staging = None
+    if publication is not None and todo:
+        from modelark import publication_staging
+        staging = publication_staging.directory(publication, repo_id)
+        stage_dir = staging.path
+        staging.check()
     try:
-        model_dir.mkdir(parents=True, exist_ok=True)
-        stage_dir.mkdir(parents=True, exist_ok=True)
+        if publication is None:
+            model_dir.mkdir(parents=True, exist_ok=True)
+            stage_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise DownloadLocalError(str(exc), exc.errno) from exc
     done = dl_bytes = 0
@@ -958,18 +977,31 @@ def fetch_model(
         base = {"drive": drive_label, "repo": repo_id, "file": f["rfilename"],
                 "file_index": i + 1, "n_files": n, "n_shards": n_shards,
                 "shard_no": (shard_names.index(f["rfilename"]) + 1) if f["fmt"] == "safetensors" else None}
+        if publication is not None and publication._resuming:
+            resumed = publication_staging.resume_file(
+                publication, fetch_publication.FileRequest(repo_id, f["rfilename"], drive_label))
+            if resumed is not None:
+                staging.check()
+                done += 1
+                ctx.on_progress({**base, "file_phase": "stored", "resumed": True})
+                continue
         if before_file is not None:
             item = next(entry for entry in task_manifest if entry.rfilename == f["rfilename"])
             if before_file(item) is False:               # another durable writer satisfied stale work
                 continue
         ctx.on_progress({**base, "file_phase": "download"})
+        if staging is not None:
+            staging.check()
         local = _download_shard(ctx, repo_id, f["rfilename"], stage_dir, base, inherit_fds=inherit_fds)
+        if staging is not None:
+            staging.check()
         # Every archived original needs durable restore evidence. Hugging Face does not publish a
         # sha256 for ordinary Git-tracked files such as .gitattributes, so checking only when the
         # catalog supplied one stranded those files at restore time (INC-017). Always hash the
         # downloaded original; when HF did supply a canonical digest, require it to agree.
         ctx.on_progress({**base, "file_phase": "verify"})
         got = compress.sha256_file(local)
+        original_bytes = local.stat().st_size
         if f["sha256"]:
             canonical = f["sha256"].lower()
             if got != canonical:
@@ -988,6 +1020,8 @@ def fetch_model(
                 dtype = compress.zipnn_dtype(f["quant"])
                 res = _compress_isolated(local, dtype, codec, compress_cfg["threads"], got,
                                          ctx.should_stop, inherit_fds=inherit_fds)
+                if staging is not None:
+                    staging.check()
                 if res["status"] in ("crash", "stalled", "over-cap", "resource", "decode-refused"):
                     # INC-005: the compressor died natively (ZipNN double-free) or hung on this shard. The
                     # child absorbed it — store the shard RAW so the fill routes around it instead of
@@ -1026,31 +1060,48 @@ def fetch_model(
         stored_digest = znn_sha if compressed else got
         final_relpath = f["rfilename"] + (compress.ZNN_SUFFIX if compressed else "")
         ctx.on_progress({**base, "file_phase": "publish"})
-        stored = _publish_staged(
-            dest, stored, model_dir / final_relpath, stored_digest,
-            f["rfilename"], annex,
-        )
-        if annex:
+        if publication is not None:
+            try:
+                staging.check()
+                receipt = publication.publish(
+                    fetch_publication.FileRequest(repo_id, f["rfilename"], drive_label), stored,
+                    original_bytes=original_bytes, original_sha256=got,
+                    stored_sha256=stored_digest, compressed=compressed)
+                from modelark import publication_staging
+                publication_staging.release(publication, file_id=receipt["file_id"], path=stored)
+                staging.check()
+            except PublicationRefused:
+                raise
+            except Exception as exc:
+                raise PublicationRefused("PUBLICATION_ACQUISITION_FAILED",
+                                         failure=type(exc).__name__) from exc
+            stored_sz = receipt["stored_bytes"]
+        else:
+            stored = _publish_staged(
+                dest, stored, model_dir / final_relpath, stored_digest,
+                f["rfilename"], annex,
+            )
+        if annex and publication is None:
             ctx.on_progress({**base, "file_phase": "annex"})
             key = _annex_add(dest, stored, inherit_fds=inherit_fds)
             _annex_metadata(dest, key, repo_id, params, f["fmt"], f["quant"],   # #14: self-describing key
                             inherit_fds=inherit_fds)
-        else:
+        elif publication is None:
             key = None
-        stored_sz = stored.stat().st_size
-        stored_relpath = _stored_relative_path(stored, model_dir)
-        # DEC-053: Hub-confirmed when the manifest carried a digest that matched the
-        # downloaded bytes; otherwise ingestion-computed from the local hash.
-        provenance = "hub_confirmed" if f.get("sha256") else "ingestion_computed"
-        ctx.write(lambda c: db.upsert(c, "archived", {
-            "repo_id": repo_id, "rfilename": f["rfilename"], "stored_name": stored.name,
-            "stored_relpath": stored_relpath,
-            "drive_label": drive_label, "orig_sha256": got, "znn_sha256": znn_sha,
-            "orig_bytes": f["size"], "stored_bytes": stored_sz,
-            "compressed": compressed, "annex_key": key,
-            "orig_sha256_provenance": provenance,
-        }, pk=["repo_id", "rfilename", "drive_label"], touch=["verified_at"]))
-        if mutation_writer is not None:
+        if publication is None:
+            stored_sz = stored.stat().st_size
+            stored_relpath = _stored_relative_path(stored, model_dir)
+            # DEC-053: otherwise ingestion-computed from the local hash.
+            provenance = "hub_confirmed" if f.get("sha256") else "ingestion_computed"
+            ctx.write(lambda c: db.upsert(c, "archived", {
+                "repo_id": repo_id, "rfilename": f["rfilename"], "stored_name": stored.name,
+                "stored_relpath": stored_relpath,
+                "drive_label": drive_label, "orig_sha256": got, "znn_sha256": znn_sha,
+                "orig_bytes": f["size"], "stored_bytes": stored_sz,
+                "compressed": compressed, "annex_key": key,
+                "orig_sha256_provenance": provenance,
+            }, pk=["repo_id", "rfilename", "drive_label"], touch=["verified_at"]))
+        if mutation_writer is not None and publication is None:
             # record the touched write set AFTER physical publication + the durable archived row, so
             # generation-scoped reconciliation validates exactly what landed (dest-relative path + key)
             mutation_writer.record_touched(
@@ -1069,7 +1120,7 @@ def fetch_model(
                          "done_by_drive": dict(st["by_drive"])})
         # Reclaim current staging leftovers plus the legacy final-directory cache used before
         # DEC-046. The age guard keeps this safe even if an unexpected second writer exists.
-        freed = _sweep_incomplete(stage_dir) + _sweep_incomplete(model_dir)
+        freed = (_sweep_incomplete(stage_dir) + _sweep_incomplete(model_dir)) if publication is None else 0
         if freed:
             print(f"    [swept] {freed/1e9:.1f} GB orphaned .incomplete reclaimed")
             ctx.on_progress({**base, "file_phase": "swept", "reclaimed": freed})
@@ -1083,9 +1134,12 @@ def fetch_model(
                 "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=?",
                 [repo_id, drive_label],
             ).fetchall()}
-            if {item.rfilename for item in canonical} <= present:
+            complete = {item.rfilename for item in canonical} <= present
+            if complete and publication is None:
                 con.execute("UPDATE models SET status='archived' WHERE repo_id=?", [repo_id])
-    if done == len(todo) and stage_dir.exists():
+        if complete and publication is not None:
+            ctx.write(lambda c: c.execute("UPDATE models SET status='archived' WHERE repo_id=?", [repo_id]))
+    if publication is None and done == len(todo) and stage_dir.exists():
         shutil.rmtree(stage_dir, ignore_errors=True)
     return {"repo_id": repo_id, "files": done, "skipped": len(files) - len(todo), "bytes": dl_bytes}
 
@@ -1182,7 +1236,8 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                 })
                 return result
 
-        annex = _is_annex(dest)
+        publication_enabled = fetch_publication.enabled(con)
+        annex = True if publication_enabled else _is_annex(dest)
         if not annex:
             print(f"WARNING: {dest} is not a git-annex repo — storing verified files raw, "
                   f"not annex-tracked. (Run drive registration to enable annex.)")
@@ -1202,14 +1257,22 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
             return _reconcile_touched(con, label, dest, annex, paths, keys)
 
         try:
-            with drive_mutation.drive_mutation(
+            if publication_enabled:
+                requests, task_manifests = fetch_publication.fill_requests(ctx, ids, drive_label, task_manifests)
+                if not requests:
+                    return result
+                envelope = fetch_publication.scope(ctx, requests, destination=dest, drive_label=drive_label)
+            else:
+                envelope = drive_mutation.drive_mutation(
                     con, [drive_label], "fill", observe=_observe, reconcile=_reconcile,
                     now=datetime.now(timezone.utc).isoformat(sep=" "),
                     session_id=getattr(ctx, "session_id", None),
                     fencing_token=getattr(ctx, "fencing_token", None),
-            ) as _writer:
+                    **({"map_path": register.library_root()} if annex else {}))
+            with envelope as _writer:
                 for k, rid in enumerate(ids):
                     if ctx.should_stop():
+                        result["stopped"] = True
                         break
                     with ctx.lock:
                         used = _bytes_last_24h(con) if cap else 0
@@ -1244,6 +1307,8 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                         print(f"  [archived] {rid}  ({tag})")
                         ctx.write(lambda c: _event(c, rid, "archived", bytes=r["bytes"], detail=tag))
                         result["stored_repos"].append(rid)
+                    except PublicationRefused:
+                        raise  # No legacy error/event writer after a publication failure.
                     except _StopRequested:
                         result["stopped"] = True
                         break                                    # clean stop requested mid-shard (INC-004)
@@ -1329,6 +1394,9 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                         ctx.write(lambda c: _event(c, rid, "error", detail="repo not found"))
                         result["failed_repos"].append(rid)
                     except Exception as e:                       # INC-004: isolate ANY other repo failure (stalled
+                        if publication_enabled:
+                            raise PublicationRefused(            # v9 never probes dest with the legacy writer
+                                "PUBLICATION_ACQUISITION_FAILED", failure=type(e).__name__) from e
                         print(f"  [error   ] {rid}: {type(e).__name__}: {str(e)[:100]}")   # download exhausted retries,
                         detail = f"{type(e).__name__}: {str(e)[:180]}"
                         ctx.write(lambda c: _event(c, rid, "error", detail=detail))
@@ -1348,16 +1416,28 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                 # this drive's remote (drive_label) — the same explicit-remote form registration uses —
                 # never all remotes, so it cannot reach other (possibly offline) drives; both mutating
                 # sync children inherit the held drive-fence FDs.
-                if annex:
-                    s = subprocess.run(["git", "-C", str(dest), "annex", "sync"], capture_output=True,
+                if ctx._publication is not None:
+                    ctx._publication.finish()
+                elif annex:
+                    lib = register.library_root()
+                    fetch_publication.legacy_map_targets(lib, {drive_label: dest})
+                    s = subprocess.run(["git", "-C", str(dest), "annex", "sync", "--no-pull", "--no-push"], capture_output=True,
                                        text=True, pass_fds=tuple(_writer.child_fence_fds))
-                    m = subprocess.run(["git", "-C", str(register.library_root()), "annex", "sync",
+                    m = subprocess.run(["git", "-C", str(lib), "annex", "sync", "--no-push",
                                         drive_label],
                                        capture_output=True, text=True, pass_fds=tuple(_writer.child_fence_fds))
                     if s.returncode == 0 and m.returncode == 0:
                         print("  synced drive + map (location log + index)")
                     else:
                         print(f"  sync warning: {((s.stderr or s.stdout) + ' ' + (m.stderr or m.stdout)).strip()[:160]}")
+        except PublicationRefused as exc:
+            result["terminal_failure"] = result["terminal_failure"] or {
+                "code": exc.code, "message": f"{exc.code} on drive {drive_label}",
+                "evidence": exc.evidence,
+                "actions": (["inspect_archive_publication", "resume_publication"] if publication_enabled
+                            else ["inspect_map_remote", "reconcile_drive", "retry_fill"]), "gate": "C"}
+            ctx.on_progress({"phase": "fetch-blocked", "drive": drive_label, "code": exc.code,
+                             "say": f"🔴 {exc.code} — publication recovery required."})
         except drive_mutation.DriveMutationRefused as exc:
             # entry: identity unproven/mismatched or fence unavailable; clean close: reconciliation gap.
             # Surface a typed terminal without clobbering a per-repo terminal; the affected generation
@@ -1369,7 +1449,8 @@ def run(dest=None, drive_label=None, limit=None, repos=None, dry_run=False, max_
                 "evidence": evidence,
                 "actions": ["reconcile_drive", "retry_fill"], "gate": "C",
             }
-            ctx.write(lambda c: _event(c, None, "error", detail=f"{code}: drive {drive_label}"))
+            if not fetch_publication.enabled(con):
+                ctx.write(lambda c: _event(c, None, "error", detail=f"{code}: drive {drive_label}"))
             ctx.on_progress({"phase": "fetch-blocked", "drive": drive_label, "code": code,
                              "say": f"🔴 {code} on {drive_label} — reconcile required."})
         return result
@@ -1434,6 +1515,8 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
         "failed": [],
     }
     try:
+        if fetch_publication.enabled(con):
+            return fetch_publication.replica_tasks(ctx, tasks, result)
         grouped: dict[tuple[str | None, str], list[Any]] = {}
         for task in tasks:
             grouped.setdefault((task.source_drive, task.target_drive), []).append(task)
@@ -1505,7 +1588,7 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                 # child inherits both held FDs, and the mutating writability probe runs after dirtying.
                 with drive_mutation.drive_mutation(
                         con, [source, target], "replica", observe=_observe, reconcile=_reconcile,
-                        now=datetime.now(timezone.utc).isoformat(sep=" ")) as _writer:
+                        now=datetime.now(timezone.utc).isoformat(sep=" "), map_path=lib) as _writer:
                     fds = tuple(_writer.child_fence_fds)
                     source_writable = _dest_writable(source_repo)
                     target_writable = _dest_writable(target_repo)
@@ -1713,11 +1796,12 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
                         # all-remotes `annex sync` after every group — so the sync stays inside this
                         # pair's held drive fences and never reaches unrelated (possibly offline) drive
                         # remotes; the sync child inherits the held FDs.
-                        subprocess.run(["git", "-C", str(lib), "annex", "sync", source, target],
+                        fetch_publication.legacy_map_targets(lib, {source: source_repo, target: target_repo})
+                        subprocess.run(["git", "-C", str(lib), "annex", "sync", "--no-push", source, target],
                                        capture_output=True, text=True, pass_fds=fds)
                     if not group_deferred and target not in result["deferred_targets"]:
                         result["copied_targets"].append(target)
-            except drive_mutation.DriveMutationRefused as exc:
+            except (drive_mutation.DriveMutationRefused, PublicationRefused) as exc:
                 result["failed"].append({
                     "code": exc.code, "target": target,
                     "requirements": [task.requirement_id for task in group],
@@ -1734,105 +1818,50 @@ def run_replica_tasks(tasks: Sequence[Any], ctx: RunCtx | None = None) -> dict:
 
 
 def run_replica(replica_assign: dict, source: str | None, ctx: RunCtx | None = None) -> dict:
-    """Realize must-have COPY #2+ as LOCAL copies (DEC-017): transfer the already-fetched copy#1
-    (on `source` — the RAID/primary home) to each replica drive, no HF re-download. git-annex 8.x
-    has no one-shot `copy --from A --to B` (and clones only know `origin`), so we teach the SOURCE
-    clone about the target remote and run a plain `copy --to` — a direct clone→clone transfer, no
-    map staging. Records the landed copy in `archived` (mirroring source's rows) only on success.
+    """Legacy selection facade; all actual copies use the exact fenced task path.
 
-    DEF-022 fail-soft: PROBE the source (copy#2 reads from it) and each target BEFORE copying. An
-    offline / read-only source or target is DEFERRED — emit an awaiting-drive prompt and bail, never
-    churn a failed `annex copy` per repo (INC-009: a dead RAID source failed every copy → GATE-C red).
-    Returns {deferred, source_offline, deferred_targets, copied_targets} so GATE-C can PAUSE (resumable)
-    instead of hard-erroring a run whose copy #1 is all safe."""
+    Version nine requires explicit approved task manifests, not expansion of a
+    whole-repository request. Version eight resolves its existing source catalog
+    rows to exact files and uses the same controller/map/drive envelope as tasks.
+    """
+    from types import SimpleNamespace
+
     own = ctx is None
     con = db.connect() if own else ctx.con
     if own:
         ctx = RunCtx(con=con)
     result = {"deferred": False, "source_offline": False, "deferred_targets": [], "copied_targets": []}
     try:
-        targets = [(label, [i["repo"] for i in items]) for label, items in replica_assign.items() if items]
-        if not targets:
+        if fetch_publication.enabled(con):
+            raise PublicationRefused("PUBLICATION_EXACT_REPLICA_TASKS_REQUIRED")
+        targets = [(label, [item["repo"] for item in items]) for label, items in replica_assign.items() if items]
+        if not targets or source is None:
             return result
-        if source is None:
-            print("  [replica] no copy#1 source placed (no RAID/primary home) — skipping replica copies.")
-            return result
-        lib = register.library_root()
         with ctx.lock:
-            src_archive = register.archive_path(con, source)
-        # DEF-022: the source must be mounted AND healthy — INC-009's RAID went read-only + EIO'd, so a
-        # mere "mounted" check isn't enough. A dead source can serve NO copy#2 → defer the whole tier.
-        if src_archive is None or not _dest_writable(Path(src_archive)):
-            result.update(deferred=True, source_offline=True, deferred_targets=[l for l, _ in targets])
-            print(f"  [replica] source {source} offline/read-only — deferring copy #2 (resumable).")
+            source_path = register.archive_path(con, source)
+        # Read-only absence check: writable probes belong inside the dirty/fenced
+        # pair adapter, never ahead of its physical exclusion.
+        if source_path is None or not Path(source_path).exists():
+            result.update(deferred=True, source_offline=True, deferred_targets=[label for label, _ in targets])
             ctx.on_progress({"phase": "awaiting-drive", "awaiting_drive": source,
-                             "say": f"⏳ replica source {source} is offline/read-only — copy #2 deferred; re-seat it."})
+                             "say": f"⏳ replica source {source} is offline — copy deferred; re-seat it."})
             return result
-        for label, repos in targets:
-            with ctx.lock:
-                tgt_archive = register.archive_path(con, label)
-            if tgt_archive is None or not _dest_writable(Path(tgt_archive)):
-                result.update(deferred=True)
-                result["deferred_targets"].append(label)
-                print(f"  [replica] target {label} offline/unwritable — deferring (resumable).")
-                ctx.on_progress({"phase": "awaiting-drive", "awaiting_drive": label,
-                                 "say": f"⏳ replica target {label} offline/unwritable — copy #2 deferred; re-seat it."})
-                continue
-            print(f"\n-- replica {label} ← local copy from {source} ({len(repos)} must-have(s)) --")
-            ctx.on_progress({"phase": "replica", "drive": label, "n_repos": len(repos),
-                             "say": f"-- replica {label} ← local copy from {source} ({len(repos)} must-have(s)) --"})
-            # teach the source clone where the target lives (idempotent), then a plain copy --to
-            if subprocess.run(["git", "-C", str(src_archive), "remote", "set-url", label, str(tgt_archive)],
-                              capture_output=True, text=True).returncode != 0:
-                subprocess.run(["git", "-C", str(src_archive), "remote", "add", label, str(tgt_archive)],
-                               capture_output=True, text=True)
-            r = subprocess.run(["git", "-C", str(src_archive), "annex", "copy", "--to", label, *repos],
-                               capture_output=True, text=True)
-            if r.returncode != 0:
-                # A copy failure with a HEALTHY source/target is a real per-repo failure (record nothing).
-                # But if the TARGET just went unwritable mid-copy, treat it as deferred (re-seat), not churn.
-                if not _dest_writable(Path(tgt_archive)):
-                    result.update(deferred=True)
-                    result["deferred_targets"].append(label)
-                    ctx.on_progress({"phase": "awaiting-drive", "awaiting_drive": label,
-                                     "say": f"⏳ replica target {label} went unwritable mid-copy — deferred; re-seat it."})
-                    continue
-                print(f"    ✗ copy failed — not recording. {(r.stderr or r.stdout).strip()[:180]}")
-                ctx.on_progress({"phase": "replica", "drive": label,
-                                 "say": f"    ✗ replica {label} copy failed — not recording."})
-                continue
-            print("    ok")
-            subprocess.run(["git", "-C", str(lib), "annex", "sync"], capture_output=True, text=True)
-            def _mirror(c, _label=label, _source=source, _repos=repos):
-                cols = {r[1] for r in c.execute("PRAGMA table_info(archived)")}
-                has_prov = "orig_sha256_provenance" in cols
-                if has_prov:
-                    c.execute(
-                        "INSERT INTO archived (repo_id, rfilename, stored_name, stored_relpath, "
-                        "drive_label, orig_sha256, znn_sha256, orig_bytes, stored_bytes, compressed, "
-                        "annex_key, orig_sha256_provenance, verified_at) "
-                        "SELECT repo_id, rfilename, stored_name, stored_relpath, ?, orig_sha256, "
-                        "znn_sha256, orig_bytes, stored_bytes, compressed, annex_key, "
-                        "orig_sha256_provenance, CURRENT_TIMESTAMP FROM archived "
-                        f"WHERE drive_label=? AND repo_id IN ({','.join(['?'] * len(_repos))}) "
-                        "ON CONFLICT (repo_id, rfilename, drive_label) DO NOTHING",
-                        [_label, _source, *_repos],
-                    )
-                else:
-                    c.execute(
-                        "INSERT INTO archived (repo_id, rfilename, stored_name, stored_relpath, "
-                        "drive_label, orig_sha256, znn_sha256, orig_bytes, stored_bytes, compressed, "
-                        "annex_key, verified_at) "
-                        "SELECT repo_id, rfilename, stored_name, stored_relpath, ?, orig_sha256, "
-                        "znn_sha256, orig_bytes, stored_bytes, compressed, annex_key, "
-                        "CURRENT_TIMESTAMP FROM archived "
-                        f"WHERE drive_label=? AND repo_id IN ({','.join(['?'] * len(_repos))}) "
-                        "ON CONFLICT (repo_id, rfilename, drive_label) DO NOTHING",
-                        [_label, _source, *_repos],
-                    )
-            ctx.write(_mirror)
-            result["copied_targets"].append(label)
-            ctx.on_progress({"phase": "replica", "drive": label, "say": f"    ✓ replica {label} ok"})
+        tasks = []
+        with ctx.lock:
+            for label, repositories in targets:
+                for repo_id in sorted(set(repositories)):
+                    names = tuple(row[0] for row in con.execute(
+                        "SELECT rfilename FROM archived WHERE repo_id=? AND drive_label=? ORDER BY rfilename",
+                        [repo_id, source]))
+                    if names:
+                        tasks.append(SimpleNamespace(
+                            source_drive=source, target_drive=label, repo_id=repo_id,
+                            requirement_id=f"legacy-replica:{source}:{label}:{repo_id}",
+                            budget=SimpleNamespace(missing_files=names)))
+        exact = run_replica_tasks(tasks, ctx=ctx)
+        result.update({key: exact[key] for key in result})
+        # Do not hide a fenced task refusal behind the legacy facade.
+        result["failed"] = exact["failed"]
         return result
     finally:
         if own:

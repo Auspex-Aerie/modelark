@@ -26,6 +26,15 @@ class HashRepairError(RuntimeError):
     """Legacy hash evidence could not be repaired safely."""
 
 
+def _require_publication_clear(con, labels):
+    from modelark.publication_policy import PublicationRefused
+    from modelark.publication_store import require_clear
+    try:
+        require_clear(con, labels)
+    except PublicationRefused as exc:
+        raise HashRepairError(f"{exc.code}: {exc.evidence}") from exc
+
+
 def _require_supported_repair_catalog(con) -> None:
     """Supplied connections must obey the same reader floor as normal catalog opens."""
     version = con.execute("PRAGMA user_version").fetchone()[0]
@@ -233,6 +242,7 @@ def _audit_hashes_snapshot(con, repo_ids, *, archive_resolver) -> dict:
     scope = list(dict.fromkeys(repo_ids or ()))
     resolver = archive_resolver or register.archive_path
     rows = _rows(con, scope)
+    _require_publication_clear(con, {row["drive_label"] for row in rows})
     diagnostics: list[dict] = []
     repairs: list[dict] = []
     if scope:
@@ -534,6 +544,7 @@ def run_explicit_drive_repair(
 
     _require_supported_repair_catalog(con)
     epoch = int(identity_epoch)
+    _require_publication_clear(con, [drive_label])
     tables = {
         r[0] for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")
@@ -574,6 +585,7 @@ def run_explicit_drive_repair(
         # open while another client changed the catalog reader floor.
         _require_supported_repair_catalog(con)
         # Re-read drive identity only after acquiring the write lock.
+        _require_publication_clear(con, [drive_label])
         drive = con.execute(
             "SELECT drive_label, identity_epoch, identity_fingerprint, lifecycle "
             "FROM drives WHERE drive_label=?",

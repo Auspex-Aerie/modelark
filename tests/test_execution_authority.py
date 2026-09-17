@@ -114,6 +114,32 @@ def test_fill_recovery_rejects_authority_changed_before_fenced_transaction(monke
         con.close()
 
 
+def test_expired_session_recovery_refuses_pending_publication_before_terminalizing(monkeypatch):
+    con = _connection()
+    monkeypatch.setattr("modelark.proposal.load_proposal", lambda *args: {"tasks": [{"target_drive": "d0"}]})
+    monkeypatch.setattr(execution_recovery, "child_fence_still_held", lambda **kw: False)
+    monkeypatch.setattr(execution_recovery, "owned_dirty_generations", lambda *args, **kw: ())
+
+    @contextmanager
+    def hold(*args):
+        yield
+
+    def refuse(c, labels=None):
+        raise Refusal("MAINTENANCE_REQUIRED", {"operation_ids": ["op"]}, ("inspect_archive_publication",))
+
+    monkeypatch.setattr(execution_recovery, "require_publication_clear", refuse)
+    services = SimpleNamespace(controller_flock=SimpleNamespace(hold=hold),
+                               drive_fences=SimpleNamespace(hold_all_sorted=hold))
+    try:
+        with pytest.raises(Refusal, match="MAINTENANCE_REQUIRED"):
+            execution_recovery.recover_expired_session(con, session_id="fill", services=services)
+        assert con.execute("SELECT state,terminal_code FROM execution_sessions").fetchone() == (
+            "running", None)
+        assert not con.in_transaction
+    finally:
+        con.close()
+
+
 def test_fill_recovery_checks_shared_attempt_under_fences_and_transaction(monkeypatch):
     con = _connection()
     monkeypatch.setattr("modelark.proposal.load_proposal", lambda *args: {"tasks": []})

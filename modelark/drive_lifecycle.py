@@ -660,7 +660,11 @@ def register_new_identity(
     confirmation: str,
     prepare_archive: Callable[..., Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Prepare and register one exact new identity under the central graph-write boundary."""
+    """Prepare outside SQLite, then register through one exact graph-write CAS.
+
+    The controller spans both steps. A failed or stale final CAS preserves the
+    physical preparation receipt for explicit retry, never adopts another tree.
+    """
     if not isinstance(expected_binding, Mapping):
         raise proposal.Refusal(
             "DRIVE_REGISTRATION_BINDING_INVALID",
@@ -691,6 +695,36 @@ def register_new_identity(
             ("type_exact_confirmation",),
         )
 
+    leftover_intent = {
+        "kind": "register_new_identity",
+        "label": expected["label"],
+        "plan_id": expected["plan_id"],
+    }
+    observed = {"serial": expected.get("serial"), "fs_uuid": expected.get("fs_uuid")}
+    from modelark import publication_store, registration_setup
+    from modelark.publication_policy import PublicationRefused
+    try:
+        if publication_store.library(con) is not None and registration_setup.leftover(
+                con, leftover_intent, cataloged=True, observed=observed):
+            with registration_setup.hold(con, leftover_intent) as setup:
+                written = setup.publish(
+                    physical={"archive_path": expected["archive_path"], "annex_uuid": ""},
+                    catalog=lambda _c: proposal.GraphResult(proven_noop=True))
+            return {
+                "changed": True,
+                "already_registered": False,
+                "drive_label": expected["label"],
+                "planner_revision": planner_revision(con),
+                "plan_id": expected["plan_id"],
+                "archive_path": written.value["archive_path"],
+                "annex_uuid": written.value["annex_uuid"],
+                "approval_invalidated": False,
+                "capacity_evidence": "unknown_until_reconcile",
+                "reconciliation_required": True,
+                "inherited_from_lost_identity": [],
+            }
+    except PublicationRefused as exc:
+        raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
     already = _exact_existing_registration(
         con,
         expected=expected,
@@ -720,8 +754,7 @@ def register_new_identity(
     volume = current_preview["volume"]
     approval_invalidated = False
 
-    def op(c):
-        nonlocal approval_invalidated
+    def check_catalog(c):
         current_revision = planner_revision(c)
         active = plan.active(c)
         current_catalog_binding = {
@@ -735,11 +768,19 @@ def register_new_identity(
             "plan_id": expected["plan_id"],
         }
         if current_catalog_binding != expected_catalog_binding:
-            raise proposal.Refusal(
-                "DRIVE_REGISTRATION_PREVIEW_STALE",
-                {"expected": expected_catalog_binding, "current": current_catalog_binding},
-                ("refresh_onboarding_preview",),
-            )
+            from modelark import registration_publication
+            setup = registration_publication._SETUP.get()
+            if setup is not None:
+                expected_catalog_binding = {
+                    **expected_catalog_binding,
+                    "planner_revision": setup.base_revision,
+                }
+            if current_catalog_binding != expected_catalog_binding:
+                raise proposal.Refusal(
+                    "DRIVE_REGISTRATION_PREVIEW_STALE",
+                    {"expected": expected_catalog_binding, "current": current_catalog_binding},
+                    ("refresh_onboarding_preview",),
+                )
         for column, value in (
             ("drive_label", expected["label"]),
             ("serial", expected["serial"]),
@@ -754,33 +795,11 @@ def register_new_identity(
                     {column: value, "registered_labels": [str(row[0]) for row in collision]},
                     ("review_registered_identity",),
                 )
-        try:
-            prepared = dict(prepare_archive(
-                volume_dev=expected["volume_dev"],
-                mount=expected["mount"],
-                archive_path=expected["archive_path"],
-                label=expected["label"],
-                fs_uuid=expected["fs_uuid"],
-                fstype=volume["fstype"],
-                serial=expected["serial"],
-                model=observed_device.get("model"),
-                role=expected["role"],
-            ))
-        except proposal.Refusal:
-            raise
-        except Exception as exc:
-            raise proposal.Refusal(
-                "DRIVE_REGISTRATION_PREPARATION_INCOMPLETE",
-                {"archive_path": expected["archive_path"], "error": str(exc)},
-                ("refresh_onboarding_preview", "review_prepared_namespace"),
-            ) from exc
-        annex_uuid = str(prepared.get("annex_uuid") or "")
-        if not annex_uuid or prepared.get("archive_path") != expected["archive_path"]:
-            raise proposal.Refusal(
-                "DRIVE_REGISTRATION_PREPARATION_INCOMPLETE",
-                {"prepared": prepared},
-                ("refresh_onboarding_preview", "review_prepared_namespace"),
-            )
+
+    def op(c):
+        nonlocal approval_invalidated
+        registration_publication.require_legacy_registration(c)
+        check_catalog(c)
         annex_collision = c.execute(
             "SELECT drive_label FROM drives WHERE annex_uuid=? ORDER BY drive_label",
             [annex_uuid],
@@ -841,7 +860,63 @@ def register_new_identity(
             },
         )
 
-    written = proposal.graph_write(con, op)
+    from modelark import registration_publication, publication_store
+    from modelark.publication_policy import PublicationRefused
+
+    def prepare_and_commit():
+        registration_publication.require_legacy_registration(con)
+        check_catalog(con)
+        try:
+            prepared = dict(prepare_archive(
+                volume_dev=expected["volume_dev"],
+                mount=expected["mount"],
+                archive_path=expected["archive_path"],
+                label=expected["label"],
+                fs_uuid=expected["fs_uuid"],
+                fstype=volume["fstype"],
+                serial=expected["serial"],
+                model=observed_device.get("model"),
+                role=expected["role"],
+            ))
+        except proposal.Refusal:
+            raise
+        except Exception as exc:
+            raise proposal.Refusal(
+                "DRIVE_REGISTRATION_PREPARATION_INCOMPLETE",
+                {"archive_path": expected["archive_path"], "error": str(exc)},
+                ("refresh_onboarding_preview", "review_prepared_namespace"),
+            ) from exc
+        annex_uuid = str(prepared.get("annex_uuid") or "")
+        if not annex_uuid or prepared.get("archive_path") != expected["archive_path"]:
+            raise proposal.Refusal(
+                "DRIVE_REGISTRATION_PREPARATION_INCOMPLETE",
+                {"prepared": prepared},
+                ("refresh_onboarding_preview", "review_prepared_namespace"),
+            )
+        return prepared, annex_uuid
+
+    try:
+        identity = publication_store.library(con)
+    except PublicationRefused as exc:
+        raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
+
+    if identity is None:
+        with registration_publication.controller(con):
+            prepared, annex_uuid = prepare_and_commit()
+            written = proposal.graph_write(con, op)
+    else:
+        from modelark import registration_setup
+        try:
+            with registration_setup.hold(con, {
+                "kind": "register_new_identity",
+                "label": expected["label"],
+                "archive_path": expected["archive_path"],
+                "plan_id": expected["plan_id"],
+            }) as setup:
+                prepared, annex_uuid = prepare_and_commit()
+                written = setup.publish(physical=prepared, catalog=op)
+        except PublicationRefused as exc:
+            raise proposal.Refusal(exc.code, exc.evidence, ("inspect_archive_publication",)) from exc
     return {
         "changed": True,
         "already_registered": False,
@@ -924,6 +999,7 @@ def declare_lost(
 
     def op(c):
         current_revision = planner_revision(c)
+        proposal.require_publication_clear(c, [drive_label])
         drive = _drive(c, drive_label)
         current_binding = {
             "planner_revision": current_revision,
