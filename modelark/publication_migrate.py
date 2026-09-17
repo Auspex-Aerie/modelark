@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -118,8 +119,109 @@ def _read_private(path):
         os.close(fd)
 
 
-def apply_conversion(con, plan=None, *, writers_stopped=False, dest_dir=None):
-    """Freeze an inspect plan on a disposable catalog. Never converts live bytes."""
+def _git_env():
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+    return env
+
+
+def _git(archive, *args, check=True):
+    result = subprocess.run(
+        ["git", "-C", str(archive), "-c", "user.name=ModelArk",
+         "-c", "user.email=publication@modelark.invalid", "-c", "commit.gpgsign=false",
+         "-c", "core.hooksPath=/dev/null", "-c", "core.pager=", *args],
+        env=_git_env(), capture_output=True, text=True, check=False)
+    if check and result.returncode != 0:
+        raise PublicationRefused("PUBLICATION_MIGRATE_GIT_FAILED", stderr=(result.stderr or "")[-500:])
+    return (result.stdout or "").strip()
+
+
+def _source_path(archive, candidate):
+    stored = candidate.get("stored_relpath") or candidate.get("rfilename")
+    if not stored:
+        raise PublicationRefused("PUBLICATION_MIGRATE_SOURCE_UNPROVEN")
+    path = archive / stored
+    if not path.is_file() and not path.is_symlink():
+        alt = archive / candidate["rfilename"]
+        if alt.is_file() or alt.is_symlink():
+            return alt
+        raise PublicationRefused("PUBLICATION_MIGRATE_SOURCE_UNPROVEN", path=str(path))
+    return path
+
+
+def _convert_file(archive, candidate):
+    archive = Path(archive)
+    src = _source_path(archive, candidate)
+    data = src.read_bytes()
+    expected = candidate.get("orig_sha256")
+    digest = hashlib.sha256(data).hexdigest()
+    if expected and digest != expected:
+        raise PublicationRefused("PUBLICATION_MIGRATE_HASH_MISMATCH", expected=expected, observed=digest)
+    dest_rel = candidate["proposed_stored_relpath"]
+    dest = archive / dest_rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.resolve() != src.resolve():
+        dest.write_bytes(data)
+    _git(archive, "-c", "annex.largefiles=anything", "annex", "add", "--", dest_rel)
+    key = _git(archive, "annex", "lookupkey", "--", dest_rel)
+    if not key:
+        raise PublicationRefused("PUBLICATION_MIGRATE_KEY_UNPROVEN", path=dest_rel)
+    src_rel = str(src.relative_to(archive))
+    if dest.resolve() != src.resolve():
+        _git(archive, "rm", "-q", "--", src_rel, check=False)
+    _git(archive, "commit", "-qm", f"annex-migrate {candidate['rfilename']}")
+    return key, dest_rel
+
+
+def _current_annex_key(con, candidate):
+    row = con.execute(
+        "SELECT annex_key FROM archived WHERE drive_label=? AND repo_id=? AND rfilename=?",
+        [candidate["drive_label"], candidate["repo_id"], candidate["rfilename"]]).fetchone()
+    return None if row is None else row[0]
+
+
+def _publish_key(con, candidate, key, stored_relpath):
+    from modelark.proposal import GraphResult, graph_write
+
+    def write(c):
+        changed = c.execute(
+            "UPDATE archived SET annex_key=?, stored_relpath=? "
+            "WHERE drive_label=? AND repo_id=? AND rfilename=? "
+            "AND (annex_key IS NULL OR annex_key='')",
+            [key, stored_relpath, candidate["drive_label"], candidate["repo_id"],
+             candidate["rfilename"]])
+        if changed.rowcount != 1:
+            raise PublicationRefused("PUBLICATION_MIGRATE_CATALOG_UNPROVEN",
+                                     drive_label=candidate["drive_label"],
+                                     rfilename=candidate["rfilename"])
+        return GraphResult(proven_noop=False)
+
+    graph_write(con, write)
+
+
+def _convert_archives(con, frozen, archives):
+    converted = []
+    for candidate in frozen.get("candidates") or []:
+        if candidate.get("state") != "convertible":
+            continue
+        if _current_annex_key(con, candidate):
+            continue
+        label = candidate["drive_label"]
+        archive = archives.get(label)
+        if archive is None:
+            raise PublicationRefused("PUBLICATION_MIGRATE_ARCHIVE_REQUIRED", drive_label=label)
+        key, stored = _convert_file(archive, candidate)
+        _publish_key(con, candidate, key, stored)
+        converted.append({"drive_label": label, "rfilename": candidate["rfilename"],
+                          "annex_key": key, "stored_relpath": stored})
+    frozen = dict(frozen)
+    frozen["apply"] = "physical-disposable"
+    frozen["converted"] = converted
+    return frozen
+
+
+def apply_conversion(con, plan=None, *, writers_stopped=False, dest_dir=None, archives=None):
+    """Freeze an inspect plan; optionally convert on disposable archives."""
     if not writers_stopped:
         raise PublicationRefused("PUBLICATION_WRITERS_STILL_RUNNING")
     catalog = _catalog_file(con)
@@ -132,17 +234,29 @@ def apply_conversion(con, plan=None, *, writers_stopped=False, dest_dir=None):
     seal = _seal(plan)
     frozen = {**_census(plan), "frozen": True, "seal": seal, "apply": "frozen-inspect-only"}
     path = dest_dir / f"annex-migrate-{seal[:12]}.json"
-    try:
-        _write_private(path, plan_json(frozen))
-    except FileExistsError as exc:
-        raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_EXISTS", path=str(path)) from exc
-    except OSError as exc:
-        raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", path=str(path)) from exc
+    if path.exists():
+        if archives is None:
+            raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_EXISTS", path=str(path))
+        try:
+            frozen = json.loads(_read_private(path))
+        except OSError as exc:
+            raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", path=str(path)) from exc
+        if frozen.get("seal") != seal or frozen.get("seal") != _seal(frozen):
+            raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", path=str(path))
+    else:
+        try:
+            _write_private(path, plan_json(frozen))
+        except FileExistsError as exc:
+            raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_EXISTS", path=str(path)) from exc
+        except OSError as exc:
+            raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", path=str(path)) from exc
     frozen["plan_path"] = str(path)
+    if archives:
+        frozen = _convert_archives(con, frozen, {str(label): Path(root) for label, root in archives.items()})
     return frozen
 
 
-def resume_conversion(con, plan_id, *, writers_stopped=False, dest_dir=None):
+def resume_conversion(con, plan_id, *, writers_stopped=False, dest_dir=None, archives=None):
     """Reload a frozen inspect plan. Does not convert live bytes."""
     if not writers_stopped:
         raise PublicationRefused("PUBLICATION_WRITERS_STILL_RUNNING")
@@ -164,6 +278,8 @@ def resume_conversion(con, plan_id, *, writers_stopped=False, dest_dir=None):
         raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", plan_id=plan_id)
     if frozen.get("seal", "")[:12] != prefix:
         raise PublicationRefused("PUBLICATION_MIGRATE_PLAN_UNPROVEN", plan_id=plan_id)
+    if archives:
+        frozen = _convert_archives(con, frozen, {str(label): Path(root) for label, root in archives.items()})
     return frozen
 
 

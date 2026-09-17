@@ -261,15 +261,15 @@ dropped to close; injected stop at each durable phase resumes without clearing
 the obligation; leftover PREPARED registration after `CATALOG_PUBLISHED` resumes
 and closes. Conversion remains disabled. Live Fill/catalog migration remain off.
 
-Stage 2 inspect is read-only. Disposable apply/resume freeze an inspect plan to
-private JSON (`frozen-inspect-only`) and refuse the live catalog path. Physical
-Git/annex conversion is not enabled.
+Stage 2 inspect is read-only. Disposable apply freezes a plan and, with
+`--archive label=path`, annex-converts convertible files and CASes `annex_key`.
+Live catalog path remains forbidden. Physical conversion of the production
+library is not authorized.
 
 Next remaining work:
 
-1. Physical conversion apply on a disposable git-annex catalog (still not live).
-2. Returning-clone interception and guarded map publication.
-3. Live Fill restart / catalog migration apply, only when explicitly authorized.
+1. Returning-clone interception and guarded map publication.
+2. Live Fill restart / catalog migration apply, only when explicitly authorized.
 
 Current code is local and uncommitted on `codex/annex-publication-stage1` in
 `claudedocs/operator-scratch/worktrees/codec-stage-d`. Unrelated dirty ledger, bridge

@@ -3388,3 +3388,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `tests/test_catalog_reader_versions.py`; `publication_migrate.apply_conversion` / `resume_conversion`. No live Fill or live cutover.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/publication_migrate.py, modelark/cli.py, tests/test_publication_migrate.py, tests/test_catalog_reader_versions.py
 - `related`: DEC-166
+
+### DEC-168: Disposable physical conversion annexes payload and CASes annex_key
+- `id`: DEC-168
+- `date`: 2026-09-17
+- `status`: accepted
+- `triggered_by`: Operator authorized physical conversion apply on a disposable git-annex catalog after PR 85 merge; live cutover still forbidden
+- `decision`: `apply_conversion(..., archives={drive_label: archive})` on a non-live catalog freezes the inspect plan, annex-adds each convertible file under `__modelark_payload_v1__/`, and CASes `archived.annex_key`/`stored_relpath` only when the row still has a null key. Bytes must match `orig_sha256`. Resume skips already-keyed rows. Live catalog path still raises `PUBLICATION_LIVE_CUTOVER_FORBIDDEN`. No `maintenance` kind enablement and no production library conversion.
+- `rationale`: Inspect named the INC-017 null-key copies. Disposable physical apply proves git-blob → annex key + catalog CAS without touching the live ModelArk catalog.
+- `impact`: `publication_migrate.py`, CLI `--archive`, tests. No live Fill or live cutover.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/publication_migrate.py, modelark/cli.py, tests/test_publication_migrate.py
+- `related`: DEC-166, DEC-167
