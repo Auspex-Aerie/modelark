@@ -3399,3 +3399,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `publication_migrate.py`, CLI `--archive`, tests. No live Fill or live cutover.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/publication_migrate.py, modelark/cli.py, tests/test_publication_migrate.py
 - `related`: DEC-166, DEC-167
+
+### DEC-169: Disposable convert proves frozen source, path-limited commits, and before-state CAS
+- `id`: DEC-169
+- `date`: 2026-09-17
+- `status`: accepted
+- `triggered_by`: Greptile PR 86 P1s on `cae2f61` (unproven rfilename fallback, unrestricted commit, ignored retirement, empty-key-only CAS)
+- `decision`: Physical apply opens only the inspect-frozen `stored_relpath`; a missing path is `PUBLICATION_MIGRATE_SOURCE_UNPROVEN` and never falls back to `rfilename`. Inspect classifies a null-key row without `stored_relpath` as `needs-evidence`. Git commits are limited to the migration-owned path. Catalog CAS matches frozen `orig_sha256`, `orig_bytes`, `stored_relpath`, `compressed`, `stored_bytes`, and `orig_sha256_provenance` plus empty `annex_key`. Source retirement `git rm`/`commit` must succeed; resume of an already-keyed row still retires a leftover frozen source. Live catalog path remains forbidden. No production library conversion.
+- `rationale`: The four P1s were the same leftover-identity class as DEC-163: locator/fallback is not proof. Frozen inspect facts are the before-state; conversion must not open, commit, or CAS anything else, and resume must close leftover source rather than skip it.
+- `impact`: `publication_migrate.py`, tests. No live Fill or live cutover.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/publication_migrate.py, tests/test_publication_migrate.py
+- `related`: DEC-165, DEC-168
