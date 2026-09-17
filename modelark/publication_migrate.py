@@ -230,6 +230,10 @@ def _publish_key(con, candidate, key, stored_relpath):
     graph_write(con, write)
 
 
+def _head_has(archive, joined):
+    return bool(_git(archive, "ls-tree", "--name-only", "HEAD", "--", joined))
+
+
 def _retire_source(archive, candidate, dest):
     stored = candidate.get("stored_relpath")
     if not stored:
@@ -237,11 +241,15 @@ def _retire_source(archive, candidate, dest):
     src, src_joined = _confined(archive, candidate["repo_id"], stored)
     if dest.resolve() == src.resolve():
         return
-    if not (src.is_file() or src.is_symlink()):
+    if not _head_has(archive, src_joined):
         return
-    _git(archive, "rm", "-q", "--", src_joined)
+    indexed = bool(_git(archive, "ls-files", "--", src_joined))
+    if src.is_file() or src.is_symlink() or indexed:
+        _git(archive, "rm", "-q", "--", src_joined)
     _git(archive, "commit", "-qm", f"annex-migrate-retire {candidate['rfilename']}",
          "--", src_joined)
+    if _head_has(archive, src_joined):
+        raise PublicationRefused("PUBLICATION_MIGRATE_GIT_FAILED", path=src_joined)
 
 
 def _dest_path(archive, candidate):

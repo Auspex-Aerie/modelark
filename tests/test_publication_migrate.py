@@ -287,6 +287,46 @@ def test_physical_convert_path_limited_commit_and_required_retirement(tmp_path, 
                                 dest_dir=tmp_path / "plans", archives={"drive-00": archive})
     assert resumed["converted"] == []
     assert not (archive / "org" / "m" / ".gitattributes").exists()
+    assert not git("ls-tree", "--name-only", "HEAD", "--", "org/m/.gitattributes")
     assert "unrelated.txt" not in git("log", "--name-only", "--pretty=format:", "-1")
     assert "unrelated.txt" in git("diff", "--cached", "--name-only")
+    con.close()
+
+
+def test_physical_convert_resume_commits_staged_retirement(tmp_path, monkeypatch):
+    _require_annex()
+    payload = b"* annex.largefiles=anything\n"
+    digest = hashlib.sha256(payload).hexdigest()
+    archive = tmp_path / "archive"
+    git = _init_annex(archive)
+    path = archive / "org" / "m"
+    path.mkdir(parents=True)
+    (path / ".gitattributes").write_bytes(payload)
+    git("add", "--", "org/m/.gitattributes")
+    git("commit", "-qm", "git blobs")
+    con = _catalog_copy(tmp_path, monkeypatch, "org/m", digest, payload, ".gitattributes")
+    census = inspect_conversion(con)
+    import modelark.publication_migrate as migrate
+    real_git = migrate._git
+    failing = {"retire_commit": True}
+
+    def wrapped(archive_root, *args, check=True):
+        if (failing["retire_commit"] and args and args[0] == "commit"
+                and any("annex-migrate-retire" in str(arg) for arg in args)):
+            raise PublicationRefused("PUBLICATION_MIGRATE_GIT_FAILED", stderr="forced retire commit")
+        return real_git(archive_root, *args, check=check)
+
+    monkeypatch.setattr(migrate, "_git", wrapped)
+    with pytest.raises(PublicationRefused, match="GIT_FAILED"):
+        apply_conversion(con, census, writers_stopped=True, dest_dir=tmp_path / "plans",
+                         archives={"drive-00": archive})
+    assert con.execute("SELECT annex_key FROM archived").fetchone()[0].startswith("SHA256-")
+    assert not (archive / "org" / "m" / ".gitattributes").exists()
+    assert git("ls-tree", "--name-only", "HEAD", "--", "org/m/.gitattributes").strip()
+    failing["retire_commit"] = False
+    plan_file = next((tmp_path / "plans").glob("annex-migrate-*.json"))
+    resumed = resume_conversion(con, plan_file.stem.split("-", 2)[2], writers_stopped=True,
+                                dest_dir=tmp_path / "plans", archives={"drive-00": archive})
+    assert resumed["converted"] == []
+    assert not git("ls-tree", "--name-only", "HEAD", "--", "org/m/.gitattributes")
     con.close()
