@@ -270,9 +270,31 @@ Physical conversion of the production library is not authorized.
 
 Next remaining work:
 
-1. Returning-clone interception and guarded map publication.
-2. Live Fill restart / catalog migration apply, only when explicitly authorized.
+1. Guarded map retirement is implemented on the current post-PR-86 branch: exact
+   source retirement is two-action journalled and resumable; the map candidate
+   removes the old path only with its receipt; every registered clone receives a
+   layout obligation before map publication; selected clones close with physical
+   inventory/generation closure while offline clones remain pending and blocked
+   from ModelArk tree changes. Local Grok round 1/3 returned one P1: per-file
+   retirement snapshots were incorrectly treated as the final source HEAD for a
+   same-drive multi-file batch. The implementation now composes exact Git
+   transitions; its focused cases and the 118-case publication regression pass.
+   Local Grok round 2/3 confirmed that correction but returned one new P1: the
+   new retirement action had mutated the already-qualified v9 action CHECK in
+   place. DEC-171 freezes exact v9, introduces explicit additive v10, keeps both
+   reader contracts, and requires v10 for retirement. Focused migration/reader
+   tests pass. Local Grok round 3/3 **ACCEPTED** with no P1/P2 after verifying the
+   exact released-v9 match, atomic v10 rebuild, v10-only maintenance gate, composed
+   Git transitions and clone-obligation enforcement. PR publication remains pending.
+   Final post-fix scoped publication regression: **120 passed** in 19m54s; exact
+   migration/reader batch: **80 passed**; action/store/retirement batch: **44
+   passed**; full Slice operator file: **50 passed** with its local lease socket;
+   Ruff and `git diff --check` are clean.
+2. Attended returning-clone inspect/apply/closure remains: capture the returned
+   clone's actual old refs/bytes, convert claimed or unclaimed materialized paths
+   without inventing catalog rows, then close only that clone's pending obligation.
+3. Live Fill restart / catalog migration apply, only when explicitly authorized.
 
-Current branch is `feat/annex-migrate-physical-apply` in
-`claudedocs/operator-scratch/worktrees/codec-stage-d` (PR 86). Unrelated
+Current branch is `codex/returning-clone-publication` in
+`claudedocs/operator-scratch/worktrees/codec-stage-d`, based on merged PR 86. Unrelated
 bridge/DGXSpark files remain untracked.

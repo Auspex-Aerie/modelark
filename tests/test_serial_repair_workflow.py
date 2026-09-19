@@ -194,7 +194,7 @@ def test_inspection_captures_one_snapshot_across_concurrent_catalog_change(tmp_p
             if not changed:
                 other.execute('BEGIN IMMEDIATE')
                 other.execute("UPDATE drives SET eligibility='excluded'")
-                other.execute('PRAGMA user_version=10')
+                other.execute('PRAGMA user_version=11')
                 other.execute('COMMIT')
                 changed.append(True)
             return bound(connection, label)

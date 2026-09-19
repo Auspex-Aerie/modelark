@@ -69,14 +69,23 @@ class ArchivePublisher:
     work remains durable until its explicit owning continuation completes it.
     """
 
-    def __init__(self, con, requests, *, kind="fill", session_id=None, fencing_token=None):
+    def __init__(self, con, requests, *, kind="fill", session_id=None, fencing_token=None,
+                 retired_paths=None):
         requests = tuple(requests)
         if (not requests or any(type(item) is not FileRequest for item in requests)
-                or len(set(requests)) != len(requests) or kind not in {"fill", "replica"}):
+                or len(set(requests)) != len(requests) or kind not in {"fill", "replica", "maintenance"}):
             raise PublicationRefused("PUBLICATION_REQUEST_SET_INVALID")
         if any((item.source_drive is not None) != (kind == "replica") for item in requests):
             raise PublicationRefused("PUBLICATION_REQUEST_KIND_MISMATCH")
+        retired_paths = {} if retired_paths is None else dict(retired_paths)
+        if (kind == "maintenance" and (set(retired_paths) != set(requests)
+                                       or any(type(path) is not str for path in retired_paths.values()))
+                or kind != "maintenance" and retired_paths):
+            raise PublicationRefused("PUBLICATION_RETIREMENT_SET_INVALID")
+        retired_paths = {request: relative_path(path).as_posix()
+                         for request, path in retired_paths.items()}
         self._connection, self._requests, self._kind = con, tuple(sorted(requests)), kind
+        self._retired_paths = retired_paths
         self._session_id, self._fencing_token = session_id, fencing_token
         self.operation_id = str(uuid.uuid4())
         self._stack, self._active, self._finished = ExitStack(), False, False
@@ -91,15 +100,24 @@ class ArchivePublisher:
                           [operation_id]).fetchone()
         _require(row is not None and row[2] == "PREPARED", "PUBLICATION_OPERATION_NOT_ACTIVE")
         binding = store._unseal(row[0], row[1])
+        rows = list(binding["before_state"]["requests"].values())
         requests = [FileRequest(**{name: item[name] for name in ("repo_id", "rfilename", "drive_label", "source_drive")})
-                    for item in binding["before_state"]["requests"].values()]
-        result = cls(con, requests, kind=binding["kind"], session_id=session_id, fencing_token=fencing_token)
+                    for item in rows]
+        retired = {request: row.get("retired_path") for request, row in zip(requests, rows)
+                   if row.get("retired_path") is not None}
+        result = cls(con, requests, kind=binding["kind"], session_id=session_id,
+                     fencing_token=fencing_token, retired_paths=retired)
         result.operation_id, result._resuming = operation_id, True
         return result
 
     def __enter__(self):
         if self._active or self._finished:
             raise PublicationRefused("PUBLICATION_COORDINATOR_REUSED")
+        if self._kind == "maintenance":
+            from modelark.publication_migrate import _catalog_file, live_catalog_path
+            catalog_path = _catalog_file(self._connection)
+            if catalog_path is None or catalog_path == live_catalog_path():
+                raise PublicationRefused("PUBLICATION_LIVE_CUTOVER_FORBIDDEN")
         if self._resuming:
             return self._resume_enter()
         identity = store.library(self._connection)
@@ -147,12 +165,17 @@ class ArchivePublisher:
                 file_id = _id(self.operation_id, store.canonical(item.record()))
                 batch_id = _id(self.operation_id, "batch:" + item.drive_label)
                 batch_files.setdefault(batch_id, []).append(file_id)
-                requests[file_id] = {"batch_id": batch_id, **item.record()}
+                requests[file_id] = {"batch_id": batch_id, **item.record(),
+                                     "retired_path": self._retired_paths.get(item)}
                 self._files[item] = file_id
             before_state = {"profiles": profiles, "trees": before_trees, "requests": requests,
                             "policies": policies, "inventories": inventories,
                             "roots": {label: str(repository.tree.path) for label, repository in repositories.items()},
                             "attachments": {key: value.record() for key, value in self._attachments.items()}}
+            if self._kind == "maintenance":
+                before_state["clone_layout"] = [list(row) for row in self._connection.execute(
+                    "SELECT annex_uuid,drive_label FROM drives WHERE annex_uuid IS NOT NULL "
+                    "ORDER BY annex_uuid")]
             # Recheck physical identity after all preparatory reads, then dirty
             # every participant and freeze operation ownership in one revision.
             for label, proof in self._attachments.items():
@@ -164,9 +187,14 @@ class ArchivePublisher:
                 for label in sorted(labels):
                     _advance_one(con, label, "archive-publication:" + self._kind, _drive_facts(con, label),
                                  owner_session_id=self._session_id, owner_fencing_token=self._fencing_token)
-                return store.prepare_operation(self.scope, operation_id=self.operation_id, kind=self._kind,
-                                               profile_digest=store.digest(profiles), batch_files=batch_files,
-                                               before_state=before_state)
+                prepare = (store.prepare_maintenance_operation if self._kind == "maintenance"
+                           else store.prepare_operation)
+                arguments = {"operation_id": self.operation_id,
+                             "profile_digest": store.digest(profiles), "batch_files": batch_files,
+                             "before_state": before_state}
+                if self._kind != "maintenance":
+                    arguments["kind"] = self._kind
+                return prepare(self.scope, **arguments)
             self.binding_digest = self.scope.write(prepare)
             self._before_state = before_state
             self._active = True
@@ -235,7 +263,8 @@ class ArchivePublisher:
             for request in self._requests:
                 identifier = _id(self.operation_id, store.canonical(request.record()))
                 _require(state["requests"].get(identifier) == {
-                    "batch_id": _id(self.operation_id, "batch:" + request.drive_label), **request.record()},
+                    "batch_id": _id(self.operation_id, "batch:" + request.drive_label), **request.record(),
+                    "retired_path": self._retired_paths.get(request)},
                     "PUBLICATION_RESUME_WORKSET_CHANGED")
                 self._files[request] = identifier
             self._active = True
@@ -319,6 +348,18 @@ class ArchivePublisher:
                 b"blob " + str(len(pointer)).encode() + b"\0" + pointer).hexdigest())
             if any(existing.path == path for existing in before.entries):
                 raise PublicationRefused("PUBLICATION_TARGET_COMMITTED")
+            retired_source = None
+            retired_path = self._retired_paths.get(request)
+            if retired_path is not None:
+                old_entries = {existing.path: existing for existing in before.entries}
+                old_entry = old_entries.get(retired_path)
+                _require(old_entry is not None and old_entry.mode == "100644" and retired_path != path,
+                         "PUBLICATION_RETIREMENT_SOURCE_UNPROVEN")
+                raw = trees._object(repository.read, "blob", old_entry.oid, limit=64 * 1024 * 1024)
+                _require(len(raw) == original_bytes and hashlib.sha256(raw).hexdigest() == original_sha256,
+                         "PUBLICATION_RETIREMENT_SOURCE_UNPROVEN")
+                retired_source = {"path": retired_path, "entry": asdict(old_entry),
+                                  "bytes": len(raw), "sha256": original_sha256}
             observed_at = datetime.now(timezone.utc).isoformat(sep=" ")
             source_record = source.record() if source is not None else None
             frozen = {}
@@ -330,6 +371,15 @@ class ArchivePublisher:
                 if (facts["sha256"] and facts["sha256"].lower() != original_sha256
                         or facts["size_bytes"] is not None and facts["size_bytes"] != original_bytes):
                     raise PublicationRefused("PUBLICATION_ARTIFACT_MANIFEST_MISMATCH")
+                if retired_source is not None:
+                    legacy = pair_before["archived"]
+                    expected_old = (request.repo_id + "/" + legacy["stored_relpath"]
+                                    if legacy is not None and legacy.get("stored_relpath") else None)
+                    _require(legacy is not None and not legacy.get("annex_key")
+                             and expected_old == retired_path
+                             and legacy.get("orig_sha256") == original_sha256
+                             and legacy.get("orig_bytes") == original_bytes,
+                             "PUBLICATION_RETIREMENT_CATALOG_UNPROVEN")
                 archived = {**pair_before["key"], "stored_name": PurePosixPath(relative).name,
                             "stored_relpath": relative, "orig_sha256": original_sha256,
                             "znn_sha256": stored_sha256 if compressed else None,
@@ -349,6 +399,8 @@ class ArchivePublisher:
                                "stored_path": path, "annex_key": key, "object_path": object_path,
                                "tree_before": before.record(), "entry": asdict(entry), "install": install_plan,
                                "metadata_before": metadata_before.record(), "tags": tags})
+                if retired_source is not None:
+                    frozen.update({"retired_path": retired_path, "retired_source": retired_source})
                 if source_record is not None:
                     frozen["source_proof"] = source_record
                 return store.prepare_file(self.scope, operation_id=self.operation_id,
@@ -356,6 +408,15 @@ class ArchivePublisher:
             self.scope.write(prepare_file)
             from modelark import publication_file_resume
             return publication_file_resume.publish(self, request, artifact, source=source)
+
+    def retire(self, request):
+        """Retire one migration-selected old path after its catalog transition."""
+        self._require()
+        if self._kind != "maintenance" or request not in self._retired_paths:
+            raise PublicationRefused("PUBLICATION_RETIREMENT_FILE_UNSELECTED")
+        from modelark import publication_retirement
+        return publication_retirement.retire(
+            self._repositories[request.drive_label], file_id=self._files[request])
 
     def _batch_rows(self, batch_id):
         self._require()
@@ -408,7 +469,8 @@ class ArchivePublisher:
                                                tuple(sorted(intent["tags"].items())), file_digest)
             _require(write.seal() == proof["annotation_seal"], "PUBLICATION_ANNOTATION_RECEIPT_CHANGED")
             writes[path] = write
-            selections.append(map_files.FileSelection(file_id, trees.TreeEntry(**intent["entry"])))
+            selections.append(map_files.FileSelection(
+                file_id, trees.TreeEntry(**intent["entry"]), intent.get("retired_path")))
         _require(_snapshot(repository) == source_head and self._batch_rows(batch_id) == rows,
                  "PUBLICATION_BATCH_SOURCE_CHANGED")
         # A durable map action is resumable authority, but not a substitute for
@@ -491,6 +553,11 @@ class ArchivePublisher:
             entry = trees.TreeEntry(**intent["entry"])
             _require(entry.path not in expected or expected[entry.path] == entry, "PUBLICATION_MAP_FINAL_CONFLICT")
             expected[entry.path] = entry
+            retired = intent.get("retired_path")
+            if retired is not None:
+                _require(retired in expected and retired != entry.path,
+                         "PUBLICATION_MAP_FINAL_RETIREMENT_CHANGED")
+                del expected[retired]
         expected = tuple(sorted(expected.values()))
         final_map = _snapshot(self.map)
         _require(final_map.entries == expected, "PUBLICATION_MAP_FINAL_TREE_CHANGED")

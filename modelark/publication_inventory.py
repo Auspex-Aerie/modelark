@@ -13,8 +13,10 @@ import os
 from pathlib import PurePosixPath
 import posixpath
 import stat
+from uuid import UUID, uuid5
 
-from modelark import publication_attachment as attachment, publication_catalog as catalog
+from modelark import publication_actions as actions, publication_attachment as attachment
+from modelark import publication_catalog as catalog
 from modelark import publication_payload as payload, publication_store as store, publication_tree as trees
 from modelark.drive_mutation import Observation
 from modelark.publication_native import QualifiedRepository
@@ -282,22 +284,38 @@ def verify(repository, baseline_record, *, file_rows) -> InventoryProof:
     _require(expected_tree.record() == state["trees"][label], "PUBLICATION_INVENTORY_TREE_BINDING_MISMATCH")
     expected_claims = {table: {_row_key(row): row for row in baseline_record["claims"][table]}
                        for table in ("archived", "replicas")}
-    touched, hashes, touched_keys = {}, [], set()
+    touched, hashes, touched_keys, retired = {}, [], set(), set()
+    transitions = {}
+
+    def add_transition(before, after):
+        _require(before.head_oid not in transitions and after.parents == (before.head_oid,)
+                 and after.head_ref == before.head_ref
+                 and after.root_identity == before.root_identity and after.mount_id == before.mount_id,
+                 "PUBLICATION_INVENTORY_TREE_CHAIN_CHANGED")
+        before_tree, before_parents = trees._commit(repository.read, before.head_oid)
+        after_tree, after_parents = trees._commit(repository.read, after.head_oid)
+        _require(before_tree == before.tree_oid and before_parents == before.parents
+                 and trees._entries(trees._read(
+                     repository.read, "ls-tree", "-r", "--full-tree", "-z", before_tree)) == before.entries
+                 and after_tree == after.tree_oid and after_parents == after.parents
+                 and trees._entries(trees._read(
+                     repository.read, "ls-tree", "-r", "--full-tree", "-z", after_tree)) == after.entries,
+                 "PUBLICATION_INVENTORY_COMMIT_CHANGED")
+        transitions[before.head_oid] = after
+
     ordered_rows = sorted(initial["rows"], key=lambda row: row[4])
     latest_objects = {row[2]["annex_key"]: row[3]["local"]["object_identity"] for row in ordered_rows}
     for file_id, digest, intent, proof, _revision, seal in ordered_rows:
         path, key = intent["stored_path"], intent["annex_key"]
         entry = trees.TreeEntry(**intent["entry"])
-        _require(intent["tree_before"] == expected_tree.record() and entry.path == path
-                 and path not in touched and path not in {old.path for old in expected_tree.entries},
+        pointer_before = trees.TreeSnapshot.from_record(intent["tree_before"])
+        _require(entry.path == path and path not in touched
+                 and path not in {old.path for old in pointer_before.entries},
                  "PUBLICATION_INVENTORY_TREE_CHAIN_CHANGED")
         after = trees.TreeSnapshot.from_record(proof["tree"]["after"])
-        _require(after.entries == tuple(sorted((*expected_tree.entries, entry)))
-                 and after.parents == (expected_tree.head_oid,) and after.head_ref == expected_tree.head_ref
-                 and after.root_identity == expected_tree.root_identity and after.mount_id == expected_tree.mount_id,
+        _require(after.entries == tuple(sorted((*pointer_before.entries, entry))),
                  "PUBLICATION_INVENTORY_TREE_CHAIN_CHANGED")
-        _require(trees._commit(repository.read, after.head_oid) == (after.tree_oid, after.parents),
-                 "PUBLICATION_INVENTORY_COMMIT_CHANGED")
+        add_transition(pointer_before, after)
         object_path = repository.object_path(key)
         _require(object_path == intent["object_path"], "PUBLICATION_INVENTORY_OBJECT_CHANGED")
         pointer = trees._object(repository.read, "blob", entry.oid, limit=4096)
@@ -309,8 +327,33 @@ def verify(repository, baseline_record, *, file_rows) -> InventoryProof:
         # receipt, while keeping each mapped reader's own identity exact.
         expected_local = {**proof["local"], "object_identity": latest_objects[key]}
         _require(observed.record() == expected_local, "PUBLICATION_INVENTORY_TOUCHED_COPY_CHANGED")
-        hashes.append({"file_id": file_id, "catalog_receipt_digest": seal, "payload": observed.record()})
-        touched[path], expected_tree = observed, after
+        touched[path] = observed
+        retired_path = intent.get("retired_path")
+        retirement = None
+        if retired_path is not None:
+            retired_path = relative_path(retired_path).as_posix()
+            _require(retired_path not in retired and retired_path != path
+                     and any(item.path == retired_path for item in expected_tree.entries),
+                     "PUBLICATION_INVENTORY_RETIREMENT_CHANGED")
+            identifier = str(uuid5(UUID(file_id), "source-retirement"))
+            action = actions.read(scope, identifier)
+            retirement = action.get("receipt", {}).get("receipt", {})
+            retirement_intent = action.get("intent", {}).get("retirement", {})
+            retirement_before = trees.TreeSnapshot.from_record(retirement_intent.get("before"))
+            retirement_after = trees.TreeSnapshot.from_record(retirement.get("after"))
+            _require(action["kind"] == "source_retirement" and action["status"] == "VERIFIED"
+                     and retirement.get("version") == 1 and retirement.get("kind") == "retired-source"
+                     and retirement.get("file_id") == file_id and retirement.get("path") == retired_path
+                     and retirement_intent.get("file_id") == file_id
+                     and retirement_intent.get("path") == retired_path
+                     and any(item.path == retired_path for item in retirement_before.entries)
+                     and retirement_after.entries == tuple(
+                         item for item in retirement_before.entries if item.path != retired_path),
+                     "PUBLICATION_INVENTORY_RETIREMENT_CHANGED")
+            add_transition(retirement_before, retirement_after)
+            retired.add(retired_path)
+        hashes.append({"file_id": file_id, "catalog_receipt_digest": seal,
+                       "payload": observed.record(), "retirement": retirement})
         touched_keys.add(key)
         pair = intent["catalog_pair"]
         catalog._validate(pair)
@@ -320,6 +363,12 @@ def verify(repository, baseline_record, *, file_rows) -> InventoryProof:
                      "PUBLICATION_INVENTORY_CATALOG_CHAIN_CHANGED")
             if pair["after"][table] is not None:
                 expected_claims[table][row_key] = pair["after"][table]
+    used = set()
+    while expected_tree.head_oid in transitions:
+        _require(expected_tree.head_oid not in used, "PUBLICATION_INVENTORY_TREE_CHAIN_CHANGED")
+        used.add(expected_tree.head_oid)
+        expected_tree = transitions[expected_tree.head_oid]
+    _require(len(used) == len(transitions), "PUBLICATION_INVENTORY_TREE_CHAIN_CHANGED")
     expected_claims = {table: [rows[key] for key in sorted(rows)] for table, rows in expected_claims.items()}
     _require(initial["claims"] == expected_claims, "PUBLICATION_INVENTORY_CATALOG_CHANGED")
     _require(_snapshot(repository) == expected_tree, "PUBLICATION_INVENTORY_FINAL_TREE_CHANGED")
@@ -328,9 +377,11 @@ def verify(repository, baseline_record, *, file_rows) -> InventoryProof:
     new_nodes = {row["path"]: row for row in namespace}
     parents = {""} if touched else set()
     parents.update(str(parent) for path in touched for parent in relative_path(path).parents if str(parent) != ".")
-    _require(set(new_nodes) == set(old_nodes) | set(touched) | parents,
+    _require(set(new_nodes) == (set(old_nodes) - retired) | set(touched) | parents,
              "PUBLICATION_INVENTORY_UNEXPLAINED_PATHS")
     for path, before in old_nodes.items():
+        if path in retired:
+            continue
         actual = new_nodes[path]
         if path in touched:
             continue
@@ -344,7 +395,7 @@ def verify(repository, baseline_record, *, file_rows) -> InventoryProof:
     presence = _presence(repository, initial["claims"])
     current_presence = {row["path"]: row for row in presence}
     for old in baseline_record["presence"]:
-        if old["path"] in touched:
+        if old["path"] in touched or old["path"] in retired:
             continue
         current = current_presence[old["path"]]
         if old["annex_key"] in touched_keys:

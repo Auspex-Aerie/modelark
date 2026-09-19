@@ -72,14 +72,26 @@ def stamp(path, version):
         con.close()
 
 
-def install_publication(path):
+def install_publication(path, *, version=10):
     from modelark import publication_store as store
     from modelark.proposal import graph_write
     con = _sqlite(path, isolation_level=None)
     try:
-        graph_write(con, lambda c: store._install_schema(
-            c, library_id="11111111-1111-4111-8111-111111111111",
-            map_uuid="22222222-2222-4222-8222-222222222222"))
+        if version == 10:
+            graph_write(con, lambda c: store._install_schema(
+                c, library_id="11111111-1111-4111-8111-111111111111",
+                map_uuid="22222222-2222-4222-8222-222222222222"))
+        elif version == 9:
+            def install_v9(c):
+                for statement in store.DDL_V9:
+                    c.execute(statement)
+                c.execute("INSERT INTO publication_library VALUES(1,?,?,?)", [
+                    "11111111-1111-4111-8111-111111111111",
+                    "22222222-2222-4222-8222-222222222222", store.PROTOCOL])
+                c.execute("PRAGMA user_version=9")
+            graph_write(con, install_v9)
+        else:
+            raise AssertionError(f"unsupported publication fixture version {version}")
         con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         con.close()
@@ -89,7 +101,7 @@ def install_publication(path):
 @pytest.mark.parametrize("read_only", [True, False])
 def test_qualified_v9_open_preserves_schema_history_and_pending_diagnostics(catalog, read_only):
     from test_publication_store import pending
-    install_publication(catalog)
+    install_publication(catalog, version=9)
     con = _sqlite(catalog, isolation_level=None)
     try:
         pending(con, label="saved")
@@ -155,7 +167,7 @@ def test_invalid_publication_contract_refuses_before_schema_or_journal_writes(ca
 
 
 def test_qualified_v9_explicit_schema_ladder_preserves_floor(catalog):
-    install_publication(catalog)
+    install_publication(catalog, version=9)
     before = snapshot(catalog)
     con = db.migrate_existing_catalog(backup_existing=False)
     try:
@@ -196,11 +208,11 @@ def test_normal_open_preserves_physical_version_schema_and_identity(catalog, ver
 def test_bootstrap_and_provenance_layout_stay_separate_from_reader_ceiling(catalog):
     assert db._SCHEMA_VERSION == 7
     assert snapshot(catalog)[0] == 7
-    assert SUPPORTED_CATALOG_VERSIONS == {7, 8, 9}
-    assert MAX_SUPPORTED_CATALOG_VERSION == 9
+    assert SUPPORTED_CATALOG_VERSIONS == {7, 8, 9, 10}
+    assert MAX_SUPPORTED_CATALOG_VERSION == 10
 
 
-@pytest.mark.parametrize("version", [0, 5, 6, 10, 99])
+@pytest.mark.parametrize("version", [0, 5, 6, 11, 99])
 @pytest.mark.parametrize("read_only", [True, False])
 def test_unsupported_normal_open_is_byte_preserving(catalog, version, read_only):
     stamp(catalog, version)
@@ -225,7 +237,7 @@ def test_explicit_ladder_rejects_future_before_journal_mode_mutation(catalog):
     try:
         con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         con.execute("PRAGMA journal_mode=DELETE")
-        con.execute("PRAGMA user_version=10")
+        con.execute("PRAGMA user_version=11")
         con.commit()
     finally:
         con.close()
@@ -246,7 +258,7 @@ def test_clone_validator_accepts_closed_compatible_versions(catalog, version):
 
 
 def test_clone_validator_refuses_future_layout_lookalike(catalog):
-    stamp(catalog, 10)
+    stamp(catalog, 11)
     con = _sqlite(catalog)
     try:
         with pytest.raises(RuntimeError, match="newer"):
@@ -256,7 +268,7 @@ def test_clone_validator_refuses_future_layout_lookalike(catalog):
 
 
 def test_remigration_refuses_future_snapshot_without_touching_source(catalog, tmp_path):
-    stamp(catalog, 10)
+    stamp(catalog, 11)
     before = catalog.read_bytes()
     with pytest.raises(RuntimeError, match="newer"):
         db._remigrate_snapshot_to_expected(catalog, tmp_path / "remigrate")

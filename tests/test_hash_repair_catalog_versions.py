@@ -15,7 +15,7 @@ def _run(con, resolver, fingerprint=_FP):
     )
 
 
-@pytest.mark.parametrize('version', [0, 2, 6, 10, 11])
+@pytest.mark.parametrize('version', [0, 2, 6, 11, 12])
 @pytest.mark.parametrize('entry', ['explicit', 'audit', 'dry_run', 'apply'])
 def test_unsupported_supplied_connection_refuses_before_any_archive_or_write(tmp_path, version, entry):
     with _catalog(tmp_path) as con:
@@ -95,17 +95,17 @@ def test_version_change_before_write_lock_refuses_without_repair_state(tmp_path)
 
             def execute(self, sql, *args):
                 if sql == 'BEGIN IMMEDIATE':
-                    con.execute('PRAGMA user_version=10')
+                    con.execute('PRAGMA user_version=11')
                 return con.execute(sql, *args)
 
         before = con.execute('SELECT * FROM drives').fetchall()
         resolver = mock.Mock(side_effect=AssertionError('must not observe archive'))
-        with pytest.raises(hash_repair.HashRepairError, match='unsupported catalog version 10'):
+        with pytest.raises(hash_repair.HashRepairError, match='unsupported catalog version 11'):
             _run(ChangedBeforeBegin(), resolver)
         resolver.assert_not_called()
         assert con.execute('SELECT * FROM drives').fetchall() == before
         assert con.execute('SELECT * FROM drive_hash_repair_state').fetchall() == []
-        assert con.execute('PRAGMA user_version').fetchone() == (10,)
+        assert con.execute('PRAGMA user_version').fetchone() == (11,)
         assert not con.in_transaction
 
 
@@ -125,7 +125,7 @@ def test_audit_pins_version_and_rows_across_concurrent_commit(tmp_path, monkeypa
 
         def commit_future():
             writer.execute('BEGIN IMMEDIATE')
-            writer.execute('PRAGMA user_version=10')
+            writer.execute('PRAGMA user_version=11')
             writer.execute("UPDATE drives SET serial='future-serial'")
             writer.execute('COMMIT')
 
@@ -151,7 +151,7 @@ def test_audit_pins_version_and_rows_across_concurrent_commit(tmp_path, monkeypa
             assert report['archived_rows'] == 1
             assert seen == [7, 7]
             assert not con.in_transaction
-            assert con.execute('PRAGMA user_version').fetchone() == (10,)
+            assert con.execute('PRAGMA user_version').fetchone() == (11,)
         finally:
             writer.close()
 

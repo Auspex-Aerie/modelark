@@ -3410,3 +3410,25 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `publication_migrate.py`, tests. No live Fill or live cutover.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/publication_migrate.py, tests/test_publication_migrate.py
 - `related`: DEC-165, DEC-168
+
+### DEC-170: Fence map retirement with durable clone-layout obligations
+- `id`: DEC-170
+- `date`: 2026-09-19
+- `status`: accepted
+- `triggered_by`: accepted annex-payload migration plan section F and the post-PR-86 returning-clone/map-publication increment
+- `decision`: Admit `maintenance` publication only through a retirement-bound ArchivePublisher workset whose catalogued raw source path, committed blob, original hash/size, replacement pointer and catalog transition are all sealed. After `CATALOG_PUBLISHED`, retire only that exact old path through separately journalled `git rm` and path-limited commit actions with crash-state observation. Before any map retirement, create layout-1-to-2 obligations for every registered annex clone under the same operation; require that exact set at map publication. Close only selected, physically verified clone obligations with generation closure. Offline clones remain `PENDING` and the shared tree-change guard intercepts them when they return.
+- `rationale`: Publishing the central retirement tree without first fencing offline clones could make a returning old-layout clone delete its only raw bytes during sync. Command success also cannot distinguish an unstarted retirement, a staged deletion, and a committed deletion after a lost reply. Durable per-clone obligations plus independently observed replay states make both boundaries fail closed.
+- `impact`: Adds the shared source-retirement action/recovery primitive, retirement-aware inventory and map-tree candidates, constrained maintenance admission, and selected/offline clone closure semantics. It does not implement attended conversion of an offline returning clone, enable `returning_clone`, authorize the live catalog cutover, restart Fill, or weaken `publication_migrate`'s live-path refusal.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/archive_publisher.py, modelark/publication_actions.py, modelark/publication_inventory.py, modelark/publication_map.py, modelark/publication_map_files.py, modelark/publication_native.py, modelark/publication_retirement.py, modelark/publication_store.py, tests/test_publication_retirement.py
+- `related`: DEC-157, DEC-166, DEC-169, docs/plans/annex-payload-migration.md section F
+
+### DEC-171: Preserve publication schema v9 and add source retirement in explicit v10
+- `id`: DEC-171
+- `date`: 2026-09-19
+- `status`: accepted
+- `triggered_by`: Local Grok round-2 P1 found that adding `source_retirement` to the already-qualified v9 `publication_actions` CHECK in place would reject existing PR-86 catalogs and could not write the new action into their physical table
+- `decision`: Keep the exact v9 publication DDL as a supported read/write contract for its existing Fill, replica and registration actions. Catalog v10 is the additive publication floor that extends the action CHECK with `source_retirement`. The explicit, graph-authorized schema installer may rebuild only `publication_actions` from a qualified v9 catalog, copying every journal row, checking foreign keys and atomically stamping v10 with the normal planner-revision bump. New v7/v8 publication installs create v10 directly. Readers admit exact v9 and v10 contracts; maintenance and direct source-retirement action admission require v10. No normal connect, reader, Slice path or maintenance entry implicitly upgrades v9.
+- `rationale`: An exact-match schema contract is immutable after release. Mutating the Python definition while retaining `user_version=9` makes valid deployed catalogs look corrupt and leaves their old SQLite CHECK unable to store the new action. A distinct floor makes the capability boundary observable and preserves ordinary v9 operation until an explicit rehearsed upgrade.
+- `impact`: `publication_actions.ACTION_DDL_V9`; `publication_store` v9/v10 validation and explicit v9-to-v10 rebuild; catalog/Slice reader floors; schema compatibility and rollback tests. This does not authorize migration of the live catalog, conversion of the production library, attended returning-clone conversion, or Fill restart.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/reviews/annex-returning-clone-grok-1.md, modelark/publication_actions.py, modelark/publication_store.py, modelark/catalog_versions.py, modelark/slice/catalog.py, modelark/slice/operator.py, tests
+- `related`: DEC-157, DEC-166, DEC-170

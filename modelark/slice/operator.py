@@ -53,7 +53,8 @@ def _archives(catalog_path):
         con.execute("PRAGMA query_only=ON")
         con.execute("BEGIN")
         if con.execute("PRAGMA user_version").fetchone()[0] not in SUPPORTED_CATALOG_VERSIONS:
-            raise d.SliceRefusal("CATALOG_VERSION_UNSUPPORTED", "direct delivery requires catalog v7, v8 or v9")
+            raise d.SliceRefusal(
+                "CATALOG_VERSION_UNSUPPORTED", "direct delivery requires catalog v7, v8, v9 or v10")
         validate_publication_schema(con)
         return tuple(SimpleNamespace(fs_uuid=uuid, serial=serial)
                      for uuid, serial in con.execute("SELECT fs_uuid,serial FROM drives ORDER BY drive_label"))

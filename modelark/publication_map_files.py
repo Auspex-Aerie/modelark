@@ -13,13 +13,14 @@ from uuid import UUID, uuid5
 
 from modelark import publication_actions as actions, publication_map_stage as staging
 from modelark import publication_native as native, publication_store as store, publication_tree as trees
-from modelark.publication_policy import _require, check_committed_pointer
+from modelark.publication_policy import PublicationRefused, _require, check_committed_pointer, relative_path
 
 
 @dataclass(frozen=True)
 class FileSelection:
     file_id: str
     entry: trees.TreeEntry
+    retired_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class FileCandidate:
     new_tree: str
     entries: tuple[trees.TreeEntry, ...]
     delta: tuple[trees.TreeEntry, ...]
+    retired: tuple[str, ...]
     selection_json: str
     action_receipts: tuple[tuple[str, str], ...]
 
@@ -49,7 +51,8 @@ class FileCandidate:
                 "binding_digest": self.binding_digest, "stage_profile_digest": self.stage_profile_digest,
                 "before": self.before.record(), "new_head": self.new_head, "new_tree": self.new_tree,
                 "entries": [asdict(entry) for entry in self.entries],
-                "delta": [asdict(entry) for entry in self.delta], "selection": json.loads(self.selection_json),
+                "delta": [asdict(entry) for entry in self.delta], "retired": list(self.retired),
+                "selection": json.loads(self.selection_json),
                 "action_receipts": [{"action_id": key, "receipt_digest": seal}
                                     for key, seal in self.action_receipts]}
 
@@ -65,6 +68,20 @@ def _snapshot(repository):
 def _index(repository):
     return trees._entries(trees._read(repository.read, "ls-files", "--full-name", "--stage", "-v", "-z"),
                           index=True)
+
+
+def _is_ancestor(repository, ancestor, descendant, *, limit=10_000):
+    """Bounded first-parent proof for the qualified single-parent file branch."""
+    current = trees._oid(descendant)
+    ancestor = trees._oid(ancestor)
+    for _ in range(limit):
+        if current == ancestor:
+            return True
+        _tree, parents = trees._commit(repository.read, current)
+        if len(parents) != 1:
+            return False
+        current = parents[0]
+    raise PublicationRefused("PUBLICATION_GIT_HISTORY_LIMIT")
 
 
 def _receipt_rows(scope, sources, batch_id):
@@ -97,7 +114,7 @@ def _source_proofs(source, rows):
     current = _snapshot(repository)
     _require(current.head_oid == source.head_oid, "PUBLICATION_MAP_FILE_SOURCE_CHANGED")
     current_entries = {entry.path: entry for entry in current.entries}
-    selected = []
+    selected, dependencies = [], []
     for item in source.files:
         file_digest, intent, committed, catalog, seal = rows[item.file_id]
         entry = item.entry
@@ -136,11 +153,42 @@ def _source_proofs(source, rows):
         blob = trees._object(repository.read, "blob", entry.oid, limit=64 * 1024)
         check_committed_pointer(mode=entry.mode, blob=blob, stored_path=entry.path,
                                 key=intent["annex_key"], qualified_object_path=object_path)
+        retirement = None
+        if item.retired_path is not None:
+            retired = relative_path(item.retired_path).as_posix()
+            _require(retired != entry.path and intent.get("retired_path") == retired
+                     and retired not in current_entries, "PUBLICATION_MAP_FILE_RETIREMENT_CHANGED")
+            identifier = str(uuid5(UUID(item.file_id), "source-retirement"))
+            record = actions.read(repository.scope, identifier)
+            receipt = record.get("receipt", {}).get("receipt", {})
+            retirement = record.get("intent", {}).get("retirement", {})
+            retired_before = trees.TreeSnapshot.from_record(retirement.get("before"))
+            retired_after = trees.TreeSnapshot.from_record(receipt.get("after"))
+            expected_after = tuple(item for item in retired_before.entries if item.path != retired)
+            _require(record["kind"] == "source_retirement" and record["status"] == "VERIFIED"
+                     and receipt.get("version") == 1 and receipt.get("kind") == "retired-source"
+                     and receipt.get("file_id") == item.file_id and receipt.get("path") == retired
+                     and retirement.get("file_id") == item.file_id and retirement.get("path") == retired
+                     and any(item.path == retired for item in retired_before.entries)
+                     and retired_after.entries == expected_after
+                     and retired_after.parents == (retired_before.head_oid,)
+                     and retired_after.head_ref == retired_before.head_ref == current.head_ref
+                     and retired_after.root_identity == retired_before.root_identity == current.root_identity
+                     and retired_after.mount_id == retired_before.mount_id == current.mount_id
+                     and trees._commit(repository.read, retired_after.head_oid)
+                     == (retired_after.tree_oid, retired_after.parents)
+                     and _is_ancestor(repository, retired_after.head_oid, current.head_oid),
+                     "PUBLICATION_MAP_FILE_RETIREMENT_CHANGED")
+            retirement = {"path": retired, "action_id": identifier,
+                          "receipt_digest": record["receipt_digest"],
+                          "after_head": retired_after.head_oid}
+            dependencies.append((identifier, record["receipt_digest"]))
         selected.append({"file_id": item.file_id, "file_digest": file_digest, "catalog_receipt_digest": seal,
                          "entry": asdict(entry), "annex_key": intent["annex_key"],
-                         "source_profile_digest": repository.profile.digest, "source_head": current.head_oid})
+                         "source_profile_digest": repository.profile.digest, "source_head": current.head_oid,
+                         "retirement": retirement})
     _require(_snapshot(repository) == current, "PUBLICATION_MAP_FILE_SOURCE_CHANGED")
-    return current, selected
+    return current, selected, dependencies
 
 
 def candidate(stage: native.QualifiedRepository, map_repository: native.QualifiedRepository, *,
@@ -170,6 +218,7 @@ def candidate(stage: native.QualifiedRepository, map_repository: native.Qualifie
         _require(source.repository.scope is scope and source.repository.drive_label in scope.identities
                  and source.repository.drive_label not in labels and type(source.files) is tuple
                  and bool(source.files) and all(type(item) is FileSelection and type(item.entry) is trees.TreeEntry
+                                               and (item.retired_path is None or type(item.retired_path) is str)
                                                for item in source.files),
                  "PUBLICATION_MAP_FILE_SOURCE_UNQUALIFIED")
         labels.add(source.repository.drive_label)
@@ -186,16 +235,24 @@ def candidate(stage: native.QualifiedRepository, map_repository: native.Qualifie
     initial_index = _index(stage)
     stage_head = staging._head(stage)
     staging._no_payload(stage)
-    selection, observations = [], []
+    selection, observations, source_dependencies = [], [], []
     for source in sources:
-        observation, selected = _source_proofs(source, rows)
+        observation, selected, dependencies = _source_proofs(source, rows)
         observations.append(observation)
         selection.extend(selected)
+        source_dependencies.extend(dependencies)
     selection.sort(key=lambda item: item["file_id"])
     selected_entries = [item.entry for source in sources for item in source.files]
     _require(len({entry.path for entry in selected_entries}) == len(selected_entries),
              "PUBLICATION_MAP_FILE_PATH_COLLISION")
     union = {entry.path: entry for entry in before.entries}
+    retired = tuple(sorted(item.retired_path for source in sources for item in source.files
+                           if item.retired_path is not None))
+    _require(len(retired) == len(set(retired)) and not set(retired) & {entry.path for entry in selected_entries},
+             "PUBLICATION_MAP_FILE_PATH_COLLISION")
+    for path in retired:
+        _require(path in union, "PUBLICATION_MAP_FILE_RETIREMENT_MISSING")
+        del union[path]
     delta = []
     for entry in sorted(selected_entries):
         existing = union.get(entry.path)
@@ -209,7 +266,7 @@ def candidate(stage: native.QualifiedRepository, map_repository: native.Qualifie
     paths = set(union)
     _require(not any("/".join(path.split("/")[:index]) in paths for path in paths
                      for index in range(1, len(path.split("/")))), "PUBLICATION_MAP_FILE_PATH_CONFLICT")
-    receipts = []
+    receipts = list(source_dependencies)
     selection_seal = store.digest(selection)
     profile = stage.profile.record()
     base = {"expected_phase": {"entity": "batch", "id": batch_id, "phase": "PREPARED"},
@@ -238,10 +295,11 @@ def candidate(stage: native.QualifiedRepository, map_repository: native.Qualifie
                      "PUBLICATION_MAP_FILE_CONTINUATION_MISMATCH")
             existing_actions[identifier] = record
     expected_actions = {action_id("fetch:" + source.repository.profile.annex_uuid) for source in sources}
-    if delta:
+    changed = bool(delta or retired)
+    if changed:
         expected_actions.update(action_id(step) for step in ("index", "tree", "commit"))
     _require(set(existing_actions) <= expected_actions, "PUBLICATION_MAP_FILE_CONTINUATION_MISMATCH")
-    if delta and initial_index == expected:
+    if changed and initial_index == expected:
         _require(action_id("index") in existing_actions, "PUBLICATION_MAP_FILE_INDEX_INTENT_MISSING")
 
     def unchanged():
@@ -294,8 +352,10 @@ def candidate(stage: native.QualifiedRepository, map_repository: native.Qualifie
         verified(record, {"ref": ref, "head": source.head_oid, "selection_digest": selection_seal})
 
     new_tree, new_head = before.tree_oid, before.head_oid
-    if delta:
-        stdin = b"".join(f"{entry.mode} {entry.oid}\t{entry.path}".encode() + b"\0" for entry in delta)
+    if changed:
+        removals = b"".join(f"0 {'0' * 40}\t{path}".encode() + b"\0" for path in retired)
+        additions = b"".join(f"{entry.mode} {entry.oid}\t{entry.path}".encode() + b"\0" for entry in delta)
+        stdin = removals + additions
         _require(len(stdin) <= 1024 * 1024, "PUBLICATION_MAP_FILE_DELTA_LIMIT")
         command = ("update-index", "-z", "--index-info")
         record = prepare("index", command, stdin)
@@ -328,4 +388,5 @@ def candidate(stage: native.QualifiedRepository, map_repository: native.Qualifie
     unchanged()
     _require(_index(stage) == expected, "PUBLICATION_MAP_FILE_STAGE_INDEX_MISMATCH")
     return FileCandidate(scope.operation_id, batch_id, operation_digest, stage.profile.digest,
-                         before, new_head, new_tree, expected, tuple(delta), store.canonical(selection), tuple(receipts))
+                         before, new_head, new_tree, expected, tuple(delta), retired,
+                         store.canonical(selection), tuple(receipts))
