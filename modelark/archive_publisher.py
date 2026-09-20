@@ -84,6 +84,9 @@ class ArchivePublisher:
             raise PublicationRefused("PUBLICATION_RETIREMENT_SET_INVALID")
         retired_paths = {request: relative_path(path).as_posix()
                          for request, path in retired_paths.items()}
+        retirement_claims = [(request.drive_label, path) for request, path in retired_paths.items()]
+        if len(retirement_claims) != len(set(retirement_claims)):
+            raise PublicationRefused("PUBLICATION_RETIREMENT_PATH_COLLISION")
         self._connection, self._requests, self._kind = con, tuple(sorted(requests)), kind
         self._retired_paths = retired_paths
         self._session_id, self._fencing_token = session_id, fencing_token

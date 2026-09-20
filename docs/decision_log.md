@@ -3443,3 +3443,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Retirement-aware inventory normalization, map candidate/final-tree deduplication, admission-time legacy census, compatibility-gated clone closure, and nested/partial/two-drive end-to-end regressions. This does not implement attended closure of a pending returning clone or authorize live migration.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/reviews/annex-returning-clone-grok-1.md, modelark/archive_publisher.py, modelark/publication_inventory.py, modelark/publication_map_files.py, modelark/publication_retirement.py, modelark/publication_store.py, tests/test_publication_retirement.py
 - `related`: DEC-170, DEC-171, docs/plans/annex-payload-migration.md section F
+
+### DEC-173: Retirement is single-owner admission plus compare-and-delete
+- `id`: DEC-173
+- `date`: 2026-09-19
+- `status`: accepted
+- `triggered_by`: Codex cloud round-2 review of PR 88 found that two file requests could claim one physical legacy path on the same drive and that central-map retirement deleted a path without comparing its entry to the source clone's sealed before-image
+- `decision`: A maintenance operation admits at most one request for each `(drive_label, retired_path)`; ambiguous same-clone ownership refuses before operation entry or durable mutation. Every central-map retirement carries the exact old `TreeEntry` recovered from the verified source-retirement before-snapshot and removes the path only when the map entry is byte-for-byte that entry. A path already removed by an earlier drive batch remains an idempotent success only when the exact replacement entry is already present.
+- `rationale`: A pathname identifies where to attempt a transition, not which object the operation owns. Multiple file receipts cannot independently own one physical deletion, and evidence from a source clone cannot authorize deletion of a divergent central-map object. Unique admission plus compare-and-delete binds destructive work to both one owner and its sealed before-image.
+- `impact`: Maintenance request validation, map-candidate retirement evidence, and regressions for duplicate same-drive claims and divergent map entries. This does not authorize live migration, returning-clone closure, or Fill restart.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/reviews/annex-returning-clone-grok-1.md, modelark/archive_publisher.py, modelark/publication_map_files.py, tests/test_publication_retirement.py
+- `related`: DEC-169, DEC-170, DEC-172

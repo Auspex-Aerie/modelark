@@ -165,11 +165,12 @@ def _source_proofs(source, rows):
             retired_before = trees.TreeSnapshot.from_record(retirement.get("before"))
             retired_after = trees.TreeSnapshot.from_record(receipt.get("after"))
             expected_after = tuple(item for item in retired_before.entries if item.path != retired)
+            retired_entries = tuple(item for item in retired_before.entries if item.path == retired)
             _require(record["kind"] == "source_retirement" and record["status"] == "VERIFIED"
                      and receipt.get("version") == 1 and receipt.get("kind") == "retired-source"
                      and receipt.get("file_id") == item.file_id and receipt.get("path") == retired
                      and retirement.get("file_id") == item.file_id and retirement.get("path") == retired
-                     and any(item.path == retired for item in retired_before.entries)
+                     and len(retired_entries) == 1
                      and retired_after.entries == expected_after
                      and retired_after.parents == (retired_before.head_oid,)
                      and retired_after.head_ref == retired_before.head_ref == current.head_ref
@@ -179,7 +180,7 @@ def _source_proofs(source, rows):
                      == (retired_after.tree_oid, retired_after.parents)
                      and _is_ancestor(repository, retired_after.head_oid, current.head_oid),
                      "PUBLICATION_MAP_FILE_RETIREMENT_CHANGED")
-            retirement = {"path": retired, "action_id": identifier,
+            retirement = {"path": retired, "entry": asdict(retired_entries[0]), "action_id": identifier,
                           "receipt_digest": record["receipt_digest"],
                           "after_head": retired_after.head_oid}
             dependencies.append((identifier, record["receipt_digest"]))
@@ -249,17 +250,24 @@ def candidate(stage: native.QualifiedRepository, map_repository: native.Qualifie
             existing = selected_by_path.get(item.entry.path)
             _require(existing is None or existing == item.entry, "PUBLICATION_MAP_FILE_PATH_COLLISION")
             selected_by_path[item.entry.path] = item.entry
-            if item.retired_path is not None:
-                existing = retired_by_path.get(item.retired_path)
-                _require(existing is None or existing == item.entry, "PUBLICATION_MAP_FILE_PATH_COLLISION")
-                retired_by_path[item.retired_path] = item.entry
+    for selected in selection:
+        retirement = selected["retirement"]
+        if retirement is not None:
+            path = retirement["path"]
+            replacement = trees.TreeEntry(**selected["entry"])
+            retired_entry = trees.TreeEntry(**retirement["entry"])
+            existing = retired_by_path.get(path)
+            _require(existing is None or existing == (replacement, retired_entry),
+                     "PUBLICATION_MAP_FILE_PATH_COLLISION")
+            retired_by_path[path] = (replacement, retired_entry)
     selected_entries = list(selected_by_path.values())
     union = {entry.path: entry for entry in before.entries}
     _require(not set(retired_by_path) & set(selected_by_path),
              "PUBLICATION_MAP_FILE_PATH_COLLISION")
     retired = []
-    for path, replacement in sorted(retired_by_path.items()):
+    for path, (replacement, retired_entry) in sorted(retired_by_path.items()):
         if path in union:
+            _require(union[path] == retired_entry, "PUBLICATION_MAP_FILE_RETIREMENT_CHANGED")
             del union[path]
             retired.append(path)
         else:

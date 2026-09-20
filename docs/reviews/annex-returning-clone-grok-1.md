@@ -90,3 +90,24 @@ cloud re-review is required on the correction commit. Final correction verificat
 the focused retirement suite passed **8 tests** in 6m33s and the complete scoped
 publication regression passed **123 tests** in 23m30s; Ruff and `git diff --check`
 passed.
+
+## PR 88 — Codex cloud round 2/3
+
+Outcome: **NOT ACCEPT** — one P1 and one P2. Codex found that the map candidate
+removed a legacy path because its name existed without comparing the map entry
+to the source retirement's sealed old entry. It also found that two distinct
+same-drive requests could claim one physical legacy path, allowing durable file
+and catalog work before the second per-file retirement discovered the collision.
+
+These findings share an ownership-proof boundary, recorded as DEC-173. A path is
+not proof of the object owned at that path. Admission now requires one request per
+`(drive_label, retired_path)`, before entering the operation. The verified source
+retirement before-snapshot now supplies the exact old `TreeEntry`; map publication
+uses compare-and-delete and refuses a divergent object. Cross-drive idempotence
+from DEC-172 remains valid only after the first exact comparison and only when the
+exact replacement is already present. New regressions cover both cases. Codex
+cloud round 3 re-review is required on the correction commit. The complete
+retirement end-to-end file passes **10 tests** in 7m09s; the two new cases plus
+the cross-drive deduplication regression pass **3 tests** in 2m10s. Ruff and
+`git diff --check` pass. The neighboring ArchivePublisher and map-candidate
+normal/conflict/resume matrix also passes **18 tests** in 7m47s.

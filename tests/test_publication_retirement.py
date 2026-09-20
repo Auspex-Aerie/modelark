@@ -117,6 +117,33 @@ def test_maintenance_publisher_hard_refuses_live_catalog(con, fleet, monkeypatch
     assert con.execute("SELECT count(*) FROM publication_operations").fetchone() == (0,)
 
 
+def test_maintenance_rejects_duplicate_drive_retirement_path_before_entry(con):
+    first = publisher.FileRequest("org/a", ".gitattributes", "d0")
+    second = publisher.FileRequest("org/a", ".gitignore", "d0")
+    retired = {first: "org/a/shared", second: "org/a/shared"}
+    with pytest.raises(PublicationRefused, match="RETIREMENT_PATH_COLLISION"):
+        publisher.ArchivePublisher(con, [first, second], kind="maintenance", retired_paths=retired)
+    assert con.execute("SELECT count(*) FROM publication_operations").fetchone() == (0,)
+
+
+def test_map_retirement_requires_exact_old_source_entry(con, fleet):
+    archive, map_root, git = fleet
+    data, digest, old = _legacy(con, fleet)
+    (map_root / old).write_bytes(b"independently repaired map value\n")
+    git("-C", str(map_root), "add", "--", old)
+    git("-C", str(map_root), "commit", "-qm", "diverge central map legacy entry")
+    request = publisher.FileRequest("org/a", ".gitattributes", "d0")
+    with pytest.raises(PublicationRefused, match="ENCLOSING_COMPLETION_REQUIRED"):
+        with publisher.ArchivePublisher(
+                con, [request], kind="maintenance", retired_paths={request: old}) as operation:
+            operation.publish(request, archive / old, original_bytes=len(data), original_sha256=digest,
+                              stored_sha256=digest, compressed=False)
+            operation.retire(request)
+            with pytest.raises(PublicationRefused, match="MAP_FILE_RETIREMENT_CHANGED"):
+                operation.finish()
+    assert (map_root / old).read_bytes() == b"independently repaired map value\n"
+
+
 def test_same_drive_two_file_retirements_compose_one_map_and_inventory_chain(con, fleet):
     archive, map_root, git = fleet
     selected = []

@@ -295,7 +295,13 @@ Next remaining work:
    and partial work closing a clone-wide obligation. DEC-172 implements the
    architectural correction. The three direct regressions pass; the full scoped
    publication rerun passes **123 tests** in 23m30s; the focused retirement suite
-   passes **8 tests** in 6m33s. Codex cloud round-2 review is pending.
+   passes **8 tests** in 6m33s. Codex cloud round 2/3 then returned one P1 and one
+   P2 sharing an ownership-proof boundary: a central-map delete lacked an exact
+   old-entry comparison, and two same-drive requests could claim one physical
+   retirement path. DEC-173 adds admission uniqueness and compare-and-delete;
+   the retirement end-to-end file passes **10 tests** in 7m09s and the direct
+   three-case regression passes in 2m10s. The adjacent publisher/map-candidate
+   matrix passes **18 tests** in 7m47s. Codex cloud round 3/3 is next.
 2. Attended returning-clone inspect/apply/closure remains: capture the returned
    clone's actual old refs/bytes, convert claimed or unclaimed materialized paths
    without inventing catalog rows, then close only that clone's pending obligation.
