@@ -93,11 +93,14 @@ passed.
 
 ## PR 88 — Codex cloud round 2/3
 
-Outcome: **NOT ACCEPT** — one P1 and one P2. Codex found that the map candidate
+Outcome: **NOT ACCEPT** — two P1s and one P2. Codex found that the map candidate
 removed a legacy path because its name existed without comparing the map entry
 to the source retirement's sealed old entry. It also found that two distinct
 same-drive requests could claim one physical legacy path, allowing durable file
 and catalog work before the second per-file retirement discovered the collision.
+The second P1 was reported in the review body rather than an inline comment: a
+nested retired file changes metadata on a surviving parent directory, but the
+inventory treated that parent as untouched unless it also parented the replacement.
 
 These findings share an ownership-proof boundary, recorded as DEC-173. A path is
 not proof of the object owned at that path. Admission now requires one request per
@@ -105,9 +108,14 @@ not proof of the object owned at that path. Admission now requires one request p
 retirement before-snapshot now supplies the exact old `TreeEntry`; map publication
 uses compare-and-delete and refuses a divergent object. Cross-drive idempotence
 from DEC-172 remains valid only after the first exact comparison and only when the
-exact replacement is already present. New regressions cover both cases. Codex
-cloud round 3 re-review is required on the correction commit. The complete
-retirement end-to-end file passes **10 tests** in 7m09s; the two new cases plus
-the cross-drive deduplication regression pass **3 tests** in 2m10s. Ruff and
+exact replacement is already present. New regressions cover both ownership cases.
+The directory finding is the DEC-172 scope rule applied to the full mutation
+footprint and is recorded explicitly in DEC-174: ancestors of both additions and
+removals are touched, but surviving directories must keep device, inode and mode.
+Codex cloud round 3 re-review is required on the complete correction commit. The
+complete retirement end-to-end file passes **11 tests** in 8m12s; the two ownership
+cases plus the cross-drive deduplication regression pass **3 tests** in 2m10s. Ruff and
 `git diff --check` pass. The neighboring ArchivePublisher and map-candidate
 normal/conflict/resume matrix also passes **18 tests** in 7m47s.
+The new surviving-parent case plus the complete neighboring inventory suite pass
+**23 tests** in 5m47s, including unrelated-drift and directory-replacement negatives.

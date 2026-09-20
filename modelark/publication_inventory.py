@@ -387,6 +387,7 @@ def verify(repository, baseline_record, *, file_rows) -> InventoryProof:
         path for path in retired_ancestors
         if path in old_nodes and old_nodes[path]["kind"] == "directory" and path not in new_nodes
     }
+    changed_directories = parents | retired_ancestors
     _require(set(new_nodes) == (set(old_nodes) - retired - vanished_directories) | set(touched) | parents,
              "PUBLICATION_INVENTORY_UNEXPLAINED_PATHS")
     for path, before in old_nodes.items():
@@ -395,7 +396,7 @@ def verify(repository, baseline_record, *, file_rows) -> InventoryProof:
         actual = new_nodes[path]
         if path in touched:
             continue
-        if before["kind"] == "directory" and path in parents:
+        if before["kind"] == "directory" and path in changed_directories:
             _require(actual["kind"] == "directory" and actual["identity"][:3] == before["identity"][:3],
                      "PUBLICATION_INVENTORY_DIRECTORY_REPLACED")
         else:

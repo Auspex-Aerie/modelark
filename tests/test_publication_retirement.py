@@ -201,6 +201,28 @@ def test_nested_last_raw_file_may_remove_its_empty_legacy_parent(con, fleet):
     assert (archive / mapped).is_symlink() and (map_root / mapped).is_symlink()
 
 
+def test_nested_retirement_allows_metadata_change_on_surviving_parent(con, fleet):
+    archive, map_root, git = fleet
+    name = "nested/.gitignore"
+    data, digest, old = _legacy(con, fleet, name=name, data=b"*.tmp\n")
+    sibling = "org/a/nested/operator-note.txt"
+    for root in (archive, map_root):
+        (root / sibling).write_text("preserve me\n")
+        git("-C", str(root), "add", "--", sibling)
+        git("-C", str(root), "commit", "-qm", "add surviving legacy sibling")
+    request = publisher.FileRequest("org/a", name, "d0")
+    with publisher.ArchivePublisher(
+            con, [request], kind="maintenance", retired_paths={request: old}) as operation:
+        operation.publish(request, archive / old, original_bytes=len(data), original_sha256=digest,
+                          stored_sha256=digest, compressed=False)
+        operation.retire(request)
+        operation.finish()
+    mapped = "org/a/" + payload_relative_path(name)
+    assert (archive / sibling).read_text() == "preserve me\n"
+    assert (map_root / sibling).read_text() == "preserve me\n"
+    assert (archive / mapped).is_symlink() and (map_root / mapped).is_symlink()
+
+
 def test_partial_drive_workset_closes_operation_but_not_layout_obligation(con, fleet):
     archive, map_root, _ = fleet
     first = _legacy(con, fleet, name=".gitattributes")

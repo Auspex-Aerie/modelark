@@ -3454,3 +3454,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: Maintenance request validation, map-candidate retirement evidence, and regressions for duplicate same-drive claims and divergent map entries. This does not authorize live migration, returning-clone closure, or Fill restart.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/reviews/annex-returning-clone-grok-1.md, modelark/archive_publisher.py, modelark/publication_map_files.py, tests/test_publication_retirement.py
 - `related`: DEC-169, DEC-170, DEC-172
+
+### DEC-174: Inventory mutation footprint includes surviving removal ancestors
+- `id`: DEC-174
+- `date`: 2026-09-19
+- `status`: accepted
+- `triggered_by`: Codex cloud round-2 review body on PR 88 identified that removing a nested source changes metadata on a surviving parent directory even when that directory is not an ancestor of the replacement payload path
+- `decision`: Generation inventory treats ancestors of both added paths and retired paths as operation-touched directories. A vanished retired ancestor is allowed only when it was an old directory and is actually absent. A surviving touched ancestor must remain a directory with the same device, inode and mode; only mutable directory metadata such as size and timestamps may change. All unrelated namespace nodes still require full baseline identity equality.
+- `rationale`: Directory metadata is changed by entry removal as well as entry addition. Requiring full stat equality for a surviving removal parent rejects the operation's own legitimate mutation after durable work, while ignoring the directory entirely would permit replacement or mount substitution. The stable identity prefix proves continuity without pretending timestamps are immutable.
+- `impact`: Retirement-aware inventory closure and a nested-source-with-sibling end-to-end regression. This does not broaden file mutation, ignore unrelated drift, authorize live migration, or close a pending returning clone.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/reviews/annex-returning-clone-grok-1.md, modelark/publication_inventory.py, tests/test_publication_retirement.py
+- `related`: DEC-170, DEC-172, DEC-173
