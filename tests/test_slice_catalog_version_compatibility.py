@@ -15,7 +15,9 @@ from test_slice_catalog import seed
 from test_slice_domain import spec
 
 
-def test_qualified_v9_preserves_logical_facts_but_pending_source_stays_blocked(tmp_path, monkeypatch):
+@pytest.mark.parametrize("publication_version", [9, 10])
+def test_qualified_publication_floor_preserves_logical_facts_but_pending_source_stays_blocked(
+        tmp_path, monkeypatch, publication_version):
     from test_catalog_reader_versions import install_publication
     from test_publication_store import pending
     from modelark.slice.operator import _archives
@@ -26,7 +28,7 @@ def test_qualified_v9_preserves_logical_facts_but_pending_source_stays_blocked(t
         before = catalog.read_catalog(path, spec(domain))
         proposal = domain.preview(spec(domain), before)
         fleet = _archives(path)
-        install_publication(path)
+        install_publication(path, version=publication_version)
         assert catalog.read_catalog(path, spec(domain)) == before
         assert domain.preview(spec(domain), catalog.read_catalog(path, spec(domain))) == proposal
         assert _archives(path) == fleet
@@ -131,7 +133,7 @@ def test_physical_v8_is_not_a_new_logical_snapshot_layout(tmp_path):
         con.close()
 
 
-@pytest.mark.parametrize("physical_version", [0, 1, 6, 10, 99])
+@pytest.mark.parametrize("physical_version", [0, 1, 6, 11, 99])
 def test_unsupported_physical_versions_refuse_without_touching_catalog(physical_version, tmp_path):
     path = tmp_path / "catalog.sqlite"
     con = seed(path, domain)

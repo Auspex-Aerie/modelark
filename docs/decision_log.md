@@ -3410,3 +3410,58 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `publication_migrate.py`, tests. No live Fill or live cutover.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/publication_migrate.py, tests/test_publication_migrate.py
 - `related`: DEC-165, DEC-168
+
+### DEC-170: Fence map retirement with durable clone-layout obligations
+- `id`: DEC-170
+- `date`: 2026-09-19
+- `status`: accepted
+- `triggered_by`: accepted annex-payload migration plan section F and the post-PR-86 returning-clone/map-publication increment
+- `decision`: Admit `maintenance` publication only through a retirement-bound ArchivePublisher workset whose catalogued raw source path, committed blob, original hash/size, replacement pointer and catalog transition are all sealed. After `CATALOG_PUBLISHED`, retire only that exact old path through separately journalled `git rm` and path-limited commit actions with crash-state observation. Before any map retirement, create layout-1-to-2 obligations for every registered annex clone under the same operation; require that exact set at map publication. Close only selected, physically verified clone obligations with generation closure. Offline clones remain `PENDING` and the shared tree-change guard intercepts them when they return.
+- `rationale`: Publishing the central retirement tree without first fencing offline clones could make a returning old-layout clone delete its only raw bytes during sync. Command success also cannot distinguish an unstarted retirement, a staged deletion, and a committed deletion after a lost reply. Durable per-clone obligations plus independently observed replay states make both boundaries fail closed.
+- `impact`: Adds the shared source-retirement action/recovery primitive, retirement-aware inventory and map-tree candidates, constrained maintenance admission, and selected/offline clone closure semantics. It does not implement attended conversion of an offline returning clone, enable `returning_clone`, authorize the live catalog cutover, restart Fill, or weaken `publication_migrate`'s live-path refusal.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, modelark/archive_publisher.py, modelark/publication_actions.py, modelark/publication_inventory.py, modelark/publication_map.py, modelark/publication_map_files.py, modelark/publication_native.py, modelark/publication_retirement.py, modelark/publication_store.py, tests/test_publication_retirement.py
+- `related`: DEC-157, DEC-166, DEC-169, docs/plans/annex-payload-migration.md section F
+
+### DEC-171: Preserve publication schema v9 and add source retirement in explicit v10
+- `id`: DEC-171
+- `date`: 2026-09-19
+- `status`: accepted
+- `triggered_by`: Local Grok round-2 P1 found that adding `source_retirement` to the already-qualified v9 `publication_actions` CHECK in place would reject existing PR-86 catalogs and could not write the new action into their physical table
+- `decision`: Keep the exact v9 publication DDL as a supported read/write contract for its existing Fill, replica and registration actions. Catalog v10 is the additive publication floor that extends the action CHECK with `source_retirement`. The explicit, graph-authorized schema installer may rebuild only `publication_actions` from a qualified v9 catalog, copying every journal row, checking foreign keys and atomically stamping v10 with the normal planner-revision bump. New v7/v8 publication installs create v10 directly. Readers admit exact v9 and v10 contracts; maintenance and direct source-retirement action admission require v10. No normal connect, reader, Slice path or maintenance entry implicitly upgrades v9.
+- `rationale`: An exact-match schema contract is immutable after release. Mutating the Python definition while retaining `user_version=9` makes valid deployed catalogs look corrupt and leaves their old SQLite CHECK unable to store the new action. A distinct floor makes the capability boundary observable and preserves ordinary v9 operation until an explicit rehearsed upgrade.
+- `impact`: `publication_actions.ACTION_DDL_V9`; `publication_store` v9/v10 validation and explicit v9-to-v10 rebuild; catalog/Slice reader floors; schema compatibility and rollback tests. This does not authorize migration of the live catalog, conversion of the production library, attended returning-clone conversion, or Fill restart.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/reviews/annex-returning-clone-grok-1.md, modelark/publication_actions.py, modelark/publication_store.py, modelark/catalog_versions.py, modelark/slice/catalog.py, modelark/slice/operator.py, tests
+- `related`: DEC-157, DEC-166, DEC-170
+
+### DEC-172: Bind retirement completion to file, map and clone scope separately
+- `id`: DEC-172
+- `date`: 2026-09-19
+- `status`: accepted
+- `triggered_by`: Codex cloud round-1 review of PR 88 found three P1s: empty retired parent directories failed inventory, a shared old map path was retired once per drive batch, and a partial file workset closed a whole-clone layout obligation
+- `decision`: Treat raw-source retirement, central-map retirement and clone compatibility as three distinct completion scopes. Inventory may remove only the exact retired file and its actually vanished empty ancestor directories. Central map retirement is an idempotent shared delta: later drive batches accept an already-removed old path only when the exact replacement entry is already present. A selected clone's layout obligation closes only when its frozen census and final inventory prove that no catalogued raw claims or unclaimed model-namespace paths remain; otherwise the enclosing file operation may close but the clone obligation stays `PENDING` and continues blocking tree changes.
+- `rationale`: A file receipt proves one file transition, not exclusive ownership of a shared map path or exhaustive conversion of a drive. Matching the scope of each completion claim to independently observed evidence prevents partial work from being promoted into drive-wide compatibility while allowing exact multi-drive deduplication and harmless filesystem directory cleanup.
+- `impact`: Retirement-aware inventory normalization, map candidate/final-tree deduplication, admission-time legacy census, compatibility-gated clone closure, and nested/partial/two-drive end-to-end regressions. This does not implement attended closure of a pending returning clone or authorize live migration.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/reviews/annex-returning-clone-grok-1.md, modelark/archive_publisher.py, modelark/publication_inventory.py, modelark/publication_map_files.py, modelark/publication_retirement.py, modelark/publication_store.py, tests/test_publication_retirement.py
+- `related`: DEC-170, DEC-171, docs/plans/annex-payload-migration.md section F
+
+### DEC-173: Retirement is single-owner admission plus compare-and-delete
+- `id`: DEC-173
+- `date`: 2026-09-19
+- `status`: accepted
+- `triggered_by`: Codex cloud round-2 review of PR 88 found that two file requests could claim one physical legacy path on the same drive and that central-map retirement deleted a path without comparing its entry to the source clone's sealed before-image
+- `decision`: A maintenance operation admits at most one request for each `(drive_label, retired_path)`; ambiguous same-clone ownership refuses before operation entry or durable mutation. Every central-map retirement carries the exact old `TreeEntry` recovered from the verified source-retirement before-snapshot and removes the path only when the map entry is byte-for-byte that entry. A path already removed by an earlier drive batch remains an idempotent success only when the exact replacement entry is already present.
+- `rationale`: A pathname identifies where to attempt a transition, not which object the operation owns. Multiple file receipts cannot independently own one physical deletion, and evidence from a source clone cannot authorize deletion of a divergent central-map object. Unique admission plus compare-and-delete binds destructive work to both one owner and its sealed before-image.
+- `impact`: Maintenance request validation, map-candidate retirement evidence, and regressions for duplicate same-drive claims and divergent map entries. This does not authorize live migration, returning-clone closure, or Fill restart.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/reviews/annex-returning-clone-grok-1.md, modelark/archive_publisher.py, modelark/publication_map_files.py, tests/test_publication_retirement.py
+- `related`: DEC-169, DEC-170, DEC-172
+
+### DEC-174: Inventory mutation footprint includes surviving removal ancestors
+- `id`: DEC-174
+- `date`: 2026-09-19
+- `status`: accepted
+- `triggered_by`: Codex cloud round-2 review body on PR 88 identified that removing a nested source changes metadata on a surviving parent directory even when that directory is not an ancestor of the replacement payload path
+- `decision`: Generation inventory treats ancestors of both added paths and retired paths as operation-touched directories. A vanished retired ancestor is allowed only when it was an old directory and is actually absent. A surviving touched ancestor must remain a directory with the same device, inode and mode; only mutable directory metadata such as size and timestamps may change. All unrelated namespace nodes still require full baseline identity equality.
+- `rationale`: Directory metadata is changed by entry removal as well as entry addition. Requiring full stat equality for a surviving removal parent rejects the operation's own legitimate mutation after durable work, while ignoring the directory entirely would permit replacement or mount substitution. The stable identity prefix proves continuity without pretending timestamps are immutable.
+- `impact`: Retirement-aware inventory closure and a nested-source-with-sibling end-to-end regression. This does not broaden file mutation, ignore unrelated drift, authorize live migration, or close a pending returning clone.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/reviews/annex-returning-clone-grok-1.md, modelark/publication_inventory.py, tests/test_publication_retirement.py
+- `related`: DEC-170, DEC-172, DEC-173

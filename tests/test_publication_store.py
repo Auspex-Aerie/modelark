@@ -27,6 +27,15 @@ def install(con):
     graph_write(con, lambda c: store._install_schema(c, library_id=LIBRARY, map_uuid=MAP))
 
 
+def install_v9(con):
+    def apply(c):
+        for statement in store.DDL_V9:
+            c.execute(statement)
+        c.execute("INSERT INTO publication_library VALUES(1,?,?,?)", [LIBRARY, MAP, store.PROTOCOL])
+        c.execute("PRAGMA user_version=9")
+    graph_write(con, apply)
+
+
 def pending(con, label="d0", operation="fixture-op"):
     # Direct fixture construction only. Production prepare/closure must use the
     # authority-bound publisher, not these deliberately minimal synthetic rows.
@@ -72,12 +81,47 @@ def test_explicit_additive_floor_preserves_history_and_bumps_once(con, version):
     revision = con.execute("SELECT planner_revision FROM planner_state").fetchone()[0]
     install(con)
     assert store.library(con) == (LIBRARY, MAP)
-    assert con.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert con.execute("PRAGMA user_version").fetchone()[0] == 10
     assert con.execute("SELECT * FROM models").fetchall() == old
     assert con.execute("SELECT planner_revision FROM planner_state").fetchone()[0] == revision + 1
     store.require_clear(con)
     # Reader admission is integrated; this is not a conversion implementation.
-    assert MAX_SUPPORTED_CATALOG_VERSION == 9
+    assert MAX_SUPPORTED_CATALOG_VERSION == 10
+
+
+def test_qualified_v9_opens_and_explicit_v10_migration_preserves_action_history(con):
+    install_v9(con)
+    pending(con)
+    con.execute(
+        "INSERT INTO publication_actions(operation_id,action_id,kind,intent_json,intent_digest,status) "
+        "VALUES('fixture-op','old-action','annex_add','{}',?,'PREPARED')", ["a" * 64])
+    before_action = con.execute("SELECT * FROM publication_actions").fetchone()
+    before_revision = con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0]
+    assert store.library(con) == (LIBRARY, MAP)
+
+    graph_write(con, lambda c: store._install_schema(c, library_id=LIBRARY, map_uuid=MAP))
+
+    assert con.execute("PRAGMA user_version").fetchone() == (10,)
+    assert store.library(con) == (LIBRARY, MAP)
+    assert con.execute("SELECT * FROM publication_actions").fetchone() == before_action
+    assert con.execute(
+        "SELECT planner_revision FROM planner_state WHERE singleton_id=1").fetchone()[0] == before_revision + 1
+    con.execute(
+        "INSERT INTO publication_actions(operation_id,action_id,kind,intent_json,intent_digest,status) "
+        "VALUES('fixture-op','retirement-action','source_retirement','{}',?,'PREPARED')", ["b" * 64])
+
+
+def test_v9_refuses_maintenance_before_reading_caller_workset(con):
+    install_v9(con)
+
+    class Scope:
+        connection = con
+
+    with pytest.raises(PublicationRefused, match="PUBLICATION_SCHEMA_UPGRADE_REQUIRED"):
+        store.prepare_maintenance_operation(
+            Scope(), operation_id="not-even-a-uuid", profile_digest="invalid",
+            batch_files={}, before_state={})
 
 
 def test_migration_rollback_restores_floor_schema_and_revision(con):
@@ -114,7 +158,7 @@ def test_old_empty_catalog_has_no_obligation_but_floor_downgrade_refuses(con):
 
 @pytest.mark.parametrize("corruption", [
     "DROP TABLE publication_files", "DELETE FROM publication_library",
-    "UPDATE publication_library SET map_uuid='unknown'", "PRAGMA user_version=10",
+    "UPDATE publication_library SET map_uuid='unknown'", "PRAGMA user_version=11",
 ])
 def test_partial_unknown_or_unbound_store_is_not_empty_success(con, corruption):
     install(con)

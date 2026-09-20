@@ -78,6 +78,7 @@ def _ref_state(repository, plan):
 def require_map_action(repository, record):
     """Native command admission, bound to the exact real map and frozen plan."""
     binding = _map(repository)
+    store.require_clone_obligations(repository.scope, repository.scope.operation_id)
     plan = record["intent"].get("map_plan")
     _require(type(plan) is dict and plan.get("operation_id") == repository.scope.operation_id
              and plan.get("binding_digest") == store.digest(binding)
@@ -143,9 +144,10 @@ def _candidate_plan(stage, repository, file_candidate, metadata_candidates):
              "PUBLICATION_MAP_FILE_CANDIDATE_CHANGED")
     tree, parents = trees._commit(stage.read, file_candidate.new_head)
     _require(tree == file_candidate.new_tree
-             and (file_candidate.new_head == file_candidate.before.head_oid and not file_candidate.delta
+             and (file_candidate.new_head == file_candidate.before.head_oid
+                  and not file_candidate.delta and not file_candidate.retired
                   or parents == (file_candidate.before.head_oid,)), "PUBLICATION_MAP_FILE_CANDIDATE_CHANGED")
-    if file_candidate.delta:
+    if file_candidate.delta or file_candidate.retired:
         _require(any(row.get("head") == file_candidate.new_head and row.get("tree") == tree
                      and row.get("parent") == file_candidate.before.head_oid for row in verified),
                  "PUBLICATION_MAP_FILE_RECEIPT_CHANGED")
@@ -181,6 +183,7 @@ def resume(stage, repository, *, batch_id):
 def _apply_plan(stage, repository, plan):
     staging.require_stage(stage)
     binding = _map(repository)
+    store.require_clone_obligations(repository.scope, repository.scope.operation_id)
     scope, batch_id = repository.scope, plan["batch_id"]
     _require(stage.scope is scope and plan["binding_digest"] == store.digest(binding)
              and plan["stage_profile_digest"] == stage.profile.digest, "PUBLICATION_MAP_PLAN_CHANGED")
@@ -262,7 +265,9 @@ def _apply_plan(stage, repository, plan):
              "tree": final_tree.record(), "metadata": final_metadata.record(),
              "native_locations": locations, "no_annex_payload": True,
              "entries": [asdict(entry) for entry in observed.index]}
+    store.require_clone_obligations(scope, scope.operation_id)
     verified(checkout, proof)
+    store.require_clone_obligations(scope, scope.operation_id)
     _require(worktree.observe(repository, old=old, new=new).replay_state == "complete",
              "PUBLICATION_MAP_FINAL_WORKTREE_CHANGED")
     return {**proof, "actions": dependencies}

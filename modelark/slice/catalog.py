@@ -14,11 +14,12 @@ from modelark.publication_policy import PublicationRefused
 from .domain import AnchorFact, CatalogSnapshot, CopyFact, DriveFact, FileFact, Gap, SliceRefusal, SliceSpec
 
 # Catalog v8 raises the minimum reader version for serial-identity repair;
-# v9 adds the validated publication journal. Neither changes the v7 domain record
+# v9 adds the validated publication journal; v10 adds source-retirement actions.
+# Neither changes the v7 domain record
 # layout. Keep seals about those records,
 # not the reader-floor metadata. This is a closed mapping, never a future-version
 # fallback, and is unrelated to the private Slice transaction-store schema.
-_CATALOG_TO_SNAPSHOT_VERSION = {7: 7, 8: 7, 9: 7}
+_CATALOG_TO_SNAPSHOT_VERSION = {7: 7, 8: 7, 9: 7, 10: 7}
 
 
 def _foreign_weight(name: str, format: str | None) -> bool:
@@ -37,7 +38,7 @@ def read_catalog(path: str | Path, spec: SliceSpec) -> CatalogSnapshot:
         con.execute("BEGIN")
         version = con.execute("PRAGMA user_version").fetchone()[0]
         if version not in _CATALOG_TO_SNAPSHOT_VERSION:
-            raise SliceRefusal("CATALOG_VERSION_UNSUPPORTED", f"expected 7, 8 or 9, observed {version}")
+            raise SliceRefusal("CATALOG_VERSION_UNSUPPORTED", f"expected 7, 8, 9 or 10, observed {version}")
         validate_publication_schema(con)
         snapshot_version = _CATALOG_TO_SNAPSHOT_VERSION[version]
         files, copies, issues = [], [], []

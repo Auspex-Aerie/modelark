@@ -834,6 +834,14 @@ class QualifiedRepository:
         if kind == "file_commit" and len(args) == 6 and args[:5] == (
                 "commit", "--quiet", "--no-gpg-sign", "--no-verify", "-m"):
             admitted = args[5] == "ModelArk publication " + self.scope.operation_id and not input_data
+        if kind == "source_retirement" and len(args) == 4 and args[:3] == ("rm", "-q", "--"):
+            relative_path(args[3])
+            admitted = not input_data
+        if kind == "source_retirement" and len(args) == 8 and args[:5] == (
+                "commit", "--quiet", "--no-gpg-sign", "--no-verify", "-m"):
+            relative_path(args[7])
+            admitted = (args[5] == "ModelArk retire source " + self.scope.operation_id
+                        and args[6] == "--" and not input_data)
         if kind == "annex_metadata" and args == (
                 "annex", "sync", "--only-annex", "--no-content", "--no-pull", "--no-push", "--no-commit"):
             admitted = not input_data
@@ -854,10 +862,16 @@ class QualifiedRepository:
                 for row in input_data.split(b"\0")[:-1]:
                     header, path = row.split(b"\t", 1)
                     mode, oid = header.decode("ascii").split(" ")
-                    entry = TreeEntry(path.decode("utf-8"), mode, oid)
-                    if entry.mode not in {"100644", "120000"} or entry.path in seen:
+                    decoded = path.decode("utf-8")
+                    relative_path(decoded)
+                    if mode == "0" and oid == "0" * 40:
+                        entry = None
+                    else:
+                        entry = TreeEntry(decoded, mode, oid)
+                    if (entry is not None and entry.mode not in {"100644", "120000"}
+                            or decoded in seen):
                         raise ValueError()
-                    seen.add(entry.path)
+                    seen.add(decoded)
             except (TypeError, ValueError, UnicodeError) as exc:
                 raise PublicationRefused("PUBLICATION_COMMAND_INPUT_INVALID") from exc
             admitted = True

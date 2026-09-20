@@ -13,7 +13,7 @@ from modelark import catalog_write_context as writes
 from modelark.publication_policy import PublicationRefused
 
 
-ACTION_DDL = (
+ACTION_DDL_V9 = (
     """CREATE TABLE publication_actions (
         operation_id TEXT NOT NULL, action_id TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('policy_setup','payload_install','annex_add',
@@ -28,12 +28,30 @@ ACTION_DDL = (
         CHECK((status='PREPARED' AND receipt_json IS NULL AND verified_revision IS NULL)
            OR (status='VERIFIED' AND receipt_json IS NOT NULL)))""",
 )
+
+ACTION_DDL = (
+    """CREATE TABLE publication_actions (
+        operation_id TEXT NOT NULL, action_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK(kind IN ('policy_setup','payload_install','annex_add',
+            'annex_metadata','file_commit','map_stage','map_refs','map_checkout','staging_release','staging_directory',
+            'source_retirement')),
+        intent_json TEXT NOT NULL, intent_digest TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('PREPARED','VERIFIED')),
+        prepared_revision INTEGER, verified_revision INTEGER,
+        receipt_json TEXT, receipt_digest TEXT,
+        PRIMARY KEY(operation_id,action_id),
+        FOREIGN KEY(operation_id) REFERENCES publication_operations(operation_id),
+        CHECK((receipt_json IS NULL)=(receipt_digest IS NULL)),
+        CHECK((status='PREPARED' AND receipt_json IS NULL AND verified_revision IS NULL)
+           OR (status='VERIFIED' AND receipt_json IS NOT NULL)))""",
+)
 KINDS = frozenset({"policy_setup", "payload_install", "annex_add", "annex_metadata",
-                   "file_commit", "map_stage", "map_refs", "map_checkout", "staging_release", "staging_directory"})
+                   "file_commit", "map_stage", "map_refs", "map_checkout", "staging_release", "staging_directory",
+                   "source_retirement"})
 
 
 def _store():
-    # ACTION_DDL is imported by the store when assembling the version-nine schema.
+    # Both frozen v9 and current action contracts are imported by the store.
     from modelark import publication_store
     return publication_store
 
@@ -191,6 +209,9 @@ def prepare(scope, *, action_id, kind, intent):
     store.canonical_uuid(action_id)
     if not isinstance(kind, str) or kind not in KINDS:
         raise PublicationRefused("PUBLICATION_ACTION_KIND_INVALID")
+    if kind == "source_retirement" and scope.connection.execute(
+            "PRAGMA user_version").fetchone()[0] < store.VERSION:
+        raise PublicationRefused("PUBLICATION_SCHEMA_UPGRADE_REQUIRED")
     # Normalize caller-owned dictionaries before persisting or returning them.
     intent = json.loads(store.canonical(intent))
     frozen = {"version": 1, "operation_id": scope.operation_id, "operation_digest": operation_digest,

@@ -270,9 +270,48 @@ Physical conversion of the production library is not authorized.
 
 Next remaining work:
 
-1. Returning-clone interception and guarded map publication.
-2. Live Fill restart / catalog migration apply, only when explicitly authorized.
+1. Guarded map retirement is implemented on the current post-PR-86 branch: exact
+   source retirement is two-action journalled and resumable; the map candidate
+   removes the old path only with its receipt; every registered clone receives a
+   layout obligation before map publication; selected clones close with physical
+   inventory/generation closure while offline clones remain pending and blocked
+   from ModelArk tree changes. Local Grok round 1/3 returned one P1: per-file
+   retirement snapshots were incorrectly treated as the final source HEAD for a
+   same-drive multi-file batch. The implementation now composes exact Git
+   transitions; its focused cases and the 118-case publication regression pass.
+   Local Grok round 2/3 confirmed that correction but returned one new P1: the
+   new retirement action had mutated the already-qualified v9 action CHECK in
+   place. DEC-171 freezes exact v9, introduces explicit additive v10, keeps both
+   reader contracts, and requires v10 for retirement. Focused migration/reader
+   tests pass. Local Grok round 3/3 **ACCEPTED** with no P1/P2 after verifying the
+   exact released-v9 match, atomic v10 rebuild, v10-only maintenance gate, composed
+   Git transitions and clone-obligation enforcement. PR publication remains pending.
+   Final post-fix scoped publication regression: **120 passed** in 19m54s; exact
+   migration/reader batch: **80 passed**; action/store/retirement batch: **44
+   passed**; full Slice operator file: **50 passed** with its local lease socket;
+   Ruff and `git diff --check` are clean.
+   PR 88 Codex cloud round 1/3 then returned three P1s sharing a scope-promotion
+   cause: nested empty-parent normalization, shared-map retirement deduplication,
+   and partial work closing a clone-wide obligation. DEC-172 implements the
+   architectural correction. The three direct regressions pass; the full scoped
+   publication rerun passes **123 tests** in 23m30s; the focused retirement suite
+   passes **8 tests** in 6m33s. Codex cloud round 2/3 then returned two P1s and one
+   P2. Two shared an ownership-proof boundary: a central-map delete lacked an exact
+   old-entry comparison, and two same-drive requests could claim one physical
+   retirement path. DEC-173 adds admission uniqueness and compare-and-delete;
+   the other was another DEC-172 scope case, where inventory omitted a surviving
+   retired-path ancestor from the operation's directory-mutation footprint.
+   DEC-174 permits only its mutable directory metadata while preserving stable
+   device/inode/mode identity and full equality for unrelated nodes.
+   The direct case plus the inventory suite pass **23 tests** in 5m47s, and the
+   complete retirement end-to-end file passes **11 tests** in 8m12s. The direct
+   ownership three-case regression passes in 2m10s. The adjacent publisher/map-candidate
+   matrix passes **18 tests** in 7m47s. Codex cloud round 3/3 is next.
+2. Attended returning-clone inspect/apply/closure remains: capture the returned
+   clone's actual old refs/bytes, convert claimed or unclaimed materialized paths
+   without inventing catalog rows, then close only that clone's pending obligation.
+3. Live Fill restart / catalog migration apply, only when explicitly authorized.
 
-Current branch is `feat/annex-migrate-physical-apply` in
-`claudedocs/operator-scratch/worktrees/codec-stage-d` (PR 86). Unrelated
+Current branch is `codex/returning-clone-publication` in
+`claudedocs/operator-scratch/worktrees/codec-stage-d`, based on merged PR 86. Unrelated
 bridge/DGXSpark files remain untracked.

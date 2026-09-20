@@ -1,6 +1,6 @@
 """Durable archive-publication records and the shared fail-closed read guard.
 
-Schema 9 is readable when the exact publication contract is present.
+Schemas 9 and 10 are readable when their exact publication contract is present.
 Installation is an explicit migration primitive, never an import/connect side
 effect. Supporting the reader floor does not enable conversion or activate
 writer/closure integrations (DEC-157).
@@ -15,17 +15,18 @@ from typing import Iterable
 import uuid
 
 from modelark import catalog_write_context as writes
-from modelark.publication_actions import ACTION_DDL
+from modelark.publication_actions import ACTION_DDL, ACTION_DDL_V9
 from modelark.publication_policy import PublicationRefused
 
-VERSION = 9
+MIN_VERSION = 9
+VERSION = 10
 PROTOCOL = 1
 _CLOSING = ContextVar("modelark_publication_closing", default=None)
 _CATALOG_WRITE = ContextVar("modelark_publication_catalog_write", default=None)
 TABLES = frozenset({"publication_library", "publication_operations", "publication_participants",
                     "publication_files", "publication_batches", "publication_clone_obligations", "publication_actions"})
 
-DDL = (
+BASE_DDL = (
     """CREATE TABLE publication_library (
         singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),
         library_id TEXT NOT NULL UNIQUE, map_uuid TEXT NOT NULL UNIQUE,
@@ -80,8 +81,9 @@ DDL = (
         CHECK(new_layout>old_layout), CHECK(state!='CLOSED' OR receipt_json IS NOT NULL))""",
     "CREATE INDEX publication_participant_drive ON publication_participants(drive_label,operation_id)",
     "CREATE INDEX publication_open_operations ON publication_operations(state) WHERE state!='CLOSED'",
-    *ACTION_DDL,
 )
+DDL_V9 = (*BASE_DDL, *ACTION_DDL_V9)
+DDL = (*BASE_DDL, *ACTION_DDL)
 
 
 def canonical(value) -> str:
@@ -166,6 +168,80 @@ def _stamp_operation(scope, operation_id, previous, *, created=False):
 
 
 def prepare_operation(scope, *, operation_id, kind, profile_digest, batch_files, before_state):
+    if kind not in {"fill", "replica", "registration"}:
+        raise PublicationRefused("PUBLICATION_CONVERSION_DISABLED")
+    return _prepare_operation(scope, operation_id=operation_id, kind=kind,
+                              profile_digest=profile_digest, batch_files=batch_files,
+                              before_state=before_state)
+
+
+def prepare_maintenance_operation(scope, *, operation_id, profile_digest, batch_files, before_state):
+    """Admit only a coordinator-frozen old-path retirement workset."""
+    if scope.connection.execute("PRAGMA user_version").fetchone()[0] != VERSION:
+        raise PublicationRefused("PUBLICATION_SCHEMA_UPGRADE_REQUIRED")
+    requests = before_state.get("requests") if isinstance(before_state, dict) else None
+    clone_layout = before_state.get("clone_layout") if isinstance(before_state, dict) else None
+    legacy_census = before_state.get("legacy_census") if isinstance(before_state, dict) else None
+    children = sorted(file_id for files in batch_files.values() for file_id in files) \
+        if isinstance(batch_files, dict) else []
+    selected_labels = {row.get("drive_label") for row in requests.values()} if isinstance(requests, dict) else set()
+    if (not isinstance(requests, dict) or sorted(requests) != children
+            or any(type(row) is not dict or not isinstance(row.get("retired_path"), str)
+                   or not row["retired_path"] for row in requests.values())
+            or type(clone_layout) is not list or not clone_layout
+            or type(legacy_census) is not dict or set(legacy_census) != selected_labels
+            or any(type(row) is not dict or set(row) != {"raw_claims", "unclaimed_paths"}
+                   or any(type(paths) is not list or paths != sorted(set(paths))
+                          or any(not isinstance(path, str) or not path for path in paths)
+                          for paths in row.values())
+                   for row in legacy_census.values())):
+        raise PublicationRefused("PUBLICATION_RETIREMENT_SET_INVALID")
+    current = [list(row) for row in scope.connection.execute(
+        "SELECT annex_uuid,drive_label FROM drives WHERE annex_uuid IS NOT NULL ORDER BY annex_uuid")]
+    if clone_layout != current or len({row[0] for row in current}) != len(current):
+        raise PublicationRefused("PUBLICATION_CLONE_LAYOUT_CHANGED")
+    for annex_uuid, label in current:
+        canonical_uuid(annex_uuid)
+        if not isinstance(label, str) or not label:
+            raise PublicationRefused("PUBLICATION_CLONE_LAYOUT_CHANGED")
+    seal = _prepare_operation(scope, operation_id=operation_id, kind="maintenance",
+                              profile_digest=profile_digest, batch_files=batch_files,
+                              before_state=before_state)
+    try:
+        for annex_uuid, _label in current:
+            scope.connection.execute(
+                "INSERT INTO publication_clone_obligations VALUES(?,?,1,2,'PENDING',NULL,NULL)",
+                [annex_uuid, operation_id])
+    except sqlite3.IntegrityError as exc:
+        raise PublicationRefused("PUBLICATION_CLONE_OBLIGATION_CONFLICT") from exc
+    return seal
+
+
+def require_clone_obligations(scope, operation_id):
+    """Prove every currently registered clone was fenced before map retirement."""
+    scope.require_io()
+    con = scope.connection
+    con.execute("BEGIN")
+    try:
+        scope.require()
+        binding, _operation_digest, _revision = _load_bound_operation(scope, operation_id)
+        if binding.get("kind") != "maintenance":
+            return []
+        expected = binding.get("before_state", {}).get("clone_layout")
+        current = [list(row) for row in con.execute(
+            "SELECT annex_uuid,drive_label FROM drives WHERE annex_uuid IS NOT NULL ORDER BY annex_uuid")]
+        obligations = [list(row) for row in con.execute(
+            "SELECT annex_uuid,operation_id,old_layout,new_layout,state FROM "
+            "publication_clone_obligations ORDER BY annex_uuid")]
+        wanted = [[annex_uuid, operation_id, 1, 2, "PENDING"] for annex_uuid, _label in expected or []]
+        if expected != current or obligations != wanted:
+            raise PublicationRefused("PUBLICATION_CLONE_OBLIGATIONS_CHANGED")
+        return current
+    finally:
+        con.rollback()
+
+
+def _prepare_operation(scope, *, operation_id, kind, profile_digest, batch_files, before_state):
     """Persistence half of PREPARED, called only after publisher profile/IO preflight.
 
     Requires the actual held lock scope and the existing owning adapter's TX.
@@ -175,7 +251,7 @@ def prepare_operation(scope, *, operation_id, kind, profile_digest, batch_files,
     scope.require_transaction(scope.connection)
     canonical_uuid(operation_id)
     _require_digest(profile_digest)
-    if kind not in {"fill", "replica", "registration"}:
+    if kind not in {"fill", "replica", "registration", "maintenance"}:
         raise PublicationRefused("PUBLICATION_CONVERSION_DISABLED")
     if not isinstance(batch_files, dict) or not batch_files:
         raise PublicationRefused("PUBLICATION_BATCHES_REQUIRED")
@@ -431,6 +507,56 @@ def close_operation(scope, *, operation_id, observations, inventory_proofs, now)
         seals[batch_id] = seal
     closure = {"version": PROTOCOL, "operation_digest": operation_digest,
                "batches": seals, "inventory_proofs": inventory_proofs, "actions": action_receipts}
+    clone_receipts = {}
+    if binding.get("kind") == "maintenance":
+        expected_clones = binding.get("before_state", {}).get("clone_layout")
+        registered = [list(row) for row in con.execute(
+            "SELECT annex_uuid,drive_label FROM drives WHERE annex_uuid IS NOT NULL ORDER BY annex_uuid")]
+        if expected_clones != registered:
+            raise PublicationRefused("PUBLICATION_CLONE_LAYOUT_CHANGED")
+        participants = {row[0]: row[1] for row in registered if row[1] in labels}
+        census = binding.get("before_state", {}).get("legacy_census", {})
+        pending_clones = {}
+        for annex_uuid, label in participants.items():
+            proof = inventory_proofs[label]
+            row = census.get(label)
+            if (type(proof) is not dict or proof.get("kind") != "publication-generation-inventory"
+                    or proof.get("drive_label") != label or type(row) is not dict):
+                raise PublicationRefused("PUBLICATION_CLONE_COMPATIBILITY_UNPROVEN")
+            claims = proof.get("claims", {}).get("archived")
+            namespace = proof.get("namespace")
+            if type(claims) is not list or type(namespace) is not list:
+                raise PublicationRefused("PUBLICATION_CLONE_COMPATIBILITY_UNPROVEN")
+            if (any(type(item) is not dict or not isinstance(item.get("repo_id"), str)
+                    or not isinstance(item.get("stored_relpath"), str) for item in claims)
+                    or any(type(item) is not dict or not isinstance(item.get("path"), str)
+                           for item in namespace)):
+                raise PublicationRefused("PUBLICATION_CLONE_COMPATIBILITY_UNPROVEN")
+            remaining_raw = sorted(
+                item["repo_id"] + "/" + item["stored_relpath"]
+                for item in claims if not item.get("annex_key"))
+            namespace_paths = {item["path"] for item in namespace}
+            unresolved = sorted(set(row["unclaimed_paths"]) & namespace_paths)
+            if remaining_raw or unresolved:
+                pending_clones[annex_uuid] = {
+                    "drive_label": label, "remaining_raw_claims": remaining_raw,
+                    "unclaimed_paths": unresolved,
+                }
+                continue
+            receipt = {"version": PROTOCOL, "operation_digest": operation_digest,
+                       "annex_uuid": annex_uuid, "drive_label": label,
+                       "old_layout": 1, "new_layout": 2,
+                       "inventory_proof_digest": digest(inventory_proofs[label])}
+            changed = con.execute(
+                "UPDATE publication_clone_obligations SET state='CLOSED',receipt_json=? "
+                "WHERE annex_uuid=? AND operation_id=? AND old_layout=1 AND new_layout=2 "
+                "AND state='PENDING' AND receipt_json IS NULL AND committed_revision IS NULL",
+                [canonical(receipt), annex_uuid, operation_id])
+            if changed.rowcount != 1:
+                raise PublicationRefused("PUBLICATION_CLONE_CLOSURE_CAS_FAILED")
+            clone_receipts[annex_uuid] = receipt
+        closure["closed_clones"] = clone_receipts
+        closure["pending_clones"] = pending_clones
     # Only this coordinator may temporarily satisfy the shared anchor guard. It
     # revalidates the complete record first and publishes every selected anchor
     # in the SAME owning transaction. Any exception keeps the durable obligation.
@@ -449,6 +575,12 @@ def close_operation(scope, *, operation_id, observations, inventory_proofs, now)
                        "WHERE operation_id=? AND last_revision=? AND state='CLOSED' AND closed_revision IS NULL",
                        [new_revision, new_revision, operation_id, revision]).rowcount != 1:
             raise PublicationRefused("PUBLICATION_CLOSURE_CAS_FAILED")
+        for annex_uuid in clone_receipts:
+            if con.execute(
+                    "UPDATE publication_clone_obligations SET committed_revision=? "
+                    "WHERE annex_uuid=? AND operation_id=? AND state='CLOSED' "
+                    "AND committed_revision IS NULL", [new_revision, annex_uuid, operation_id]).rowcount != 1:
+                raise PublicationRefused("PUBLICATION_CLONE_CLOSURE_CAS_FAILED")
     writes.defer_revision(con, scope.writer, stamp)
     return digest(closure)
 
@@ -464,14 +596,28 @@ def _install_schema(con, *, library_id: str, map_uuid: str) -> None:
     canonical_uuid(library_id)
     canonical_uuid(map_uuid)
     version = con.execute("PRAGMA user_version").fetchone()[0]
-    if version not in (7, 8):
+    if version not in (7, 8, MIN_VERSION):
         raise PublicationRefused("PUBLICATION_MIGRATION_SOURCE_INVALID", version=version)
     existing = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    if TABLES & existing:
-        raise PublicationRefused("PUBLICATION_SCHEMA_AMBIGUOUS")
-    for statement in DDL:
-        con.execute(statement)
-    con.execute("INSERT INTO publication_library VALUES(1,?,?,?)", [library_id, map_uuid, PROTOCOL])
+    if version in (7, 8):
+        if TABLES & existing:
+            raise PublicationRefused("PUBLICATION_SCHEMA_AMBIGUOUS")
+        for statement in DDL:
+            con.execute(statement)
+        con.execute("INSERT INTO publication_library VALUES(1,?,?,?)", [library_id, map_uuid, PROTOCOL])
+    else:
+        if library(con) != (library_id, map_uuid):
+            raise PublicationRefused("PUBLICATION_LIBRARY_CHANGED")
+        con.execute("ALTER TABLE publication_actions RENAME TO publication_actions_v9")
+        con.execute(ACTION_DDL[0])
+        columns = ("operation_id,action_id,kind,intent_json,intent_digest,status,"
+                   "prepared_revision,verified_revision,receipt_json,receipt_digest")
+        con.execute(f"INSERT INTO publication_actions({columns}) SELECT {columns} "
+                    "FROM publication_actions_v9")
+        con.execute("DROP TABLE publication_actions_v9")
+        violations = con.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise PublicationRefused("PUBLICATION_SCHEMA_MIGRATION_INVALID", violations=violations[:12])
     con.execute(f"PRAGMA user_version={VERSION}")
 
 
@@ -484,14 +630,15 @@ def library(con) -> tuple[str, str] | None:
     try:
         version = int(con.execute("PRAGMA user_version").fetchone()[0])
         tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if version < VERSION:
+        if version < MIN_VERSION:
             if TABLES & tables:
                 raise PublicationRefused("PUBLICATION_SCHEMA_FLOOR_INVALID")
             return None
-        if version != VERSION or not TABLES <= tables:
+        if version not in {MIN_VERSION, VERSION} or not TABLES <= tables:
             raise PublicationRefused("PUBLICATION_SCHEMA_UNSUPPORTED", version=version)
+        expected_ddl = DDL_V9 if version == MIN_VERSION else DDL
         definitions = dict(con.execute("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL"))
-        for statement in DDL:
+        for statement in expected_ddl:
             name = statement.split()[2]
             if " ".join(definitions.get(name, "").split()) != " ".join(statement.split()):
                 raise PublicationRefused("PUBLICATION_SCHEMA_UNQUALIFIED", object=name)
