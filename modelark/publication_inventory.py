@@ -377,10 +377,20 @@ def verify(repository, baseline_record, *, file_rows) -> InventoryProof:
     new_nodes = {row["path"]: row for row in namespace}
     parents = {""} if touched else set()
     parents.update(str(parent) for path in touched for parent in relative_path(path).parents if str(parent) != ".")
-    _require(set(new_nodes) == (set(old_nodes) - retired) | set(touched) | parents,
+    retired_ancestors = {
+        str(parent)
+        for path in retired
+        for parent in relative_path(path).parents
+        if str(parent) != "."
+    }
+    vanished_directories = {
+        path for path in retired_ancestors
+        if path in old_nodes and old_nodes[path]["kind"] == "directory" and path not in new_nodes
+    }
+    _require(set(new_nodes) == (set(old_nodes) - retired - vanished_directories) | set(touched) | parents,
              "PUBLICATION_INVENTORY_UNEXPLAINED_PATHS")
     for path, before in old_nodes.items():
-        if path in retired:
+        if path in retired or path in vanished_directories:
             continue
         actual = new_nodes[path]
         if path in touched:

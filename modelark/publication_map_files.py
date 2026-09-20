@@ -242,17 +242,29 @@ def candidate(stage: native.QualifiedRepository, map_repository: native.Qualifie
         selection.extend(selected)
         source_dependencies.extend(dependencies)
     selection.sort(key=lambda item: item["file_id"])
-    selected_entries = [item.entry for source in sources for item in source.files]
-    _require(len({entry.path for entry in selected_entries}) == len(selected_entries),
-             "PUBLICATION_MAP_FILE_PATH_COLLISION")
+    selected_by_path = {}
+    retired_by_path = {}
+    for source in sources:
+        for item in source.files:
+            existing = selected_by_path.get(item.entry.path)
+            _require(existing is None or existing == item.entry, "PUBLICATION_MAP_FILE_PATH_COLLISION")
+            selected_by_path[item.entry.path] = item.entry
+            if item.retired_path is not None:
+                existing = retired_by_path.get(item.retired_path)
+                _require(existing is None or existing == item.entry, "PUBLICATION_MAP_FILE_PATH_COLLISION")
+                retired_by_path[item.retired_path] = item.entry
+    selected_entries = list(selected_by_path.values())
     union = {entry.path: entry for entry in before.entries}
-    retired = tuple(sorted(item.retired_path for source in sources for item in source.files
-                           if item.retired_path is not None))
-    _require(len(retired) == len(set(retired)) and not set(retired) & {entry.path for entry in selected_entries},
+    _require(not set(retired_by_path) & set(selected_by_path),
              "PUBLICATION_MAP_FILE_PATH_COLLISION")
-    for path in retired:
-        _require(path in union, "PUBLICATION_MAP_FILE_RETIREMENT_MISSING")
-        del union[path]
+    retired = []
+    for path, replacement in sorted(retired_by_path.items()):
+        if path in union:
+            del union[path]
+            retired.append(path)
+        else:
+            _require(union.get(replacement.path) == replacement,
+                     "PUBLICATION_MAP_FILE_RETIREMENT_MISSING")
     delta = []
     for entry in sorted(selected_entries):
         existing = union.get(entry.path)
@@ -295,6 +307,7 @@ def candidate(stage: native.QualifiedRepository, map_repository: native.Qualifie
                      "PUBLICATION_MAP_FILE_CONTINUATION_MISMATCH")
             existing_actions[identifier] = record
     expected_actions = {action_id("fetch:" + source.repository.profile.annex_uuid) for source in sources}
+    retired = tuple(retired)
     changed = bool(delta or retired)
     if changed:
         expected_actions.update(action_id(step) for step in ("index", "tree", "commit"))

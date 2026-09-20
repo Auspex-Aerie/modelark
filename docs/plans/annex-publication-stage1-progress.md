@@ -290,6 +290,12 @@ Next remaining work:
    migration/reader batch: **80 passed**; action/store/retirement batch: **44
    passed**; full Slice operator file: **50 passed** with its local lease socket;
    Ruff and `git diff --check` are clean.
+   PR 88 Codex cloud round 1/3 then returned three P1s sharing a scope-promotion
+   cause: nested empty-parent normalization, shared-map retirement deduplication,
+   and partial work closing a clone-wide obligation. DEC-172 implements the
+   architectural correction. The three direct regressions pass; the full scoped
+   publication rerun passes **123 tests** in 23m30s; the focused retirement suite
+   passes **8 tests** in 6m33s. Codex cloud round-2 review is pending.
 2. Attended returning-clone inspect/apply/closure remains: capture the returned
    clone's actual old refs/bytes, convert claimed or unclaimed materialized paths
    without inventing catalog rows, then close only that clone's pending obligation.

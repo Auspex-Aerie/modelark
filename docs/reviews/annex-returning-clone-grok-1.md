@@ -69,3 +69,24 @@ reader/repair/Slice tests passed in the restricted sandbox, with the 13 lease-so
 cases then passing as part of the complete 50-test Slice operator file outside that
 socket restriction; and the full scoped publication regression passed **120 tests**
 in 19m54s. Ruff across every changed Python file and `git diff --check` passed.
+
+## PR 88 — Codex cloud round 1/3
+
+Outcome: **NOT ACCEPT** — three P1s, no P2. Codex found that inventory did
+not admit an empty legacy parent directory removed with its last retired child;
+separate drive batches tried to delete the same shared central-map path twice;
+and a partial per-drive file workset could close the drive's entire layout-1-to-2
+obligation while another raw path remained.
+
+The common cause is scope promotion: a valid file-level transition was being
+treated as proof of map-exclusive or clone-exhaustive completion. DEC-172 makes
+those scopes explicit. Inventory now normalizes only actually vanished retired
+ancestors; map deletion is idempotent only with the exact replacement already
+present; and clone closure requires a frozen admission census plus final inventory
+with no remaining raw catalog claims or unclaimed model-namespace paths. Otherwise
+the operation closes while the clone obligation remains pending and tree-blocking.
+New nested-path, partial-workset and two-drive shared-map regressions pass. Codex
+cloud re-review is required on the correction commit. Final correction verification:
+the focused retirement suite passed **8 tests** in 6m33s and the complete scoped
+publication regression passed **123 tests** in 23m30s; Ruff and `git diff --check`
+passed.

@@ -3432,3 +3432,14 @@ incidents* — not tasks (those live in the work tracker / HANDOFF notes).
 - `impact`: `publication_actions.ACTION_DDL_V9`; `publication_store` v9/v10 validation and explicit v9-to-v10 rebuild; catalog/Slice reader floors; schema compatibility and rollback tests. This does not authorize migration of the live catalog, conversion of the production library, attended returning-clone conversion, or Fill restart.
 - `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/reviews/annex-returning-clone-grok-1.md, modelark/publication_actions.py, modelark/publication_store.py, modelark/catalog_versions.py, modelark/slice/catalog.py, modelark/slice/operator.py, tests
 - `related`: DEC-157, DEC-166, DEC-170
+
+### DEC-172: Bind retirement completion to file, map and clone scope separately
+- `id`: DEC-172
+- `date`: 2026-09-19
+- `status`: accepted
+- `triggered_by`: Codex cloud round-1 review of PR 88 found three P1s: empty retired parent directories failed inventory, a shared old map path was retired once per drive batch, and a partial file workset closed a whole-clone layout obligation
+- `decision`: Treat raw-source retirement, central-map retirement and clone compatibility as three distinct completion scopes. Inventory may remove only the exact retired file and its actually vanished empty ancestor directories. Central map retirement is an idempotent shared delta: later drive batches accept an already-removed old path only when the exact replacement entry is already present. A selected clone's layout obligation closes only when its frozen census and final inventory prove that no catalogued raw claims or unclaimed model-namespace paths remain; otherwise the enclosing file operation may close but the clone obligation stays `PENDING` and continues blocking tree changes.
+- `rationale`: A file receipt proves one file transition, not exclusive ownership of a shared map path or exhaustive conversion of a drive. Matching the scope of each completion claim to independently observed evidence prevents partial work from being promoted into drive-wide compatibility while allowing exact multi-drive deduplication and harmless filesystem directory cleanup.
+- `impact`: Retirement-aware inventory normalization, map candidate/final-tree deduplication, admission-time legacy census, compatibility-gated clone closure, and nested/partial/two-drive end-to-end regressions. This does not implement attended closure of a pending returning clone or authorize live migration.
+- `docs_updated`: docs/decision_log.md, docs/plans/annex-publication-stage1-progress.md, docs/reviews/annex-returning-clone-grok-1.md, modelark/archive_publisher.py, modelark/publication_inventory.py, modelark/publication_map_files.py, modelark/publication_retirement.py, modelark/publication_store.py, tests/test_publication_retirement.py
+- `related`: DEC-170, DEC-171, docs/plans/annex-payload-migration.md section F

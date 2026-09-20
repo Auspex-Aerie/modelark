@@ -1,10 +1,12 @@
 """Disposable end-to-end maintenance retirement and guarded map publication."""
 import hashlib
+import os
 
 import pytest
 
-from modelark import archive_publisher as publisher, publication_native as native
+from modelark import archive_publisher as publisher, publication_native as native, register
 from modelark import publication_store as store
+from modelark.capacity_evidence import identity_fingerprint_v1
 from modelark.publication_policy import PublicationRefused, payload_relative_path
 from test_archive_publisher import fleet as archive_fleet  # noqa: F401
 from test_publication_native import _connection, publication_connection, git_repository  # noqa: F401
@@ -16,11 +18,10 @@ def _fleet(request):
     return request.getfixturevalue("archive_fleet")
 
 
-def _legacy(con, fleet):
+def _legacy(con, fleet, name=".gitattributes", data=b"* annex.largefiles=anything\n"):
     archive, map_root, git = fleet
-    data = b"* annex.largefiles=anything\n"
     digest = hashlib.sha256(data).hexdigest()
-    old = "org/a/.gitattributes"
+    old = "org/a/" + name
     for root in (archive, map_root):
         target = root / old
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -28,12 +29,12 @@ def _legacy(con, fleet):
         git("-C", str(root), "add", "--", old)
         git("-C", str(root), "commit", "-qm", "legacy raw payload")
     con.execute("INSERT INTO files(repo_id,rfilename,size_bytes,format,sha256) "
-                "VALUES('org/a','.gitattributes',?,'aux',?)", [len(data), digest])
+                "VALUES('org/a',?,?,'aux',?)", [name, len(data), digest])
     con.execute(
         "INSERT INTO archived(repo_id,rfilename,drive_label,stored_name,stored_relpath,orig_sha256,"
         "orig_bytes,stored_bytes,compressed,annex_key,orig_sha256_provenance) "
-        "VALUES('org/a','.gitattributes','d0','.gitattributes','.gitattributes',?,?,?,0,NULL,"
-        "'archive-head-blob')", [digest, len(data), len(data)])
+        "VALUES('org/a',?,'d0',?,?,?, ?,?,0,NULL,'archive-head-blob')",
+        [name, name, name, digest, len(data), len(data)])
     return data, digest, old
 
 
@@ -154,3 +155,94 @@ def test_same_drive_two_file_retirements_compose_one_map_and_inventory_chain(con
         mapped = request.repo_id + "/" + payload_relative_path(request.rfilename)
         assert not (archive / old).exists() and not (map_root / old).exists()
         assert (archive / mapped).is_symlink() and (map_root / mapped).is_symlink()
+
+
+def test_nested_last_raw_file_may_remove_its_empty_legacy_parent(con, fleet):
+    archive, map_root, _ = fleet
+    name = "nested/.gitignore"
+    data, digest, old = _legacy(con, fleet, name=name, data=b"*.tmp\n")
+    request = publisher.FileRequest("org/a", name, "d0")
+    with publisher.ArchivePublisher(
+            con, [request], kind="maintenance", retired_paths={request: old}) as operation:
+        operation.publish(request, archive / old, original_bytes=len(data), original_sha256=digest,
+                          stored_sha256=digest, compressed=False)
+        operation.retire(request)
+        operation.finish()
+    mapped = "org/a/" + payload_relative_path(name)
+    assert not (archive / "org/a/nested").exists()
+    assert not (map_root / "org/a/nested").exists()
+    assert (archive / mapped).is_symlink() and (map_root / mapped).is_symlink()
+
+
+def test_partial_drive_workset_closes_operation_but_not_layout_obligation(con, fleet):
+    archive, map_root, _ = fleet
+    first = _legacy(con, fleet, name=".gitattributes")
+    _legacy(con, fleet, name=".gitignore", data=b"*.tmp\n")
+    data, digest, old = first
+    request = publisher.FileRequest("org/a", ".gitattributes", "d0")
+    with publisher.ArchivePublisher(
+            con, [request], kind="maintenance", retired_paths={request: old}) as operation:
+        operation.publish(request, archive / old, original_bytes=len(data), original_sha256=digest,
+                          stored_sha256=digest, compressed=False)
+        operation.retire(request)
+        assert operation.finish()["phase"] == "CLOSED"
+    assert con.execute(
+        "SELECT state FROM publication_clone_obligations WHERE annex_uuid="
+        "(SELECT annex_uuid FROM drives WHERE drive_label='d0')").fetchone() == ("PENDING",)
+    with pytest.raises(PublicationRefused, match="MAINTENANCE_REQUIRED"):
+        store.require_clear(con, ["d0"], tree_change=True)
+    assert (archive / "org/a/.gitignore").is_file()
+    assert (map_root / "org/a/.gitignore").is_file()
+
+
+def test_same_logical_retirement_on_two_drives_is_one_shared_map_delta(
+        con, fleet, tmp_path, monkeypatch):
+    archive, map_root, git = fleet
+    data, digest, old = _legacy(con, fleet)
+    second = tmp_path / "archive-d1"
+    git("clone", "--no-local", "--quiet", str(archive), str(second))
+    git("-C", str(second), "remote", "remove", "origin")
+    git("-C", str(second), "annex", "init", "--version=8", "--quiet", "test-d1")
+    git("-C", str(second), "config", "annex.backend", "SHA256")
+    annex_uuid = git("-C", str(second), "config", "annex.uuid").decode().strip()
+    capacity = os.statvfs(second).f_blocks * os.statvfs(second).f_frsize
+    fingerprint = identity_fingerprint_v1(
+        fs_uuid="d1-fs", annex_uuid=annex_uuid, serial=None, filesystem_capacity_bytes=capacity)
+    con.execute("UPDATE drives SET annex_uuid=?,identity_fingerprint=?,filesystem_capacity_bytes=? "
+                "WHERE drive_label='d1'", [annex_uuid, fingerprint, capacity])
+    con.execute("INSERT INTO drive_clean_anchors(drive_label,identity_epoch,generation,anchor_free_bytes,"
+                "filesystem_capacity_bytes,identity_fingerprint,write_authority,identity_proof,fence_proof,observed_at) "
+                "VALUES('d1',1,2,?,?,?,'dedicated_local','fixture','fixture','2026-09-19')",
+                [os.statvfs(second).f_bavail * os.statvfs(second).f_frsize, capacity, fingerprint])
+    con.execute(
+        "INSERT INTO archived(repo_id,rfilename,drive_label,stored_name,stored_relpath,orig_sha256,"
+        "orig_bytes,stored_bytes,compressed,annex_key,orig_sha256_provenance) "
+        "VALUES('org/a','.gitattributes','d1','.gitattributes','.gitattributes',?,?,?,0,NULL,"
+        "'archive-head-blob')", [digest, len(data), len(data)])
+    annex_ref = git("-C", str(second), "rev-parse", "refs/heads/git-annex").decode().strip()
+    git("-C", str(map_root), "fetch", "--quiet", str(second),
+        annex_ref + ":refs/remotes/registered-d1/git-annex")
+    git("-C", str(map_root), "annex", "sync", "--only-annex", "--no-content", "--no-pull",
+        "--no-push", "--no-commit")
+    monkeypatch.setattr(register, "archive_path", lambda _, label: {"d0": archive, "d1": second}.get(label))
+
+    def observe(root):
+        path = archive if str(root) == str(archive) else second
+        label = "d0" if path == archive else "d1"
+        uuid = git("-C", str(path), "config", "annex.uuid").decode().strip()
+        value = os.statvfs(path)
+        return register.ArchiveVolumeObservation(
+            label + "-fs", uuid, None, value.f_blocks * value.f_frsize,
+            value.f_bavail * value.f_frsize, value.f_frsize)
+
+    monkeypatch.setattr(register, "observe_archive_volume", observe)
+    requests = [publisher.FileRequest("org/a", ".gitattributes", label) for label in ("d0", "d1")]
+    with publisher.ArchivePublisher(
+            con, requests, kind="maintenance", retired_paths={request: old for request in requests}) as operation:
+        for request, root in zip(requests, (archive, second), strict=True):
+            operation.publish(request, root / old, original_bytes=len(data), original_sha256=digest,
+                              stored_sha256=digest, compressed=False)
+            operation.retire(request)
+        operation.finish()
+    mapped = "org/a/" + payload_relative_path(".gitattributes")
+    assert not (map_root / old).exists() and (map_root / mapped).is_symlink()

@@ -176,6 +176,20 @@ class ArchivePublisher:
                 before_state["clone_layout"] = [list(row) for row in self._connection.execute(
                     "SELECT annex_uuid,drive_label FROM drives WHERE annex_uuid IS NOT NULL "
                     "ORDER BY annex_uuid")]
+                prefixes = tuple(row[0] + "/" for row in self._connection.execute(
+                    "SELECT repo_id FROM models ORDER BY repo_id"))
+                census = {}
+                for label, baseline in inventories.items():
+                    archived = baseline["claims"]["archived"]
+                    claimed = {row["repo_id"] + "/" + row["stored_relpath"] for row in archived}
+                    raw = sorted(row["repo_id"] + "/" + row["stored_relpath"]
+                                 for row in archived if not row["annex_key"])
+                    unclaimed = sorted(
+                        row["path"] for row in baseline["namespace"]
+                        if row["kind"] != "directory" and row["path"] not in claimed
+                        and any(row["path"].startswith(prefix) for prefix in prefixes))
+                    census[label] = {"raw_claims": raw, "unclaimed_paths": unclaimed}
+                before_state["legacy_census"] = census
             # Recheck physical identity after all preparatory reads, then dirty
             # every participant and freeze operation ownership in one revision.
             for label, proof in self._attachments.items():
@@ -555,9 +569,12 @@ class ArchivePublisher:
             expected[entry.path] = entry
             retired = intent.get("retired_path")
             if retired is not None:
-                _require(retired in expected and retired != entry.path,
-                         "PUBLICATION_MAP_FINAL_RETIREMENT_CHANGED")
-                del expected[retired]
+                _require(retired != entry.path, "PUBLICATION_MAP_FINAL_RETIREMENT_CHANGED")
+                if retired in expected:
+                    del expected[retired]
+                else:
+                    _require(expected.get(entry.path) == entry,
+                             "PUBLICATION_MAP_FINAL_RETIREMENT_CHANGED")
         expected = tuple(sorted(expected.values()))
         final_map = _snapshot(self.map)
         _require(final_map.entries == expected, "PUBLICATION_MAP_FINAL_TREE_CHANGED")

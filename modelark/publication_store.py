@@ -181,12 +181,20 @@ def prepare_maintenance_operation(scope, *, operation_id, profile_digest, batch_
         raise PublicationRefused("PUBLICATION_SCHEMA_UPGRADE_REQUIRED")
     requests = before_state.get("requests") if isinstance(before_state, dict) else None
     clone_layout = before_state.get("clone_layout") if isinstance(before_state, dict) else None
+    legacy_census = before_state.get("legacy_census") if isinstance(before_state, dict) else None
     children = sorted(file_id for files in batch_files.values() for file_id in files) \
         if isinstance(batch_files, dict) else []
+    selected_labels = {row.get("drive_label") for row in requests.values()} if isinstance(requests, dict) else set()
     if (not isinstance(requests, dict) or sorted(requests) != children
             or any(type(row) is not dict or not isinstance(row.get("retired_path"), str)
                    or not row["retired_path"] for row in requests.values())
-            or type(clone_layout) is not list or not clone_layout):
+            or type(clone_layout) is not list or not clone_layout
+            or type(legacy_census) is not dict or set(legacy_census) != selected_labels
+            or any(type(row) is not dict or set(row) != {"raw_claims", "unclaimed_paths"}
+                   or any(type(paths) is not list or paths != sorted(set(paths))
+                          or any(not isinstance(path, str) or not path for path in paths)
+                          for paths in row.values())
+                   for row in legacy_census.values())):
         raise PublicationRefused("PUBLICATION_RETIREMENT_SET_INVALID")
     current = [list(row) for row in scope.connection.execute(
         "SELECT annex_uuid,drive_label FROM drives WHERE annex_uuid IS NOT NULL ORDER BY annex_uuid")]
@@ -507,7 +515,34 @@ def close_operation(scope, *, operation_id, observations, inventory_proofs, now)
         if expected_clones != registered:
             raise PublicationRefused("PUBLICATION_CLONE_LAYOUT_CHANGED")
         participants = {row[0]: row[1] for row in registered if row[1] in labels}
+        census = binding.get("before_state", {}).get("legacy_census", {})
+        pending_clones = {}
         for annex_uuid, label in participants.items():
+            proof = inventory_proofs[label]
+            row = census.get(label)
+            if (type(proof) is not dict or proof.get("kind") != "publication-generation-inventory"
+                    or proof.get("drive_label") != label or type(row) is not dict):
+                raise PublicationRefused("PUBLICATION_CLONE_COMPATIBILITY_UNPROVEN")
+            claims = proof.get("claims", {}).get("archived")
+            namespace = proof.get("namespace")
+            if type(claims) is not list or type(namespace) is not list:
+                raise PublicationRefused("PUBLICATION_CLONE_COMPATIBILITY_UNPROVEN")
+            if (any(type(item) is not dict or not isinstance(item.get("repo_id"), str)
+                    or not isinstance(item.get("stored_relpath"), str) for item in claims)
+                    or any(type(item) is not dict or not isinstance(item.get("path"), str)
+                           for item in namespace)):
+                raise PublicationRefused("PUBLICATION_CLONE_COMPATIBILITY_UNPROVEN")
+            remaining_raw = sorted(
+                item["repo_id"] + "/" + item["stored_relpath"]
+                for item in claims if not item.get("annex_key"))
+            namespace_paths = {item["path"] for item in namespace}
+            unresolved = sorted(set(row["unclaimed_paths"]) & namespace_paths)
+            if remaining_raw or unresolved:
+                pending_clones[annex_uuid] = {
+                    "drive_label": label, "remaining_raw_claims": remaining_raw,
+                    "unclaimed_paths": unresolved,
+                }
+                continue
             receipt = {"version": PROTOCOL, "operation_digest": operation_digest,
                        "annex_uuid": annex_uuid, "drive_label": label,
                        "old_layout": 1, "new_layout": 2,
@@ -521,6 +556,7 @@ def close_operation(scope, *, operation_id, observations, inventory_proofs, now)
                 raise PublicationRefused("PUBLICATION_CLONE_CLOSURE_CAS_FAILED")
             clone_receipts[annex_uuid] = receipt
         closure["closed_clones"] = clone_receipts
+        closure["pending_clones"] = pending_clones
     # Only this coordinator may temporarily satisfy the shared anchor guard. It
     # revalidates the complete record first and publishes every selected anchor
     # in the SAME owning transaction. Any exception keeps the durable obligation.

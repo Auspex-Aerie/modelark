@@ -71,11 +71,13 @@ def _source_bytes(repository, evidence):
 
 
 def _absent(repository, path):
-    with repository.tree.parent(path) as (parent, name):
-        try:
+    try:
+        with repository.tree.parent(path) as (parent, name):
             os.stat(name, dir_fd=parent, follow_symlinks=False)
-        except FileNotFoundError:
-            return
+    except FileNotFoundError:
+        # git rm may remove an empty parent directory. A missing confined
+        # ancestor proves the exact descendant cannot still be present.
+        return
     raise PublicationRefused("PUBLICATION_RETIREMENT_SOURCE_PRESENT", path=path)
 
 
